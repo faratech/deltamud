@@ -336,9 +336,9 @@ cpp_extern struct command_info *complete_cmd_info;
  * priority.
  */
 
-char *cmds_mortal_builders_cant_use="sacrifice trigedit tlist tstat auction brew buy carve cast deposit
-donate drink drop eat fill fillet forge give group mount quaff recite sacrafice scribe school
-sell sip steal take tan taste train use withdraw nosummon chain";
+char *cmds_mortal_builders_cant_use="sacrifice trigedit tlist tstat auction brew buy carve cast deposit "
+"donate drink drop eat fill fillet forge give group mount quaff recite sacrafice scribe school "
+"sell sip steal take tan taste train use withdraw nosummon chain";
 
 char *cmds_dead_can_use="qui quit look who say north south east west up down ' emote";
 
@@ -1893,7 +1893,12 @@ nanny (struct descriptor_data *d, char *arg)
 	close_socket (d);
       else
 	{
-	  if (strncmp (CRYPT (arg, GET_PASSWD (d->character)), GET_PASSWD (d->character), MAX_PWD_LENGTH))
+	  /* Temporary: Test original CircleMUD password verification */
+	  sprintf (buf, "DEBUG: Testing password '%s' against stored '%s'", arg, GET_PASSWD (d->character));
+	  mudlog (buf, NRM, LVL_IMPL, TRUE);
+	  
+	  /* Try original CircleMUD method: direct string comparison */
+	  if (strcmp(arg, GET_PASSWD (d->character)) != 0)
 	    {
 	      sprintf (buf, "Bad PW: %s [%s]", GET_NAME (d->character), d->host);
 	      mudlog (buf, BRF, LVL_GOD, TRUE);
@@ -1916,6 +1921,43 @@ nanny (struct descriptor_data *d, char *arg)
 	  load_result = GET_BAD_PWS (d->character);
 	  GET_BAD_PWS (d->character) = 0;
 	  d->bad_pws = 0;
+
+	  /* Automatic password upgrade on successful login */
+	  sprintf (buf, "DEBUG: Checking password upgrade for %s, current hash: '%s', length: %d", 
+	           GET_NAME (d->character), GET_PASSWD (d->character), 
+	           GET_PASSWD (d->character) ? (int)strlen(GET_PASSWD (d->character)) : 0);
+	  mudlog (buf, NRM, LVL_IMPL, TRUE);
+	  
+	  if (password_needs_upgrade(GET_PASSWD (d->character))) {
+	    sprintf (buf, "DEBUG: Password needs upgrade for %s", GET_NAME (d->character));
+	    mudlog (buf, NRM, LVL_IMPL, TRUE);
+	    
+	    char *new_hash = create_secure_password_hash(arg, GET_NAME (d->character));
+	    if (new_hash) {
+	      sprintf (buf, "DEBUG: Generated new hash for %s: '%s'", GET_NAME (d->character), new_hash);
+	      mudlog (buf, NRM, LVL_IMPL, TRUE);
+	      
+	      sprintf (buf, "Upgrading password security for %s", GET_NAME (d->character));
+	      mudlog (buf, NRM, LVL_IMPL, TRUE);
+	      
+	      if (GET_PASSWD (d->character)) free(GET_PASSWD (d->character));
+	      GET_PASSWD (d->character) = new_hash;
+	      
+	      sprintf (buf, "DEBUG: About to save character %s", GET_NAME (d->character));
+	      mudlog (buf, NRM, LVL_IMPL, TRUE);
+	      
+	      save_char (d->character, NOWHERE);
+	      
+	      sprintf (buf, "DEBUG: Successfully saved character %s", GET_NAME (d->character));
+	      mudlog (buf, NRM, LVL_IMPL, TRUE);
+	    } else {
+	      sprintf (buf, "DEBUG: Failed to generate new hash for %s", GET_NAME (d->character));
+	      mudlog (buf, NRM, LVL_IMPL, TRUE);
+	    }
+	  } else {
+	    sprintf (buf, "DEBUG: Password does not need upgrade for %s", GET_NAME (d->character));
+	    mudlog (buf, NRM, LVL_IMPL, TRUE);
+	  }
 
 	  if (isbanned (d->host) == BAN_SELECT &&
 	      !PLR_FLAGGED (d->character, PLR_SITEOK))
@@ -1980,7 +2022,7 @@ nanny (struct descriptor_data *d, char *arg)
 
     case CON_NEWPASSWD:
     case CON_CHPWD_GETNEW:
-      if (!*arg || strlen (arg) > MAX_PWD_LENGTH || strlen (arg) < 3 ||
+      if (!*arg || strlen (arg) > 64 || strlen (arg) < 3 ||
 	  !str_cmp (arg, GET_NAME (d->character)))
 	{
 	  SEND_TO_Q ("\r\nIllegal password.\r\n", d);
@@ -1988,7 +2030,7 @@ nanny (struct descriptor_data *d, char *arg)
 	  return;
 	}
       if (GET_PASSWD (d->character)) free(GET_PASSWD (d->character));
-      GET_PASSWD (d->character)=strdup(CRYPT (arg, GET_NAME (d->character)));
+      GET_PASSWD (d->character)=create_secure_password_hash(arg, GET_NAME (d->character));
 
       SEND_TO_Q ("\r\nPlease retype password: ", d);
       if (STATE (d) == CON_NEWPASSWD)
@@ -2084,8 +2126,8 @@ d);
             SEND_TO_Q ("\r\nThat's not a race.\r\nRace: ", d);
             return;
           }
-       sprintf(buf2, "At 11 as the universal statistic average, your race averages the following
-abilities:\r\n"
+       sprintf(buf2, "At 11 as the universal statistic average, your race averages the following "
+"abilities:\r\n"
                       "Str: %2d Int: %2d Wis: %2d Dex: %2d Con: %2d Cha: %2d\r\nRace: ",
                       (GET_RACE_MIN(load_result, 1)+GET_RACE_MAX(load_result, 1))/2,
                       (GET_RACE_MIN(load_result, 2)+GET_RACE_MAX(load_result, 2))/2,
@@ -2326,7 +2368,7 @@ abilities:\r\n"
       break;
 
     case CON_CHPWD_GETOLD:
-      if (strncmp (CRYPT (arg, GET_PASSWD (d->character)), GET_PASSWD (d->character), MAX_PWD_LENGTH))
+      if (!verify_password(arg, GET_PASSWD (d->character), GET_NAME (d->character)))
 	{
 	  echo_on (d);
 	  SEND_TO_Q ("\r\nIncorrect password.\r\n", d);
@@ -2344,7 +2386,7 @@ abilities:\r\n"
 
     case CON_DELCNF1:
       echo_on (d);
-      if (strncmp (CRYPT (arg, GET_PASSWD (d->character)), GET_PASSWD (d->character), MAX_PWD_LENGTH))
+      if (!verify_password(arg, GET_PASSWD (d->character), GET_NAME (d->character)))
 	{
 	  SEND_TO_Q ("\r\nIncorrect password.\r\n", d);
 	  SEND_TO_Q (MENU, d);

@@ -36,7 +36,7 @@ extern struct char_data *mob_proto;
 extern struct obj_data *obj_proto;
 extern struct room_data *world;
 extern struct time_info_data time_info;
-extern char *item_types[];
+extern const char *item_types[];
 extern char *extra_bits[];
 
 const char *shop_bits[];

@@ -6,13 +6,13 @@
 CC = gcc
 
 # Any special flags you want to pass to the compiler
-MYFLAGS = -Wall -DCIRCLE_UTIL
+MYFLAGS = -Wall -DCIRCLE_UTIL -I/usr/include/mysql
 
 #flags for profiling (see hacker.doc for more information)
 PROFILE = 
 
 #special linker libraries
-LIBLINK = -lm /scsi2/server1/seadog/deltamud/src/libmysqlclient.a
+LIBLINK = -lm -lmysqlclient
 
 ##############################################################################
 # Do Not Modify Anything Below This Line (unless you know what you're doing) #

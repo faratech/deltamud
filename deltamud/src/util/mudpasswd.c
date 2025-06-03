@@ -43,7 +43,13 @@ void pword(char *filename, char *name, char *password)
 
     if (str_eq(name, buf.name)) {
       found = TRUE;
-      strncpy(buf.pwd, CRYPT(password, buf.name), MAX_PWD_LENGTH);
+      char *new_hash = create_secure_password_hash(password, buf.name);
+      if (new_hash) {
+        strncpy(buf.pwd, new_hash, MAX_PWD_LENGTH);
+        free(new_hash);
+      } else {
+        strncpy(buf.pwd, CRYPT(password, buf.name), MAX_PWD_LENGTH);
+      }
       if (fseek(fl, -1L * sizeof(buf), SEEK_CUR) != 0)
 	perror("fseek");
       if (fwrite(&buf, sizeof(buf), 1, fl) != 1)

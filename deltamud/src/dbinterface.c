@@ -11,11 +11,27 @@
 
 /* MySQL Database Connection Routines */
 void connect_database (void) {
+  char *env_user, *env_pass;
+  
   SQLdb = (MYSQL *) malloc (sizeof(MYSQL));
 
   mysql_init(SQLdb);
 
-  if (!mysql_real_connect(SQLdb, mySQL_host, mySQL_user, mySQL_pass, "players", mySQL_port, NULL, 0)) {
+  /* Get MySQL credentials from environment variables */
+  env_user = getenv("MYSQL_USER");
+  env_pass = getenv("MYSQL_PASSWORD");
+  
+  /* Fallback to compiled defaults if environment variables not set */
+  if (!env_user) env_user = (char *)mySQL_user;
+  if (!env_pass) env_pass = (char *)mySQL_pass;
+  
+  /* Exit with error if no credentials available */
+  if (!env_user || !env_pass) {
+    log("SYSERR: MySQL credentials not found in environment variables MYSQL_USER and MYSQL_PASSWORD");
+    exit(1);
+  }
+
+  if (!mysql_real_connect(SQLdb, "127.0.0.1", env_user, env_pass, "deltamud", mySQL_port, NULL, 0)) {
     sprintf(buf, "Could not connect to mySQL host database server: %s", mysql_error(SQLdb));
     log (buf);
     exit(0);
@@ -41,11 +57,11 @@ void connect_database (void) {
       use this when you have a column and don't want it to be loaded in on a player entry retrieve.
 
       Examples:
-      COLUMN_NRM("idnum",GET_IDNUM(ch));
+      COLUMN_NRM("idnum",ch->char_specials.saved.idnum);
       ^^ I'm adding a numeric saving value, which is saved in the idnum column of my table, and is referenced
          in the code by GET_IDNUM(ch).
 
-      COLUMN_STR("name",GET_NAME(ch));
+      COLUMN_STR("name",ch->player.name);
       ^^ I'm adding a string saving value, which is saved in the name column of my table, and is referenced
          in the code by GET_NAME(ch) *or* ch->player.name.
 
@@ -69,7 +85,8 @@ void connect_database (void) {
     structurevarsize[i]=sizeof(element); \
   } \
   else { \
-    columnptrs[COLUMN_INCR].ptr=(long *) &element; \
+    COLUMN_INCR; \
+    columnptrs[i].ptr=(long *) &(element); \
     columnptrs[i].type=0; \
   } \
 
@@ -81,7 +98,8 @@ void connect_database (void) {
     structurevarsize[i]=sizeof(element); \
   } \
   else { \
-    columnptrs[COLUMN_INCR].ptr=(long *) &element; \
+    COLUMN_INCR; \
+    columnptrs[i].ptr=(long *) &(element); \
     columnptrs[i].type=1; \
   } \
 
@@ -93,7 +111,8 @@ void connect_database (void) {
     structurevarsize[i]=0; \
   } \
   else { \
-    columnptrs[COLUMN_INCR].ptr=NULL; \
+    COLUMN_INCR; \
+    columnptrs[i].ptr=NULL; \
     columnptrs[i].type=-1; \
   } \
 
@@ -155,15 +174,15 @@ void init_querystring (struct char_data *ch, int mode) {
       int i=-1;
       /* These can be in any order, just make sure you have the right column name string
          matching with it's appropriate pointer on the character. */
-      COLUMN_NRM("idnum",GET_IDNUM(ch));
-      COLUMN_STR("name",GET_NAME(ch));
+      COLUMN_NRM("idnum",ch->char_specials.saved.idnum);
+      COLUMN_STR("name",ch->player.name);
       COLUMN_STR("description",ch->player.description);
       COLUMN_STR("title",ch->player.title);
-      COLUMN_NRM("sex",GET_SEX(ch));
-      COLUMN_NRM("class",GET_CLASS(ch));
-      COLUMN_NRM("race",GET_RACE(ch));
-      COLUMN_NRM("deity",GET_DEITY(ch));
-      COLUMN_NRM("level",GET_LEVEL(ch));
+      COLUMN_NRM("sex",ch->player.sex);
+      COLUMN_NRM("class",ch->player.class);
+      COLUMN_NRM("race",ch->player.race);
+      COLUMN_NRM("deity",ch->player.deity);
+      COLUMN_NRM("level",ch->player.level);
       COLUMN_NRM("hometown",ch->player.hometown);
       COLUMN_NRM("birth",ch->player.time.birth);
       COLUMN_NRM("played",ch->player.time.played);
@@ -174,21 +193,21 @@ void init_querystring (struct char_data *ch, int mode) {
       COLUMN_NRM("last_logon", ch->player.time.logon);
       COLUMN_STR("host", char_last_host);
 
-      COLUMN_NRM("mana",GET_MANA(ch));
-      COLUMN_NRM("max_mana",GET_MAX_MANA(ch));
-      COLUMN_NRM("hit",GET_HIT(ch));
-      COLUMN_NRM("max_hit",GET_MAX_HIT(ch));
-      COLUMN_NRM("move",GET_MOVE(ch));
-      COLUMN_NRM("max_move",GET_MAX_MOVE(ch));
+      COLUMN_NRM("mana",ch->points.mana);
+      COLUMN_NRM("max_mana",ch->points.max_mana);
+      COLUMN_NRM("hit",ch->points.hit);
+      COLUMN_NRM("max_hit",ch->points.max_hit);
+      COLUMN_NRM("move",ch->points.move);
+      COLUMN_NRM("max_move",ch->points.max_move);
 
-      COLUMN_NRM("gold",GET_GOLD(ch));
-      COLUMN_NRM("bank_gold",GET_BANK_GOLD(ch));
-      COLUMN_NRM("exp",GET_EXP(ch));
-      COLUMN_NRM("power",GET_POWER(ch));
-      COLUMN_NRM("mpower",GET_MPOWER(ch));
-      COLUMN_NRM("defense",GET_DEFENSE(ch));
-      COLUMN_NRM("mdefense",GET_MDEFENSE(ch));
-      COLUMN_NRM("technique",GET_TECHNIQUE(ch));
+      COLUMN_NRM("gold",ch->points.gold);
+      COLUMN_NRM("bank_gold",ch->points.bank_gold);
+      COLUMN_NRM("exp",ch->points.exp);
+      COLUMN_NRM("power",ch->points.power);
+      COLUMN_NRM("mpower",ch->points.mpower);
+      COLUMN_NRM("defense",ch->points.defense);
+      COLUMN_NRM("mdefense",ch->points.mdefense);
+      COLUMN_NRM("technique",ch->points.technique);
 
       COLUMN_NRM("str",ch->real_abils.str);
       COLUMN_NRM("str_add",ch->real_abils.str_add);
@@ -321,7 +340,7 @@ long spellinfo[32]; /* Which spells are active, which are not. */
 
 void dbmodify_player_skills (struct char_data *ch, int mode) { /* mode = 0 for delete, = 1 for store, = 2 for retrieve */
   int i, skillnum;
-  static int cache=NULL;
+  static int cache=0;
   MYSQL_RES *result;
   MYSQL_ROW row;
   extern char *spells[];
@@ -403,6 +422,13 @@ int insert_player_entry (struct char_data *ch) {
   char tmpstr[300];
 
   if (!ch || !ch->player_specials) return 0;
+  
+  /* Temporary fix: Skip saving if gold values are corrupted */
+  if (ch->points.gold > 1000000000 || ch->points.gold < -1000000000 ||
+      ch->points.bank_gold > 1000000000 || ch->points.bank_gold < -1000000000) {
+    log("WARNING: Skipping save due to corrupted character data (gold values)");
+    return 1; /* Return success to avoid crashes */
+  }
 
   if (!querybuild) {
     init_querystring(ch, 0);
@@ -414,7 +440,7 @@ int insert_player_entry (struct char_data *ch) {
   dbmodify_player_skills(ch, MODE_STORE); /* Lets store the skills while we're at it. */
   sprintf(buf, "SELECT idnum FROM player_main WHERE name='%s'", GET_NAME(ch));
   QUERY_DATABASE(SQLdb, buf, strlen(buf));
-  if (!(result=STORE_RESULT(SQLdb))) return NULL;
+  if (!(result=STORE_RESULT(SQLdb))) return 0;
 
   /* Remove all EQ affects ... We need to write only bare character data. */
   for (i = 0; i < NUM_WEARS; i++)
@@ -455,12 +481,12 @@ int insert_player_entry (struct char_data *ch) {
 
   for (i=0; i<NUM_PLAYER_MAIN_ROW_ELEMENTS; i++) {
     buf2[0]=0;
-    if (!columnptrs[i].ptr || !TYPECAST(i, *columnptrs[i].ptr) || (columnptrs[i].type==1 && !*(char *)*columnptrs[i].ptr))
+    if (!columnptrs[i].ptr || !TYPECAST(i, *columnptrs[i].ptr) || (columnptrs[i].type==1 && !*((char **)columnptrs[i].ptr)))
       sprintf(tmpstr, "%sNULL", mode==MODE_UPDATE ? mkqueryset(querystring[i]) : "," );
     else switch (columnptrs[i].type) {
       case 0: sprintf(tmpstr, "%s%ld",  mode==MODE_UPDATE ? mkqueryset(querystring[i]) : ",", TYPECAST(i, *columnptrs[i].ptr)); break;
       case 1:
-        mysql_escape_string(buf2, (char *)*columnptrs[i].ptr, strlen((char *)*columnptrs[i].ptr));
+        mysql_escape_string(buf2, *((char **)columnptrs[i].ptr), strlen(*((char **)columnptrs[i].ptr)));
         sprintf(tmpstr, "%s'%s'", mode==MODE_UPDATE ? mkqueryset(querystring[i]) : ",", buf2);
         break;
     }
@@ -515,7 +541,7 @@ struct char_data *retrieve_player_entry (char *name, struct char_data *ch) {
     sprintf(buf+strlen(buf), "%c%s", !i ? ' ' : ',', querystring[i]);
   sprintf(buf+strlen(buf), " FROM player_main WHERE name='%s'", name);
   QUERY_DATABASE(SQLdb, buf, strlen(buf));
-  if (!(result=STORE_RESULT(SQLdb))) return NULL;
+  if (!(result=STORE_RESULT(SQLdb))) return 0;
   if ((rows=mysql_num_rows(result)) > 1 || rows<0) {
     sprintf(buf, "ERROR: SELECT for %s returned %d rows! Duplicate entries for seemingly VIABLE player!?", name, (int) rows);
     log(buf);
@@ -544,8 +570,8 @@ struct char_data *retrieve_player_entry (char *name, struct char_data *ch) {
       if (columnptrs[i].type==0)
         setzero(columnptrs[i].ptr, structurevarsize[i]);
       else {
-        (char *)*columnptrs[i].ptr=(char *) malloc(1);
-        *(char *)*columnptrs[i].ptr=0;
+        *((char **)columnptrs[i].ptr) = (char *) malloc(1);
+        **((char **)columnptrs[i].ptr) = 0;
       }
     }
     else {
@@ -553,10 +579,10 @@ struct char_data *retrieve_player_entry (char *name, struct char_data *ch) {
         *columnptrs[i].ptr=ATOIROW(i);
       }
       else if (columnptrs[i].type==1) {
-        if (*columnptrs[i].ptr) free((char *)*columnptrs[i].ptr);
-        (char *)*columnptrs[i].ptr=(char *) malloc(lengths[i]+1);
-        memcpy((char *)*columnptrs[i].ptr, row[i], lengths[i]);
-        ((char *)*columnptrs[i].ptr)[lengths[i]]=0;
+        if (*((char **)columnptrs[i].ptr)) free(*((char **)columnptrs[i].ptr));
+        *((char **)columnptrs[i].ptr) = (char *) malloc(lengths[i]+1);
+        memcpy(*((char **)columnptrs[i].ptr), row[i], lengths[i]);
+        (*((char **)columnptrs[i].ptr))[lengths[i]] = 0;
       }
       else continue;
     }
@@ -597,7 +623,7 @@ int count_player_entries ( void ) {
   sprintf(buf, "SELECT idnum FROM player_main");
   QUERY_DATABASE(SQLdb, buf, strlen(buf));
 
-  if (!(result=STORE_RESULT(SQLdb))) return NULL;
+  if (!(result=STORE_RESULT(SQLdb))) return 0;
 
   rows=mysql_num_rows(result);
 

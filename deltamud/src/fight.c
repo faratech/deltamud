@@ -192,10 +192,10 @@ load_messages (void)
 
 void increase_blood(int rm)
 {
-  RM_BLOOD(rm) = MIN(RM_BLOOD(rm) + 1, 10);
+  world[rm].blood = MIN(RM_BLOOD(rm) + 1, 10);
 }
 void increase_snow(int rm) {
- RM_SNOW(rm) = MIN(RM_SNOW(rm) + 1, 10);
+ world[rm].snow = MIN(RM_SNOW(rm) + 1, 10);
 }
 
 void 

@@ -1,0 +1,67 @@
+# Compiled Object files
+*.o
+*.a
+*.so
+
+# Executables
+deltamud/bin/circle
+deltamud/bin/autowiz
+deltamud/bin/delobjs
+deltamud/bin/listrent
+deltamud/bin/mudpasswd
+deltamud/bin/play2to3
+deltamud/bin/purgeplay
+deltamud/bin/shopconv
+deltamud/bin/showplay
+deltamud/bin/sign
+deltamud/bin/split
+deltamud/bin/wld2html
+
+# Archives
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+*.zip
+*.rar
+
+# Logs and temporary files
+*.log
+syslog*
+*.tmp
+*.temp
+*.swp
+*.bak
+*~
+
+# Configuration cache
+config.cache
+config.status
+confdefs.h
+
+# Core dumps
+core
+core.*
+
+# Player data (should not be in git)
+deltamud/lib/etc/players
+deltamud/lib/etc/plrmail
+deltamud/lib/plr*
+
+# Build directories
+deltamud/obj/
+
+# MySQL data files
+mysql/mysqld.sock
+mysql/*.err
+mysql/*.pid
+mysql/*.log
+
+# IDE and editor files
+.vscode/
+.idea/
+*.sublime-*
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -709,8 +709,8 @@ SPECIAL (puff)
       do_say (ch, "I'll sleep when I'm dead", 0, 0);
       return (1);
     case 5:
-      do_say (ch, "My advice to you is get married: if you find a good wife you'll be happy; if not,
-you'll become a philosopher", 0, 0);
+      do_say (ch, "My advice to you is get married: if you find a good wife you'll be happy; if not, "
+"you'll become a philosopher", 0, 0);
       return (1);
     case 6:
       do_say (ch, "We all agree that your theory is crazy, but is it crazy enough?", 0, 0);

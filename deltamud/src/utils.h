@@ -536,11 +536,18 @@ void	update_pos(struct char_data *victim);
  * automatically sets when it determines whether or not the system is
  * capable of encrypting.
  */
+/* Password encryption system - upgraded to SHA-256 */
 #if defined(NOCRYPT) || !defined(CIRCLE_CRYPT)
 #define CRYPT(a,b) (a)
 #else
 #define CRYPT(a,b) ((char *) crypt((a),(b)))
 #endif
+
+/* New secure password functions */
+char *create_secure_password_hash(const char *password, const char *username);
+int verify_password(const char *password, const char *stored_hash, const char *username);
+char *generate_salt(void);
+int password_needs_upgrade(const char *stored_hash);
 
 #define SENDOK(ch) ((IS_NPC(ch) || (ch)->desc) && (AWAKE(ch) || sleep) && \
                     !PLR_FLAGGED((ch), PLR_WRITING))

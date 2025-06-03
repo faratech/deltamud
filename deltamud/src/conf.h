@@ -1,20 +1,19 @@
-/* src/conf.h.  Generated automatically by configure.  */
-/* src/conf.h.in.  Generated automatically from configure.in by autoheader.  */
+/* DeltaMUD Configuration - Modern Linux */
 
 /* Define to empty if the keyword does not work.  */
-/* #undef const */
+/* Modern compilers support const */
 
 /* Define if you have <sys/wait.h> that is POSIX.1 compatible.  */
 #define HAVE_SYS_WAIT_H 1
 
 /* Define to `int' if <sys/types.h> doesn't define.  */
-/* #undef pid_t */
+/* Modern systems have pid_t */
 
 /* Define as the return type of signal handlers (int or void).  */
 #define RETSIGTYPE void
 
 /* Define to `unsigned' if <sys/types.h> doesn't define.  */
-/* #undef size_t */
+/* Modern systems have size_t */
 
 /* Define if you have the ANSI C header files.  */
 #define STDC_HEADERS 1
@@ -35,10 +34,10 @@
 #define HAVE_STRUCT_IN_ADDR 1
 
 /* Define to `int' if <sys/socket.h> doesn't define.  */
-#define socklen_t int
+/* Modern systems have socklen_t */
 
 /* Define to `int' if <sys/types.h> doesn't define.  */
-/* #undef ssize_t */
+/* Modern systems have ssize_t */
 
 /* Define if you have the inet_addr function.  */
 #define HAVE_INET_ADDR 1
@@ -56,7 +55,7 @@
 #define HAVE_ASSERT_H 1
 
 /* Define if you have the <crypt.h> header file.  */
-/* #undef HAVE_CRYPT_H */
+#define HAVE_CRYPT_H 1
 
 /* Define if you have the <errno.h> header file.  */
 #define HAVE_ERRNO_H 1
@@ -117,3 +116,6 @@
 
 /* Define if you have the malloc library (-lmalloc).  */
 /* #undef HAVE_LIBMALLOC */
+
+/* Define if you have the crypt function.  */
+#define HAVE_CRYPT 1

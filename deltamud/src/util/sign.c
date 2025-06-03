@@ -18,6 +18,7 @@
 
 #include "conf.h"
 #include "sysdep.h"
+#include <arpa/inet.h>
 
 #define MY_ADDRESS "206.161.127.28"
 

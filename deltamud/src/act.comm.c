@@ -25,7 +25,7 @@
 extern struct room_data *world;
 extern struct descriptor_data *descriptor_list;
 extern struct char_data *character_list;
-struct player_index_element *player_table;
+extern struct player_index_element *player_table;
 extern int top_of_p_table;
 
 /* extern functions */

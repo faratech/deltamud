@@ -937,11 +937,11 @@ void
 check_start_rooms (void)
 {
   int count;
-  extern long mortal_start_room[NUM_STARTROOMS + 1]; 
-  extern long immort_start_room;
+  extern const long mortal_start_room[NUM_STARTROOMS + 1]; 
+  extern const long immort_start_room;
 /*  extern long frozen_start_room; */
 
-  for (count = 1; count <= (NUM_STARTROOMS + 1); count++)
+  for (count = 1; count <= NUM_STARTROOMS; count++)
     if ((r_mortal_start_room[count] = real_room (mortal_start_room[count])) < 0)
       {
 	if (count > 1)
@@ -1405,8 +1405,8 @@ parse_object (FILE * obj_f, int nr)
  if (!get_line(obj_f, line) ||
   (retval = sscanf(line, "%d %d %d %d %d %d", t, t + 1, t
    + 2, t + 3, t + 4, t + 5)) > 6) { // umm, still trying here!
-    fprintf(stderr, "Format error in second numeric line (expecting 4
-    or 6 args, got %d), %s\n", retval, buf2); exit(1);
+    fprintf(stderr, "Format error in second numeric line (expecting 4 or 6 args, got %d), %s\n", retval, buf2); 
+    exit(1);
  }
 
   obj_proto[i].obj_flags.value[0] = t[0];
@@ -2209,7 +2209,13 @@ save_char (struct char_data *ch, long load_room)
     ch->player_specials->saved.load_room = NOWHERE;
   else
     ch->player_specials->saved.load_room = world[load_room].number;
-  insert_player_entry(ch); 
+    
+  /* Save character to MySQL database */
+  if (insert_player_entry(ch)) {
+    log("DEBUG: Character saved successfully to database");
+  } else {
+    log("WARNING: Failed to save character to database");
+  } 
 }
 
 /* We won't ever need this, but just in case..
@@ -2722,6 +2728,7 @@ if (GET_LEVEL(ch) < LVL_IMPL) {
 /* Storm's SUPER SEXY binary search algorithm (works best with a whole SHITLOAD of rooms :)). */
 int real_room (int virtual) {
   int i=top_of_world/2, low=0, high=top_of_world, x, firstpass=0;
+  if (top_of_world < 0 || !world) return NOWHERE;
   if (virtual < 0 || virtual > world[top_of_world].number) return NOWHERE;
   if (!i) return 0;
   if (ismap(top_of_world) || map_start_room == -1) {

@@ -357,8 +357,7 @@ ACMD (do_build) {
     return;
   }
   if (GET_LEVEL(ch)>=LVL_IMMORT) {
-    send_to_char("Sorry, immortals don't really participate in the mortal building
-program.\r\n", ch);
+    send_to_char("Sorry, immortals don't really participate in the mortal building program.\r\n", ch);
     return;
   }
   if (!PLR_FLAGGED(ch, PLR_MBUILDER)) {

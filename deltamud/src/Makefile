@@ -6,7 +6,7 @@
 CC = gcc
 
 # Any special flags you want to pass to the compiler
-MYFLAGS = -Wall -I/usr/local/include
+MYFLAGS = -Wall -I/usr/local/include -I/usr/include/mysql
 
 #flags for profiling (see hacker.doc for more information)
 PROFILE = 
@@ -28,7 +28,7 @@ OBJFILES = comm.o act.comm.o act.create.o act.informative.o act.movement.o act.i
 	medit.o sedit.o auction.o color.o races.o quest.o clan.o deity.o \
         dg_comm.o dg_db_scripts.o dg_event.o dg_handler.o dg_mobcmd.o \
         dg_objcmd.o dg_scripts.o dg_triggers.o dg_wldcmd.o dg_olc.o \
-        maputils.o hedit.o aedit.o dbinterface.o
+        maputils.o hedit.o aedit.o dbinterface.o password.o
 
 CXREF_FILES = act.comm.c act.create.c act.informative.c act.item.c act.movement.c \
 	act.offensive.c act.other.c act.social.c act.wizard.c alias.c ban.c boards.c \
@@ -39,7 +39,7 @@ CXREF_FILES = act.comm.c act.create.c act.informative.c act.item.c act.movement.
 	medit.c sedit.c auction.c color.c races.c quest.c clan.c deity.c \
         dg_comm.c dg_db_scripts.c dg_event.c dg_handler.c dg_mobcmd.c \
         dg_objcmd.c dg_scripts.c dg_triggers.c dg_wldcmd.c dg_olc.c \
-        maputils.c hedit.c aedit.c dbinterface.c
+        maputils.c hedit.c aedit.c dbinterface.c password.c
 
 default: all
 
@@ -61,7 +61,7 @@ circle:
 	$(MAKE) $(BINDIR)/circle
 
 $(BINDIR)/circle : $(OBJFILES)
-	$(CC) -o $(BINDIR)/circle $(PROFILE) $(OBJFILES)   -L/usr/local/lib/ -L/usr/local/lib/mysql /scsi2/server1/seadog/deltamud/src/libdescrypt.a /scsi2/server1/seadog/deltamud/src/libmysqlclient.a -lm # Used to have -lcrypt -- took it out.
+	$(CC) -o $(BINDIR)/circle $(PROFILE) $(OBJFILES) -lcrypt -lm -lmysqlclient
 clean:
 	rm -f *.o
 ref:

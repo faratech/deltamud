@@ -31,15 +31,15 @@ extern struct char_data *arenamaster;
 extern struct room_data *world;
 extern struct obj_data *object_list;
 extern struct char_data *character_list;
-extern struct cha_app_type cha_app[];
-extern struct int_app_type int_app[];
+/* extern struct cha_app_type cha_app[]; */
+/* extern struct int_app_type int_app[]; */
 extern struct index_data *obj_index;
 
 extern struct descriptor_data *descriptor_list;
 extern struct zone_data *zone_table;
 
-struct house_control_rec house_control[MAX_HOUSES];
-int num_of_houses;
+extern struct house_control_rec house_control[MAX_HOUSES];
+extern int num_of_houses;
 
 extern int mini_mud;
 extern int pk_allowed;

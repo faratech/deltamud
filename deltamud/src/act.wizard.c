@@ -5181,7 +5181,7 @@ ACMD(do_addsnow)
 
     for (i = 0; i < top_of_world; i++)
     if (RM_SNOW(i) < 10)
-      RM_SNOW(i) += 1;
+      world[i].snow += 1;
 }
 ACMD(do_delsnow)
 {
@@ -5192,5 +5192,5 @@ ACMD(do_delsnow)
  
     for (i = 0; i < top_of_world; i++)
     if (RM_SNOW(i) > 0)   
-      RM_SNOW(i) -= 1;
+      world[i].snow -= 1;
 }

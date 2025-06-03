@@ -768,8 +768,7 @@ game_loop (int mother_desc)
 		  BRF, LVL_IMMORT, FALSE);
 	  mudlog ("          Please save ALL your work to prevent loss.",
 		  BRF, LVL_IMMORT, FALSE);
-	  send_to_all ("&m[&YINFO&m]&n System will AUTO Reboot in ten minutes time.
-\r\n");
+	  send_to_all ("&m[&YINFO&m]&n System will AUTO Reboot in ten minutes time.\r\n");
 	}
 	if ((tmnow->tm_hour == reboot_hr) && (tmnow->tm_min == reboot_min)){
 	  sprintf (buf, "(GC) AUTO Reboot by system.");
@@ -1519,7 +1518,7 @@ new_descriptor (int s)
 
   /* accept the new connection */
   i = sizeof (peer);
-  if ((desc = accept (s, (struct sockaddr *) &peer, &i)) == INVALID_SOCKET)
+  if ((desc = accept (s, (struct sockaddr *) &peer, (socklen_t *)&i)) == INVALID_SOCKET)
     {
       perror ("accept");
       return -1;
@@ -1637,8 +1636,10 @@ process_output (struct descriptor_data *t)
   /* add the extra CRLF if the person isn't in compact mode */
   if (!t->connected && t->character && !PRF_FLAGGED (t->character, PRF_COMPACT))
     strcat (i + 2, "\r\n");
-  if (t->character)
+  if (t->character && t->character->in_room != NOWHERE && t->character->in_room >= 0)
     proc_color (i, GET_LEVEL(t->character) < LVL_IMMORT && world[t->character->in_room].weather == WEATHER_MAGICFOG ? -1 : (clr (t->character, C_NRM)));
+  else if (t->character)
+    proc_color (i, clr (t->character, C_NRM));
   /* add a prompt */
   strncat (i + 2, make_prompt (t), MAX_PROMPT_LENGTH);
 
@@ -2690,7 +2691,7 @@ fprintf (opf, "<table border=\"0\" width=\"100%%\" height=\"1\" cellspacing=\"0\
 fprintf (opf, "<td width=\"100%%\" height=\"1\" valign=\"middle\" align=\"center\"><p align=\"center\">\n");
 fprintf (opf, "<a href=\"http://www21.valueclick.com/cgi-bin/redirect?host=h0031038&amp;b=1\" target=\"_blank\"\n");
 fprintf (opf, "<img alt=\"Please visit our sponsors.\" border=\"0\" height=\"60\" src=\"http://www21.valueclick.com/cgi-bin/cycle?host=h0031038&amp;b=1\" width=\"468\"></a></td></tr></table></center></div>\n");
-fprintf (opf, "<p align=\"center\" style=\"MARGIN-LEFT: 10px\"><small><small><font face=\"Arial\">[ <a href=\"index.html\">Home</a> | </font><a href=\"http://www.deltamud.net/main.html\"><font face=\"Arial\">Main</font></a><font face=\"Arial\"> | </font><a href=\"http://www.deltamud.net/story/index.html\"><font face=\"Arial\">Story</font></a><font face=\"Arial\"> | </font><a href=\"http://www.deltamud.net/policy/index.html\"><font face=\"Arial\">Rules</font></a><font face=\"Arial\"> | </font><a href=\"http://www.deltamud.net/download/index.html\"><font face=\"Arial\">Download</font></a><font face=\"Arial\"> | </font><a href=\"http://www.deltamud.net/news/index.html\"><font face=\"Arial\">News</font></a><font face=\"Arial\"> | </font><a href=\"http://www.deltamud.net/guide/index.html\"><font face=\"Arial\">Guide</font></a> <font face=\"Arial\"> | </font><a href=\"http://www.deltamud.net/events/index.html\"><font face=\"Arial\">Events</font></a><font face=\"Arial\"> | </font><a href=\"http://www.deltamud.net/admins/index.html\"><font face=\"Arial\">Admins</font></a><font face=\"Arial\"> ]</small></small><br> <small><small><small>DeltaMUD is © Copyright 1998 <a href=\"mailto:mulder@deltamud.net\">Michael J. Fara</a>. All Rights Reserved. The contents of this website may not be reproduced.</small></small></small></font></p></td></tr></table></body></html>\n");
+fprintf (opf, "<p align=\"center\" style=\"MARGIN-LEFT: 10px\"><small><small><font face=\"Arial\">[ <a href=\"index.html\">Home</a> | </font><a href=\"http://www.deltamud.net/main.html\"><font face=\"Arial\">Main</font></a><font face=\"Arial\"> | </font><a href=\"http://www.deltamud.net/story/index.html\"><font face=\"Arial\">Story</font></a><font face=\"Arial\"> | </font><a href=\"http://www.deltamud.net/policy/index.html\"><font face=\"Arial\">Rules</font></a><font face=\"Arial\"> | </font><a href=\"http://www.deltamud.net/download/index.html\"><font face=\"Arial\">Download</font></a><font face=\"Arial\"> | </font><a href=\"http://www.deltamud.net/news/index.html\"><font face=\"Arial\">News</font></a><font face=\"Arial\"> | </font><a href=\"http://www.deltamud.net/guide/index.html\"><font face=\"Arial\">Guide</font></a> <font face=\"Arial\"> | </font><a href=\"http://www.deltamud.net/events/index.html\"><font face=\"Arial\">Events</font></a><font face=\"Arial\"> | </font><a href=\"http://www.deltamud.net/admins/index.html\"><font face=\"Arial\">Admins</font></a><font face=\"Arial\"> ]</small></small><br> <small><small><small>DeltaMUD is ï¿½ Copyright 1998 <a href=\"mailto:mulder@deltamud.net\">Michael J. Fara</a>. All Rights Reserved. The contents of this website may not be reproduced.</small></small></small></font></p></td></tr></table></body></html>\n");
 
 //  sprintf (buf, "</BODY></HTML>\n");
 //  fprintf (opf, buf);

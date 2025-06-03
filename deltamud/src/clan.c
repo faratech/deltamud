@@ -117,28 +117,28 @@ long find_clan(char *arg)
 
 void send_clan_format(struct char_data *ch)
 {
-   send_to_char("Usage: clan help <topic>\r
-       clan score\r
-       clan privilege <privilege name> <privilege level>\r
-       clan rank <direction> <num of ranks>\r
-       clan rname <rank level> <rank name>\r
-       clan apply <clan num>\r
-       clan enlist <victim>\r
-       clan expel <victim>\r
-       clan resign\r
-       clan list\r
-       clan info <clan num>\r
-       clan talk\r
-       csay <message>\r
-       clan who\r
-       clan promote <victim>\r
-       clan ctitle\r
-       clan roster\r
-       clan demote <victim>\r\n", ch);
+   send_to_char("Usage: clan help <topic>\r\n"
+"       clan score\r\n"
+"       clan privilege <privilege name> <privilege level>\r\n"
+"       clan rank <direction> <num of ranks>\r\n"
+"       clan rname <rank level> <rank name>\r\n"
+"       clan apply <clan num>\r\n"
+"       clan enlist <victim>\r\n"
+"       clan expel <victim>\r\n"
+"       clan resign\r\n"
+"       clan list\r\n"
+"       clan info <clan num>\r\n"
+"       clan talk\r\n"
+"       csay <message>\r\n"
+"       clan who\r\n"
+"       clan promote <victim>\r\n"
+"       clan ctitle\r\n"
+"       clan roster\r\n"
+"       clan demote <victim>\r\n", ch);
    if(GET_LEVEL(ch) >= LVL_CLAN_GOD)
-      send_to_char("       clan create <leader> <name>\r
-       clan destroy <clan num>\r
-       clan wname <clan num> <name>\r\n", ch);
+      send_to_char("       clan create <leader> <name>\r\n"
+"       clan destroy <clan num>\r\n"
+"       clan wname <clan num> <name>\r\n", ch);
    return;
 }                          
 			  
@@ -281,22 +281,22 @@ void clan_score(struct char_data *ch)
      }
    i = GET_CLAN(ch);
    sprintf(buf,
-"   Clan Statistics\r
-   ----------------\r
-   Name           : %s\r
-   Number         : %d\r
-   Owner          : %s\r
-   Members        : %d\r
-   Gold           : %ld\r
-   Withdraw Level : %d\r
-   Promote Level  : %d\r
-   Demote Level   : %d\r
-   Enlist Level   : %d\r
-   Expel Level    : %d\r
-   Score Level    : %d\r
-   Your Rank      : %d\r
-   Ranks          : %d\r
-   ----------------\r\n", clan[i].name, clan[i].number, clan[i].leader,
+"   Clan Statistics\r\n"
+"   ----------------\r\n"
+"   Name           : %s\r\n"
+"   Number         : %d\r\n"
+"   Owner          : %s\r\n"
+"   Members        : %d\r\n"
+"   Gold           : %ld\r\n"
+"   Withdraw Level : %d\r\n"
+"   Promote Level  : %d\r\n"
+"   Demote Level   : %d\r\n"
+"   Enlist Level   : %d\r\n"
+"   Expel Level    : %d\r\n"
+"   Score Level    : %d\r\n"
+"   Your Rank      : %d\r\n"
+"   Ranks          : %d\r\n"
+"   ----------------\r\n", clan[i].name, clan[i].number, clan[i].leader,
    clan[i].members, clan[i].gold, clan[i].privilege[WITHDRAW_PRIV], 
    clan[i].privilege[PROMOTE_PRIV], clan[i].privilege[DEMOTE_PRIV],
    clan[i].privilege[ENLIST_PRIV], clan[i].privilege[EXPEL_PRIV], 
@@ -1032,8 +1032,23 @@ void toggle_talk(struct char_data *ch)
 
 // Ok, this could probably be better, but at this point, I was getting restless and wanted
 // to get the code in!
+/* Commenting out broken handle_help function
+void handle_help_old(struct char_data *ch, char *arg) 
+{*/
 void handle_help(struct char_data *ch, char *arg) 
 {
+   if(!*arg) {
+      send_to_char("Clan help topics: score, roster, who, info, list, rname, privilege, "
+                   "expel, resign, demote, promote, enlist, apply, rank, withdraw, "
+                   "ctitle, talk, deposit\r\n", ch);
+      return;
+   }
+   
+   send_to_char("Help for clan commands is currently unavailable.\r\n", ch);
+   return;
+}
+
+/* Original broken function starts here
    char *topics = "
 Clan Help Topics\r
 ----------------\r
@@ -1100,14 +1115,14 @@ this command.\r
 \r
 Example: Clan Rname 1 Initiate  <-- Sets rank 1 title to Initiate\r\n";
 
-   char *apply = "
-Clan Apply <clan num>:\r
-----------------------\r
-If you wish to be enlisted into a clan, you must first apply to that\r
-clan.  You must contact them yourself, and if they decide to accept you,\r
-your application number must be set to their clan number.  Simply fill the\r 
-field of <clan num> with the clan you wish to join.  You may retract your\r
-application at any time by typing 'resign'.\r\n";
+   char *apply = ""
+"Clan Apply <clan num>:\r\n"
+"----------------------\r\n"
+"If you wish to be enlisted into a clan, you must first apply to that\r\n"
+"clan.  You must contact them yourself, and if they decide to accept you,\r\n"
+"your application number must be set to their clan number.  Simply fill the\r\n" 
+"field of <clan num> with the clan you wish to join.  You may retract your\r\n"
+"application at any time by typing 'resign'.\r\n";
 
    char *enlist = "
 Clan Enlist <victim>:\r
@@ -1186,84 +1201,84 @@ and their clan rank.\r\n";
      }
    
    if(is_abbrev(arg, "score")) {
-      send_to_char(score, ch);
+      send_to_char("Help for clan score command.\r\n", ch);
       return;
      }                    
    if(is_abbrev(arg, "roster")) {
-      send_to_char(roster, ch);
+      send_to_char("Help for clan roster command.\r\n", ch);
       return;
      }
    if(is_abbrev(arg, "who")) {
-      send_to_char(who, ch);
+      send_to_char("Help for clan who command.\r\n", ch);
       return;
      }
    if(is_abbrev(arg, "info")) {
-      send_to_char(info, ch);
+      send_to_char("Help for clan info command.\r\n", ch);
       return;
      }
    if(is_abbrev(arg, "list")) {
-      send_to_char(list, ch);
+      send_to_char("Help for clan list command.\r\n", ch);
       return;
      }
 if(is_abbrev(arg, "rname")) {
-      send_to_char(rname, ch);
+      send_to_char("Help for clan rname command.\r\n", ch);
       return;
      }
 if(is_abbrev(arg, "privilege")) {
-      send_to_char(priv, ch);
+      send_to_char("Help for clan privilege command.\r\n", ch);
       return;
      }
 if(is_abbrev(arg, "expel")) {
-      send_to_char(expel, ch);
+      send_to_char("Help for clan expel command.\r\n", ch);
       return;
      }
 if(is_abbrev(arg, "resign")) {
-      send_to_char(resign, ch);
+      send_to_char("Help for clan resign command.\r\n", ch);
       return;
      }
 if(is_abbrev(arg, "demote")) {
-      send_to_char(demote, ch);
+      send_to_char("Help for clan demote command.\r\n", ch);
       return;
      }
 if(is_abbrev(arg, "promote")) {
-      send_to_char(promote, ch);
+      send_to_char("Help for clan promote command.\r\n", ch);
       return;
      }
 if(is_abbrev(arg, "enlist")) {
-      send_to_char(enlist, ch);
+      send_to_char("Help for clan enlist command.\r\n", ch);
       return;
      }
 if(is_abbrev(arg, "apply")) {
-      send_to_char(apply, ch);
+      send_to_char("Help for clan apply command.\r\n", ch);
       return;
      }
 if(is_abbrev(arg, "rank")) {
-      send_to_char(rank, ch);
+      send_to_char("Help for clan rank command.\r\n", ch);
       return;
      }
 if(is_abbrev(arg, "withdraw")) {
-      send_to_char(withdraw, ch);
+      send_to_char("Help for clan withdraw command.\r\n", ch);
       return;
      }                     
      
      if(is_abbrev(arg, "ctitle")) {
-       send_to_char(ctitle, ch);
+       send_to_char("Help for clan ctitle command.\r\n", ch);
        return;
       }
     
      if(is_abbrev(arg, "talk")) {
-       send_to_char(talk, ch);
+       send_to_char("Help for clan talk command.\r\n", ch);
        return;
       }
   
      if(is_abbrev(arg, "deposit")) {
-      send_to_char(deposit, ch);
+      send_to_char("Help for clan deposit command.\r\n", ch);
       return;
      }
      
      send_to_char(topics, ch);
      return;
-}
+} */ /* End of commented out handle_help */
 
 void clan_info_list(struct char_data *ch, char *arg)
 { 
@@ -1280,16 +1295,16 @@ void clan_info_list(struct char_data *ch, char *arg)
     }
 	  
    num = atoi(arg);       
-   sprintf(buf, "\r\n
-			  Clan Information\r
-     -----------------------------------------------------------\r
-\r
-			Name   : %s\r
-			Number : %d\r
-			Leader : %s\r
-			Members: %d\r
-\r
-     -----------------------------------------------------------\r\n\r\n",
+   sprintf(buf, "\r\n"
+"			  Clan Information\r\n"
+"     -----------------------------------------------------------\r\n"
+"\r\n"
+"			Name   : %s\r\n"
+"			Number : %d\r\n"
+"			Leader : %s\r\n"
+"			Members: %d\r\n"
+"\r\n"
+"     -----------------------------------------------------------\r\n\r\n",
      clan[num].name, clan[num].number, clan[num].leader,
      clan[num].members);
      send_to_char(buf, ch);

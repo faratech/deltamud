@@ -1872,8 +1872,10 @@ ACMD(do_repair)
 
  if (GET_OBJ_CSLOTS(repair) < 0) {
   act("You completely ruin $p and it crumbles away!", FALSE, ch,
-  repair, 0, TO_CHAR); act("$n tries to repair $p, but it crumbles
-  away!", TRUE, ch, repair, 0, TO_ROOM); extract_obj(repair); return;
+  repair, 0, TO_CHAR); 
+  act("$n tries to repair $p, but it crumbles away!", TRUE, ch, repair, 0, TO_ROOM); 
+  extract_obj(repair); 
+  return;
  }
 
  if (percent > prob) {

@@ -26,7 +26,7 @@ ACMD(do_move);
 /* necessary for CMD_IS macro */
 #ifndef __INTERPRETER_C__
 //extern struct command_info cmd_info[];
-cpp_extern struct command_info *complete_cmd_info;
+extern struct command_info *complete_cmd_info;
 #endif
 
 

@@ -102,7 +102,7 @@ int	real_object(int vnum);
 struct obj_data *read_object(int nr, int type);
 int	vnum_object(char *searchname, struct char_data *ch);
 
-int sunlight;	/* What state the sun is at */
+extern int sunlight;	/* What state the sun is at */
 
 #define REAL 0
 #define VIRTUAL 1

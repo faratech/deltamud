@@ -1567,5 +1567,5 @@ void blood_update(void)
 
   for (i = 0; i < top_of_world; i++)
     if (RM_BLOOD(i) > 0)
-      RM_BLOOD(i) -= 1;
+      world[i].blood -= 1;
 }

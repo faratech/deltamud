@@ -572,7 +572,7 @@ header file for central structures and contstants * * * * All rights reserved.  
 #define MAX_RAW_INPUT_LENGTH	512	/* Max size of *raw* input */
 #define MAX_MESSAGES		60
 #define MAX_NAME_LENGTH		20  /* Used in char_file_u *DO*NOT*CHANGE* */
-#define MAX_PWD_LENGTH		10  /* Used in char_file_u *DO*NOT*CHANGE* */
+#define MAX_PWD_LENGTH		128  /* Upgraded for SHA-256 hashes - was 10 for DES */
 #define MAX_TITLE_LENGTH	40  /* Used in char_file_u *DO*NOT*CHANGE* */
 #define HOST_LENGTH		30  /* Used in char_file_u *DO*NOT*CHANGE* */
 #define EXDSCR_LENGTH		240 /* Used in char_file_u *DO*NOT*CHANGE* */
@@ -1068,12 +1068,12 @@ struct char_data {
    byte deity;
    byte level;
    long hometown;
-   time_t birth;   Time of birth of character     
+   time_t birth;   Time of birth of character
    int	played;    Number of secs played in total 
    ubyte weight;
    ubyte height;
 
-   char	pwd[MAX_PWD_LENGTH+1];     character's password 
+   char	pwd[MAX_PWD_LENGTH+1];     character's password (SHA-256 hash) 
 
    struct char_special_data_saved char_specials_saved;
    struct player_special_data_saved player_specials_saved;
@@ -1081,7 +1081,7 @@ struct char_data {
    struct char_point_data points;
    struct affected_type affected[MAX_AFFECT];
 
-   time_t last_logon;		 Time (in secs) of last logon 
+   time_t last_logon;		 Time (in secs) of last logon
    char host[HOST_LENGTH+1];	 host of last logon 
 }; */
 /* ====================================================================== */

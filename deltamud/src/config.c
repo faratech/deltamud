@@ -134,14 +134,14 @@ char *NOEFFECT = "&CNothing seems to happen.&n\r\n";
 /* Address to bind do; NULL for all interfaces.*/
 
 //const char *DFLT_IP="205.252.89.140";
-const char *DFLT_IP="206.161.127.225";
-//const char *DFLT_IP=NULL;
+//const char *DFLT_IP="206.161.127.225";
+const char *DFLT_IP=NULL;  /* Bind to all interfaces */
 
 /* mySQL Host Database Information */
 const char        *mySQL_host="localhost";
-const unsigned int mySQL_port=4001;
-const char        *mySQL_user="system-mud";
-const char        *mySQL_pass="v5f9J8z0lm883jdks83jf45kj32l5hlh5k3j25k2jlj23h23";
+const unsigned int mySQL_port=3306;
+const char        *mySQL_user=NULL;
+const char        *mySQL_pass=NULL;
 
 /****************************************************************************/
 

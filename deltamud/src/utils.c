@@ -1078,7 +1078,7 @@ void clearobservers(struct char_data *who)
   }
 
 }
-int exp_to_level(arg)
+int exp_to_level(int arg)
 {
   double modifier;
   if (arg < 1 || arg > LVL_IMPL) return 0;

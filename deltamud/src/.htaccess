@@ -1,0 +1,31 @@
+# Deny all access to DeltaMUD source code
+# This directory contains sensitive source code and should not be web accessible
+
+<Files "*">
+    Require all denied
+</Files>
+
+# Alternative Apache 2.2 syntax for compatibility
+Order Deny,Allow
+Deny from all
+
+# Prevent directory browsing
+Options -Indexes
+
+# Disable execution of scripts
+Options -ExecCGI
+
+# Block common source file extensions
+<FilesMatch "\.(c|h|o|cpp|hpp|cc|cxx|php|py|pl|sh|sql|conf|cfg|ini|log|bak|backup|old|orig|swp|tmp)$">
+    Require all denied
+</FilesMatch>
+
+# Additional security headers
+<IfModule mod_headers.c>
+    Header always set X-Robots-Tag "noindex, nofollow, nosnippet, noarchive"
+</IfModule>
+
+# Prevent access to hidden files
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>
