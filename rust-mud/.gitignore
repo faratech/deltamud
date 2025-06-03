@@ -1,0 +1,58 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+syslog
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Runtime files
+*.pid
+pause
+.fastboot
+.killscript
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Backup files
+*.bak
+*.backup
+core.*
+
+# Development/testing files
+test_*
+debug_*
+*.tmp
+*.temp
+
+# MUD-specific runtime files
+lib/etc/players
+lib/plrmail
+lib/plrobjs/*
+!lib/plrobjs/.gitkeep
+log/
