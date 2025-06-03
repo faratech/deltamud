@@ -1,0 +1,79 @@
+/* Stub MySQL interface for compiling without MySQL */
+#include "conf.h"
+#include "sysdep.h"
+#include <stdarg.h>
+
+#include "structs.h"
+#include "utils.h"
+#include "db.h"
+#include "handler.h"
+#include "dbinterface.h"
+#include "comm.h"
+
+/* Stub implementations */
+void connect_database(void) {
+    log("WARNING: Running without MySQL database support");
+    SQLdb = (MYSQL *)malloc(sizeof(MYSQL)); /* Allocate dummy structure */
+}
+
+void disconnect_database(void) {
+}
+
+void save_char_db(struct char_data *ch, sh_int load_room) {
+    log("WARNING: Character save disabled (no MySQL)");
+}
+
+int load_char_db(char *name, struct char_data *ch) {
+    return 0; /* Character not found */
+}
+
+void init_char_db(struct char_data *ch) {
+}
+
+void update_player_table(void) {
+}
+
+MYSQL_RES *STORE_RESULT(MYSQL *db) {
+    return NULL;
+}
+
+MYSQL_ROW FETCH_ROW(MYSQL_RES *result) {
+    return NULL;
+}
+
+void pe_printf(char *name, char *types, char *querystr, ...) {
+}
+
+void QUERY_DATABASE(MYSQL *db, char *query, int len) {
+}
+
+int delete_player_entry(int idnum) {
+    return 0;
+}
+
+int insert_player_entry(struct char_data *ch) {
+    return 0;
+}
+
+struct char_data *retrieve_player_entry(char *name, struct char_data *ch) {
+    return NULL;
+}
+
+int count_player_entries(void) {
+    return 0;
+}
+
+/* Global variables - defined elsewhere */
+
+/* MySQL compatibility functions */
+void mysql_free_result(MYSQL_RES *result) {
+    /* No-op for stub */
+}
+
+int mysql_num_rows(MYSQL_RES *result) {
+    return 0;
+}
+
+const char *mysql_error(MYSQL *mysql) {
+    return "MySQL not available (using stub)";
+}
