@@ -1,0 +1,101 @@
+"Outside Map" Coordinate System:
+
+____________________________
+AAAAAAAAAABBBBBBBBBBCCCC    |
+123456789012345678901234    |
+                            |
+FFFFFFFFFFFFFFFFFFFFFFFF 1A |
+FFFFFFFFFFFMFFFFFFFFFeFF 2A |
+FFFFFFFFFFMMMMFFFFFFFFFF 3A |
+FFFFFFFFFMMMMMMFFFFFFFFF 4A |
+FFFFFFFFMMMMMMMFFFFFFFFF 5A |
+FFFFFMMMMMMMMMMFFFFFFFFF 6A |
+FFFFMMMMMMMMMMMMFFFFFFFF 7A |
+FFFFFMMMMMMMMMMMFFFFFFFF 8A |
+FFFFFFMMMMMMMMMFFFFFFFFF 9A |
+FFFFFFFFMMMMMFFFFFFFFFFF 0A |
+FFFFFFFFFMMMFFFFFFFFFFFF 1B |
+FFeFFFFFFFFFFFFFFFFxFFFF 2B |
+FFFFFFFFFFFFFFFFFFFFFFFF 3B |
+____________________________|
+
+
+Explanation:
+A base map that works like a coordinate system: 
+Going south from 1A,1A takes you to 1A,2A.
+Sector type 1B,2A is forest while sector type 2B,2A is mountain.
+0B,2B is player's position... x marks the spot =).
+e's are entries into the worldmap --- position yourself over them and type enter... viola... your in a zone.
+
+-----
+The worldmap is actually in a *modified* room structure (to provide compatibility for fighting and such in the world map - the mod will be a new "int room_enter" for a link to a zone).
+Its formatted in worldmap[XY] form, X or Y is truncated to 5 numerics long dependant on what coordinate its at, like Y coord 5 will be 00005, Y coord 50000 will be 50000.
+
+Plan:
+When a player leaves a city [zone], they are extracted from the world map, set_bit(char, PLAYER_MAP), and have moving interpreted differently in act.movement.c to work under coordinates instead of exits.
+When char positions themselves over a "e", they type enter and enter the room set in "int room_enter" in the room struct. They are sent to the appropriate room.
+
+Thats it, have fun coding =)
+-Storm
+
+Example:
+
+/* Defines a sector type, how it shows up on the map (&GF = green colored F hehe), the name of all the rooms that are of this sector, the description of all the rooms with this sector, and how much moves this sector takes up. --- This definition should be done FIRST in the file. */
+NewSector: F
+SectShow: &GF
+SectName: Questing Through Akashar Forest
+SectMove: 3
+SectDesc:
+   You are wandering around in a large forest. The green shruberry
+grows everywhere and large redwood trees extend high in the air. You
+hear many small creatures rustling in the bushes and see the chirping
+birds pirched up on the branches.
+~
+EndSector
+
+NewSector: E
+SectShow: &We
+SectName: A City Entrance
+SectMove: 1
+SectDesc:
+   You stand before the entrance to a city... it seems to be made
+of large stone blocks in a sort of mosaic pattern. You consider the
+notion of venturing inside and seeing what exactly is in there...
+~
+EndSector
+
+NewSector: M
+SectShow: &LM
+SectName: On a Mountain Range
+SectMove: 6
+SectDesc:
+   You are hiking on a HUGE mountain. The hard jagged rock here makes
+it painful for you to walk and you understand why there is no vegetation
+here. You see a wide, green forest in the distance.
+~
+EndSector
+
+/* Defines the actual world map. */
+
+WorldMap:
+FFFFFFFFFFFFFFFFFFFFFFFF
+FFFFFFFFFFFMFFFFFFFFFeFF
+FFFFFFFFFFMMMMFFFFFFFFFF
+FFFFFFFFFMMMMMMFFFFFFFFF
+FFFFFFFFMMMMMMMFFFFFFFFF
+FFFFFMMMMMMMMMMFFFFFFFFF
+FFFFMMMMMMMMMMMMFFFFFFFF
+FFFFFMMMMMMMMMMMFFFFFFFF
+FFFFFFMMMMMMMMMFFFFFFFFF
+FFFFFFFFMMMMMFFFFFFFFFFF
+FFFFFFFFFMMMFFFFFFFFFFFF
+FFeFFFFFFFFFFFFFFFFFFFFF
+FFFFFFFFFFFFFFFFFFFFFFFF
+~
+
+/* Defines an entry point into a zone, arguments are X coord, Y coord, and the room to enter in */
+EntryPoint: 3 12 3001
+EntryPoint: 22 2 9000
+
+/* A secret entrance not displayed on the map or in a room desc. (woohoo, to a GODROOM :P) -- its secret because its not "visibly" an entrance... meaning the sector type of that specific coordinate is M and not the standard e */
+EntryPoint: 12 7 1200

@@ -1,0 +1,30 @@
+#600
+Before The Gates~
+   Before you stand two immense gate doors embroidered with links of gold.  A
+pair of metal rungs permit entrance into the city of Oranthalon.  The air here
+smells fresh and breathable like any mountaintop atmosphere, to your south lies
+the dense mountainside.    
+~
+6 136 0
+D0
+To your north is a large gate obstructing your view of the city.
+~
+gate gates~
+1 0 601
+E
+gate gates~
+The gates are currently closed.
+~
+S
+#601
+Blah~
+You are in an unfinished room.
+~
+6 0 0
+D2
+To your south is a large opening leading to the mountainside beneath the city.
+~
+~
+0 0 600
+S
+$~

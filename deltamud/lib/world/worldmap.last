@@ -1,0 +1,228 @@
+NewSector: o
+SectName: Inaccessible Indoors Area
+SectShow:  
+EndSector
+
+NewSector: @
+SectName: Outside the City
+SectShow: &n@
+SectMove: -1
+EndSector
+
+NewSector: .
+SectName: In a Grassy Field
+SectShow: &G+
+EndSector
+
+NewSector: i
+SectName: On a Small Island
+SectShow: &G+
+EndSector
+
+NewSector: F
+SectName: Mystical Forest
+SectShow: &gf
+EndSector
+
+NewSector: f
+SectName: Jhaden Forest
+SectShow: &gf
+EndSector
+
+NewSector: h
+SectName: Through the Hills
+SectShow: &yh
+EndSector
+
+NewSector: ^
+SectName: The Locris Mountains
+SectShow: &r^
+EndSector
+
+NewSector: M
+SectName: The Zargos Mountains
+SectShow: &r^
+EndSector
+
+NewSector: s
+SectName: Dragon Sea
+SectShow: &B~
+SectSect: Water (No Swim)
+EndSector
+
+NewSector: 1
+SectName: The River of Midgaard
+SectShow: &B~
+SectSect: Water (No Swim)
+EndSector
+
+NewSector: 2
+SectName: The River of Anacreon
+SectShow: &B~
+SectSect: Water (No Swim)
+EndSector
+
+NewSector: 3
+SectName: The River of Strundhaven
+SectShow: &B~
+SectSect: Water (No Swim)
+EndSector
+
+NewSector: r
+SectName: On a Dirt Road
+SectShow: &w:
+EndSector
+
+NewSector: I
+SectName: A City Wall
+SectShow: &nI
+SectMove: -1
+EndSector
+
+NewSector: ~
+SectName: The Northern Swamplands
+SectShow: &g~
+EndSector
+
+NewSector: S
+SectName: A Small Patch of Swamplands
+SectShow: &g~
+EndSector
+
+NewSector: b
+SectName: On a Sandy Beach
+SectShow: &Y.
+EndSector
+
+NewSector: D
+SectName: The Great Eastern Desert
+SectShow: &Y.
+EndSector
+
+NewSector: =
+SectName: On a Wooden Bridge
+SectShow: &y=
+EndSector
+
+WorldMap:
+bbbbbbbbbbbbbbb~~~~~~~~~~~~~~~~~~bbbbbbbbbbbbb~~~~~~~bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+b..............~~~~~~~~~~~~~~~~~~.............~~~.................................................b
+b..............~~~~~.~~~~~~~~~~~~.............~~~~~~~~~~~~~~~~~............^^^^...................b
+b..............~~~~~~~~~~~~~~.~~~~~~~~~~~~~~~........~~~~~.~~~~............^^^^^..................b
+b..................~~~~~~~~~~~~~~~~~~~~~~....~~~~~~~~~~~~~~~~~~............^^^^^^^^^^^^^^^^.......b
+b.hhhhh............~~~~.~~~~~................~~~~~~~~~.~~~~~~~~............^^^^^^^^^^^^^^^^.......b
+b.hhhhh............~~~~~~~~~~.......~~~~~~~~~~~~~~~~~~~~~~~~~~~............^^^^^^^^^^^^^^^^.......b
+b.hh..................3.................................33....................^^^^^^^^^^^^^.......b
+b....................33..................................33..................DDDDDDDDDDDDDDDDDDDDDb
+b....^^^.............=....................................33...........DDDDDDDDDDDDDDDDDDDDDDDDDDDb
+b.^^^^^^^...........33.....................................33.......DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDb
+b...^@^^^...........3...................I@I.................33DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDb
+b....^^^^..........33...................@o@..................==.....DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDb
+b.................33....................I@I............FF.....33........DDDDDDDDDDDDDDDDDDDDDDDDDDb
+b................33......................r.....FFFFFFFFFF......33...DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDb
+b................3.......................r...FFFFFFFFFFFF.......33....DDDDDDDDDDDDDDDDDDDDDDDDDDDDb
+b...............33.......................r.....FFFFFFFFFF........33..DDDDDDDDDDDDDDDDDDDDDDDDDDDDDb
+bhhhhhhhhhhhh..33...............hhhhhhhhhrhhhhhhhhhhhhhhhhhhhhhhhh33hhhDDDDDDDDDDDDDDDDDDDDDDDDDDDb
+b............h33hhhhhhhhhhhhhhhhhhhhhhhhrrhhhhhhhhhhhhhhhhhhhhhhhhh33hhhDDDDDDDDDDDDDDDDDDDDDDDDhhb
+b............33..........hhhhhhhhhhhhhhrrhhhhhhhhhhhhhhhhhhhhhhhhhhh33hhhhhhhhhhhDDDDDDDDDDDDDDDhhb
+b...........33.....................hhhrrhhhhhhhhhhhhhhhhhhhhhhhhhhhhh33DDDDDDDDDDDDhhhhhhhhhhhhhhhb
+bhhhhhhhhhh33hhhhhhhhhhhhhhhhhhhhhhhhrrhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh33DDDDDDDDDDDDDDDDDhhhhhhhhhb
+b.........33........................rr.................................3333333....................b
+b........33.................FFFFFFFrrFFFF....................................33...................b
+b.......33........FFFFFFFFFFFFFFFFrr..........................................33..................b
+b....FF33FFFFFFFFFFFFFFFFFFFFFF.rrr............................................333................b
+bFFFFF33hhhhhhhhhhhhhhhhhhhhhhhhrhhhhhhhhhhhhhhhhhhhhhhhhhhFFFhhhhhhhhhhhhhhhhhhh33hhhhhhhhhhhhhhhb
+bFFFFF33FFFFFFFFFFFFFFFFFFFFFFFrrhhhhhhhhhhhhhhhhhhhhhhhhhFFFFhhhhhhhhhhhhhhhhhhhh33hhhhhhhhhhhhhhb
+bFFFFF33FFFFFFFFFFFFFFFFFFFFFFrrFFFFhhhhhhhhhhhhhhhhhhhhhFFFFFhhhhhhhhhhhhhhhhhhhh33hhhhhhhhhhhhhhb
+bFFFF33FFFFFFFFFFFFFFFFFFFFFFrrFFFFFFFhhhhhhhhhhhhhhhhhhFFFFFFhhhhhhhhhhhhhhhhhhhh33hhhhhhhhhhhhhhb
+bFFF33FFFFFFFFFFFFFFFFFFFFFFrrFFFFFhhhhhhhhhhhhhhhhhhhhFFFFFFFhhhhhhhhhhhhhhhhhhhhh33hhhhhhhhhhhhhb
+bFF33FFFFFFFFFFFFFFFFFFFFFFrrFFFFFFFFFFFFF......FFFFFFFFFFFFFFFFFFFFFFFFFFF..........33...........b
+b.33.......................r..FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF......33...........b
+b33.......................rr.....FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF.....33..........b
+33....FFFFFFFFFFFFFFFFFFFrrFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF......33.........b
+bFFFFFFFFFFFFF..........rr..........FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF..............333.......b
+bFFFFFFFFFFFFFFFF......rr.................................................................33......b
+b.................rrrrrr...................................................................33.....b
+b.................r...rrrrrrrrrrr.......................rrr..rrrrrr.......rrrrr............33.....b
+b................I@I.rr.........rrrrrrr.................r.r.rr....rr.....rr...rr............33....b
+b...............r@o@rr........M.......rrrrrrrrrrrrrrrrrrr.rrr......rr...rr.....rrr.........333....b
+b...............rI@I............M...................................rrrrr........rM........3333...b
+b...............r...............M..............................................M.r....1111111111111
+b..............rr...............MM............................................M..r..111111111111111
+b.............rr........M........MM...............MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMr111.............b
+b............rr..........MM........M...........MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMr111.............b
+b....M.......r.M...MM.M....M.........MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM........rrrr11..............b
+b.....M..M..rr..MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMffffffffffffffffrrrrrrrrrrf111fffffffffffffffb
+M.M.M..MMMMMMMMMMMMMMMMffffffffffffffffffffffffffffffffffffffffffffffrffffffffff11ffffffffffffffffb
+bMMMMMMMMMMMMMMMMMMMMffffffffffffffffffffffffffffffffffffffffffffffffrffffffff111fffffffffffffffffb
+bMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMfffffffffffffffrrrrffffffff11ffffffffffffffffffb
+bffffffffffffMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMfffffffffffffffrfffffffffff11ffffffffffffffffffb
+bMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMrrrrrrrrrrrrrrrfffffffffff11ffffffffffffffffffb
+bMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMfffffffffffffffrfffffffffff11ffffffffffffffffffb
+bMMMMMMMMMMMMMMMM.MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMfffffffffffffffffrfffffffffff11ffffffffffffffffffb
+bMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMffffffffffffffffffrfffffffffff1fffffffffffffffffffb
+bMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM....................r...........11..................b
+bMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM.....................rr...........11..................b
+bMMMM@MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM.......................rr............11..................b
+bMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM........................rrr............11..................b
+bMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM.........................r............1111..................b
+bMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM...........................rrr...........111....................b
+b..M...M....r..M........hhhhhhhhhhhhhhh.....................rr............111.....................b
+b.M...M.....r..M...hhhhhhhhhhhhhhh.........................rr...........1111......................b
+b.M..M......r.Mhhhhhhhhhhhhhhh.............................rr.........1111...hhhhhhhhhhhhhhhhhhhhhb
+b......hhhhrrhhhhhhhhhh...................................rrr........111...hhhhhhhhhhhhhhhhhhhhhhhb
+b.hhhhhhhhhrhhhhhhhhhhhhhhhhhh...........................rr........11111...hhhhhhhhhhhhhhhhhhhhhhhb
+b.......hhhrhhhhhhh..................................rrrrr..........1111SShhhhhhhhhhhhhhhhhhhhhhhhb
+b.........rr..hhhhhhhhhhhhhh.........................r...............11SSShhhhhhhhhhhhhhhhhhhhhhhhb
+b.........r........hhhhhhhhh.......................rrr................111SShhhhhhhhhhhhhhhhhhhhhhhb
+b...hhhhhrrhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh.rr....................11SSShhhhhhhhhhhhhhhhhhhhhb
+bhhhhhhhrrhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhrrr......................111SSShhhhhhhhhhhhhhhhhhhb
+bhhhhhhrrhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhrr..........................111SShhhhhhhhhhhhhhhhhhb
+brrrrrrrhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhrrhhhhhhhhhhhhhhhhhhhhhhhhhh..111SSShhhhhhhhhhhhhhhhb
+brhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhrrhhhhhhhhhhhhhhhhhhhhhhhhhhhh....11SSShhhhhhhhhhhhhhb
+brhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhrrhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh..1111Shhhhhhhhhhhhhb
+br.....................rrrrrrrrrrrrrrrrrrrrrrhhhhhhhhhh...........................11Shhhhhhhhhhhhhb
+br.....................r.........hhhhhhhhhhhhhhhhhhhhhh...........................11Shhhhhhhhhhhhhb
+br................rrrrrr...hhhhhhhhhhhhhhhhhhhhhhhhhhhh....................bbbbbbbb1bbbbbbbbbbbbbbb
+brIII@III........rr....rhhhhhhhhhhhhhhhhhh222hhhhhhhhhh..........bbbbbbbbbbbbbbsssssssssssssssssbbb
+brIoooooI........r....r.................2222....................bbbbbbbbbbbbsssssssssssssssssssssbb
+br@ooooo@rrrrrrrrr.....r...............222..22...................bbbbbbssssssssssssssssssssssssssss
+b.IoooooI........r.....r..............22.....22..................bbbbbbbsssssssssssssssssssssssssss
+b.III@III........r.....rrr.......222222.......22.................bbbbbbsssssssssssssi@issssssssssss
+b................r........rr....2222...........22................bbsssssssssssssssssiiissssssssssss
+b................r.........rr..22...............22...............bbbbbbbsssssssssssssssssssssssssss
+bhhhhhhhhhhhhhhhhr......222==222.................222.............bbbbbbbbbbbsssssssssssssssssssssss
+b.......22.......r....222..rrr.......hhhhhhhhhhhhhh22hhhh.........bbbbbbbbbbbbsssssssssssssssssssss
+b.....22.222.....rrrrr==rrrrr..hhhhhhhhhhhhhhhh.....22...........bbbbbbbbbbbsssssssssssssssssssssss
+b.....2....22222.r...22...rr...........hhhhhhhhhhhh..22.........bbbbbbbbbbsssssssssssssssssssssssss
+b.....2........2.r..22..rr..........hhhhhhhhhhhhhhhhh.22.......bbbbbbbbbbsssssssssssssiiiiissssssss
+b....22........22r.22..rr........hhhhhhhhhhhhhhhhhhhh..222.....bbbbbbbbbsssssssssssssii@iiissssssss
+b...22..........2=2...rr...............hhhhhhhhh.........22...bbbbbbbbbssssssssssssssiissssssssssss
+b.222............r...rr.................hhhhhhhh..........22..bbbbbbbssssssssssssssssisssssssssssss
+b.2..............r..rr.............hhhhhhhhhhhhhhhhhhhhh...22.bbbbbssssssssssssssssssssssssssssssss
+b.2.FFFFFFFFFFFF.r..rr.......hhhhhhhhhhhhhhhhhhhhhhhhhhh....222222sssssssssssssssssssssssssssssssss
+b22FFFFFFFFFFFFF.r.rr..............hhhhhhhhhhhhhhhhhhhhh......bbbbsssssssssssssssssssssssssssssssss
+22.FFFFFFFFFFFF..rrr.........hhhhhhhhhhhhhhhhhhhhhhhhhhh......bbbssssssssssssssssssssssssssssssssss
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbssssssssssssssssssssssssssssssssss
+~
+
+EntryPoint: 6 82 100
+
+ZWeatherPoint: 6 82 1
+
+// Avaliable sector types: (Must be typed exactly.)
+//  Inside
+//  City
+//  Field
+//  Forest
+//  Hills
+//  Mountains
+//  Water (Swim)
+//  Water (No Swim)
+//  Underwater
+//  In Flight
+//  Road (Map)
+//  Wall (Map)
+//  Swamp
+//  Desert
+//  Bridge

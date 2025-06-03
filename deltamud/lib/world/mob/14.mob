@@ -1,0 +1,222 @@
+#1400
+Kitten~
+a kitten~
+A cute little kitten stands here.
+~
+   This cute little kitty looks no more than 2 months old.  It looks quite
+defenseless, but it would be best not to touch it because it's mother would
+probably find you later.    
+~
+204 0 0 E
+X1 0 0 0 0 0 1d1+5 1d1
+0 5
+9 9 0
+BareHandAttack: 4
+E
+#1401
+Cat~
+a cat~
+A mangy old cat stands in front of your path.
+~
+   This cat has lived for a long time.  You see that the cat has a hard time
+walking, and it's eyes can't focus very well.  The cat is so skinny, that you
+can see the bones through its skin!  The cat's fur is very uneven, as you see a
+trail of cat hair behind it.    
+~
+204 0 0 E
+X2 0 0 0 0 0 1d1+37 1d4
+1 100
+9 9 0
+BareHandAttack: 8
+E
+#1402
+Fat cat~
+a fat cat~
+A big fat cat stands here.
+~
+   This fat cat has been living a VERY fortunate life and is VERY healthy!  
+The cat's fur is very shiny and rarely sheds.  You reach down to pet the cat
+and it purrs loudly.  You can tell that this is a very friendly cat.    
+~
+204 0 25 E
+X2 0 0 0 0 0 1d1+37 1d4
+1 500
+9 9 0
+BareHandAttack: 8
+E
+#1404
+Parthan~
+a parthan~
+A Parthan is standing here.
+~
+   This parthan is about 5 feet tall in height, shows all the features a cat
+and some features of a human.  He has reddish-orange fur and red eyes.  He is
+looking around waiting for something to happen.    
+~
+6156 0 15 E
+X10 0 0 0 0 0 1d20+173 1d28
+100 2500
+9 9 1
+BareHandAttack: 3
+E
+#1405
+Parthan~
+a parthan~
+A Parthan is standing here.
+~
+   The parthan has cat-like features, yet is as big as a human.  He stands at 5
+feet tall, has white fur and black eyes.  He is looking around waiting for
+something to happen.    
+~
+6156 0 0 E
+X10 0 0 0 0 0 1d25+173 1d28
+100 2500
+9 9 1
+BareHandAttack: 3
+E
+#1406
+Parthan~
+a parthan~
+A Parthan is standing here.
+~
+   Half man, half cat.  This parthan sure looks ready for action!  He stand as
+about five feet tall, has grey fur and blazing red eyes.  He's looking around
+waiting for something to pounce on!    
+~
+6216 0 0 E
+X17 0 0 0 0 0 1d1+292 1d49
+170 4250
+9 9 1
+BareHandAttack: 3
+E
+#1407
+Parthan~
+a parthan~
+A parthan is standing here.
+~
+   Half man, half cat.  This creature is well ready for combat!  He stands at
+about six feet tall, has spotted fur and black eyes.  He's standing around
+waiting for something to happen.    
+~
+6220 0 0 E
+X11 0 0 0 0 0 1d1+190 1d31
+110 2750
+9 9 1
+E
+#1408
+Parthan~
+the Parthan~
+A Parthan is standing here.
+~
+   For a half man/half cat, this parthan sure looks mean!  He stands at six
+feet tall, very muscular build, has black fur with grey spots and ruby red
+eyes.  He is just waiting for trouble!    
+~
+6250 0 0 E
+X13 0 0 0 0 0 1d1+224 1d37
+130 3250
+9 9 1
+BareHandAttack: 3
+E
+#1409
+Parthan~
+the Parthan~
+A Parthan is standing here.
+~
+   If you are superstitious, you better be careful!  He is a six foot tall half
+man, half cat with black fur and bright yellow eyes!  He's crossing your path,
+and you better be ready for what he's up to!  Instead of looking for trouble,
+he's going to bring it!
+~
+6250 0 -75 E
+X14 0 0 0 0 0 1d1+241 1d40
+140 3500
+9 9 1
+BareHandAttack: 3
+E
+#1410
+Terrel parthan~
+the Huge Parthan~
+A *HUGE* Parthan stands here!
+~
+   Here stands in front of you a great Parthan.  He is 6 and a half feet tall,
+has arms and legs the size of tree trunks.  He has black fur, and you notice
+the blood all over his body and by the king's insignia that he is no other
+than..  TERREL!    
+~
+6266 0 -100 E
+X15 0 0 0 0 0 1d1+258 1d43
+150 3750
+9 9 1
+BareHandAttack: 13
+E
+#1411
+Skeleton~
+A skeleton~
+A skeleton stands here.
+~
+   Nothing special about this skeleton.  Just your average pile of bones that
+wants to cause trouble.    
+~
+8 0 0 E
+X10 60 52 52 52 52 1d1+173 1d28
+100 4473
+9 9 0
+E
+#1412
+A zombie~
+A Zombie~
+A zombie stands here.
+~
+   Just your average moaning, slow walking, unintelligent stack of rotting
+flesh.  Kill it and make the moaning stop!    
+~
+8 0 0 E
+X10 60 52 52 52 52 1d1+173 1d28
+100 4473
+9 9 0
+E
+#1413
+A mummy~
+A mummy~
+A mummy stands in your way.
+~
+   This mummy stands about 5 and a half feet tall, wrapped in what was once
+white cloth that now is brown and reeky!  You hear a muffled moan coming from
+this mummy.  To kill it would make it stink even more.    
+~
+8 0 0 E
+X13 78 68 68 68 68 1d1+224 1d37
+130 5871
+9 9 0
+E
+#1414
+ghost~
+A ghost~
+A ghost flies in front of you!
+~
+   Just your average white ghost.  A spirit of the dead, which comes back to
+haunt this crypt, or worse, take your soul.    
+~
+8 32 0 E
+X14 84 73 73 73 73 1d1+241 1d40
+140 6309
+9 9 0
+E
+#1415
+spectre~
+A spectre~
+A spectre floats in the air in front of you!
+~
+   People confuse the spectre for the grim reaper because it wears a black
+cloak and wields a big scythe.  The main difference between the two is that the
+grim reaper attacks silently, and the spectre makes a loud shrieking noise.  
+Keep yourself from going deaf and kill this thing...  If you dare!    
+~
+8 0 0 E
+X15 90 78 78 78 78 1d1+258 1d43
+150 6732
+9 9 0
+BareHandAttack: 10
+E
+$

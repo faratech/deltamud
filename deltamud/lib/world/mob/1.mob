@@ -1,0 +1,244 @@
+#100
+baker~
+the baker~
+The baker stands behind a table preparing the oven.
+~
+
+   The baker is a jolly heavy man with a beard.  He is wearing the traditional
+white bakers clothes and apron.  He seems to be busy attending to his goods.  
+If you want to order something from him, you should type: list
+
+~
+253962 0 0 E
+X5 30 26 26 26 26 1d1+88 1d13
+50 1830
+9 9 1
+E
+#101
+innkeeper ledbin~
+Ledbin the Innkeeper~
+Ledbin the Innkeeper is behind the counter reading.
+~
+   The innkeeper is a middle aged man with black hair.  If you would like to
+use the inn, type: rent
+~
+253963 0 0 E
+X10 60 52 52 52 52 1d1+173 1d28
+100 4473
+9 9 1
+E
+#102
+librarian~
+the librarian~
+An old librarian is sorting through piles of books here.
+~
+   He's a ragged old looking man with a short beard and wild hair.  He is
+wearing many layers of clothing, many of which are torn and decaying.  He seems
+to be extremely busy searching through the various books.    
+~
+253962 0 0 E
+X10 60 52 52 52 52 1d1+173 1d28
+100 4473
+9 9 1
+E
+#103
+man~
+the middle aged man~
+A middle aged man is here sitting at the bank repository.
+~
+   He is a middle aged man with a moustache.  He looks pretty common and wears
+a tunic and pants.  His eyes are dark brown and he seems to have wild greasy
+long hair.    
+~
+83888138 0 0 E
+X2 12 10 10 10 10 1d1+37 1d4
+20 360
+9 9 1
+BareHandAttack: 13
+E
+#104
+banker clerk~
+the bank clerk~
+The bank clerk is sitting behind his desk conducting business.
+~
+   He is a rather old looking overweight man with grey balding hair.  He is
+wearing a well kept suit.  You suppose you might try to make a bank transaction
+here by using the 'bank' command.    
+~
+541319178 0 0 E
+X5 30 26 26 26 26 1d1+88 1d13
+50 1830
+9 9 1
+E
+#105
+man merchant~
+the merchant~
+A merchant is here selling his goods.
+~
+
+   It looks as though this merchant opened his store here long ago, and has
+prospered greatly from it.  He is behind a counter full of goods and useful
+materials.    
+
+~
+253962 0 0 E
+X5 30 26 26 26 26 1d1+88 1d13
+50 1830
+9 9 1
+E
+#106
+blacksmith smith~
+the blacksmith~
+A blacksmith seems to be busy here at the oven forge.
+~
+
+   The blacksmith has strong muscles and a razor edged attitude.  He is covered
+with sweat and the black dust of soot can be seen all over his face and arms.
+  
+~
+253962 0 0 E
+X5 30 26 26 26 26 1d1+88 1d13
+50 1830
+9 9 0
+E
+#107
+boy~
+the little boy~
+A little boy is on the floor playing with his toys here.
+~
+Its a little kid. He seems to be playing with a small doll.
+~
+16777354 0 300 E
+X1 6 5 5 5 5 1d1+20 1d1
+10 225
+9 9 1
+E
+#108
+woman mother~
+the woman~
+The boy's mother is sitting here watching after the stew.
+~
+
+   She looks like a very nice woman in her late 20s.  She's wearing a casual
+dress and seems to be busy working on a meal of some kind.    
+
+~
+254090 0 300 E
+X3 18 15 15 15 15 1d1+54 1d7
+30 817
+9 9 2
+E
+#109
+man~
+the old man~
+An old man is sleeping in bed here.
+~
+
+   The man looks pretty tired.  His age is clearly visible by his body and
+face.  He looks like he could use a rest.    
+
+~
+254090 0 0 E
+X4 24 21 21 21 21 1d1+71 1d10
+40 1315
+4 4 1
+E
+#110
+smith armorsmith armor~
+the armor smith~
+An armor smith is here, selling the latest in medieval combat apparel.
+~
+   The armor smith has a black moustache and seems to be in his late thirties.
+He looks like the run of the mill type strongman.  It wouldn't be unusual to
+assume that he has decided to make some use of his combat knowledge by selling
+armor.    
+
+~
+253962 0 0 E
+X30 180 157 157 157 157 1d1+513 1d88
+300 12577
+9 9 1
+E
+#111
+boy~
+a young boy~
+A bright young boy is standing here.
+~
+   He looks like an average kid just strolling around.    
+~
+16777416 0 250 E
+X1 6 5 5 5 5 1d1+20 1d1
+10 225
+9 9 1
+E
+#112
+girl~
+a young girl~
+A young girl is standing here.
+~
+   She looks like an average young girl just hanging out.    
+~
+16777416 0 250 E
+X1 6 5 5 5 5 1d1+20 1d1
+10 225
+9 9 2
+E
+#113
+merchant~
+a local merchant~
+A local merchant is standing here, buying and selling goods.
+~
+   He is one of many local merchants from around here.  Like the usual local
+merchant, he is wearing some rugged clothes of the sort.  Not too much of a
+friendly character.    
+~
+72 0 250 E
+X2 12 10 10 10 10 1d1+37 1d4
+20 360
+9 9 1
+E
+#114
+citizen~
+a citizen~
+A local citizen is standing here.
+~
+   He's just an average citizen of Itrius.    
+~
+72 0 250 E
+X1 6 5 5 5 5 1d1+20 1d1
+10 225
+9 9 1
+BareHandAttack: 13
+E
+#134
+dragon~
+&Rthe massively large red dragon~
+&RA massively huge red dragon towers above you.&n
+~
+
+It is a massive dragon with razor-sharp scales and huge wings.
+You are sure it would annihalate you.
+If you attack this monster, you will die.
+
+~
+253978 1024 0 E
+X100 600 525 525 525 525 1d1+1703 1d298
+0 33100
+9 9 1
+BareHandAttack: 6
+E
+#199
+postmaster postman mailman~
+the postmaster~
+The medieval postmaster is here processing deliveries.
+~
+   He is wearing a royal uniform furbished by the Kingdom of Anacreon.  He is
+working quickly taking letters and packages and bringing them to the back of
+the building for the other postmen to organize.    
+~
+253979 0 0 E
+X5 30 26 26 26 26 1d1+88 1d13
+50 1830
+9 9 0
+E
+$

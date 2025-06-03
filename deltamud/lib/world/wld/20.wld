@@ -1,0 +1,3125 @@
+#2000
+On a Dirt Path~
+   There are no birds chirping in this desolate forest.  The trees stand
+propped up against the horizon, barely defying gravity.  Occasionally
+a branch falls lifelessly to the forest floor, yielding little more than a
+slight thud.  The path continues on to the east, and a small clearing lies
+to the west.
+~
+20 0 3
+D0
+   You see the lifeless trees of the forest starring back at you.
+~
+~
+0 0 -1
+D1
+   You see the dirt path winding its way through the forest to the east.
+~
+~
+0 0 2001
+D2
+   You see many dead trees to the south.
+~
+~
+0 0 -1
+D3
+   You see a small clearing of brownish grass to the west.
+~
+~
+0 0 2008
+D4
+   You see the bleak grey sky, filled with ominous clouds.
+~
+~
+0 0 -1
+D5
+   You see the dirt path underfoot.
+~
+~
+0 0 -1
+E
+path dirt ground~
+   The path you travel on is made of black dirt.  Occasionally, a patch of
+grey can be seen.  It appears to be very finely ground, and is cool to the
+touch.
+~
+E
+tree trees forest branch~
+   You see large grey trees standing unnaturally upright.  Their features are
+twisted as though they had suffered long before dying of some strange
+disease.
+~
+S
+#2001
+On a Dirt Path~
+   High above vultures slowly circle in a wide gyre, their eyes fixed on you.
+Near the path lies a group of deceased forest creatures, their bodies
+blackened by some fowl plague.  Small dust clouds exude from where your
+feet fall on the path as you trudge along.  To the east lies a large cave
+opening and to the west you can see the dirt pathway.
+~
+20 0 3
+D0
+   You see many dead trees to the north.
+~
+~
+0 0 -1
+D1
+   To the east is a large cave mouth.  Around the opening, you can see many
+small bumps on the ground.  No vegetation seems to have ever grown near the
+cave.
+~
+~
+0 0 2002
+D2
+   You see the lifeless trees of the forest starring back at you.
+~
+~
+0 0 -1
+D3
+   You see a dirt path winding its way through the forest to the west.
+~
+~
+0 0 2000
+D4
+   Large black birds with featherless heads slowly spin about in a circle
+above you.  They prefer to eat the scraps left by other animals.  Their eyes
+seem fixed on you.
+~
+~
+0 0 -1
+D5
+   You see the dirt path underfoot.
+~
+~
+0 0 -1
+E
+dirt path ground~
+   The path you travel on is made of black dirt.  Occasionally, a patch of
+grey can be seen.  It appears to be very finely ground, and is cool to the
+touch.
+~
+E
+trees tree forest~
+   You see large grey trees standing unnaturally upright.  Their features are
+twisted as though they had suffered long before dying of some strange
+disease.
+~
+E
+bodies creatures~
+   Bunnies, squirrels and birds lay dead at the side of the path.  Their
+twisted forms indicate they fell victim to some plague unknown to
+mankind.  They are black and rotting.
+~
+E
+vultures birds vulture~
+   Large black birds with featherless heads slowly spin about in a circle
+above you.  They prefer to eat the scraps left by other animals.  Their eyes
+seem fixed on you.
+~
+S
+#2002
+Outside a Large Cave Opening~
+   Lifeless bodies lay motionless infront of the cave opening, their bones
+picked clean of flesh.  The stench of lizards gushes out of the cave, filling
+your nostrils.  The forests vegetation ceases twenty feet from the caves
+mouth, seemingly afraid of what lies within.
+~
+20 4 3
+D0
+   You see a large cave mouth, filled with stalactites and stalagmites.
+~
+~
+0 0 2003
+D1
+   To the east you see many dead, lifeless trees.
+~
+~
+0 0 -1
+D2
+   South of here you see the dry forest slowly rotting into nothingness.
+~
+~
+0 0 -1
+D3
+   To the west you see a dirt path winding its way through the dead forest.
+~
+~
+0 0 2001
+D4
+   You see a grey sky hanging silently, obscurring whatever lies behind them.
+~
+~
+0 0 -1
+D5
+   Beneath your feet you see black dirt, and the bones of many little
+creatures.
+~
+~
+0 0 -1
+E
+vegetation trees tree~
+   You see large grey trees standing unnaturally upright.  Their features are
+twisted as though they had suffered long before dying of some strange
+disease.
+~
+E
+bodies bones~
+   The bodies that litter the floor here are small and lacking flesh.  On their
+skulls they sport two small horns.  The bodies would be about three feet
+tall were they able to stand.
+~
+E
+Cave mouth opening~
+   Just within the mouth of the cave many stalacmites and stalactites are 
+visible.  They give you the impression that the cave is a large mouth filled
+with sharp teeth waiting to swallow any who enter.
+~
+S
+#2003
+Within a Large Cave~
+   A slowly moving droplet of water descends into a stale lake of its kind as
+you stand within the entrance of a large cave.  Stalacmites and stalactites
+have formed here over hundreds of years, making the area surounding you
+resemble a large mouth filled with teeth.  From deeper in the cave, to the
+east, you can smell the potent odour of a lizard.  A warm breeze of fresh
+air wafts in from the south.
+~
+20 8 0
+D0
+   To the north you see the cold surface of the stone cave wall, slightly
+moist it glistens as light shines on it.
+~
+~
+0 0 -1
+D1
+   The cave expands to the east, where it seems to become fairly dark.
+~
+~
+0 0 2004
+D2
+   To the south is an exit from the cave.
+~
+~
+0 0 2002
+D3
+   To the west is the cold stone wall of the cave.
+~
+~
+0 0 -1
+D4
+   Above you can see many stalactites hanging from the ceiling of the cave.
+~
+~
+0 0 -1
+D5
+   You see the cold stone floor of a cave beneath your feet.
+~
+~
+0 0 -1
+E
+rocks~
+   You see many stalactites and stalagmites in this area.
+~
+E
+stalactites stalactite~
+   Large cone shaped rocks hang tightly to the ceiling of the cave, pointing
+downward.
+~
+E
+Stalacmites stalacmite~
+   Natural pillars reaching out of the stone attempt to reach the ceiling.
+None have made it yet, although in a few hundred more years, they might.
+~
+E
+water droplet lake~
+   The droplets of water are crystal clear, and cool to the touch.
+~
+S
+#2004
+Near a Rock Outcropping~
+   Shedded reptillian scales lie abandoned on the ground here.  The walls
+are slick, moist to the touch.  A horrible stench seems to be coming from
+somewhere very nearby to the north.  A ray of light is still visible from the
+southwest, where the cave mouth lies dormant.
+~
+20 9 0
+D0
+   The cave continues to the north, although what lies in that direction
+is masked by darkness.
+~
+~
+0 0 2005
+D1
+   To the east you see the cold surface of the stone wall.
+~
+~
+0 0 -1
+D2
+   To the south is the naturally cold stone surface of the cave wall.
+~
+~
+0 0 -1
+D3
+   You can see a few rays of light to the west, where the caves entrance
+is located.
+~
+~
+0 0 2003
+D4
+   Above you darkness broods in solitude.  You assume there is a ceiling
+overhead, even if you cannot see it.
+~
+~
+0 0 -1
+D5
+   Beneath your feet is the cold stone floor of the cave.
+~
+~
+0 0 -1
+E
+scales scale~
+   The scales are old, covered in dust and debris.  They appear to be
+extremely tuff, like hard leather armor.  Each scale is about the size
+of the palm of your hand.
+~
+S
+#2005
+The Wyvern's Lair~
+   The cave walls spread far apart here, creating a large ominous cavern
+filled with stalactites.  Many skeletons litter the floor of this large area.
+Set into the western wall is a large iron door that bears many claw marks
+on its surface.  North and south of the cavern, the cave wall narrows into
+tunnels.
+~
+20 41 0
+D0
+   The caverns walls narrow into a passage to the north.
+~
+~
+0 0 2006
+D1
+   To the east you see the stone surface of the caverns walls.
+~
+~
+0 0 -1
+D2
+   The caverns walls narrow into a passage to the south.
+~
+~
+0 0 2004
+D3
+   Rust covers the frame of this large iron door.  Yet, despite its rust
+the door appears very sturdy.  Claw marks mar the surface of the door as if
+some massive beast had attempted many times to claw through it.
+~
+door iron large~
+1 0 2018
+D4
+   Overhead a multitude of stalactites hang from the ceiling.
+~
+~
+0 0 -1
+D5
+   Underfoot numerous skeletons lay motionless on the stone floor of the
+cavern.
+~
+~
+0 0 -1
+E
+skeletons bones skeleton~
+   The skeletons on the floor are of little interest.  What gear you could
+loot from their bodies is damaged beyond repair, and there isn't a gold piece
+in sight.  Most of the bones are of small humanoids, but some larger ones
+litter the area aswell.
+~
+E
+stalactites stalactite ceiling~
+   You see stalactites hanging from the ceiling.  They look almost like large
+stone spears hanging from the ceiling, waiting to fall on you.
+~
+S
+#2006
+Inside a Wyvern Nest~
+   Piled four feet off the ground, a large mound of bones rests in the center
+of this place.  In between the bones, faint glints of metal can be seen
+shining in the darkness.  The walls here are coated in a black substance
+that appears to obscure some of your torch light.  To the north lies the
+back wall of the cave.
+~
+20 41 0
+D0
+~
+~
+0 0 2007
+D1
+   To the east you see the cold surface of the stone wall.
+~
+~
+0 0 -1
+D2
+~
+~
+0 0 2005
+D3
+   To the west is the cold stone wall of the cave.
+~
+~
+0 0 -1
+S
+#2007
+The Back of a Large Cave~
+   Small and secluded, a natural alcove has formed in the back wall
+of the cave.  The light absorbing walls coupled with the large number of
+stalactites and stalacmites of this area make it very difficult to see.  There
+appears to be no other way to go but back south.
+~
+20 300 0
+D0
+   To the north you see the cool surface of the caves wall.
+~
+~
+0 0 -1
+D1
+   To the east you see the cold surface of the stone wall.
+~
+~
+0 0 -1
+D2
+~
+~
+0 0 2006
+D3
+   To the west is the cold stone wall of the cave.
+~
+~
+0 0 -1
+E
+stalactites stalacmites~
+   You see many large rock outcroppings in this area.  It seems as though it
+would be quite easy to remain hidden behind them.
+~
+S
+#2008
+In a Small Clearing~
+   Light trickles down from the sky above you as you enter into a small
+clearing.  The lifeless trees seem to watch you as the brown grass underfoot
+fails to recover from your footfalls.  To the north, a crude pathway seems to
+have been made, while a well established dirt path leads off to the east.
+~
+20 0 0
+D0
+~
+~
+0 0 2009
+D1
+~
+~
+0 0 2000
+S
+#2009
+Near a Small Hill~
+   Pushing your way through the rough branches of the forest, you stumble
+across an anomoly.  A single patch of grass, located in the side of a small
+hill has withstood whatever befell the rest of this forest.
+~
+20 4 4
+D0
+   There is a small door poorly concealed here, beneath a patch of bright
+green grass.
+~
+door grass patch entrance~
+4 0 2010
+D2
+~
+~
+0 0 2008
+E
+patch grass~
+   The patch of grass on closer inspection reveals itself as a rather
+poorly disguised secret entrance into the hillside just north of here.
+~
+S
+#2010
+Within a Kobold Guard Post~
+   Many small chairs lie scattered and broken about the room.  A small
+table, sporting spent cigars, rests on its side near the door to the south.  A
+few miniature weapons litter the floor.  The halls are quiet, lined with
+spent torches.  Tunnels lead both to the north, and to the east from here.
+Two doors, one to the south and one to the west stand silently watching
+your actions.
+~
+20 41 0
+D0
+   To the north is a dark passage.
+~
+~
+0 0 2011
+D1
+   To the east you see a dark passage.
+~
+~
+0 0 2012
+D2
+   To the south is a small wooden door leading outside.
+~
+door wood~
+1 0 2009
+D3
+   To the west is a large oak door with a sliding panel in it.
+~
+door oak~
+1 0 2056
+E
+chairs~
+   The chairs have fallen apart due to time and poor maintenance.  They
+are completely useless.
+~
+E
+table cigar~
+   A few burnt cigar stubs sit on a dusty table in this room.  Judging
+by the amount of dust you can see on the table, you surmise that it must
+have been quite a long time since this place was used as a guard post.
+~
+E
+weapons~
+   You see many small, broken and useless weapons scattered about this room.
+~
+S
+#2011
+A Collapsed Tunnel~
+   Large boulders prevent you from continuing down this tunnel.  Beneath
+them, you see the remains of a rotted support beam and a tiny skeletal
+hand.  It would seem that the only way to go from here is to the south.
+~
+20 297 0
+D0
+   Large boulders sit in the passage to the north, blocking passage.
+~
+~
+0 0 -1
+D1
+   To the east is the cold, solid stone cave wall.
+~
+~
+0 0 -1
+D2
+~
+~
+0 0 2010
+D3
+   To the west is the cool surface of the cave wall.
+~
+~
+0 0 -1
+S
+#2012
+A Narrow Passage~
+   Large stalacmites jut rigidly from the floor of this narrow tunnel, causing
+movement to become very difficult.  Above you, a few large bats stir
+momentarily, roused by your presence, only to fall back into a deep
+slumber.  To the north, the rocky passage seems to get easier to walk
+through, and to the west is a small intersection.
+~
+20 297 0
+D0
+   To the north you see a rocky passage.
+~
+~
+0 0 2014
+D1
+   The cave wall sits peacefully to the east.
+~
+~
+0 0 -1
+D2
+   To the south you see solid stone wall.
+~
+~
+0 0 -1
+D3
+   To the west you see a small intersection.
+~
+~
+0 0 2010
+E
+bats~
+   Over head you see a few large, peacefully sleeping bats.
+~
+E
+stalacmites~
+   Stalacmites are large cone shaped rock formations that grow out of the
+ground.  The ones in this room are fairly close together, and make it hard
+for you to move around.
+~
+S
+#2013
+Kobold Sleeping Quarters~
+   Small tufts of hay have been strewn about this room.  Hanging like a thick
+cloud of impenetrable smoke, the stench of the little unclean beasts who dwell
+here afronts your nostrils.  You can feel the bile in your stomach begin to
+rise with each inhalation of the seemingly toxic fumes.
+~
+20 41 0
+D0
+   To the north you spy the cold stone cave wall.
+~
+~
+0 0 -1
+D1
+   To the east is the cold, solid stone cave wall.
+~
+~
+0 0 -1
+D2
+   To the south you see solid stone wall.
+~
+~
+0 0 -1
+D3
+   To the west you see a dark, dirty passage.
+~
+~
+0 0 2014
+E
+hay~
+   You see many piles of hay that appear to be crude sleeping mats.
+~
+S
+#2014
+A Dirty Hallway~
+   Scattered about this hallway, various pieces of trash dormantly rest in a
+thin layer of dirt and grime.  As you tread across the floor, your feet sink 
+slightly into the scum, causing disgusting sounds and smells to issue forth.
+~
+20 41 0
+D0
+   To the north is a dark passage.
+~
+~
+0 0 2015
+D1
+   To the east is a dark passage leading into a larger room.
+~
+~
+0 0 2013
+D2
+   To the south is a dark rocky passage.
+~
+~
+0 0 2012
+D3
+   To the west is the cool surface of the cave wall.
+~
+~
+0 0 -1
+E
+slime dirt trash~
+   The trash consists of completely useless filth.  Rotting food and rat
+bodies seem to dominate the floor, but there is also a large amount of
+feces lying about.
+~
+S
+#2015
+A Kobold Guard Post~
+   In the center of this room a small square table has been left abandoned,
+along with a small deck of playing cards.  Aside from a small lamp atop 
+the table, very little lighting is afforded to this room, where the shadows 
+seem to dance chaotically upon the walls and ceiling.
+~
+20 105 0
+D0
+~
+~
+0 0 2016
+D1
+   The cave wall sits peacefully to the east.
+~
+~
+0 0 -1
+D2
+~
+~
+0 0 2014
+D3
+   Westward you see a large stone mass blocking passage, also known as a cave 
+wall.
+~
+~
+0 0 -1
+E
+cards~
+   The see that the deck is incomplete and unusable.  The few cards that
+still bear their faces show that the royalty of this deck consists of
+orcs and ogres.
+~
+E
+table~
+   The see a table, a square table.  It has four legs and four sides that are
+about the same length.
+~
+E
+lamp~
+   The lamp hasn't a drop of oil to burn, so it cannot provide you with
+light.  It appears useless.
+~
+E
+shadows~
+   The shadows that play across the ceiling and walls appear to mimic a
+group of chaotic humanoid shapes, hunting a small frightened pony.
+~
+S
+T 2093
+#2016
+Food Storage Area~
+   Large, rotting wooden crates line the walls of this large room.  From 
+under the lid of each crate, small pieces of nearly moldy food attempt to 
+gain freedom.  
+~
+20 41 0
+D0
+   To the north you see the stone cave wall.
+~
+~
+0 0 -1
+D1
+   To the east you see a fairly well maintained passage.
+~
+~
+0 0 2017
+D2
+   To the south you see a small room with a table.
+~
+~
+0 0 2015
+D3
+   To the west you see a large, seemingly wet, room.
+~
+~
+0 0 2048
+E
+crates~
+   The crates are full of food that appears unsafe to consume.  The crates
+are far too large to carry.
+~
+S
+#2017
+A well kept Passage~
+   This passage appears to be fairly well kept, with ample lighting supplied 
+by numerous torches set into the walls.  The hollow sound of your boots as 
+you walk along the bare, hard floor echoes into your ears, making you feel 
+slightly tense.
+~
+20 40 0
+D0
+   To the north you see a dark passage leading into another room.
+~
+~
+0 0 2019
+D1
+   To the east you see a passage leading towards a large door.
+~
+~
+0 0 2018
+D2
+   You see that the cave wall blocks passage to the south.
+~
+~
+0 0 -1
+D3
+   To the west you see a dark passage.
+~
+~
+0 0 2016
+E
+torches~
+   Along the walls of this passage are many torches that are securely
+fastened to the wall.  They supply enough light to see clearly in this room.
+~
+S
+#2018
+A Fortified GuardPost~
+   Numerous large objects block a large iron door set into the eastern wall 
+of this room.  Around the frame of the door, the claw marks of a large 
+beast have left the rock severely chipped.  Two circular tables rest in the 
+center of this room, each surrounded by eight chairs.  A small broken 
+spitoon sits shattered upon the floor near one of the chairs, its contents 
+slowly soaking into the stone floor.  The smell of cheap tobacco lingers in 
+the air.
+~
+20 361 0
+D0
+   To the north you spy the cold stone cave wall.
+~
+~
+0 0 -1
+D1
+   Before you stands a lage iron door.  Across it are many solid beams, used
+to reinforce its huge bulk.  A few claw marks are visible near the doors frame.
+~
+door~
+1 0 2005
+D2
+   You see that the cave wall blocks passage to the south.
+~
+~
+0 0 -1
+D3
+   To the west you see a well maintained passage.
+~
+~
+0 0 2017
+E
+tables~
+   The tables are made of poor quality wood, and show signs of rot.  They
+have been carved into semicircular shapes by crude tools.
+~
+E
+spitoon~
+   From the broken side of this spitting jug leeks the drool of many kobolds.
+~
+S
+#2019
+A Kobold Guard Post~
+   A small torch resting atop the peak of a large stalacmite perched in the 
+middle of this room supplies the area with dim lighting and an eerie 
+atmosphere.  Three drooping stalactites hang from the ceiling near the dim 
+light source, dripping noisey droplets of water onto the floor.  The faint 
+sound of snickering lingers in the caves corridors, originating from some 
+unknown location.
+~
+20 105 0
+D0
+   To the north you see a dark passage.
+~
+~
+0 0 2020
+D1
+   The cave wall sits peacefully to the east.
+~
+~
+0 0 -1
+D2
+   To the south you see a well maintained passage.
+~
+~
+0 0 2017
+D3
+   To the west is the cool surface of the cave wall.
+~
+~
+0 0 -1
+E
+stalacmite torch~
+   The tip of a large stalacmite in the center of this room has been hollowed
+out and filled with a dimly glowing gem.  The gem appears to be very firmly
+set in the stone.
+~
+S
+T 2094
+#2020
+An Unlighted Passage~
+   Spent torches line the walls of this long, dark passage.  From somewhere 
+in the darkness, you can hear the scurrying of a tiny animal apparently 
+startled by your presence.  
+~
+20 41 0
+D0
+   To the north you see the stone cave wall.
+~
+~
+0 0 -1
+D1
+   To the east you see a dimly lit passage.
+~
+~
+0 0 2021
+D2
+   To the south you see a short passage leading to a larger room.
+~
+~
+0 0 2019
+D3
+   To the west you see a narrow, dark passage.
+~
+~
+0 0 2032
+E
+torches~
+   You see that the torches are spent.
+~
+S
+#2021
+A Dimly Lit Passage~
+   A tiny space in a large stalactite hanging in the middle of this room 
+holds a faintly flickering flame.  Its weak light, projected through the 
+chamber of the stalactite, casts eerie images about the room.
+~
+20 41 0
+D0
+   To the north is a rickety wooden gate.
+~
+gate fence~
+1 0 2030
+D1
+   To the east you see a dark passage.
+~
+~
+0 0 2024
+D2
+   To the south is a small wooden door that has been painted black.
+~
+door~
+1 0 2022
+D3
+   To the west you see a dark passage.
+~
+~
+0 0 2020
+E
+images flame~
+   The small flame in the middle of this room casts dark, almost sinister
+images upon the walls.  Across the walls, two large shadows endlessly
+battle one another.  When one of the shadows is injured, small speckles
+of black blood seem to speckle to the ground only to evaporate and
+reappear on the shadow warrior.
+~
+S
+#2022
+Grulag's Quarters~
+   The darkness residing in this room seems to consume all who stand in it, 
+letting not a trace of light escape its grasp.  A small cot, stained black by 
+some fowl beasts blood, rests in the far corner.  The only decoration in this 
+room is a large engraving on the southern wall.
+~
+20 41 0
+D0
+   To the north is a small wooden door that has been painted black.
+~
+door~
+1 0 2021
+D1
+   To the east you see a short, dark passge leading to another room.
+~
+~
+0 0 2023
+D2
+   On the southern wall is a large engraving.
+~
+~
+0 0 -1
+D3
+   To the west is the cool surface of the cave wall.
+~
+~
+0 0 -1
+D4
+   Above you is the stone ceiling of the cave.
+~
+~
+0 0 -1
+D5
+   Underfoot you see the cave floor.  In this room, it has been painted black.
+~
+~
+0 0 -1
+E
+cot bed~
+   This cot is repugnant; its matress is made of some beasts hair and held
+together by dried, black blood.
+~
+E
+engraving decoration~
+   The engraving depicts a large moon being swallowed whole by a ravenous wolf.
+The wolf's eyes glow a bright red, its fur shines in the darkness and its
+claws seem to rend the earth assunder.  A single phrase is writen beneath
+the engraving,
+                 "&WChaka, Elestra's finest child.&w"
+~
+S
+#2023
+Galurg's Quarters~
+   Your nostrils flare, agitated by the horrible odor of this room.  Coating
+the floor, a three foot thick carpet of filth rests, releasing flatuent bubbles
+of repulsive stench.  Deep brown smears stain the walls, which bubble slightly
+under the corrosive substance.  You can hardly surpress your last meal as you
+wade through this room.
+~
+20 41 0
+D0
+   To the north is a large door coated in thick black crud.
+~
+door~
+1 0 2024
+D1
+   To the east you see a filth covered cave wall.
+~
+~
+0 0 -1
+D2
+   To the south you see a filth covered cave wall.
+~
+~
+0 0 -1
+D3
+   To the west is a short, dark passage leading to a very dark room.
+~
+~
+0 0 2022
+D4
+   Overhead you see the ceiling of the cave, it has a few brown stains.
+~
+~
+0 0 -1
+D5
+   You see a filthy layer of slime underfoot.
+~
+~
+0 0 -1
+E
+slime filth carpet walls smears~
+   The filth on the floor looks like a bubbling mass of really slimy dung.  The
+bubbles that burst spatter the walls with the sickly brown color of the filth.
+~
+S
+#2024
+A Potent Passage~
+   From the room to the north, and the room to the south, two distinctive 
+odors flood into this room, each competing for dominence.  The smell from 
+the north bares the unmistakable characteristic of a bestial odor, while the 
+south's has more of a sewage aroma to it.  From the smell of things, the 
+south is winning on this front.
+~
+20 41 0
+D0
+   To the north is a rickety wooden gate.
+~
+gate fence~
+1 0 2025
+D1
+   To the east is the cold, solid stone cave wall.
+~
+~
+0 0 -1
+D2
+   To the south you see a large door coated in thick black crud.
+~
+door~
+1 0 2023
+D3
+   To the west you see a dark passage.
+~
+~
+0 0 2021
+S
+#2025
+Boar Pens~
+   The ground of this area is covered in mud and the swill of the creatures 
+which inhabit it.  Crudely made gates block the southern and northern 
+exits, while the large pen continues to the west.
+~
+20 41 0
+D0
+   To the north you see a rocky, dark passage.
+~
+~
+0 0 2026
+D1
+   The cave wall sits peacefully to the east.
+~
+~
+0 0 -1
+D2
+   To the south you see a rickety wooden gate.
+~
+gate fence~
+1 0 2024
+D3
+   To the west you see boar pens.
+~
+~
+0 0 2030
+S
+#2026
+A Rocky Corridor~
+   Small rocks and stalacmites dominate this small room.  Faint white lines 
+have been sketched into the ground of this room, forming lanes that lead 
+towards small cushioned pads on the eastern wall surface.
+~
+20 297 0
+D0
+   To the north you see a small alcove that appears to be some kind of shrine.
+~
+~
+0 0 2027
+D1
+   To the east is the cold, solid stone cave wall.
+~
+~
+0 0 -1
+D2
+   To the south you see boar pens.
+~
+~
+0 0 2025
+D3
+   To the west is a well kept wooden gate leading to some boar pens.
+~
+gate~
+1 0 2028
+E
+pads~
+   The pads appear to be quite worn down, as if something had been ramming into
+them repeatadly.  It's possible that they are used to help train the boars to fight. . .
+~
+E
+lanes lines~
+   The lines are made of chalk, and lead towards cushioned pads on the walls.
+~
+E
+rocks stalacmites~
+   You see some rocks and stalacmites in this room.
+~
+S
+#2027
+A tiny Alcove~
+   The walls of this small alcove are lined with a reflective substance that 
+focus' any light in the area into the center of the room, where a small 
+statue ornately rests.
+~
+20 297 0
+D0
+   To the north you see the stone cave wall.
+~
+~
+0 0 -1
+D1
+   The cave wall sits peacefully to the east.
+~
+~
+0 0 -1
+D2
+~
+~
+0 0 2026
+D3
+   To the west is the cool surface of the cave wall.
+~
+~
+0 0 -1
+E
+statue~
+   The small statue is of a boar-man wearing a large copper crown.  It seems
+to be very well attached to its surrounding area.
+~
+S
+#2028
+Elite Boar Pens~
+   The mud of this pen is fairly firm, giving your feet full support as you 
+walk along its surface.  The odor of the boar's is much stronger here, and 
+there is little waste left around on the ground.
+~
+20 41 0
+D0
+   To the north you see the stone cave wall.
+~
+~
+0 0 -1
+D1
+   To the east is a well kept wooden gate.
+~
+gate~
+1 0 2026
+D2
+   To the south you see solid stone wall.
+~
+~
+0 0 -1
+D3
+   To the west is a well kept wooden gate.
+~
+gate~
+1 0 2029
+S
+#2029
+Boar Food Storage Area~
+   Lined along the walls of this room are multiple barrels containing 
+assorted bits and pieces of meat and vegetables.  On the northern wall, a 
+small framed sign has been hung.
+~
+20 297 0
+D0
+   On the northern wall you see a sign.
+~
+~
+0 0 -1
+D1
+   To the east is a well kept wooden gate leading to some boar pens.
+~
+gate~
+1 0 2028
+D2
+   To the south you see animal pens.
+~
+~
+0 0 2030
+D3
+   To the west is the cool surface of the cave wall.
+~
+~
+0 0 -1
+E
+sign~
+   The sign reads,
+                    "&RDONT TAKE DA BOAR FEWD!&w"
+~
+S
+#2030
+Boar Pens~
+   The ground of this area is covered in mud and the swill of the creatures 
+which inhabit it.  A large wooden door blocks passage to the west, crudely 
+made gates block the southern and northern exits, and the large boar pen 
+continues to the west.
+~
+20 41 0
+D0
+   To the north you see a small dark room.
+~
+~
+0 0 2029
+D1
+   To the east you see boar pens.
+~
+~
+0 0 2025
+D2
+   To the south is a rickety wooden gate.
+~
+gate fence~
+1 0 2021
+D3
+   To the west is a wooden door, with a boar painted on it.
+~
+door~
+1 0 2031
+S
+#2031
+Boar Trainers Quarters~
+   This small, untidy room has almost a homely feel to it.  In the corner, a 
+large bed sits, covered by a stinking blanket.  Opposite the bed, a small 
+table with a large empty ale mug sitting atop of it rests quietly.  On the 
+wall, numerous crude pictures have been painted by this rooms inhabitant.
+~
+20 41 0
+D0
+   To the north you see the stone cave wall.
+~
+~
+0 0 -1
+D1
+   To the east is a wooden door.
+~
+door~
+1 0 2030
+D2
+   To the south you see solid stone wall.
+~
+~
+0 0 -1
+D3
+   Westward you see a large stone mass blocking passage, also known as a cave 
+wall.
+~
+~
+0 0 -1
+E
+paintings pictures~
+   The paintings and pictures look like crude attempts to render a boar.
+~
+S
+#2032
+A Narrow Passage~
+   The walls of this passage come narrowly together, making movement 
+fairly difficult.  In a small crevice on the south wall, a group of small rocks
+seem to be growing like mushrooms out of the ground.
+~
+20 297 0
+D0
+   To the north you see a dark, large open area.
+~
+~
+0 0 2033
+D1
+   To the east you see a dark passage.
+~
+~
+0 0 2020
+D2
+   To the south you see solid stone wall.
+~
+~
+0 0 -1
+D3
+   To the west is the cool surface of the cave wall.
+~
+~
+0 0 -1
+E
+crevice rocks mushrooms~
+   The rocks seem to be growing rather quickly, as though prompted by
+some unnatural force.  Other then their odd appearance, they seem to be
+standard rocks.
+~
+S
+#2033
+A Large Open Area~
+   The vast cavern in which you now stand seems to toss any sound about 
+its walls with glee.  From high above, the high pitched screaches of a 
+family of bats reverberates painfully down into your eardrums.  The north 
+wall has an odd symbol carved into its surface.  The large cavern expands 
+further to your west, while a narrow passage offers a point of retreat
+to the south.
+~
+20 40 0
+D0
+   On the north wall you see a large carving.
+~
+wall mural carving~
+4 0 2034
+D1
+   The cave wall sits peacefully to the east.
+~
+~
+0 0 -1
+D2
+   To the south you see a narrow passage.
+~
+~
+0 0 2032
+D3
+   The large cavern in which you stand extends further to the west.
+~
+~
+0 0 2057
+E
+carving~
+   The carving on the northern wall is that of a small kobold, dressed
+in royal garb, standing at the peak of a large mountain.  Below him,
+many people have gathered, and they watch as the kobold is crowned by
+a dark robed figure.  The nose a spectator sticks out slightly of the
+carving, revealing the wall to be a secret door.
+~
+E
+bats~
+   The bats are shrouded in darkness.
+~
+S
+#2034
+A Secret Gaurd Post~
+   The large burnt out remains of once deliciously plump cigars rest in piles
+on the tiled floor of this room.  A half painted image adorns the northern
+wall.  To the east is a small wooden door, to the west an archway and to the
+south there is a secret door built into the wall.
+~
+20 364 0
+D0
+   On the northern wall you see an unfinished picture depicting the meeting
+of a group of humanoids and some dark robed humans.  It seems as though they
+are allies.
+~
+~
+0 0 -1
+D1
+   To the east you see a small wooden door.
+~
+door~
+1 0 2036
+D2
+   To the south you see a small door.
+~
+door~
+1 0 2033
+D3
+   To the west is an archway leading to a small room.
+~
+~
+0 0 2035
+E
+cigars~
+   You see that the cigars were completely used by their previous owners.  All
+that remains is a pile of ash.
+~
+S
+#2035
+A Comfortable Lounge~
+   A large oak table has been set into the floor of this room.  Large 
+mushrooms growing out of the floor of this room serve as the tables chairs.  
+To the east an archway leads out.
+~
+20 40 0
+D0
+   To the north you see the cool surface of the caves wall.
+~
+~
+0 0 -1
+D1
+   To the east is a small archway leading to another room.
+~
+~
+0 0 2034
+D2
+   To the south is the naturally cold stone surface of the cave wall
+~
+~
+0 0 -1
+D3
+   To the west is the cold stone wall of the cave.
+~
+~
+0 0 -1
+E
+table~
+   The table seems to rot before your eyes.  Its once proud oak finish has
+long since disappeared, and all that remains is a rotting hulk of a table.
+~
+E
+mushrooms chairs~
+   The mushrooms look to be an odd form of fungal growth.  They are extremely
+large and appear very sturdy.
+~
+S
+#2036
+A Secret Meeting Room~
+   A large stone table placidly exists in the center of this somewhat small
+room.  Four stone stalacmites, evenly placed around the table, seem to act as
+chairs.  To the west a small doorway leads out of this room.
+~
+20 40 0
+D0
+   To the north you see the cool surface of the caves wall.
+~
+~
+0 0 -1
+D1
+   To the east you see the cold surface of the stone wall.
+~
+~
+0 0 -1
+D2
+   To the south is the naturally cold stone surface of the cave wall
+~
+~
+0 0 -1
+D3
+   To the west you see a small wooden door.
+~
+door~
+1 0 2034
+E
+table~
+   The stone table has been divided into four equal parts that line
+up with the chairs surrounding it.  The stone of the table appears
+to have been smoothed using crude tools.
+~
+E
+chairs stalacmites~
+   Each of the stalacmites that sit around this table bares a small
+name carving on it.  The northern one has the name "Bingellytut," the
+eastern "Qwenton," the southern "BLAHBLAH," and the wester "Elandra."
+~
+S
+#2037
+A Prisoner's Cell~
+   The small skeleton of a rat cracks beneath your boot as you step into this 
+small room.  On the northern wall, a set of large iron shackles uselessly 
+bind a prisoner to the cell, as he long ago escaped its tight confines 
+through death.  Apart from following the prisoners example, the only exit 
+seems to be through the southern door.
+~
+20 131369 0
+D0
+   To the north you see the cool surface of the caves wall.
+~
+~
+0 0 -1
+D1
+   To the east you see the cold surface of the stone wall.
+~
+~
+0 0 -1
+D2
+   To the south is a cell door.
+~
+door cell~
+1 0 2038
+D3
+   To the west is the cold stone wall of the cave.
+~
+~
+0 0 -1
+E
+shackles skeleton~
+   The shackles are made of rusty iron, and old the skeleton of a dwarf.
+~
+S
+#2038
+A Small Shrine~
+   Humanoid skulls adorn this room, either atop spikes firmly set into the 
+ground, or natural rock outcroppings.  The small bones which cover the 
+floor supply your ears with a horrid crunching sound , which coupled with 
+the smell of the bone particles in the air, and the pulsating light coming 
+from three of the larger skulls, results in an extremely unique experience.
+~
+20 45 0
+D0
+   To the north is a cell door.
+~
+door cell~
+1 0 2037
+D1
+   To the east you see the cold surface of the stone wall.
+~
+~
+0 0 -1
+D2
+~
+~
+0 0 2040
+D3
+   To the west is the cold stone wall of the cave.
+~
+~
+0 0 -1
+E
+skulls~
+   The three larger skulls in this room seem to pulsate with a faint
+blue light.  They have elongated teeth and almost sinister looking
+eyesockets.  Unfortunately, they are impaled on stalactites high over-
+head, so you are unable to touch them.
+~
+E
+bones~
+   The bones scattered on the floor of this room look as though they
+once belonged to animals and other non-intelligent beings.
+~
+S
+T 2089
+#2039
+A Temple of Elestra~
+   The walls of this room are decorated with lavish carvings of hideous 
+acts.  Four small alcoves along the northern wall house four small 
+grotesque statues gazing into the center of the room.  The stench of evil 
+and blood hang heavily in the air.
+~
+20 41 0
+D0
+   To the north you see the cool surface of the caves wall.
+~
+~
+0 0 -1
+D1
+   To the east is a small passage leading to a large cavern.
+~
+~
+0 0 2058
+D2
+   To the south is the naturally cold stone surface of the cave wall
+~
+~
+0 0 -1
+D3
+   To the west is a dark passage.
+~
+~
+0 0 2040
+E
+carvings~
+   The carvings show the sacrifice, murder, rape and torture of a vast
+multitude of innocents.  From children to nuns to peasant farmers, none are
+excluded by the carvings appearance.
+~
+E
+statue alcove~
+   There are four stone statues resting in the alcoves.  The first is a dark
+robed assassin figure, the second a pale white skeletal gargoyle, the third
+a disgusting pile of slime and the fourth a large wolf.
+~
+S
+#2040
+A Dark Passage~
+   Dripping down the walls of this passage is a sticky black goo.  Any light 
+hitting the goo seems to disapear into its mucky folds.  The passage leads 
+north, south and east from here.
+~
+20 41 0
+D0
+   To the north there appears to be a shrine.
+~
+~
+0 0 2038
+D1
+   To the east is a temple of some sort.
+~
+~
+0 0 2039
+D2
+   To the south you see a black hallway.
+~
+~
+0 0 2041
+D3
+   To the west is the cold stone wall of the cave.
+~
+~
+0 0 -1
+E
+wall goo~
+   The goo that drips down the walls of this room looks much like crude oil,
+but is considerably stickier.
+~
+S
+#2041
+A Black Hallway~
+   The walls of this hallway have been purposefully turned black, either by 
+magic or charcoal.  Into their surfaces are etched small, indicipherable 
+scripts which seem to drip down the walls length.  The passage continues 
+north and south from here.
+~
+20 41 0
+D0
+   To the north you see a dark passage.
+~
+~
+0 0 2040
+D1
+   To the east you see the cold surface of the stone wall.
+~
+~
+0 0 -1
+D2
+   To the south you see a narrow corridor.
+~
+~
+0 0 2042
+D3
+   To the west is the cold stone wall of the cave.
+~
+~
+0 0 -1
+E
+scripts~
+   The scripts appear to be prayers, or writen chants, to some dark deity.
+~
+S
+#2042
+A Narrow Corridor~
+   The large stalacmites reaching up to the ceiling coupled with the
+narrowly spaced walls of this corridor make movement tiresome.  The cave
+opens up into a fairly large cavern to the east, while the tunnel runs north
+and south.
+~
+20 297 0
+D0
+   To the north you see a dark passage.
+~
+~
+0 0 2041
+D1
+   To the east you see a large cavern.
+~
+~
+0 0 2046
+D2
+   To the south is a dark room.
+~
+~
+0 0 2043
+D3
+   To the west is the cold stone wall of the cave.
+~
+~
+0 0 -1
+E
+stalacmites~
+   The stalacmites in this area have grown very close together, making movement
+difficult.  You have to maneuver around the large cone-shaped rock
+outcroppings with care.
+~
+S
+#2043
+Kobold Barracks~
+   Covering the floor quite thoroghly, hay has been scattered all over this
+room.  Ticks and other small parasites crawl among the hay, waiting to
+infest any who sleep here.  A few small pieces of junk lay in the hay beside
+the numerous malformed pillows.  To the south is a large door.  To the
+north and east the two tunnels lead away.
+~
+20 41 0
+D0
+   To the north you see a narrow corridor.
+~
+~
+0 0 2042
+D1
+   To the east you see a messy hallway.
+~
+~
+0 0 2045
+D2
+   To the south you see a large, rotting wooden door.
+~
+door~
+1 0 2044
+D3
+   To the west is the cold stone wall of the cave.
+~
+~
+0 0 -1
+E
+junk garbage~
+   The garbage that litters the area primarily consists of discarded paper and
+bandages.
+~
+E
+pillows~
+   The pillows look to be loosely bundled piles of hay, and seem completely worthless.
+~
+E
+hay~
+   The hay is infested with small bugs and roaches.
+~
+E
+ticks bugs~
+   The small bugs move quickly to avoid your gaze.
+~
+S
+#2044
+The Kobold Armory~
+   A large sign rests above the doorway of this room.  Broken weapons in
+the far corner have been stacked into a pile, collecting dust as they await
+repairs.  The only exit from this room seems to be through the northern
+door.
+~
+20 41 0
+D0
+   To the north you see a large, rotting wooden door.
+~
+door~
+1 0 2043
+D1
+   To the east you see the cold surface of the stone wall.
+~
+~
+0 0 -1
+D2
+   To the south is the naturally cold stone surface of the cave wall
+~
+~
+0 0 -1
+D3
+   To the west is the cold stone wall of the cave.
+~
+~
+0 0 -1
+E
+sign~
+   The sign reads:
+                "&RLeave yer borken wepons ere, maybee me fix.&w"
+~
+S
+#2045
+A Messy Hallway~
+   Blood clots and chunks of flesh have been carelessly left about this
+hallway.  On the southern wall, a few kobolds have used dismembered
+limbs to write phrases in blood.  To the north cave seems to open up a little
+to form a large cavern.  The passage runs east-west.
+~
+20 41 0
+D0
+   To the north you see a large cavern.
+~
+~
+0 0 2046
+D1
+   To the east is a small, dark room.
+~
+~
+0 0 2049
+D2
+On the southern wall, written in blood, you see "&RRAEL WAZ HERE!&w"
+~
+~
+0 0 -1
+D3
+   To the west is a fairly big room.
+~
+~
+0 0 2043
+E
+blood flesh~
+   You see blood clots and bits of flesh lying about the hallway.
+~
+S
+T 2045
+#2046
+The West Half of a Large Room~
+   As you tred into this room, you find yourself ankle deep in bat feces.
+Looking up, you see a vast multitude of the creatures, screaming silently to
+alert one another of your presence.  Occasionally, a large bat will swoop
+down and steal a large insect from the surface of one of the few stalacmites
+visible in the sea of feces.  The bat filled room seems to expand to the east.
+~
+20 45 0
+D0
+   To the north you see the cool surface of the caves wall.
+~
+~
+0 0 -1
+D1
+   The cavern you are in expands to the east.
+~
+~
+0 0 2047
+D2
+   To the south is a dark passage.
+~
+~
+0 0 2045
+D3
+   To the west is a dark, narrow passage.
+~
+~
+0 0 2042
+S
+#2047
+The East Half of a Large Room~
+   As you tred into this room, you find yourself ankle deep in bat feces.
+Looking up, you see a vast multitude of the creatures, screaming silently to
+alert one another of your presence.  Occasionally, a large bat will swoop
+down and steal a large insect from the surface of one of the few stalacmites
+visible in the sea of feces.  The bat filled room seems to expand to the west.
+~
+20 45 0
+D0
+~
+~
+0 0 2057
+D1
+   To the east you see the cold surface of the stone wall.
+~
+~
+0 0 -1
+D2
+~
+~
+0 0 2048
+D3
+~
+~
+0 0 2046
+S
+#2048
+A Kobold Guard Post~
+   Your feet make a pleasant sloshing sound as you enter this room, due to
+the foot deep water that covers the floor.  Water lightly trickles down the
+stalactites on the ceiling, landing in the large pool on the floor in which
+you stand.  To the north is a large cavern, and to the east lies a storage
+room.
+~
+20 297 0
+D0
+~
+~
+0 0 2047
+D1
+~
+~
+0 0 2016
+D2
+   To the south is the naturally cold stone surface of the cave wall
+~
+~
+0 0 -1
+D3
+   To the west is the cold stone wall of the cave.
+~
+~
+0 0 -1
+S
+T 2092
+#2049
+Near a Small Pit~
+   A large pit resting in the middle of this room emits the disgusting smell
+of rotting flesh.  You can go through a small archway to the south or enter
+into a hallway to the west to leave the pit.
+~
+20 105 0
+D0
+   To the north you see the cool surface of the caves wall.
+~
+~
+0 0 -1
+D1
+   To the east you see the cold surface of the stone wall.
+~
+~
+0 0 -1
+D2
+   To the south you see an eating area.
+~
+~
+0 0 2050
+D3
+   To the west you see a messy hallway.
+~
+~
+0 0 2045
+E
+pit~
+   Inside the pit you see many dead and decomposing carcasses, all of which
+have been stripped naked.
+~
+S
+#2050
+A Messy Eating Area~
+   A few long tables run the length of this room.  Four dead bodies, one of
+which appears humanoid, rest atop the tables.  Splatters of blood stain
+the walls of this room, and large chunks of meat litter the floor.  There
+are two exits from this room, north and south.
+~
+20 41 0
+D0
+   To the north you see a small pit.
+~
+~
+0 0 2049
+D1
+   To the east you see the cold surface of the stone wall.
+~
+~
+0 0 -1
+D2
+   To the south you see a dark passage.
+~
+~
+0 0 2051
+D3
+   To the west is the cold stone wall of the cave.
+~
+~
+0 0 -1
+E
+tables bodies~
+   Four long wooden tables extend to the north and south wall of
+this room.  On three of the tables you see the bodies of dead animals.
+A small halfling bodie rests on the fourth table.  Each of the bodies
+has numerous bite marks on visible on them.
+~
+E
+meat chunks~
+   The meat chunks look like they were once part of a larger body.
+~
+S
+#2051
+A Dark Passage~
+   The few torches set into the walls of this passage burn dimly, providing
+little light to see by.  A few blood droplets are spattered on the walls and
+give off a faint smell.  The passage leads off to the north, east and west
+from here.
+~
+20 40 0
+D0
+   To the north you see a fairly large room with four tables.
+~
+~
+0 0 2050
+D1
+   To the east you see a dark passage.
+~
+~
+0 0 2056
+D2
+   To the south is the naturally cold stone surface of the cave wall
+~
+~
+0 0 -1
+D3
+   To the west you see a large cavern.
+~
+~
+0 0 2052
+E
+blood droplets~
+   You see some blood droplets.
+~
+E
+torches~
+   Along the walls of this passage you see many dimly burning torches that are set into the wall.
+~
+S
+#2052
+A Large Training Area~
+   The floor of this large room is stained with blood and slippery with the
+entrails of fallen warriors.  A few bodies lay forgotten near the south wall,
+where a small passage leads into darkness.  A small tunnel exits this room
+to the east.
+~
+20 41 0
+D0
+   To the north you see the cool surface of the caves wall.
+~
+~
+0 0 -1
+D1
+   To the east you see a small tunnel.
+~
+~
+0 0 2051
+D2
+   To the south you see a small passage leading into darkness.
+~
+~
+0 0 2053
+D3
+   To the west is the cold stone wall of the cave.
+~
+~
+0 0 -1
+E
+bodies body~
+   The bodies lying against the southern wall have been stripped naked and bare many battle wounds.
+~
+E
+blood entrails~
+   You see rich red blood and slippery entrails lying about this room.
+~
+S
+#2053
+A Small, Messy Hallway~
+   Blood streaks line the floor of this room.  The blood smears migrate from
+the northern opening to the southern, as a powerfully awful smell flows in
+the reverse direction.  To the east, there is a small opening in the cave.
+~
+20 41 0
+D0
+   To the north you see a fairly large cavern.
+~
+~
+0 0 2052
+D1
+   To the east is a small opening in the wall, leading to another small cave.
+~
+~
+0 0 2054
+D2
+   To the south is a dark passage.
+~
+~
+0 0 2055
+E
+blood smears~
+   You see some blood smears, as if something were dragged from the northern end of this room out the southern exit.
+~
+S
+#2054
+A Dead End~
+   The cool walls of this room are coated in a slippery smooth substance,
+and glisten slightly when struck by light.  A few useless items are scattered
+about this room, mixed in with some small pieces of humanoid corpses.
+~
+20 297 0
+D0
+   To the north you see the cool surface of the caves wall.
+~
+~
+0 0 -1
+D1
+   To the east you see the cold surface of the stone wall.
+~
+~
+0 0 -1
+D2
+   To the south is the naturally cold stone surface of the cave wall
+~
+~
+0 0 -1
+D3
+   To the west you see a small passage.
+~
+~
+0 0 2053
+S
+#2055
+A Dead End, with a Shallow Pit~
+   In the center of this room, a shallow pit has been dug.  Peering into this
+pit, you see piles of dead humanoids, carved up in the training room to the
+north and placed here for storage.  The smell coming out of the pit seems
+to be a mixture of feces and rotting flesh.  Maggots crawl along the brim of
+the pit, waiting for their next feast.
+~
+20 41 0
+D0
+   To the north you see a small passage.
+~
+~
+0 0 2053
+D1
+   To the east you see the cold surface of the stone wall.
+~
+~
+0 0 -1
+D2
+   To the south is the naturally cold stone surface of the cave wall
+~
+~
+0 0 -1
+D3
+   To the west is the cold stone wall of the cave.
+~
+~
+0 0 -1
+E
+maggots~
+   The maggots appear very well fed.
+~
+E
+pit~
+   You see many bodies over-flowing from this deep pit.
+~
+S
+#2056
+Before a Large Door~
+   The only significant thing in this room is a rather large oak door, with a
+small sliding panel in it.  Two chairs sit to the side of the door, with a
+small flattened stalacmite between them.  The door is to the east, and a
+passage runs off to the west.
+~
+20 45 0
+D0
+   To the north you see the cool surface of the caves wall.
+~
+~
+0 0 -1
+D1
+   To the east you see a large oak door with a small sliding panel in it.
+~
+door oak~
+1 0 2010
+D2
+   To the south is the naturally cold stone surface of the cave wall
+~
+~
+0 0 -1
+D3
+   To the west is a fairly dark passage.
+~
+~
+0 0 2051
+E
+stalacmite~
+   The stalacmite between the chairs seems to serve as a crude table to place drinks on.
+~
+E
+chairs~
+   These chairs were designed for a very small person.  The wood they are made of is rotting, the chair appears very unsturdy.
+~
+E
+door~
+   The door is to the east.
+~
+S
+#2057
+At the Southern End of an Enormous Cavern~
+   In comparison to the rest of the cave, this cavern is simply immense. 
+The sound of each footstep echoes off the distant cavern walls.  A faint
+coppery glow radiates to the north.  The large cavern stretches out to the
+east and north.  To the south a small passage leads into a fairly large area.
+~
+20 41 0
+D0
+   To the north you see that the large cavern in which you stand continues.
+~
+~
+0 0 2058
+D1
+   To the east you see more of the large cavern in which you stand.
+~
+~
+0 0 2033
+D2
+   To the south you see a short path leading to another large cavern.
+~
+~
+0 0 2047
+D3
+   To the west is a large cave painting.  It displays the sacrifice
+of a human ontop of a dark altar.  From the other side of the painting
+faint sounds can be heard.
+~
+Painting~
+4 0 2060
+S
+#2058
+In the Middle of a Large Cavern~
+   The startling sound of a single drop of water slamming into the surface
+of a serene pool shatters the silence of your surroundings.  The size of this
+room is simply incredible, and fact that its large baren walls reflect noise
+so readily alarms you to how quiet it is.  The cavern runs from north to
+south, and a small opening leads off to the west.
+~
+20 45 0
+D0
+   To the north you see another section of the large cavern which you are in.
+~
+~
+0 0 2059
+D1
+   To the east you see the cold surface of the stone wall.
+~
+~
+0 0 -1
+D2
+   To the south you see another section of the cavern you are in.
+~
+~
+0 0 2057
+D3
+   To the west is a small passage leading to a dark room.
+~
+~
+0 0 2039
+S
+#2059
+Near a Small Throne~
+   The northern wall of this massive cavern is coated in a slimy black
+substance that slowly drips from a small opening in the ceiling to the floor.
+Beside the waterfall is an oddly shaped crystaline rock.  To the east
+is a large iron door, and the cavern lies to the south.
+~
+20 8 0
+D0
+To the north is a wall coated in ooze.
+~
+~
+0 0 -1
+D1
+   To the east is a large iron door bearing a crude symbol.  You
+assume that it leads to the kings private chambers.
+~
+door large iron~
+1 0 2071
+D2
+~
+~
+0 0 2058
+D3
+   To the west is the cold stone wall of the cave.
+~
+~
+0 0 -1
+E
+crystal rock~
+   The crystal rock sits oddly to the left of the ooze waterfall.  It appears
+to be firmly attached to the wall, although you could probably move it
+slightly.  Perhaps if you were to PULL it . . .
+~
+S
+T 2099
+T 2098
+#2060
+A Small, Hidden Room~
+   Bright red runes mark the walls of this room, glowing slightly.  From
+within the walls, a low murmering emerges, droning its way into your
+skull.   
+~
+20 297 0
+D1
+back side of the painting Mr.Douchebag.
+~
+door~
+1 0 2057
+S
+T 2060
+#2061
+Down a Dark Chute~
+   Slivers of light trickle down from above where the altar's surface remains
+open.  Slowly bouncing throughout the halls of this small dark cave
+complex is a cacophony of horrible moans and dark ritual chants.  You
+stand in what appears to be an intersection of four different chambers.
+Passageways lead off in every direction.
+~
+20 301 0
+D0
+   To the north you see a dark passage.
+~
+~
+0 0 2096
+D1
+   To the east you see an unlit tunnel.
+~
+~
+0 0 2080
+D2
+   To the south is a long dark tunnel.  From it the stench of death claws at your nose.
+~
+~
+0 0 2072
+D3
+   To the west is a dark tunnel.  An extremely potent odour comes from it.
+~
+~
+0 0 2088
+D4
+~
+~
+0 0 2060
+S
+#2062
+A Small Hidden Room~
+   The southern wall of this room is coated by a translucent layer of goo.  A
+large rock sits innocently on the floor.  To the north is a small door.
+~
+20 40 0
+D0
+   To the north you see a small door.
+~
+door small~
+1 0 2064
+D1
+   To the east you see the cold surface of the stone wall.
+~
+~
+0 0 -1
+D2
+   To the south you see a large sheet of dripping ooze obscuring the
+back of a small throne.
+~
+door small~
+1 0 2059
+D3
+   To the west is the cold stone wall of the cave.
+~
+~
+0 0 -1
+D5
+   Below you is the cold stone floor.
+~
+floor stone~
+1 0 2063
+E
+rock~
+   The rock is fairly large, and rests beside a crevice in the wall.  The
+crevice is the same size as the rock.  It looks like the rock could easily
+be slid into the crevice. . .
+~
+S
+T 2097
+#2063
+A Small Hidden Room~
+   This is a tiny room, whose walls have been stained a blackish brown by
+coal and feces.  A small stone is set into the northern wall.  The only route
+out appears to be back up.
+~
+20 297 0
+D0
+   To the north you see the cool surface of the caves wall.
+~
+~
+0 0 -1
+D1
+   To the east you see the cold surface of the stone wall.
+~
+~
+0 0 -1
+D2
+   To the south is the naturally cold stone surface of the cave wall
+~
+~
+0 0 -1
+D3
+   To the west is the cold stone wall of the cave.
+~
+~
+0 0 -1
+D4
+   Overhead you see a trapdoor leading to a room above you.
+~
+trapdoor~
+1 0 2062
+S
+#2064
+Near a Beautiful Painting~
+   The walls of this small corner are smooth and cool to the touch.  On the
+southern wall is a large painting.  To the east is the kings quarters.
+~
+20 297 0
+D1
+~
+~
+0 0 2065
+D2
+   To the south is a life size painting of a royal kobold.  His skin is
+scarred, and his gait uneven as though prepared to flee.  The painting
+seems to move back and forth slightly, as though a slight breeze were
+nocking against it from somewhere.
+~
+painting~
+4 0 2062
+S
+#2065
+A Lavishly Decorated Room~
+   The walls and ceiling of this room are smooth and textured with
+swirling, hypnotic patters.  The floor feels soft beneath your feet, although
+it does appear to be made of stone.  Set into the north wall is a large
+mirror with a tarnished metal frame.  To the south is a small entranceway,
+a short passage leads to the west and to the east you see a luxurious
+bedroom.
+~
+20 41 0
+D1
+~
+~
+0 0 2066
+D2
+~
+~
+0 0 2071
+D3
+~
+~
+0 0 2064
+E
+mirror~
+   The mirror is spherical, two feet in diameter.  Its frame looks to have once
+been made of some semi-precious mineral, but rust has made it worthless.  The
+reflective portion of the mirror has been dulled over time.  The mirror
+is firmly set into the wall.
+~
+S
+#2066
+The Kobold Kings Bedroom~
+   The floor beneath your feet is warm to the touch.  About the room,
+numerous small depressions slowly burn an unidentifiable substance,
+producing a pleasant calming scent.  You can leave by either the southern
+route, western route or through a large door to the east.
+~
+20 41 0
+D1
+   To the east you see a large door.
+~
+door~
+1 0 2070
+D2
+~
+~
+0 0 2067
+D3
+~
+~
+0 0 2065
+E
+depressions~
+   Inside the depressions you see burning incense.
+~
+S
+#2067
+Near some Fluffy Chairs~
+   The heat of this room almost makes you forget that you are currently
+underground, in a deep, dark cave.  From the west you can hear running
+water.  High above on the ceiling, a large cage has been made out of a
+stalactite.  There is a door to the east, and a bedroom lies to the north.
+~
+20 41 0
+D0
+~
+~
+0 0 2066
+D1
+   To the east you see a large door.
+~
+door~
+1 0 2069
+D3
+~
+~
+0 0 2068
+E
+cage stalactite~
+   A large cage has been formed using one of the stalactites on the ceiling
+of this room.  The cage itself looks like an animals resting place, and from
+where you stand, you can see that there is no door on the cage.
+~
+S
+#2068
+The Kings Washroom~
+   A small stream emerges from a tiny hole int he northern wall of this
+room, and disappears through a hole in the southern.  The only exit from
+here seems to be to the east.
+~
+20 297 0
+D1
+~
+~
+0 0 2067
+S
+#2069
+The Kobold Kings Treasury~
+   Box after box of useless garbage has been stacked carelessly in this fairly
+large room.  Amidst the boxes, small rodents scurry, devouring a few
+morsels of food they find.  Carved into the southeast corner is a small
+cloaked figure.  The stacks of boxes continue to the north, and a door leads
+out to the west.
+~
+20 41 0
+D0
+   To the north you see more of the King's treasure.
+~
+~
+0 0 2070
+D1
+   To the east you see the cave wall.
+~
+~
+0 0 -1
+D2
+   To the south you see the cave wall.
+~
+~
+0 0 -1
+D3
+   To the west you see a large door.
+~
+door~
+1 0 2067
+E
+figure statue~
+   The cloaked figure appears to be an assassin of some sort.  He has
+a small sharp dagger and a face mask obscruing his face.  The statue stands
+about two fee high.
+~
+S
+#2070
+The Kobold Kings Treasury~
+   Numerous boxes of useless garbage have been stacked carelessly in this
+fairly large room.  Amidst the boxes, small rodents scurry, devouring the
+few morsels of food they find.  Carved into the northeast corner is a small
+gargoyle.  The stacks of boxes continue to the south, and a door leads out
+to the west.
+~
+20 41 0
+D2
+   To the south you see more of the King's Treasury.
+~
+~
+0 0 2069
+D3
+   To the west is a large door.
+~
+door~
+1 0 2066
+E
+statue gargoyle~
+   The gargoyle looks to be a small grinning demon made of stone.  It has two
+long horns and a devilish face.  Its teeth are extremely sharp, and have blood
+crusted on them.
+~
+S
+#2071
+Near a Large, Iron Door~
+  A large iron door rests on the western wall of this tiny room.  Facing the
+door, two chairs have been propped up.  To the north is a large open area. 
+~
+20 41 0
+D0
+~
+~
+0 0 2065
+D3
+   To the west is a large iron door.
+~
+door large iron~
+1 0 2059
+S
+#2072
+A Long, Dark Passage~
+   Wails of sorrow and remorse reach your ears from somewhere nearby to
+the south.  The long passage in which you stand splits into three distinct
+segments, each seeming to extent further south.  The darkest one leads
+directly south, while the other two veer off slightly to the east and west.
+~
+20 41 0
+D0
+~
+~
+0 0 2061
+D1
+~
+~
+0 0 2075
+D2
+~
+~
+0 0 2074
+D3
+~
+~
+0 0 2073
+S
+#2073
+A Small, Repulsive Cavern~
+   A squealching sound drifts into your ears as your boots touch the floor
+of this room.  Strewn chaotically about, bodies lay motionless, with their
+skin in front of them.  Each one has been hollowed out and left desecrated
+by the kobolds of this cave, in preparation for some dark ritual.
+~
+20 41 0
+D0
+~
+~
+0 0 2072
+D2
+~
+~
+0 0 2076
+S
+#2074
+A Small, Dingy Cavern~
+   The mournful wails resounding throughout the hallways of the cavern
+seem to emenate from this room.  Across its floor, numerous people, not
+quite deceased but too far gone to be saved, lay pleading for mercy and
+forgiveness.
+~
+20 41 0
+D0
+~
+~
+0 0 2072
+D2
+~
+~
+0 0 2076
+S
+#2075
+A Small, Grotesque Cavern~
+   A large pile of bodies piled in the middle of this room is emenating a
+stench that causes your nostrils to flare uncomfortably.  The walls of
+this room glisten with a black substance.  From the lips of the deceased
+come dry, demonic chants that send chills down your spine.
+~
+20 41 0
+D0
+~
+~
+0 0 2072
+D2
+~
+~
+0 0 2076
+S
+#2076
+A Large, Repulsive Cavern~
+   A testimony to the cruelty of the kobold race is what you behold upon
+entering this room.  From a hole in the ceiling, countless bodies have been
+tossed down for the priests to mutilate.  So many bodies have been offered
+for the priests sacrifice, that the bodies have formed a pillar, extending
+beyond the hole into the room above.
+~
+20 41 0
+D0
+~
+~
+0 0 2074
+D1
+~
+~
+0 0 2075
+D3
+~
+~
+0 0 2073
+S
+#2077
+Amidst the Pews of Shadow~
+   Large black pews made of steel, rest on the floor of this room facing
+east.  A small area of the seats are especially black, bearing some mystic
+text to be read while the priests conduct their unholy rituals.  All around
+you, the whispers of the dead invade your thoughts.
+~
+20 41 0
+D1
+~
+~
+0 0 2098
+S
+#2078
+A Circular Cavern~
+   Small orbs of darkness seem to hover in the air here.  As your hand
+passes through one, a chill runs along your arm.  A small sigil has been
+carved into the northern wall, it seems to glow slightly as you gaze at it.
+~
+20 45 0
+D1
+   To the east you see a small black door.
+~
+door black~
+1 0 2079
+D2
+~
+~
+0 0 2098
+D3
+   To the west you see a small grey door.
+~
+door grey~
+1 0 2087
+S
+#2079
+Valtra's Chamber~
+   A black throne sits quietly at the eastern wall.  To its right resides a
+slender table, covered by various notes and dust.  Barely visible on the
+southern wall, a large painting has been left to disintigrate with time.
+In response to your presence, countless whispers echo throughout
+your skull.
+~
+20 41 0
+D3
+   To the west you see a small black door.
+~
+door black~
+1 0 2078
+S
+#2080
+A Long, Dark Passageway~
+   The floor of this passage is made of white stone that releases a cracking
+sound as you tread upon its surface.  At the eastern end of the passage
+are two doors, one set into the eastern wall and the other the southern.
+To the west, a few small glimmers of light can be seen.
+~
+20 41 0
+D1
+~
+~
+0 0 2082
+D2
+~
+~
+0 0 2081
+D3
+~
+~
+0 0 2061
+S
+#2081
+A Small Barracks~
+   Engravings line the walls of this large white room.  A few small bunks
+lay at the southern wall, made from the carcass of some dread beast.
+~
+20 41 0
+D0
+~
+~
+0 0 2080
+S
+#2082
+A Thin Walkway~
+   The chanting of many voices creeps into your mind as you stand in a
+small walkway between a group of pews to the north and a large altar to
+the south.  On the eastern wall, opposite the exit from this place, is a large
+wooden door.
+~
+20 41 0
+D0
+~
+~
+0 0 2083
+D1
+~
+~
+0 0 2085
+D2
+~
+~
+0 0 2084
+D3
+~
+~
+0 0 2080
+S
+#2083
+Amidst the Pews of Bone~
+   Multiple pews, made of bone, rest on the floor of this room facing south.
+Carved into the seats are various demonic chants to be spoken during
+ceremony.  Heavy footfalls echo down from the floor above.
+~
+20 41 0
+D2
+~
+~
+0 0 2082
+S
+#2084
+Before an Altar of Bone~
+   Four small statues rest in the corners of this room, depicting skinned
+gremlins.  Smears of blood and the resulting splatter marks of hurled
+organs mar the walls.  In the ceiling, a large visage is carved, and from its
+form a deep, petrifying voice pronounces the glory of those made to serve
+in death, encased in bone.
+~
+20 41 0
+D0
+~
+~
+0 0 2082
+S
+#2085
+A Circular Cavern~
+   A criss-cross pattern of light shines down through multiple holes in the
+ceiling of this small room.  Where the light fails to penetrate the darkness,
+small runes have been carved into the floor.  An odd odour lingers in this
+room, causing your muscles to tense slightly.
+~
+20 45 0
+D1
+   To the east is a large doorway made of bone.
+~
+door~
+1 0 2086
+D3
+~
+~
+0 0 2082
+S
+#2086
+Karakan's Chamber~
+   In the center of this room rests a large bed, created from the skull of a
+large lizard.  A table rests against the eastern wall, covered in small notes.
+The north wall is completely covered by a single, immense holy symbol of
+Elestra.
+~
+20 41 0
+D3
+   To the east is a doorway made of bone.
+~
+door~
+1 0 2085
+S
+#2087
+A Chamber of Grey~
+   No sound greets your ears as you enter this room.  Its blank, grey walls
+seem to extend forever, swallowing all noise that touches their surface.  A
+pale light just a few feet to the west glows dimly, exposing a translucent
+wall of shimmering stone.
+~
+20 41 0
+D1
+   To the east you see a small grey door.
+~
+door grey~
+1 0 2078
+S
+#2088
+A Narrow Crack~
+   Dripping down the walls of this narrow crack is a strange black ooze.  It
+smells fowl but appears harmless to touch.  Cool breezes from the north
+and west bring more potent versions of the mucks odour to your nostrils.
+To the east, the faint glint of light can be seen.
+~
+20 41 0
+D0
+~
+~
+0 0 2089
+D1
+~
+~
+0 0 2061
+D3
+~
+~
+0 0 2090
+S
+#2089
+A Sludge Coated Barracks~
+   Slowly oozing from the ceiling of this room is a seemingly endless 
+amount of black ooze.  As it drips down towards the ground, a numbing
+voice mumbles in the darkness.  On the northern wall of this room are
+several elevated pads of sludge, each with small indents on their surface.
+~
+20 0 0
+D2
+~
+~
+0 0 2088
+S
+#2090
+A Thin Walkway~
+   The droning of many voices oozes into your mind as you stand in a
+small walkway between a group of pews to the south and a large altar to
+the north.  On the western wall, opposite the exit from this place, is a large
+black door.
+~
+20 41 0
+D0
+~
+~
+0 0 2092
+D1
+~
+~
+0 0 2088
+D2
+~
+~
+0 0 2091
+D3
+   To the west you see a black door.
+~
+door black~
+1 0 2093
+S
+#2091
+Amidst the Pews of Slime~
+   Three large pews, made of stone covered by a black ooze, rest on the
+floor of this room facing north.  Small gaps in the sludge coating the seats
+reveal archaic symbols to be uttered during the temple rituals.  The sound
+of bursting slime bubbles bounces into your ears from nearby.
+~
+20 41 0
+D0
+~
+~
+0 0 2090
+S
+#2092
+Before an Altar of Slime~
+   Four slime coated statues stand ever vigilant in the corners of this
+repulsive area.  Long trickles of slime drip from the nostrils of a large
+carving in the north wall, while an eerie glow radiates from its eyes.
+~
+20 41 0
+D2
+~
+~
+0 0 2090
+S
+#2093
+A Circular Cavern~
+   Through the infinite holes that pierce the floor of this room a thick black
+substances bubbles.  Embedded in the ceiling, a large glowing gem
+provides a minimal amount of light for this room, causing the slime to
+shine unnaturally.  Doorways lie to the north, south and east.
+~
+20 45 0
+D0
+   To the north is a large door coated in slime.
+~
+door slime~
+1 0 2095
+D1
+   To the east you see a black door.
+~
+door black~
+1 0 2090
+D2
+   To the south is a large door coated in black slime.
+~
+door slime~
+1 0 2094
+S
+#2094
+Shothlah's Pit~
+   In the center of this room is a large pit filled with a black ooze.  Across
+the walls are scribbled insane rants, preaching Sluurm's greatness as the
+devourer of the world.  As you move about this room, a large eye carved
+into the southern wall seems to follow you.
+~
+20 41 0
+D0
+   To the north is a large door, covered in slime.
+~
+door slime~
+1 0 2093
+S
+#2095
+Shaladar's Chamber~
+   A large elevated rectangle of sludge dominates this room.  Down its
+sides trickles the black-green substance native to this area of the cave.  In
+the north-east corner a small table rests, covered in ooze and paper.
+~
+20 41 0
+D2
+   To the south is a large door coated by slime.
+~
+door slime~
+1 0 2093
+S
+#2096
+A Slender Path~
+   Sharp knives of cold seem to pierce your skin when you brushes against
+the walls of this narrow, dark passage.  Each step you take brings an
+unnatural echo into the air.  As you proceed down the passage, you can
+feel something watching you from the darkness.  Two doors are at the 
+northern end of the hall, one on the north wall, the other on the east.
+~
+20 41 0
+D0
+~
+~
+0 0 2098
+D1
+~
+~
+0 0 2097
+D2
+~
+~
+0 0 2061
+S
+#2097
+An Unlit Opening~
+   A fog of immense darkness fills this room.  The black walls, barely
+visible, display a large carving.  A cool breeze washes down over you 
+from the ceiling.  On the eastern wall, a few small bunks have been
+carved out of the black stone walls.
+~
+20 105 0
+D0
+   Along the northern wall are carved images of suffering people,
+writhing in pain.  From beneath their skin, a dark light bursts forth,
+seeming to consume them from within.
+~
+~
+0 0 -1
+D1
+   Along the eastern wall are carved images of suffering people,
+writhing in pain.  From beneath their skin, a dark light bursts forth,
+seeming to consume them from within.
+~
+~
+0 0 -1
+D2
+   Along the southern wall are carved images of suffering people,
+writhing in pain.  From beneath their skin, a dark light bursts forth,
+seeming to consume them from within.
+~
+~
+0 0 -1
+D3
+   Vision to the west is obscured by an eerie darkness.
+~
+~
+0 0 2096
+D4
+   The ceiling above you appears to extend into the night sky.  The moon
+passes overhead abnormally fast however, leading you to believe it nothing
+more then an impressive illusion.
+~
+~
+0 0 -1
+D5
+   Underfoot you see a dark black rock floor.
+~
+~
+0 0 -1
+E
+bunks~
+   The bunks in this room are of extremely poor quality.  They appear
+to be very poorly maintained, and would offer nothing more than a 
+mediocre nights rest.
+~
+E
+fog~
+   The unnatural fog surrounding you seems to radiate an aura of darkness.
+~
+S
+#2098
+A Thin Walkway~
+   The chanting of many voices creeps into your mind as you stand in a
+small walkway between a group of pews to the west and a large altar to
+the east.  On the northern wall, opposite the exit from this place, is a large
+iron door.
+~
+20 105 0
+D0
+   To the north you see a large black door made of iron.  On its
+surface are two large black circles held by a dark grey dragon.
+~
+door black iron~
+1 0 2078
+D1
+   The light of your torch doesn't penetrate far enough for you to make out
+anything to the east.
+~
+~
+0 0 2099
+D2
+   Your vision is obscured by darkness in that direction.
+~
+~
+0 0 2096
+D3
+   Darkness shrouds your vision to the west.
+~
+~
+0 0 2077
+S
+#2099
+Before the Altar of Shadow~
+   Small bat-winged figures hunch in the corners of this room.  The area
+about you seems to exist in perpetual midnight.  Nearby above your head,
+a whisper drifts down telling of the uselessness of the body when the soul
+is freed.  Coating the floor of the room is a flakey black powder.
+~
+20 105 0
+D0
+   To the north you see a wall of sheer darkness.
+~
+~
+0 0 -1
+D1
+   To the east you see a wall of pure black.
+~
+~
+0 0 -1
+D2
+   To the south is a wall as black as tar.
+~
+~
+0 0 -1
+D3
+   To the west you see a thin walkway leading away from the altar.
+~
+~
+0 0 2098
+D4
+   Overhead you see what appears to be a vast swirling maelstorm
+of shadows.  While each individual figure has its own unique features,
+the mass moves in such a way that you cannot track a single figure for
+long.
+~
+~
+0 0 -1
+D5
+   Beneath your feet is a flaky black powder resembling ash.  The odd
+bone protruding from its midst reveals the nature of the powder, it is
+the sacrificial remains of burnt corpses.  Beneath the powder, you think
+you see a tiled floor.
+~
+~
+0 0 -1
+E
+tiles tile~
+   Beneath the ash you see black onyx tiles.  Each stone has engraved
+in its surface a cold black sigil of arcane origin.  It is cold to the
+touch.
+~
+E
+figures statues corner figure~
+   In each corner of this room a hunched figure of stone keeps a silent
+vigil.  The statues, made of some unidentifiable stone, resemble the
+gargoyles that watch over the great human Cathedrals, however they are
+much smaller, and appear much more demonic in nature.  The tips of their
+teeth and claws are coated in dried blood.
+~
+S
+$~

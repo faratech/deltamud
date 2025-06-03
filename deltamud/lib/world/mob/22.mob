@@ -1,0 +1,38 @@
+#2200
+albino~
+the albino~
+The albino stands before you, glaring all the while.
+~
+     The albino standing before you is thin and lanky, with hair
+the same bleached color as winter snow and skin that is nearly as
+white.  He has red eyes that reflect the candle light like crimson
+jewels.  His skin is so thin, translucent...so much so that it is
+possible to see the veins throb in his neck, deep blue veins 
+running down into his white collar.
+     Seeing you finally, he says "You are not supposed to be here
+yet, but since you are, tell Walker what you think of this place.
+
+
+~
+4196426 1024 0 E
+17 10 35 1d1+292 2d49+7
+170 4250
+9 9 1
+BareHandAttack: 8
+E
+#2201
+servant~
+a whispy looking servant~
+A whispy looking servant floats here.
+~
+     A whispy looking apperation floats here ready to serve her
+master.  Currently she just floats around cleaning stuff, but 
+she would defend her master if called upon.
+~
+2120 2 0 E
+17 20 35 2d1+292 1d49+0
+170 4250
+9 9 2
+BareHandAttack: 12
+E
+$

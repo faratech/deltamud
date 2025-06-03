@@ -1,0 +1,1671 @@
+#2100
+Outside a Dark Cave~
+   You are standing in an unfinished room.    
+~
+21 4 0
+D0
+   To the north you see the myrky GloomWood trees.
+~
+~
+0 0 2139
+D1
+   To the east you see the myrky GloomWood trees.
+~
+~
+0 0 2142
+D2
+~
+~
+0 0 2170
+D3
+   To the west you see myrky Gloomwood trees.
+~
+~
+0 0 2141
+S
+#2101
+On a Gravel Path~
+You are in an unfinished room.
+~
+21 0 0
+D1
+~
+~
+0 0 2102
+D2
+~
+~
+0 0 2102
+D3
+~
+~
+0 0 2102
+S
+#2102
+Within a Dark Forest~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2139
+D1
+~
+~
+0 0 2101
+D2
+~
+~
+0 0 2141
+D3
+~
+~
+0 0 2142
+S
+T 2195
+#2103
+Within a Dark Forest~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2114
+D1
+~
+~
+0 0 2114
+D2
+~
+~
+0 0 2114
+D3
+~
+~
+0 0 2112
+S
+T 2194
+#2104
+On a Gravel Path~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2111
+D1
+~
+~
+0 0 2108
+D3
+~
+~
+0 0 2105
+S
+#2105
+In a Vineyard~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2107
+D1
+~
+~
+0 0 2104
+D2
+~
+~
+0 0 2106
+S
+#2106
+In a Vineyard~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2105
+S
+#2107
+Near some Plump Grapes~
+You are in an unfinished room.
+~
+21 0 0
+D2
+~
+~
+0 0 2105
+S
+#2108
+In a Vineyard~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2109
+D2
+~
+~
+0 0 2110
+D3
+~
+~
+0 0 2104
+S
+#2109
+In a Vineyard~
+You are in an unfinished room.
+~
+21 0 0
+D2
+~
+~
+0 0 2108
+S
+#2110
+Near some Rotting GrapeVines~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2108
+S
+#2111
+Before a Large Manor~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2115
+D1
+~
+~
+0 0 2112
+D2
+~
+~
+0 0 2104
+D3
+~
+~
+0 0 2114
+S
+#2112
+Inside some Stables~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2102
+D1
+~
+~
+0 0 2103
+D2
+~
+~
+0 0 2113
+D3
+~
+~
+0 0 2111
+S
+#2113
+A Horse Pen~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2112
+S
+#2114
+Beside a Deep Well~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2103
+D1
+~
+~
+0 0 2111
+D2
+~
+~
+0 0 2103
+D3
+~
+~
+0 0 2103
+S
+#2115
+Entrance Hall to the Manor~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2119
+D1
+~
+~
+0 0 2117
+D2
+~
+~
+0 0 2111
+D3
+~
+~
+0 0 2116
+S
+#2116
+A Clean Office~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2120
+D1
+~
+~
+0 0 2115
+S
+#2117
+Servants Quarters~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2118
+D3
+~
+~
+0 0 2115
+S
+#2118
+A Kitchen~
+You are in an unfinished room.
+~
+21 0 0
+D2
+~
+~
+0 0 2117
+D3
+~
+~
+0 0 2119
+S
+#2119
+A Large Dinning Hall~
+You are in an unfinished room.
+~
+21 0 0
+D1
+~
+~
+0 0 2118
+D2
+~
+~
+0 0 2115
+D3
+~
+~
+0 0 2120
+S
+#2120
+A Comfortable Lounge~
+You are in an unfinished room.
+~
+21 0 0
+D1
+~
+~
+0 0 2119
+D2
+~
+~
+0 0 2116
+D4
+~
+~
+0 0 2121
+D5
+~
+~
+0 0 2127
+S
+#2121
+At the Top of the Stairs~
+You are in an unfinished room.
+~
+21 0 0
+D1
+~
+~
+0 0 2122
+D5
+~
+~
+0 0 2120
+S
+#2122
+A Hallway~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2123
+D1
+~
+~
+0 0 2125
+D2
+~
+~
+0 0 2124
+D3
+~
+~
+0 0 2121
+S
+#2123
+A Bedroom~
+You are in an unfinished room.
+~
+21 0 0
+D2
+~
+~
+0 0 2122
+S
+#2124
+A Bedroom~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2122
+S
+#2125
+A Hallway~
+You are in an unfinished room.
+~
+21 0 0
+D1
+~
+~
+0 0 2126
+D3
+~
+~
+0 0 2122
+S
+#2126
+The Master Bedroom~
+You are in an unfinished room.
+~
+21 0 0
+D3
+~
+~
+0 0 2125
+S
+#2127
+The Cellar~
+You are in an unfinished room.
+~
+21 0 0
+D1
+~
+~
+0 0 2128
+D4
+~
+~
+0 0 2120
+S
+#2128
+A Secret StoreRoom~
+You are in an unfinished room.
+~
+21 0 0
+D3
+~
+~
+0 0 2127
+S
+#2129
+Near a Small Cave~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2142
+D1
+~
+~
+0 0 2130
+D2
+~
+~
+0 0 2141
+D3
+~
+~
+0 0 2140
+S
+#2130
+A Small Cave~
+You are in an unfinished room.
+~
+21 0 0
+D1
+~
+~
+0 0 2131
+D3
+~
+~
+0 0 2129
+S
+#2131
+A Small Cave~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2133
+D2
+~
+~
+0 0 2132
+D3
+~
+~
+0 0 2130
+S
+#2132
+A Small Cave~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2131
+S
+#2133
+A Small Cave~
+You are in an unfinished room.
+~
+21 0 0
+D2
+~
+~
+0 0 2131
+S
+#2134
+Beside a Steep Rocky Slope~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2135
+D1
+~
+~
+0 0 2139
+D2
+~
+~
+0 0 2140
+D3
+~
+~
+0 0 2141
+S
+#2135
+The Foot of a Rocky Slope~
+You are in an unfinished room.
+~
+21 0 0
+D2
+~
+~
+0 0 2134
+D4
+~
+~
+0 0 2136
+S
+#2136
+Ascending a Rocky Slope~
+You are in an unfinished room.
+~
+21 0 0
+D4
+~
+~
+0 0 2137
+D5
+~
+~
+0 0 2135
+S
+#2137
+The Top of a Rocky Slope~
+You are in an unfinished room.
+~
+21 0 0
+D1
+~
+~
+0 0 2134
+D3
+~
+~
+0 0 2138
+D5
+~
+~
+0 0 2136
+S
+#2138
+A Crude Nest~
+You are in an unfinished room.
+~
+21 0 0
+D1
+~
+~
+0 0 2137
+S
+#2139
+Within a Dark Forest E~
+   From high above, you hear a family of birds chirping softly.  Barely able to
+support its own weight, a large hollow tree rots in the vicinity.  From the
+west, a cool breeze lightly wafts through the area.  From here, you can walk in
+any direction into the forest.    
+~
+21 0 0
+D0
+~
+~
+0 0 2159
+D1
+~
+~
+0 0 2165
+D2
+~
+~
+0 0 2141
+D3
+~
+~
+0 0 2142
+S
+#2140
+Within a Dark Forest E~
+   Red ribbons have been nailed to some of the trees in this area.  From the
+east, a cool breeze lightly wafts through the area.  There is a small pile of
+rocks, neatly stacked, close to a nearby bush.  A large tree, possibly
+centuries old, is growing nearby.  In every direction you see the creepy
+forest.    
+~
+21 0 0
+D0
+~
+~
+0 0 2142
+D1
+~
+~
+0 0 2149
+D2
+~
+~
+0 0 2151
+D3
+~
+~
+0 0 2163
+S
+#2141
+Within a Dark Forest E~
+   Large, dark trees grow in this area, their claw-like branches reaching
+across the sky, shredding sunlight as it falls fleecily to earth.  From the
+south, a cool breeze lightly wafts through the area.  To the south is a steep
+dropoff falling into a river that looks very unsafe to travel on.  To the
+north, east and west you see the creepy forest.    
+~
+21 0 0
+D0
+~
+~
+0 0 2139
+D1
+~
+~
+0 0 2159
+D3
+~
+~
+0 0 2150
+S
+#2142
+Within a Dark Forest E~
+   There is a small pile of rocks, neatly stacked, close to a nearby bush.  A
+large tree, possibly centuries old, is growing nearby.  From the north, a cool
+breeze lightly wafts through the area.  In all directions the forest expands,
+inviting you to travel within it.    
+~
+21 0 0
+D0
+~
+~
+0 0 2163
+D1
+~
+~
+0 0 2139
+D2
+~
+~
+0 0 2140
+D3
+~
+~
+0 0 2164
+S
+#2143
+Diving in the River~
+You are in an unfinished room.
+~
+21 0 0
+S
+#2144
+Diving in the River~
+You are in an unfinished room.
+~
+21 0 0
+S
+#2145
+Diving in the River~
+You are in an unfinished room.
+~
+21 0 0
+S
+#2146
+Diving in the River~
+You are in an unfinished room.
+~
+21 0 0
+S
+#2147
+Diving in the River~
+You are in an unfinished room.
+~
+21 0 0
+S
+#2148
+Diving in the River~
+You are in an unfinished room.
+~
+21 0 0
+S
+#2149
+GloomWood Forest~
+   The forest trees have grown wide apart in this area, but their branches join
+into a tight mesh canopy overhead.  From the west, a cool breeze lightly wafts
+through the area.  A deep resounding hoot emits from a nested hollow high
+overhead.  An extremely large rock lies to the east, blocking passage.  To the
+north, south and west you see the forest.    
+~
+21 0 0
+D0
+~
+~
+0 0 2165
+D2
+~
+~
+0 0 2156
+D3
+~
+~
+0 0 2151
+S
+#2150
+GloomWood Forest~
+   Spotted red petals adorn the shubbery.  Large towering trees surround you,
+their upper branches seeming to support the sky above.  To the west there is an
+extremely large rock blocking passage.  The forest lies to the north, east and
+south, watching.    
+~
+21 0 0
+D0
+~
+~
+0 0 2165
+D1
+~
+~
+0 0 2141
+D2
+~
+~
+0 0 2154
+S
+#2151
+GloomWood Forest~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2140
+D1
+~
+~
+0 0 2149
+D2
+~
+~
+0 0 2168
+S
+#2152
+An unfinished room~
+   Large, dark trees grow in this area, their claw-like branches reaching
+across the sky, shredding sunlight as it falls fleecily to earth.  A cacaphony
+of crowing bursts into existence as you enter this area.  The birds screach
+ruthlessly from their elevated homes.  From the east, a cool breeze lightly
+wafts through the area.  The sound of a river can be heard to the south and
+west.  North and east of you the forest trees.    
+~
+21 0 0
+S
+#2153
+GloomWood Forest~
+   The forest trees have grown wide apart in this area, but their branches join
+into a tight mesh canopy overhead.  A deep resounding hoot emits from a nested
+hollow high overhead.  There is a small pile of rocks, neatly stacked, close to
+a nearby bush.  A large tree, possibly centuries old, is growing nearby.  
+Surrounding you completely, the forest expands in every direction.    
+~
+21 0 0
+D0
+~
+~
+0 0 2167
+D1
+~
+~
+0 0 2154
+D2
+~
+~
+0 0 2157
+S
+#2154
+GloomWood Forest~
+   From the east, a cool breeze lightly wafts through the area.  A cacaphony of
+crowing bursts into existence as you enter this area.  The birds screach
+ruthlessly from their elevated homes.  There is a small pile of rocks, neatly
+stacked, close to a nearby bush.  The forest trees have grown wide apart in
+this area, but their branches join into a tight mesh canopy overhead.  Trees
+lie in every direction from here.    
+~
+21 0 0
+D0
+~
+~
+0 0 2150
+D1
+~
+~
+0 0 2155
+D2
+~
+~
+0 0 2158
+D3
+~
+~
+0 0 2153
+S
+#2155
+On a Gently Flowing River~
+You are in an unfinished room.
+~
+21 0 0
+D1
+~
+~
+0 0 2159
+D2
+~
+~
+0 0 2166
+D3
+~
+~
+0 0 2154
+S
+#2156
+On a Gently Flowing River~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2149
+D1
+~
+~
+0 0 2157
+D2
+~
+~
+0 0 2160
+D3
+~
+~
+0 0 2168
+S
+#2157
+GloomWood Forest~
+   Large, dark trees grow in this area, their claw-like branches reaching
+across the sky, shredding sunlight as it falls fleecily to earth.  A cacaphony
+of crowing bursts into existence as you enter this area.  The birds screach
+ruthlessly from their elevated homes.  To the east, south and west you can hear
+the sound of a swiftly flowing river.  To the north you see many trees.    
+
+~
+21 0 0
+D0
+~
+~
+0 0 2153
+D1
+~
+~
+0 0 2158
+D2
+~
+~
+0 0 2161
+D3
+~
+~
+0 0 2156
+S
+#2158
+On a Gently Flowing River~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2154
+D1
+~
+~
+0 0 2166
+D2
+~
+~
+0 0 2162
+D3
+~
+~
+0 0 2157
+S
+#2159
+GloomWood Forest~
+   From the south, a cool breeze lightly wafts through the area.  A deep
+resounding hoot emits from a nested hollow high overhead.  Spotted red petals
+adorn the shubbery.  A large tree, possibly centuries old, is growing nearby.
+Although an extremely large patch of thorns blocks passage to the north, you
+can travel east, south or west of here to explore the forest.    
+~
+21 0 0
+D1
+~
+~
+0 0 2160
+D2
+~
+~
+0 0 2139
+D3
+~
+~
+0 0 2141
+S
+#2160
+GloomWood Forest~
+   The forest trees have grown wide apart in this area, but their branches join
+into a tight mesh canopy overhead.  A cacaphony of crowing bursts into
+existence as you enter this area.  The birds screach ruthlessly from their
+elevated homes.  A large tree, possibly centuries old, is growing nearby.  A
+deep pit lies to the south of you, descending into darkness.  The trees of the
+forest watch you from the west.  A river can be heard flowing swiftly nearby to
+the north and east.    
+~
+21 0 0
+D0
+~
+~
+0 0 2156
+D1
+~
+~
+0 0 2161
+D3
+~
+~
+0 0 2159
+S
+#2161
+On a Gently Flowing River~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2157
+D1
+~
+~
+0 0 2162
+D2
+~
+~
+0 0 2169
+D3
+~
+~
+0 0 2160
+S
+#2162
+GloomWood Forest~
+   Large towering trees surround you, their upper branches seeming to support
+the sky above.  A large tree, possibly centuries old, is growing nearby.  From
+the east, a cool breeze lightly wafts through the area.  There is a small pile
+of rocks, neatly stacked, close to a nearby bush.  From the north and west you
+can hear a river.  Forest trees stand silently to the south and east.    
+~
+21 0 0
+D0
+~
+~
+0 0 2158
+D1
+~
+~
+0 0 2163
+D2
+~
+~
+0 0 2164
+D3
+~
+~
+0 0 2161
+S
+#2163
+GloomWood Forest~
+   Large, dark trees grow in this area, their claw-like branches reaching
+across the sky, shredding sunlight as it falls fleecily to earth.  From the
+east, a cool breeze lightly wafts through the area.  Your vision is filled by
+the forest trees to the east, south and west.  To the north is a large boulder
+that blocks passage.    
+~
+21 0 0
+D1
+~
+~
+0 0 2140
+D2
+~
+~
+0 0 2142
+D3
+~
+~
+0 0 2162
+S
+#2164
+On a Gently Flowing River L~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2162
+D1
+~
+~
+0 0 2142
+D3
+~
+~
+0 0 2169
+S
+#2165
+GloomWood Forest~
+   Large, dark trees grow in this area, their claw-like branches reaching
+across the sky, shredding sunlight as it falls fleecily to earth.  From the
+east, a cool breeze lightly wafts through the area.  North of here is a deep,
+dark pit.  The forest expands in all directions except north.    
+~
+21 0 0
+D1
+~
+~
+0 0 2169
+D2
+~
+~
+0 0 2149
+D3
+~
+~
+0 0 2139
+S
+#2166
+GloomWood Forest X~
+   Barely able to support its own weight, a large hollow tree rots in the
+vicinity.  Large, dark trees grow in this area, their claw-like branches
+reaching across the sky, shredding sunlight as it falls fleecily to earth.  A
+deep resounding hoot emits from a nested hollow high overhead.  There is a
+river flowing north and west of this room, to the south is a large boulder
+blocking passage, and to the east is the forest.    
+~
+21 0 0
+D0
+~
+~
+0 0 2155
+D3
+~
+~
+0 0 2158
+S
+T 2193
+#2167
+GloomWood Forest X~
+   A large tree, possibly centuries old, is growing nearby.  From the east, a
+cool breeze lightly wafts through the area.  Spotted red petals adorn the
+shubbery.  Red ribbons have been nailed to some of the trees in this area.  To
+the east and west, two large thorn patches block passage.  The forest lies to
+the north and south.    
+~
+21 0 0
+D0
+~
+~
+0 0 2101
+D2
+~
+~
+0 0 2153
+S
+T 2192
+#2168
+GloomWood Forest X~
+   The forest trees have grown wide apart in this area, but their branches join
+into a tight mesh canopy overhead.  Spotted red petals adorn the shubbery.  
+From the south, a cool breeze lightly wafts through the area.  A river can be
+heard to the north and east of this room, and to the south you see a deep, dark
+pit leading into darkness.  West of here you see the forest.    
+~
+21 0 0
+D0
+~
+~
+0 0 2151
+D1
+~
+~
+0 0 2156
+D3
+~
+~
+0 0 2101
+S
+T 2191
+#2169
+GloomWood X~
+   The forest trees have grown wide apart in this area, but their branches join
+into a tight mesh canopy overhead.  From high above, you hear a family of birds
+chirping softly.  Red ribbons have been nailed to some of the trees in this
+area.  A large tree, possibly centuries old, is growing nearby.  The forest
+extends in every direction.    
+~
+21 0 0
+D0
+~
+~
+0 0 2139
+D1
+~
+~
+0 0 2140
+D2
+~
+~
+0 0 2102
+D3
+~
+~
+0 0 2142
+S
+T 2190
+#2170
+A Dank Cave~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2100
+D2
+~
+~
+0 0 2171
+S
+#2171
+A Dark Cave~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2170
+D1
+~
+~
+0 0 2173
+D2
+~
+~
+0 0 2172
+S
+#2172
+A Dark Cave~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2171
+S
+#2173
+A Dark Cave~
+You are in an unfinished room.
+~
+21 0 0
+D2
+~
+~
+0 0 2174
+D3
+~
+~
+0 0 2171
+S
+#2174
+A Dark Cave~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2173
+S
+#2175
+The Edge of a Dark Forest~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2180
+D1
+~
+~
+0 0 2184
+D2
+~
+~
+0 0 2190
+D3
+~
+~
+0 0 2185
+S
+T 2196
+#2176
+Near a Dark Forest~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2181
+D1
+~
+~
+0 0 2187
+D2
+~
+~
+0 0 2189
+D3
+~
+~
+0 0 2182
+S
+T 2197
+#2177
+Near a Dark Glade~
+You are in an unfinished room.
+~
+21 0 0
+D1
+~
+~
+0 0 2179
+D3
+~
+~
+0 0 2188
+S
+T 2198
+#2178
+The Edge of a Dark Forest~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2179
+D1
+~
+~
+0 0 2190
+D2
+~
+~
+0 0 2188
+D3
+~
+~
+0 0 2180
+S
+T 2199
+#2179
+Near a Dark Forest~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2184
+D1
+~
+~
+0 0 2181
+D2
+~
+~
+0 0 2178
+D3
+~
+~
+0 0 2177
+S
+#2180
+A Faint Dirt Path~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2182
+D1
+~
+~
+0 0 2178
+D2
+~
+~
+0 0 2175
+D3
+~
+~
+0 0 2181
+S
+#2181
+A Dirt Path~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2183
+D1
+~
+~
+0 0 2180
+D2
+~
+~
+0 0 2176
+D3
+~
+~
+0 0 2179
+S
+#2182
+Outside a Hut~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2185
+D1
+~
+~
+0 0 2176
+D2
+~
+~
+0 0 2180
+D3
+~
+~
+0 0 2183
+S
+#2183
+A Dirt Path~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2186
+D1
+~
+~
+0 0 2182
+D2
+~
+~
+0 0 2181
+D3
+~
+~
+0 0 2184
+S
+#2184
+Outside a Hut~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2187
+D1
+~
+~
+0 0 2183
+D2
+~
+~
+0 0 2179
+D3
+~
+~
+0 0 2175
+S
+#2185
+Outside a Hut~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2188
+D1
+~
+~
+0 0 2175
+D2
+~
+~
+0 0 2182
+D3
+~
+~
+0 0 2186
+S
+#2186
+A Large CampFire~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2189
+D1
+~
+~
+0 0 2185
+D2
+~
+~
+0 0 2183
+D3
+~
+~
+0 0 2187
+S
+#2187
+Outside a Hut~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2190
+D1
+~
+~
+0 0 2186
+D2
+~
+~
+0 0 2184
+D3
+~
+~
+0 0 2176
+S
+#2188
+Outside a Hut~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2178
+D1
+~
+~
+0 0 2177
+D2
+~
+~
+0 0 2185
+D3
+~
+~
+0 0 2189
+S
+#2189
+Outside a Large Hut~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2176
+D1
+~
+~
+0 0 2188
+D2
+~
+~
+0 0 2186
+D3
+~
+~
+0 0 2190
+S
+#2190
+Outside a Hut~
+You are in an unfinished room.
+~
+21 0 0
+D0
+~
+~
+0 0 2175
+D1
+~
+~
+0 0 2189
+D2
+~
+~
+0 0 2187
+D3
+~
+~
+0 0 2178
+S
+#2191
+Within a Hut~
+You are in an unfinished room.
+~
+21 0 0
+S
+T 2188
+#2193
+Within a Hut~
+You are in an unfinished room.
+~
+21 0 0
+S
+#2194
+Within a Hut~
+You are in an unfinished room.
+~
+21 0 0
+S
+#2195
+Within a Hut~
+You are in an unfinished room.
+~
+21 0 0
+S
+#2196
+Within a Hut~
+You are in an unfinished room.
+~
+21 0 0
+S
+#2197
+Within a Large Hut~
+You are in an unfinished room.
+~
+21 0 0
+S
+#2198
+Near a Large Bed~
+You are in an unfinished room.
+~
+21 0 0
+S
+#2199
+A Mediocre Throne Room~
+You are in an unfinished room.
+~
+21 0 0
+S
+$~

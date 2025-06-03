@@ -1,0 +1,52 @@
+#1000
+Entrance to the Apprentice's Chamber~
+  You are standing in a small chamber with finely grooved walls and 
+slightly damp, green moss hanging from above the chamber ceiling.  A
+dimly lit, but heavily travelled pathway, known amongst many adventurers
+proceeds north.  An opening just wide enough for one person can be seen
+above with what appears to be fresh air blowing through the whole.  An 
+exit perhaps?
+~
+10 4 0
+D0
+~
+~
+0 0 1001
+D1
+~
+~
+0 0 -1
+S
+#1001
+A Small Pathway~
+  Dimly lit,  but also very secure.  This area appears to be a turning 
+point for many adventurers.  This crossroad leads off in three directions.
+North, West, and South.  West the path appears to be getting brighter from
+some type of artificial lighting.  South is a small chamber that you must 
+in fact squeeze through a small hole to make proceed.  The small pathway 
+continues north.
+~
+10 0 0
+D0
+~
+~
+0 0 1002
+D2
+~
+~
+0 0 1000
+S
+#1002
+A Small Pathway~
+  The walls in this small pathway seem to be getting 
+darker.  As the construction of this pathway looks extremely
+ancient.  Poorly lit you get a strange feeling in your body.
+The pathway continues north and south.
+~
+10 0 0
+D2
+~
+~
+0 0 1001
+S
+$~

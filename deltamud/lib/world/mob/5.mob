@@ -1,0 +1,16 @@
+#500
+cow~
+the cow~
+A cow is standing in the middle of the road.
+~
+   Ahh!  You're relieved it wasn't some blood thirsty beast.  This cow is black
+and white.  You guess its kind of weird to see a cow standing on a path in a
+forest.  It must have wandered away from some farm or something...    
+~
+8413194 0 0 E
+X1 0 0 0 0 0 1d1+20 1d1
+10 250
+9 9 2
+BareHandAttack: 10
+E
+$

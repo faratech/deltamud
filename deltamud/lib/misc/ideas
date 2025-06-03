@@ -1,0 +1,145 @@
+Storm    (Oct  4) [  100] Testing 123
+Storm    (Oct  4) [  100] Modify 'exits' to show room vnum when in build mode.
+Hud      (Oct  4) [ 1500] add goto into build mode (say I make a door closed/locked in my zone but can't goto it, make it only allow you to goto within yer zone
+Azzie    (Oct  4) [  100] erm.. Healing Mist.. used in battle or stuff.. regenerates a few hp every 5 seconds or so.. i programmed this once on stock circlemud.. not too difficult
+Azzie    (Oct  4) [  100] erm.. healing mist did like, 1/3 as much as a normal tic did? i basically used the tick counter to create the 5 second thingie
+Mike     (Oct  5) [  100] We definately need a command for people to register e-mail addresses. Kind of urgent actually
+Ace      (Oct  7) [  100] Throw skill.. Only weapons with throw flag can be throw, and you can't pick the weapon up until after battle
+Ace      (Oct  7) [  100] Rotting Food: In oedit there should be a field to tell how long before something rots
+Thraken  (Oct 10) [  100] Skill - Thief - Baffle: The thief does some stuff...And based upon the thieves dex., and the enemies int., the mob may slash out wildly and possibly hit itself... (Just a idea =) -Thraken
+Vincent  (Oct 10) [  100] artisian
+Vincent  (Oct 10) [  100] artisian:  Auction...  they are tradesmen let them auction anything anytime they want.
+Uther    (Oct 11) [ 1420] A choice to have a player choose no deity and consider him/herself an atheist.
+Uther    (Oct 11) [ 1420] Character upgrade classes.
+Uther    (Oct 11) [ 1420] for spells, have the user type out the incantation...
+Uther    (Oct 11) [ 1420] Warrior Skill:  Stun -- Deliver a blow to opponent that knocks them unconscious.
+Uther    (Oct 11) [ 1420] Help guides for different actions/skills and what not.  Uther (myself) will even type them up for you!
+Balthazaar (Oct 11) [  100] perhaps a new warrior skill could be grapple.  A warrior could grapple [victim] to start a fight but (based on skill level) the warrior could get a few hits in edgewise...
+Balthazaar (Oct 12) [  100] Another Warrior skill could be: evade.  It increases the chance for you to avoid being followed be another player unwillingly.
+Balthazaar (Oct 13) [  100] Warrior skill: guard.  Percent that you intervene in the attacking of another and take the hits yourself...
+Balthazaar (Oct 13) [  100] Warrior skill: Defend.  Percent that you intervene in the attacking of another and take the hits yourself as well as attack...
+Walker   (Oct 13) [  100] thief skill...third attack or double backstab. Been a while since I last played here...sorry if I am all messed up.
+Uther    (Oct 21) [  100] MUD mailboxes.
+Uther    (Oct 23) [  100] Warrior Skill -- "Maim"  warrior hits opponent in arm and disables enemy's weapon arm.
+Uther    (Oct 23) [  100] Thief skill -- Mug  Thief attacks and steals gold from enemy at same time.
+Uther    (Oct 23) [  100] Warrior Skill -- blind Warrior attacks victim in face and blood drips over enemy's eyes.. blinding him temporarily.
+Uther    (Oct 23) [  100] Thief Skill -- Assassinate -- Thief (invisible) can sneak up behind a victim and strike victim's neck... injecting him with a poison whether it be one of paralysis or death...
+Uther    (Oct 23) [  100] Warrior Skill -- Florentine -- Warrior is so strong he/she can wield two weapons at once.
+Uther    (Oct 23) [  100] Thief Skill -- Throw -- Thief is so agile he can throw a small weapon with great accuracy and do significant damage...  
+Uther    (Oct 23) [  100] Warrior/Thief Skill -- Low Blow -- Warrior is strong/Thief is quick and can deliver a blow to the groin that makes the enemy drop for a couple of turns.. (if target is male/female)
+Uther    (Oct 23) [  100] Thief -- Impersonate  Thief is witty enough that he can change his whole identity without other people noticing.  Lasts x amount of days.
+Uther    (Oct 23) [  100] Warrior -- Decapitate  Warrior gets a lucky blow in battle and is able to decapitate his opponent.  Works once in a blue moon.
+Uther    (Oct 23) [  100] smoke screen results in no XP loss.
+Storm    (Oct 23) [ 1403] Idea -- Thief skill -- smoke screen  Thief has a smoke bomb and can use it to blind his enemy as he makes an automatic flee. 
+Uther    (Oct 23) [  100] warrior skill -- Waylay -- Warrior strikes opponent with blunt weapon (or flat of a sword blade) which chances 'KO'ing the enemy.
+Uther    (Oct 23) [  100] warrior skill -- Shield block -- Warrior is so battle hardened that he is able to put up his shield to block a shot and take NO damage.
+Uther    (Oct 23) [  100] warrior skill -- estimate enemy -- warrior is used to fighting that he knows what enemy is capable of ( knows HP, Strength) acts as an extended "Consider" command.
+Uther    (Oct 23) [  100] thief -- Promote to ninja for even faster attacks (when reaching max lvl)
+Uther    (Oct 23) [  100] thief -- promote to knight for even harder attacks! (when reaching max lvl.)
+Uther    (Oct 23) [  100] Warrior skill -- rage -- warrior is filled with hatred and starts throwing 2x damage on hits for the first 5 mins (real time) afterwards, throws 1/2 damage for 5 mins... then returns to normal...
+Uther    (Oct 23) [  100] thief -- Pick pocket -- thief can see what is in a person's pockets...  and give different steal rates for items..  thief can steal certain things at different difficulties as he gets more and more experienced...
+Uther    (Oct 23) [  100] Warrior Skill -- Critical hit -- Warrior gets lucky and is able to do 3x damage he normally does on ONE hit... (twice in a blue moon)
+Uther    (Oct 23) [  100] Throw enemy -- Warrior is so strong he manages to grapple the enemy and throw him to the ground, resulting in some damage and a possible fear factor.
+Uther    (Oct 23) [  100] PUT A FEAR FACTOR IN THE GAME!
+Uther    (Oct 23) [  100] Have the warrior throw the enemy into a wall... or a spiked wall... or whatever surroundings are near..
+Walker   (Oct 23) [  100] warrior skill called pierce can only be done with a 'pointy' weapon and if the weapon is large enough would do some major damage.
+Uther    (Oct 23) [  100] in a desert, and there is fighting, have a possibility for the character to throw sand in the enemy's eyes to blind the enemy.
+Uther    (Oct 23) [  100] Lightbringer &cI&Cd&ce&Ca&cM&Ca&cs&Ct&ce&Cr &nknight
+Uther    (Oct 23) [  100] disco emote and gemote (output:  (user) is dancing disco style.)
+Uther    (Oct 23) [  100] freestyle gemote...... instead of using the regular actions.. :)
+Mike     (Oct 23) [  107] There should be a one line command to automatically make multiple rooms with specific values (i.e. makerooms 100 199 indoors peaceful city ; blahb lah or something) 
+Ace      (Oct 24) [ 1141] cave terrain =P
+Uther    (Oct 24) [  100] the idea of having a thief being able to sneak around behind someone.
+Uther    (Oct 24) [  100] When a castle is having a court session, make the guards have the players leave their weapons with the guard.
+Uther    (Oct 24) [  100] Players having accents (in game)
+Uther    (Oct 24) [  100] if people are invisible and they say something..  instead of having it "someone says '(insert text here'"  have it say "Someone says in a (insert race here) accent ' (insert text here)'
+JarikSolo (Oct 27) [ 1204] change the imotd
+Uther    (Oct 29) [  100] It is rumored that alcohol exists in old "healing potions".. idea.. the longer a healing potion is around, the more it ferments, and the more effective it would be...  how about implementing it into the MUD?
+Uther    (Oct 29) [  100] Alchemy with using actual components.. not just the "brew" command..  
+Uther    (Oct 29) [  100] have components sold at magical shops....
+Ace      (Nov 17) [ 1145] 'complaint' command
+SoulDragon (Nov 17) [ 4x81] make all damaging weather put a temp noregen flag on the current room
+JarikSolo (Nov 17) [ 1145] urination
+Ace      (Nov 17) [ 1146] A command to report jarik abusing stuff =P
+Uther    (Nov 18) [  100] how about an intimidation factor against the enemy where the enemy gets discouraged after so many failed attacks against you?
+Uther    (Nov 18) [  100] An option where the player can choose not to attack, but to defend.  After defending enough hits, the player's "biorhythm" peaks and then the player deals out one mega hit that does mega damage?
+JarikSolo (Nov 18) [  100] graphical sex
+Uther    (Nov 18) [  100] An intimidation factor that where the enemy loses faith in his abilities after many failed attacks against the player?
+JarikSolo (Nov 18) [  100] maybe in ascii
+JarikSolo (Nov 18) [  100] im good at that
+Uther    (Nov 18) [  100] Steroids for players.
+JarikSolo (Nov 18) [  100] LOW_BLOW FOR WARRIORS AHHHHHH
+Uther    (Nov 18) [  100] Drug use and abuse... with addictions and withdrawal symptoms...
+Uther    (Nov 18) [  100] the ability for a male character to mate with a female character.. and have an NPC child.
+Uther    (Nov 18) [  100] the element of mobs aging...  how they lose skill when they get old.. or gain it as they grow from a child to an adult....
+Uther    (Nov 18) [  100] Forging that uses metal components... and a hammer tool.
+JarikSolo (Nov 18) [  100] condoms
+Uther    (Nov 18) [  100] make it so an artisan's weapon and armor enhancements can only be done near an anvil/forge....
+Uther    (Nov 18) [  100] STD's.
+BladeRaver (Dec 26) [  100] Uther is now known as BladeRaver.  Can you give him building rights to the area he was working on?
+Grif     (Jan 11) [  100] Open up a stock area at the least I mean come on , geez.
+Thraken  (Feb 26) [  102] Give us a board to post on...Might be one, but I ran out of mv looking for it :P
+Thraken  (Jun 25) [  160] Update news :)
+Ace      (Jun 28) [  102] how do you see and know what a hurricane is
+Ace      (Jun 28) [  136] like..  make meteorology something you have to train
+Ace      (Jun 28) [  100] ah
+BladeRaver (Jul  2) [ 1441] Timed blow skill for fighters..  they wait 2 rounds of combat without striking, then deliver a blow 3x as hard as their normal blow.
+BladeRaver (Jul  2) [ 1441] A parry skill.  Every once in a while, a warrior parries a blow with his weapon.
+BladeRaver (Jul  2) [ 1441] A disarming skill for wizards.  They cast a spell that renders the weapon in their enemy's hands out of the fighter's grasp, causing the fighter to hit at 1/4th their normal damage.
+BladeRaver (Jul  2) [ 1441] break weapon skill.  Give artesian the ability to break a weapon.. (Great for those fake trade deals)
+BladeRaver (Jul  2) [ 1441] class upgrades.
+BladeRaver (Jul  2) [ 1441] Artesian skill - low blow in combat..  (at least give them something to keep alive)
+BladeRaver (Jul  2) [ 1441] for forging, have components to do forges..
+BladeRaver (Jul  2) [ 1441] for thieves, pickpocketing..  only steals gold.
+BladeRaver (Jul  2) [ 1441] corpse ressurection..  1 hour after person dies, one can come around and ressurect the corpse... more detail on that topic.
+BladeRaver (Jul  2) [ 1441] mob killing counter for players
+BladeRaver (Jul  2) [ 1441] if mobs are killed that are 5 levels lower than the player, the player gets NO exp from it.
+BladeRaver (Jul  2) [  100] a re-naming feature.
+Bladeraver (Jul  2) [  100] florentine fighting! (Also known as Dual Wield)
+Tmp      (Jul  2) [  100] Under dual wield, have a special attack that lets the user hold back 2 rounds, and throw a flurry of slashes (2-6) that do 2x damage each slash!
+Bladeraver (Jul  2) [ 6x82] Weather control for wizards
+Bladeraver (Jul  2) [ 6x82] Calm weather for clerics
+Bladeraver (Jul  2) [ 6x82] get more builders! :)
+Bladeraver (Jul  2) [ 6x82] magic consisting of songs (bards) or dance (mog from FF3USA)
+Bladeraver (Jul  2) [ 6x82] harnessing the power of the elements.. such as fire, or lightning for attacking or defense.
+Bladeraver (Jul  2) [ 6x82] Repel your enemy for mages or clerics!
+Bladeraver (Jul  2) [ 6x82] 2 storms in one!
+Bladeraver (Jul  2) [ 6x82] a coordinate system for location
+Thraken  (Jul  5) [  100] Skill for Thieves: Conceal...Hide items in your inventory. Syntax: conceal item  Conceal plain lists what you have concealed. Wielded/worn eq couldn't be concealed.
+Thraken  (Jul  5) [  100] Update "news"
+Thraken  (Jul  5) [  100] make mobs stay out of the temple-type thinger
+JarikSolo (Jul  5) [ 1204] shove drag shit
+Bladeraver (Jul  5) [  100] bow and arrow weapons - hit someone from two squares away! :)
+Bladeraver (Jul  5) [  100] idea accept/rejection notes to people who submit ideas.
+Bladeraver (Jul  5) [  100] MUDmail! :)
+BladeRaver (Jul  7) [  100] semi-permanent hp/mp loss..  the max drops for 1-3 MUD days, then rises again.. (for example, when you do a forge or something like that.. the capacity drops during those skills due to exhaustion from tedious work)
+BladeRaver (Jul  7) [  100] resurrection of a PC corpse..  can only do it within the time span of 1 MUD hour from dying... more details too long to fit into ideas.  Please ask BladeRaver for more info.
+BladeRaver (Jul  7) [  100] Bow & Arrow weapons - strike someone from 1 or 2 blocks away! :)
+BladeRaver (Jul  7) [  100] the artisan having the skill to break a weapon in a non-combat situation..  (for faking those forge trade deals)
+BladeRaver (Jul  7) [  100] the warrior being able to strike so hard that not only does he do extreme damage to his opponent, he also destroys his weapon in the process.
+BladeRaver (Jul  7) [  100] the thief with the ability to sneak up behind his opponent and use a poison to render his victim unconscious.
+BladeRaver (Jul  7) [  100] throwing weapons - they do 1.25 times more damage than a wielded weapon, but once used, it's gone.
+BladeRaver (Jul  7) [  100] the ability to use a potion on an enemy to do damage. (Ex/ Poison cure potion may be so acidic, that if used against a water based creature, they suffer damage from the acid in the potion)
+BladeRaver (Jul  7) [  100] different castles that can be sieged by PC characters and can be ruled by PCs.
+BladeRaver (Jul  7) [  100] occasional npc town members rebel against the town guard
+BladeRaver (Jul  7) [  100] animals that not only attack other PC's, but other npc animals/characters as well.
+BladeRaver (Jul  7) [  100] deathtraps that can be forewarned ( like in deltaMUD 2.5 )
+BladeRaver (Jul  7) [  100] NPC characters that have different weaknesses. (Fire elementals are weak against ice)
+BladeRaver (Jul  7) [  100] a PC's ability to torture an NPC to get more information from it...  (the act of waylaying an npc, then using rope to tie the npc to a chair, etc..)
+BladeRaver (Jul  7) [  100] the npc's ability to do the same torture treatment to a PC character
+Thraken  (Jul  7) [ 2300] Make a mortal zones command type thinger, or help zones or something which would show all the complete zones and who built them...Or, just says who has completed a zone
+Thraken  (Jul  7) [ 2300] Make dig create the room if it's nonexistant
+BladeRaver (Jul  7) [  100] spirit rap spell for clerics to see ghosts/spirits
+Thraken  (Jul  8) [ 2300] Give show zones to builders 
+BladeRaver (Jul  8) [  100] disco dance emote!
+BladeRaver (Jul  8) [  100] ban datamonkey from getting on this MUD :-)
+BladeRaver (Jul  8) [  100] damn i'm good
+BladeRaver (Jul  8) [ 1441] diseases that keep the PC from regaining HP naturally or from a healing spell/potion. (Such as rabies)
+BladeRaver (Jul  8) [ 1441] A taunt skill (Warriors or Thieves)
+BladeRaver (Jul  8) [ 1441] holy weapons that kill spirit mobs (such as ghosts)
+Vincent  (Jul  8) [  100] I think we should have something like we had earlier in the last game, he was called sifius.  Very smart man, and very useful.
+BladeRaver (Jul 13) [  100] A way for the artisan to break down or melt down a metallic piece of armor into metallic components.
+Thraken  (Jul 14) [  100] Idle command, shows how long someone has been idle...Have a toggle so people can't see how long you've been idle
+BladeRaver (Jul 16) [  110] mobs that respond to "Hail, (name of mob)!"
+BladeRaver (Jul 16) [  110] npc-run quests.
+BladeRaver (Jul 28) [  110] make titles longer than 40 characters

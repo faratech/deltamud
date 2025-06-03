@@ -1,0 +1,77 @@
+#!/bin/sh
+# Copyright Abandoned 1996 TCX DataKonsult AB & Monty Program KB & Detron HB
+# This file is public domain and comes with NO WARRANTY of any kind
+#
+# scripts to start the MySQL demon and restart it if it dies unexpectedly
+#
+# This should be executed in the MySQL base directory if you are using a
+# binary installation that has other paths than you are using.
+#
+# mysql.server works by first doing a cd to the base directory and from there
+# executing safe_mysqld
+
+RootDir=/scsi2/server1
+MY_BASEDIR_VERSION=$RootDir/seadog/mysql-install
+DATADIR=$RootDir/seadog/mysql
+ledir=$RootDir/seadog/mysql-install
+
+pidfile=$DATADIR/mysql.pid
+log=$DATADIR/mysql.log
+err=$DATADIR/mysql.err
+
+#
+# If there exists an old pid file, check if the demon is already running
+# Note: The switches to 'ps' may depend on your operating system
+
+if test -f $pidfile
+then
+  PID=`cat $pidfile`
+  if /bin/kill -0 $PID
+  then
+    if /bin/ps -uaxww | grep mysqld | grep " $PID " > /dev/null
+    then    # The pid contains a mysqld process
+      echo "A mysqld process already exists"
+      echo "A mysqld process already exists at " `date` >> $log
+      exit 1;
+    fi
+  fi
+  rm -f $pidfile
+  if test -f $pidfile
+  then
+    echo "Fatal error: Can't remove the pid file: $pidfile"
+    echo "Fatal error: Can't remove the pid file: $pidfile at " `date` >> $log
+    echo "Please remove it manually and start $0 again"
+    echo "mysqld demon not started"
+    exit 1;
+  fi
+fi
+
+echo "Starting mysqld demon with databases from $DATADIR"
+
+# Does this work on all systems?
+#if type ulimit | grep "shell builtin" > /dev/null
+#then
+#  ulimit -n 256 > /dev/null 2>&1		# Fix for BSD and FreeBSD systems
+#fi
+
+echo "mysqld started on " `date` >> $log
+while true
+do
+  rm -f $MYSQL_UNIX_PORT $pidfile	# Some extra safety
+  if test "$#" -eq 0
+  then
+    nohup $ledir/mysqld --basedir=$MY_BASEDIR_VERSION --datadir=$DATADIR --pid-file=$pidfile --socket=$RootDir/seadog/mysql/mysqld.sock\
+      >> $err 2>&1
+  else
+    nohup $ledir/mysqld --basedir=$MY_BASEDIR_VERSION --datadir=$DATADIR --pid-file=$pidfile --socket=$RootDir/seadog/mysqlmysqld.sock\
+      "$@" >> $err 2>&1
+  fi
+  if test ! -f $pidfile			# This is removed if normal shutdown
+  then
+    break;
+  fi
+  echo "mysqld restarted" | tee -a $log
+done
+
+echo -n "mysqld ended on " `date` >> $log
+echo "mysqld demon ended"

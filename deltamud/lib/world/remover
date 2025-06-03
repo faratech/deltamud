@@ -1,0 +1,2 @@
+pico mob/index; pico obj/index; pico shp/index; pico trg/index; pico wld/index
+rm mob/20000.mob; rm obj/20000.obj; rm shp/20000.shp; rm trg/20000.trg; rm wld/20000.wld

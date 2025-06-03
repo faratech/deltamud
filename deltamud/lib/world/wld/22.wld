@@ -1,0 +1,1475 @@
+#2200
+In the forest~
+     Incredibly thick, the forest effectively blocks out all sunlight
+leaving you in near darkness. Small animal sounds reach your ears
+as you look around, but nothing stirs in the trees or underbrush.
+The faint path continues to the north.
+~
+22 0 3
+D0
+~
+~
+0 0 2201
+E
+underbrush~
+     The thick underbrush would make a good hiding place for small
+animals.  Strangely you can't see nor hear any movement around you.
+~
+E
+trees~
+The thick trees loom overhead effectively blocking out the sunlight.
+~
+S
+#2201
+In the forest~
+     As you continue along the path you begin to notice the trees
+thinning out further north and what looks like a building of some 
+sort rising above the forest canopy.  The path continues toward the 
+north.
+~
+22 0 3
+D0
+~
+~
+0 0 2202
+D2
+~
+~
+0 0 2200
+D5
+~
+~
+0 0 -1
+E
+building~
+     A thick fog effectively reduces what you can make out about 
+the building to the north.
+~
+S
+#2202
+In the forest~
+     The forest, thinning out all around you, seems sickly here.  The
+trees appear stunted, their branches drooping.  A noxious fog is 
+begining to creep in along the path from the north.  Further north 
+you can still see the building looming ever present above the tree
+tops.
+~
+22 0 3
+D0
+~
+~
+0 0 2203
+D2
+~
+~
+0 0 2201
+E
+building~
+     The thick fog effectively blocks your view of the building 
+from here.  Perhaps further up the path you can see better...
+~
+E
+fog~
+     The fog is incredibly thick and moves as if it has a mind of
+its own.
+~
+S
+#2203
+On the casm~
+     As you break free of the dense forest, you find yourself standing
+on the edge of an incredibly deep casm, stretching far out of sight 
+to the east and west.  A single bridge spans the casm here, and though 
+rickety and worn, it appears to be the only way across.
+~
+22 0 3
+D0
+~
+~
+0 0 2204
+D2
+~
+~
+0 0 2202
+E
+statues~
+     The statues, though incredibly old, still hold much of their
+past glory.  One, a man, looks almost like it could start moving
+as it leers at you.  The other, a woman, smiles grimly at you, 
+its eyes seemingly to follow your every movement.
+~
+E
+bridge~
+     The bridge before you looks incredibly old.  Two statues 
+stand on either side of the bridge enterance holding it in place.
+~
+E
+casm~
+     Standing on the edge of the casm looking down, you watch as 
+a small pebble falls from the lip, dissapearing into the inky 
+blackness below.
+~
+S
+#2204
+On the bridge~
+     Creaking with every step you make, the bridge sways lazily over
+the deep casm.  Through the fog you can faintly make out the immense 
+form of the building you have been noticing ahead of you.  The 
+forest stands the south, and the bridge continues toward the north.
+~
+22 0 14
+D0
+~
+~
+0 0 2205
+D2
+~
+~
+0 0 2203
+E
+casm~
+     Too deep for you to see the bottom, the casm stretches well 
+beyond your sight to the east and west.
+~
+E
+building~
+     Still the fog keeps your impression of the building vauge.
+Perhaps if you got a bit closer...
+~
+E
+forest~
+     Tall and dark, the forest looms quietly waiting for your 
+return...if you return.
+~
+E
+bridge~
+     This bridge has stood the test of time.  Anchient and worn, 
+it looks as if it could not support much more than a dog, and yet
+you are walking on it...
+~
+S
+#2205
+On the bridge~
+     The bridge has further decomposed here.  Sharp cracks and groans
+of the lumber beneath you give the impression that staying here
+would be detrimental to your health. The bridge extends behind you
+and ends shortly to your front.  The building looms ever higher 
+to the north, its sharp edges breaking through the fog here and there.
+~
+22 0 14
+D0
+~
+~
+0 0 2206
+D2
+~
+~
+0 0 2204
+E
+building~
+     You begin to wonder if the fog will ever thin out enough for
+you to get a good look at the building in front of you...
+~
+E
+bridge~
+     The bridge has grown quite dangerous to stand on at this
+point.  As you look on, a plank falls silently away behind you
+leaving a gaping hole.
+~
+S
+#2206
+On the casm~
+     Standing on the edge of the casm you notice that the building 
+is becomming more and more recognizable through the fog.  The 
+bridge spans the casm to the south and the path continues to the 
+north through the fog.
+~
+22 0 3
+D0
+~
+~
+0 0 2207
+D2
+~
+~
+0 0 2205
+E
+bridge~
+     The bridge spans the casm here.  Old and rickety, you wonder 
+how long it has been here and if it is safe to cross.
+~
+E
+building~
+     The building, though still covered by the fog, is huge.  It
+appears much older than the bridge, and you wonder who built it.
+~
+E
+casm~
+     Jagged ledges mar this side of the casm.  Stunted brush grows
+wildly on every outcrop that dots the casm wall.  You wonder if
+there is a bottom down there...
+~
+S
+#2207
+In a clearing~
+     You find your self standing in a small clearing, devoid of 
+any brush or vegitation, almost as if there was a great fire here
+once.  The fog has finally thined here, and before you stands a 
+massive keep.  Darkness seems to eminate from the keep, and you 
+can almost see the light being sucked into it.  Made of black 
+marble, you wonder what wizardry could have possibly made such a
+structure.  Spires reach high into the sky and dark windows peer
+out at you like sockets in a skull.  You see the path splits here,
+a faint trail wanders to the east and west and the main path 
+continues north to the enterance of the keep.
+~
+22 0 2
+D0
+~
+~
+0 0 2215
+D1
+~
+~
+0 0 2208
+D2
+~
+~
+0 0 2206
+D3
+~
+~
+0 0 2211
+E
+enterance~
+     The enterance, though still a ways away, is blocked by two 
+massive doors.
+~
+E
+spires~
+     From your vantage point, you can make out two spires for sure.
+Reaching high into the sky like fingers, you can see small windows
+dot their surface every so often.  In one spire, you notice a dim
+flickering of light comming from the top window.  It appears that
+someone is still living here...
+~
+E
+marble~
+     The marble, deep black in color, seems to consume the light 
+around it.
+~
+S
+#2208
+On the path~
+     You are standing on a small path running next to the massive 
+keep.  On the othe side of you is the deep casm.  Thin brush lines 
+the walls here, and the rocks are slick with the mist in the air.
+~
+22 0 2
+D1
+~
+~
+0 0 2209
+D3
+~
+~
+0 0 2207
+E
+rocks~
+     The rocks here are covered by a thin film of mold from all
+the moisture in the air.
+~
+E
+casm~
+     The casm drops away from you here, leaving you wondering if 
+there is indeed a botom to it.  Further to the east it almost
+looks like it starts to turn back to the north...
+~
+E
+keep~
+     The keep's walls stretch high above you, it's top unseen through 
+the thick mist overhead.  The black surface mirrors your reflection
+back at you.  Man, are you ugly...
+~
+S
+#2209
+On the path~
+     Still on the path, you notice you that the keep appears to 
+turn a courner a ways away.  Though massively tall, the keep
+obviously is not incredibly wide.  The casm proceeds on to the 
+east and west here.
+~
+22 0 2
+D1
+~
+~
+0 0 2210
+D3
+~
+~
+0 0 2208
+E
+casm~
+     The casm appears to make a turn to the north further ahead, 
+yet you still cannot make out the bottom...
+~
+E
+brush~
+     Full of thorns to rip and catch your armor, this brush is 
+climbing the side of the keep. It is becomming increasingly thick
+and full.
+~
+E
+keep~
+     The walls are in worse shape here compaired to the enterance
+way.  The brush is beginning to thicken, making progress more and 
+more difficult.
+~
+S
+#2210
+End of the path~
+     As you push your way through the brush you see that the keep
+does come to a corner here.  Extending toward the north now, you 
+realise the reason for the turn is because the casm has also
+taken a turn here traveling north.  The brush, so thick now,
+prevents you from continuing on around the keep here.
+~
+22 0 2
+D3
+~
+~
+0 0 2209
+E
+brush~
+     The brush is too thick for you to continue onward from here.
+Perhaps it is best to turn around and go back.
+~
+E
+casm~
+     The casm turns from its path from east to west to go north 
+from here.  Still incredibly deep you think you can make out 
+jagged rock formations at the bottom.  Apparently the builders
+of this keep intended this casm to act like a moat in times of 
+trouble.
+~
+S
+#2211
+On the path~
+     This path creeps along the edge of the casm by the keep 
+offering little in the way of footing as the rocks here are
+very slick.  Thin brush has began to pop along the keep's wall 
+here and sparatic vegitaiton grows up from the casm wall.
+~
+22 0 2
+D1
+~
+~
+0 0 2207
+D3
+~
+~
+0 0 2212
+E
+wall~
+     The wall of the massive keep, though incredibly black still 
+reflects your image back at you.  
+~
+E
+rocks~
+     The rocks here are covered with a thin mold making them 
+very slick.
+~
+E
+vegetation~
+     The vegetation is thin and unhealthly looking as it snakes
+it's way up from the casm wall.  Incredibly thorny, you know it
+would shred your hand if you held on to it.
+~
+E
+casm~
+     The casm here is impossibly deep and you still cannot 
+fathom the bottom through the darkness.  
+~
+S
+#2212
+On the path~
+     The path continues here, growing more trecherous each step.
+The brush, growing more firmly here, catches at your armor and 
+tears your skin with each step.  The casm continues on here, though
+you think you can make out a turn to the west.
+~
+22 0 2
+D1
+~
+~
+0 0 2211
+D3
+~
+~
+0 0 2213
+E
+casm~
+     Darkness looms up at you from the depths of the casm here.
+You still cannot see the bottom, nor do you really wish to see
+it at this point.
+~
+S
+#2213
+On the path~
+     The path, a faint marking of something's passing by this time,
+has grown quite dangerous.  Forcing your legs through the thick 
+brush, leaves your feet open to fall into unnoticed holes in the 
+ground.  The casm continues on to the west, though you can plainly
+see it curving to the north up ahead.
+~
+22 0 0
+D1
+~
+~
+0 0 2212
+D3
+~
+~
+0 0 2214
+E
+casm~
+     You almost can make out what you think is a bottom to the
+deep casm here.  With no way down at this point though, you cannot
+be sure, nor are you sure you wish to find out...
+~
+S
+#2214
+End of the path~
+     Despite your better judgement you have made it to the end 
+of the path.  You see that the casm has indeed turned north here,
+acting as a kind of moat for the keep.  The brush here is so thick
+and thorny you fear that if you continue on, you will walk right 
+off the edge of the casm, falling to your death.  
+~
+22 0 2
+D1
+~
+~
+0 0 2213
+E
+brush~
+     Even animals cannot live in the brush here.  You see the 
+skeleton of some unfortunate animal tangled deep in the brush, 
+its skeleton, a warning to others to go no further.
+~
+E
+casm~
+     The casm turn to the north here as you thought.  Though 
+deep you are certain you can make out rock formations at the 
+bottom, or what you think is the bottom.  There appears to be no
+way down from here.
+~
+S
+#2215
+In the courtyard~
+     High walls sit on both sides as well as in front of you as
+you enter the courtyard.  Cobble stones line the ground here, with
+sparce grass poking through here and there.  A fairly large area,
+you notice that it extends east and west as well as north to the
+staris leading up to the massive double doors.  A massive statue, 
+perfectly white, in the form of a demon sits here.  
+~
+22 0 1
+D0
+~
+~
+0 0 2219
+D1
+~
+~
+0 0 2217
+D2
+~
+~
+0 0 2207
+D3
+~
+~
+0 0 2216
+E
+plaque~
+     The plaque is old and faded with time, but you can make out
+a few lines of what appears to be a poem...
+
+     ...while I nodded, nearly napping, suddenly there came a
+tapping, as of someone gently rapping, rapping at my chamber
+door.  'Tis some visitor,' I muttered, 'tapping at my chamber
+door, only this and nothing more...'
+
+     The rest has been washed away by the rain and weather.  What
+could it mean...
+~
+E
+statue~
+      Incredibly tall, the statue is that of a demon.  Wings sit 
+on its back and a snarl on its face.  There is a look of evil so 
+intense about it that you wonder if it is only a statue or something
+more.  As you look at it more closely you see the eyes begin to 
+burn red for an instant then go dark again.  At the base of the 
+statue is a plaque with some writting on it.
+~
+E
+stones~
+     The cobble stones are as black as the keep is.  You wonder 
+who would use this material for this purpose...
+~
+S
+#2216
+In the courtyard~
+     You find yourself in the couryard of the keep.  To the 
+north is more of the courtyard, and the west you see a massive
+white statue.  The grass, growing up between the cobble stones, is 
+stained dark here.  You wonder what could have caused the
+discoloration.  The cobble stones here also have some deep scratches
+in them, from what you would guess, is massive claws.
+~
+22 0 1
+D0
+~
+~
+0 0 2220
+D1
+~
+~
+0 0 2215
+E
+stones~
+     The cobble stones here have deep scratches in them from 
+what you would guess could only be claws.  
+~
+E
+grass~
+     The grass here, though sparce, has been stained by something 
+making them dark in color.  There seems to be more of the dark
+color in the ground between the cobble stones themselves, in small
+round shapes...reminds you of how blood looks as it hits the 
+ground.
+~
+S
+#2217
+In the courtyard~
+     You find yourself in the courtyard of the dark keep.  The
+black walls seem to suck the very light from the air around you,
+making you shiver.  Cobble stones line the ground here, bits
+of grass poking through any crack they can find.  To the west
+is the massive statue and to the north is more of the courtyard.
+~
+22 0 1
+D0
+~
+~
+0 0 2218
+D3
+~
+~
+0 0 2215
+S
+#2218
+In the courtyard~
+     You find yourself in the corner of the courtyard.  The 
+darkness seems unusually thick here and seems almost to have a 
+life of its own.  You feel the hair on your arms rise up from the
+feeling that you are being watched...
+~
+22 0 1
+D2
+~
+~
+0 0 2217
+D3
+~
+~
+0 0 2219
+E
+darkness~
+     The darkness seems to move this way and that, like a thing
+capable of thought.  As you watch, it seems to get darker in one 
+section of the wall, then it seems to move to another section of 
+the wall...
+~
+S
+#2219
+In the courtyard~
+     You stand in a courtyard.  The massive walls of the keep 
+tower over you, stealing away your breath at the sheer size of them.
+Stairs begin their accent to the doors ahead, and the massive 
+form of the statue lies to the south.
+~
+22 0 1
+D1
+~
+~
+0 0 2218
+D2
+~
+~
+0 0 2215
+D3
+~
+~
+0 0 2220
+D4
+~
+~
+0 0 2221
+E
+reflection~
+     Whoa...you need to get some sleep!
+~
+E
+stairs~
+     The stairs are jet black like the keep's walls here.  Though
+time has taken its toll on them, they still retain a high shine
+in which you can make out your reflection.
+~
+S
+#2220
+In the courtyard~
+     You stand in the courner of the courtyard.  Here nothing 
+grows, not even the grass you have noticed everywhere else from
+between the cobble stones.  A strange darkness seems to eminate
+from the very walls of the keep here.
+~
+22 0 1
+D1
+~
+~
+0 0 2219
+D2
+~
+~
+0 0 2216
+E
+walls~
+     Darkness seems to come from the very walls here along with
+comming from the very ground on which you stand.  It is not so
+much a visul darkness but one of pure evil...
+~
+E
+darkness~
+     The darkness seems to come from the walls of the keep and the
+very ground on which you stand.  It is not so much a visual 
+darkness but one of pure evil...
+~
+S
+#2221
+On the stairs~
+     You find yourself on the stairs leading to the massive double
+doors of the keep.  Polished to a high sheen, you can make out
+your reflection in them as you walk upward.  Just ahead is the 
+landing before the doors, and to the south is the massive statue.
+~
+22 0 1
+D4
+~
+~
+0 0 2222
+D5
+~
+~
+0 0 2219
+E
+reflection~
+     Quit admiring yourself and get to looking around!
+~
+S
+#2222
+On the landing~
+     Before you stands the massive double doors of the castle.  
+Apparently very heavy you wonder how one man can open and close 
+these doors.  Scared and torn, the doors look as though they have
+withstood many battering rams or other things.  Deep claw marks 
+have gouged out deep creveses in the wood.  A tiny key hole is 
+in one door.
+~
+22 0 1
+D5
+~
+~
+0 0 2221
+O
+~
+enter~
+enter~
+$n looks back as the doors close silently...~
+1 0 2223
+E
+doors~
+     The doors are masive by any standards.  Though marred by time
+and what looks like numerous battles, they still hold their 
+original beauty.  Intricate carvings fill the surface, deplicting
+scenes of men fighting and killing, great beasts, and wonderous
+treasure.
+~
+E
+keyhole~
+     This tiny keyhole appears to be the only thing that locks 
+these huge doors from invaders or unwanted guests...
+~
+S
+#2223
+Inside the Keep~
+     The keep's enterance is no less specatular than the outside.  
+Built entirely out of black marble streaked with random bits of 
+crimson, the light here gives the floors a bloodstained loook that
+you find a bit unsetteling.  The furniture is black as well, heavy
+oaken pieces that are as intricately worked as the building's 
+facade, cushioned in jet blackvelvet.  Red silk tassels and fine
+red fringe edged black velveteen draperies, fixed slightly open
+over the high arched windows.  There are bits of gold here and 
+there...drawer handles, locks, opulent doorknobs...but the dramatic
+darkness of the keep's interior is only intensified further by the
+contrast.
+~
+22 0 0
+D0
+~
+~
+0 0 2224
+O
+~
+exit~
+exit~
+$n looks back as the shadows seem to drift after him...~
+1 0 2218
+S
+#2224
+Gleaming black hall~
+     You are standing in a hall of gleaming black marble.  
+Tapestries of black and crimson silk hang on the walls, rugs so
+dark that only their texture makes them visible.  Though candles 
+set in golden sconces along the wall had been lit some time ago,
+by whom you could only guess, the cold stone sucks in their light
+as soon as it is cast.
+     The hall splits here going east and west, as well as further
+north, deeper into the heart of the keep.
+~
+22 0 0
+D0
+~
+~
+0 0 2225
+D1
+~
+~
+0 0 2228
+D2
+~
+~
+0 0 2223
+D3
+~
+~
+0 0 2227
+E
+candles~
+     The candles are old and very thick.  They appear to have 
+been buring for some time now as wax runs down the side.
+~
+E
+rip~
+     The rip is small by any standard, yet it disturbs you that 
+with all the beauty here, this one thing has gone unnoticed.
+~
+E
+rugs~
+     You would not have realised that you were standing on a rug
+at all until you noticed a small rip near the wall.  How strange 
+that in this place of utter perfection, that a rip would go 
+unnoticed by its caretaker...
+~
+E
+tapestries~
+     Made of black and crimson silk, scenes of battle are the 
+major theme in each one you look at.  Incredibly detailed, you 
+almost feel as if you are actually there with the men fighting,
+and dieing...
+~
+S
+#2225
+In the black hall~
+     You cannot get over how incredibly beautiful everything is
+here, and how evil as well.  The evil seems to flow freely here
+from every thing you see.  It is so thick, you swear you can 
+almost reach out and touch it.  Out of the corner of your eye you
+would swear that you can see things moving in the shadows from 
+time to time.  Each time you turn your head, however, there is 
+nothing there.
+     Before you is a double door of black marble laced with thick
+strands of silver.  The hall also continues back the way you came.
+~
+22 0 0
+D0
+~
+doors~
+1 0 2226
+D2
+~
+~
+0 0 2224
+E
+runes~
+     The runes are in a language you have never seen.  As you 
+begin to mouth out the sylables, you see the glow intensify for
+a moment then return back to their normal state.
+~
+E
+door~
+     The double door before you is polished to a mirror like 
+gleam and laced with thick strands of silver.  The strands have 
+runes carved into them and give off a faint glow that the darkness 
+cannot, or will not eat.
+~
+S
+#2226
+The Audience Chamber~
+     The dark carpets give way here to the marble floors once 
+again.  Polished to a mirror-like gleam, you feel as if you are
+standing on a lake of blackness.  A high vaulted ceiling is
+complimented by its impressively decorated arches.  The light here
+gives the impression once again of the room having blood splashed
+on the walls, and you wonder if it might really be.  A single 
+throne sits in the middle of the room here.  
+~
+22 0 0
+D2
+~
+door double~
+1 0 2225
+O
+Nothing.
+~
+nothing~
+e~
+$n steps into the wall and dissapears!~
+0 0 2234
+E
+rubies~
+     The rubies are imbedded so deeply into the throne that you 
+would have to actually take the entire thing to just get the
+rubies.
+~
+E
+dragon~
+     The dragon is a work of art in itself.  Each scale is carved
+and polished to perfection.  Made of gold with what looks like
+silver thown in here and there for color, the dragon is truely
+wonderous.  Its head thrown back prepairing to breath its deadly
+breath weapon, you can see its eyes, that could only be rubies.
+~
+E
+throne~
+     Constructed from gold and black silk, the throne is beautiful.
+Intricate carvings adorn the sides and arms depicting wonderous
+creatures and battles of glory.  A single dragon adorns the upper
+half of the back of the throne.
+~
+S
+#2227
+A gleaming hallway~
+     The hallway actually gets darker here, if that was possible.
+It is becomming more and more difficult to determine what time 
+it is with the lack of the sunlight here.  Dark carpets flow easily
+down the hall, and there are some pictures on the walls.
+     The hall continues to the east and west.
+~
+22 0 0
+D1
+~
+~
+0 0 2224
+D3
+~
+~
+0 0 2229
+E
+plaque~
+     Brushing away the dust you can barely make out the words...
+
+                'Drunamour Keep'
+
+     There is more below the title of the picture, but it is 
+unreadable...
+~
+E
+pictures~
+     The pictures that line the walls here are of a family.  A
+larger one of a group of people, and singles of a man and woman.
+The pictures of the man and woman look frighteningly like the 
+statues you noticed at the bridge.  There is also a picture of 
+the keep you now stand in.  A small plaque is attached to the 
+picture at the bottom.
+~
+S
+#2228
+A dark hallway~
+     The hallway here looks like it grows lighter further down
+and you can almost see a flicker of movement up ahead.  Short 
+tables dot the sides of the hall here and there.  There appears
+to be a mirror or two on the walls also.  The hall continues
+east and west from here.
+~
+22 0 0
+D3
+~
+~
+0 0 2224
+E
+mirrors~
+     The mirrors are just that.  Framed in silver they do their
+job well and reflect your face back at you.
+~
+E
+tables~
+     The tables though short, appear to be well made.  There is 
+nothing on them however.
+~
+S
+#2229
+A dark hallway~
+     The hallway continues here becommingly more and more dark.
+You are now certain that someone or something is watching you.
+More than once you have glimpsed something further up the hall,
+only for it to be gone by the time you get there.  Something 
+is just not right here.  The hall continues east and west from 
+here and there is a door to the north.
+~
+22 0 0
+D0
+~
+door~
+1 0 2270
+D1
+~
+~
+0 0 2227
+D3
+~
+~
+0 0 2230
+S
+#2230
+A dark junction~
+     You have come to a junction in the hallway.  You see that
+you can proceed either north, south or back the way you came.  
+There is also a door to the west.
+~
+22 0 0
+D0
+~
+~
+0 0 2240
+D1
+~
+~
+0 0 2229
+D2
+~
+~
+0 0 2243
+D3
+~
+door~
+1 0 2231
+S
+#2231
+The Library~
+     As you enter this room you realise you are totally surrounded
+by the single largest book collection you have ever seen.  Books
+line the shelves from the floor up to the vaulted ceiling high 
+above.  Rows upon rows fill this room, and it appears that the 
+librabry continues north as well as south.  There are a few 
+tables here with scattered books on them.
+~
+22 0 0
+D0
+~
+~
+0 0 2232
+D1
+~
+door~
+1 0 2230
+D2
+~
+~
+0 0 2233
+D3
+I want a secret passage here with a moving bookshelf when a book is pulled from the book case.
+~
+bookshelf~
+4 0 2244
+E
+drunamour~
+     The pages are torn and tattered making the task of desiphering
+the garbled words a chore...
+
+     '...I still do not understand what happend.  Things flying
+at me...shadows.....ran, and ran........a scream...my wife...
+
+     The rest is faded and so smeared that you cannot make 
+out any words.  You can make out a date however...it reads a 
+date no more than a few days ago...
+~
+E
+books~
+     One book in particular catches your attention here.  It is
+titled 'A Working History of Drunamour'.  Others like 'Demonology
+Made Easy' and 'Everything you need to know about Hell and Its 
+Minions' are laying here.
+~
+E
+tables~
+     The tables are incredibly long stretching nearly from one end
+of this room to the other.  There appears to be a few books laying
+scattered upon the tables.
+~
+S
+#2232
+In the library~
+    This part of the library is no less spectatcular than the rest
+of it.  There is a long table in this room as well on it is a
+few books that appear to have been read repeatedly.
+~
+22 0 0
+D2
+~
+~
+0 0 2231
+E
+lost~
+     Turning the book to the marker you read...
+
+     '...remember the story about some kids that wandered into
+the woods droping bread crumbs?  Not a bad idea, use something
+ a bit more durable...'
+~
+E
+hide~
+     Opening the book to a marked page you read...
+
+    '...interestingly enough you can make a secret passage out
+of almost anything.  Books, statues, chairs can even be a trigger
+to open a secret passage.  The biggest thing in not getting
+caught is to not be obvious about how you place them...'
+~
+E
+table~
+     This long table, though very old appears to be very sturdy
+as it holds the weight of a few of these mamoth books easily. 
+Getting a closer look at the books you read 'How to HIDE and get
+away with it' on one, and another reads 'How to never get LOST 
+in a round room'.  Interesting reading...
+~
+S
+#2233
+In the library~
+     This end of the library is filled with books, much the same
+as the rest of the library.  Here and there you see books laying 
+the table that occupies a corner of the room.
+~
+22 0 0
+D0
+~
+~
+0 0 2231
+E
+table~
+     This table is small compaired to the others.  On it you see 
+a few books about paper mache, and one on making your own moonshine
+but other than that, there doesn't seem to be anything of interest 
+here.
+~
+S
+#2234
+In a Secret Hall~
+     You have stumbled onto a secret passage!  Unused for some
+time now, it is filled with spider webbs and thick with dust.  
+This must have been the owners private passage to get out in times
+of extreme danger.  Up ahead it looks like it gets a bit lighter.
+~
+22 1 0
+D0
+~
+~
+0 0 2235
+D3
+~
+~
+0 0 2226
+S
+#2235
+In the passage~
+You are in an unfinished room.
+~
+22 0 0
+D2
+~
+~
+0 0 2234
+D3
+~
+~
+0 0 2236
+S
+#2236
+In a passage~
+You are in an unfinished room.
+~
+22 0 0
+D0
+~
+~
+0 0 2237
+D1
+~
+~
+0 0 2235
+S
+#2237
+In a passageway~
+You are in an unfinished room.
+~
+22 0 0
+D1
+~
+~
+0 0 2238
+D2
+~
+~
+0 0 2236
+S
+#2238
+At a junction~
+You are in an unfinished room.
+Connect to tower...go u from here
+~
+22 0 0
+D0
+~
+~
+0 0 2239
+D3
+~
+~
+0 0 2237
+S
+#2239
+At the enterance~
+You are in an unfinished room.
+~
+22 0 0
+D2
+~
+~
+0 0 2238
+S
+#2240
+In the hallway~
+You are in an unfinished room.
+~
+22 0 0
+D0
+~
+~
+0 0 2241
+D2
+~
+~
+0 0 2230
+S
+#2241
+In a hallway~
+You are in an unfinished room.
+Attach indoor playground to e from here....
+~
+22 0 0
+D0
+~
+~
+0 0 2242
+D2
+~
+~
+0 0 2240
+S
+#2242
+Before the Atrium~
+You are in an unfinished room.
+attach atrium n from here
+~
+22 0 0
+D0
+~
+door~
+1 0 2273
+D2
+~
+~
+0 0 2241
+S
+#2243
+In a hallway~
+You are in an unfinished room.
+~
+22 0 0
+D0
+~
+~
+0 0 2230
+D2
+~
+~
+0 0 2250
+S
+#2244
+In a Secret Passage~
+You are in an unfinished room.
+~
+22 0 0
+D1
+~
+~
+0 0 2231
+D5
+~
+~
+0 0 2245
+S
+#2245
+In a silent passage~
+You are in an unfinished room.
+attach catacombs/torchure chamber d from here.
+~
+22 0 0
+D4
+~
+~
+0 0 2244
+S
+#2250
+At a junction~
+You are in an unfinished room.
+~
+22 0 0
+D0
+~
+~
+0 0 2243
+D1
+~
+~
+0 0 2252
+D2
+~
+~
+0 0 2251
+S
+#2251
+Before a tower~
+You are in an unfinished room.
+attach tower w of here.
+~
+22 0 0
+D0
+~
+~
+0 0 2250
+S
+#2252
+In a quiet hallway~
+You are in an unfinished room.
+~
+22 0 0
+D0
+~
+door~
+1 0 2256
+D1
+~
+door~
+1 0 2253
+D2
+~
+door~
+1 0 2255
+D3
+~
+~
+0 0 2250
+S
+#2253
+In a servant's quarters~
+You are in an unfinished room.
+~
+22 0 0
+D0
+~
+door~
+1 0 2254
+D3
+~
+door~
+1 0 2252
+S
+#2254
+A small closet~
+You are in an unfinished room.
+~
+22 0 0
+D2
+~
+door~
+1 0 2253
+S
+#2255
+In a servant's quarters~
+You are in an unfinished room.
+~
+22 0 0
+D0
+~
+door~
+1 0 2252
+S
+#2256
+In a servant's quarters~
+You are in an unfinished room.
+~
+22 0 0
+D2
+~
+door~
+1 0 2252
+S
+#2269
+Test room~
+exits work
+~
+22 0 0
+D4
+~
+~
+0 0 2226
+S
+#2270
+In a classroom~
+You are in an unfinished room.
+~
+22 0 0
+D2
+~
+door~
+1 0 2229
+S
+#2273
+In the Atrium~
+     You are blinded from the dazling beauty here.  Amazing
+plants line every corner of this maginicant room from the very
+floor on which you stand to the high vaulted ceiling.  Incredibly
+there are even small birds and reptiles you can see and hear
+every so often in the distance.  Seemingly able to contain itself,
+this room has a small pool of running water in one corner, and 
+some trees that appear to have fruit on them close by.  
+~
+22 8192 0
+D2
+~
+door~
+1 0 2242
+D3
+~
+~
+0 0 2274
+S
+#2274
+In the Atrium~
+     This corner of the atrium is no less spectacular than the 
+rest of the room.  Here you notice small animal tracks leading 
+from the underbrush and plants to the small pool just to the north.
+Among other things, the maker of this place included trees with
+fruit on them, one of which is here.  Small birds twitter in the
+upper rafters of the room overhead, and the water from the pool
+splashes lazily against its banks.
+~
+22 8192 0
+D0
+~
+~
+0 0 2275
+D1
+~
+~
+0 0 2273
+E
+tree~
+     A short apple tree grows here.  You see some fruit growing 
+on the tree, and as you look closer you notice that the tree itself
+is giving off a strange glow.  
+
+~
+E
+apple fruit~
+     The apples growing on the tree appear to be your 
+run-of-the-mill variety.  Red and very ripe looking, they glisten
+in the sunlight filtering in from outside.
+~
+S
+#2275
+In the Atrium~
+     Birds fly from the pool as you approach.  Clear water falls
+from overhead in a waterfall sending mist into the air.  The 
+plants are thick here from all the moisture and the animals seem
+to gather here more than anywhere else in the room.  You can see
+a small tree growing to the south and a small stream runns from
+the pool to the east.
+~
+22 8192 0
+D1
+~
+~
+0 0 2276
+D2
+~
+~
+0 0 2274
+E
+pool~
+     The pool though not deep provides enough room for some small
+fish to swim lazily in it and it apparently provides enough water
+for this small ecosystem to live on.  A small trickle of water 
+leaves to the east from here making a small stream cutting into
+the fertile ground.
+~
+E
+waterfall~
+     The waterfall falls from a small ledge overhead.  There is
+a small walkway leading right to it overhead that seems to go
+around the outside edge of the room.
+~
+E
+fish~
+     You recognise the small fish as &YGold&w fish from their 
+color.  They are much too fast for you to catch.
+~
+S
+#2276
+In the Atrium~
+     This part of the atrium is much like the rest of the room.
+Plants of all discriptions grow everywhere and the scent of all
+the different flowers is nearly overwhelming.  The insects seem
+to have be come a bit thicker here, and a low hum seems to 
+permiate the air.
+~
+22 8192 0
+D3
+~
+~
+0 0 2275
+S
+$~

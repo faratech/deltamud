@@ -1,0 +1,660 @@
+#2000
+kobold child~
+the kobold child~
+A kobold child is playing here.
+~
+   The young kobold displays many common features of the kobold race.
+He appears to be a cross between a halfling and a small, ugly dog.  He
+has two small horns, and glowing red eyes.
+~
+12 1024 0 E
+X1 0 0 0 0 0 1d1+20 1d1
+10 250
+9 9 1
+BareHandAttack: 4
+E
+T 2000
+T 2002
+#2001
+female kobold child~
+the young female kobold~
+A childish female kobold plays nearby.
+~
+   She has two small horns on the top of her head, and bright red eyes.
+Two curly greenish locks of hair mottled with dirt and mud rest on her
+shoulders.  She looks like a cross between an ugly halfling and a dog.
+~
+12 1024 0 E
+X1 0 0 0 0 0 1d1+20 1d1
+10 250
+9 9 2
+BareHandAttack: 4
+E
+T 2000
+T 2002
+#2002
+kobold man~
+the male kobold~
+An adult male kobold stands here.
+~
+   He is a fully grown male kobold.  On his head he sports two small horns
+and he has the facial features of a halfling-dog.  His eyes glow red.  He
+grins cunningly as he gazes about.
+~
+12 1024 0 E
+X2 0 0 0 0 0 1d1+37 1d4
+20 500
+9 9 1
+BareHandAttack: 4
+E
+T 2002
+#2003
+kobold woman~
+the kobold woman~
+A kobold woman is standing here.
+~
+   The kobold woman has two small horns on top of her dog-like head.  Dirty
+green locks of hair rest on her shoulders.  From the center of her oily face,
+two glowing red eyes look about nervously.
+~
+140 1024 0 E
+X2 0 0 0 0 0 1d1+37 1d4
+20 500
+9 9 2
+BareHandAttack: 4
+E
+T 2002
+#2004
+kobold guard~
+the kobold guard~
+A kobold appears to be on guard duty here.
+~
+   This kobold guard appears to be a slightly tougher version of the
+standard dog faced kobolds.  He has two small horns atop his head and
+his eyes glow red.  He wears a sneer on his ugly scarred face.
+~
+4618 1024 0 E
+X3 0 0 0 0 0 1d1+54 1d7
+30 750
+9 9 1
+BareHandAttack: 13
+E
+T 2002
+T 2001
+#2005
+kobold warrior~
+a kobold warrior~
+A kobold warrior is standing here.
+~
+   This kobold appears to be a cross between a dog and a migit.  He has
+two small horns on the top of his head, and his eyes glow red.  His face
+has many battle scars on it.
+~
+4620 1024 0 E
+X2 0 0 0 0 0 1d1+37 1d4
+20 500
+9 9 1
+E
+T 2002
+#2010
+wyvern male~
+the male wyvern~
+A male wyvern is relaxing here.
+~
+   The male wyverns description will be done later
+~
+9441320 1024 0 E
+X3 0 0 0 0 0 1d1+54 1d7
+30 750
+9 9 1
+BareHandAttack: 4
+E
+T 2010
+#2011
+wyvern female~
+the female wyvern~
+A fairly large female wyvern stands here.
+~
+   Descriptions will be added later
+~
+9441320 1024 0 E
+X3 0 0 0 0 0 1d1+54 1d7
+30 750
+9 9 2
+BareHandAttack: 4
+E
+#2012
+wyvern large female mother~
+the large wyvern~
+A large wyvern scavenges for food here.
+~
+   The large female wyvern streches about six metres from head to tail.
+Her mouth is filled with long, dagger sharp teeth that drip a deep green
+liquid.  Her scales look as strong as steal, but as flexible as leather.
+~
+12587050 1024 0 E
+X6 0 0 0 0 0 1d1+105 1d16
+60 1500
+9 9 2
+BareHandAttack: 4
+E
+#2020
+boar~
+a large boar~
+A large boar is wandering around this area.
+~
+   This large boar appears to be basically a big, mad pig with tusks.  It looks
+violent.
+~
+9437192 1024 0 E
+X3 0 0 0 0 0 1d1+54 1d7
+30 750
+9 9 1
+BareHandAttack: 10
+E
+#2021
+boar~
+a boar~
+A boar is looking for food in this area.
+~
+   The boar has two long tusks pertruding from its mouth.  It's pig body
+is colored black, and its eyes seem to have a red hue to them.
+~
+9437192 1024 0 E
+X2 0 0 0 0 0 1d1+37 1d4
+20 500
+9 9 2
+BareHandAttack: 10
+E
+#2022
+boar sickly~
+a sick boar~
+A sick boar is lying here recovering.
+~
+   From the mouth of this pigbeast a trickle of green vomit oozes.  Its
+nostrils seem clogged and its eyes blankly glare into space.  The boars
+tusks look weak and chipped.
+~
+9437192 1024 0 E
+X1 0 0 0 0 0 1d1+20 1d1
+10 250
+9 9 2
+E
+#2023
+bat~
+a large bat~
+A large bat is flying around here.
+~
+   It looks like a large version of the standard flying rat.  It has a leathery
+wingspan of about five feet and needle-like fangs.
+~
+8519690 1024 0 E
+X1 0 0 0 0 0 1d1+20 1d1
+10 250
+9 9 0
+BareHandAttack: 4
+E
+#2024
+bat huge~
+a huge bat~
+A huge bat is flying around here.
+~
+   This appears to be an extremely large version of the standard cave bat.  Its
+fangs are about the size of daggers.
+~
+8388650 1024 0 E
+X3 0 0 0 0 0 1d1+54 1d7
+30 750
+9 9 0
+BareHandAttack: 4
+E
+#2031
+shadow~
+the shadow~
+A wispy shadow floats here.
+~
+   It is a shadow, the absence of light.  This particular shadow seems to
+resemble a humanoid figure ablaze with black flame.
+~
+8 263168 0 E
+X1 0 0 0 0 0 1d3+10 1d1
+0 10
+9 9 0
+E
+#2032
+animal skeleton ldiof~
+a skeletal animal~
+An skeletal animal stands here.
+~
+   This abomination is the work of some dark power.  It appears to be
+some kind of rodent, but its bones look mismatched.  It doesn't look
+too dangerous, even though its eyes glow a dark blue.
+~
+8582666 295936 0 E
+X1 0 0 0 0 0 1d8+0 1d1
+10 50
+9 9 0
+BareHandAttack: 4
+E
+#2040
+cultist kobold~
+the kobold cultist~
+A kobold cultist gibbers here.
+~
+   The kobold is wearing pale green robes, and has a crazed look in his
+eye.  His small horns are adorned with little religious trinkets, and his
+face painted with wild colors.
+~
+268435980 1024 0 E
+X3 0 0 0 0 0 1d1+54 1d7
+30 750
+9 9 1
+BareHandAttack: 4
+E
+#2041
+kobold acolyte~
+the kobold acolyte~
+A kobold wearing the robes of an acolyte stands here.
+~
+   This kobold wears many religious baubles about her person.  From her
+ears dangle bone charms, and in her hair rotting food.  From her mouth
+a seemingly constant river of unholy chants flows.  She appears insane.
+~
+270533132 1024 0 E
+X3 0 0 0 0 0 1d1+54 1d7
+30 750
+9 9 2
+E
+#2042
+zombie~
+a zombie~
+A rotting zombie stands here.
+~
+   The skin of this living corpse seems to hang loosely from its skeletal
+form.  Its gaping mouth lets out vile fumes and terrifying moans.  Behind
+it lays a small trail of its own rotting flesh.
+~
+8561160 1024 0 E
+X4 0 0 0 0 0 1d1+71 1d10
+40 1000
+9 9 0
+E
+#2043
+shade~
+a shade~
+A black shade hovers here.
+~
+   The shade appears to be a midnight black humanoid.  Its form is cold
+to the touch, and seems to radiate evil.
+~
+8561160 263168 0 E
+X3 0 0 0 0 0 1d1+54 1d7
+30 750
+9 9 0
+E
+#2044
+skeleton~
+a skeleton~
+A skeleton stands here.
+~
+   The skeleton is the animated bones of a deceased person.  From the
+evil grin on its face, and demented cackle it mimes, you feel certain
+these bones now serve some dark power.
+~
+8561160 1024 0 E
+X3 0 0 0 0 0 1d1+54 1d7
+30 750
+9 9 0
+E
+#2077
+kobold assassin~
+the kobold assassin~
+A kobold dressed completely in black stands here.
+~
+   The kobold before you wears completely black clothing.  He has a sinister
+grin on his face, and his movements seem cat-like and elegant.  His small horns
+have been filed down to his skull.
+~
+522 263168 0 E
+X3 0 0 0 0 0 1d1+54 1d7
+30 750
+9 9 1
+E
+#2078
+Tortran kobold armorer~
+Tortran~
+A large kobold armorer stands here.
+~
+   Tortran seems much larger than the standard kobold.  He has slightly
+greenish skin and long pointy horns.  His teeth are exceptionally sharp
+and his grin seems just as cruel.
+~
+1546 1024 0 E
+X3 0 0 0 0 0 1d1+54 1d7
+30 750
+9 9 1
+E
+T 2052
+#2079
+squire page boy~
+a young squire~
+A young boy stands here.
+~
+   The young boy wears the garb of a squire.  His arms appears weak and
+frail now, but in time, with training from a worthy knight, this boy
+could become quite a powerful warrior.
+~
+4108 0 0 E
+X2 0 0 0 0 0 1d1+37 1d4
+20 500
+9 9 1
+E
+#2080
+woman Elandra mage~
+Elandra the sorceress~
+A woman wearing purple stands here.
+~
+   Elandra is a slender woman who wears nothing but purple robes.  Her
+skin appears to have been whitened with a kind of make-up.  She radiates
+slightly, even in the darkest of caves.
+~
+2097160 8 0 E
+X3 0 0 0 0 0 1d1+54 1d7
+30 750
+9 9 2
+E
+#2081
+Qwenton man warrior~
+Qwenton the black warrior~
+A large man dressed in black stands here.
+~
+   Qwenton is a human fighter with an impressive build.  He wears completely
+blackened armor and wields a large sword.  He has many wrinkles on his face,
+which serve to camoflauge some of his battle scars.
+~
+8 8192 0 E
+X3 0 0 0 0 0 1d1+54 1d7
+30 750
+9 9 1
+E
+#2082
+phantom~
+the phantom~
+A whispy phantom hovers here.
+~
+   The phantom is very hard to distinguish from its surroundings, being
+mostly transparent.  The only parts of its body that remain completely
+visible are its large red eyes, which watch you intently.
+~
+8561162 9216 0 E
+X4 0 0 0 0 0 1d1+71 1d10
+40 1000
+9 9 0
+BareHandAttack: 8
+E
+#2083
+wraith~
+the grey wraith~
+A grey wraith hovers here.
+~
+   Semi-transparent and robed in grey, the wraith hovers a few feet from
+the floor.  Its cold red eyes look about hatingly, and the air around it
+seems to chill slightly.
+~
+8391178 9220 0 E
+X5 0 0 0 0 0 1d1+88 1d13
+50 1250
+9 9 0
+BareHandAttack: 8
+E
+#2084
+Valtra kobold priest~
+Valtra~
+A kobold dressed in grey robes stands here.
+~
+   Valtra is a small, seemingly meek kobold.  Her head has been shaved
+clean, and she has many boils on her skin.  Her eyes glow a dull purple
+and her horns have been filed into stubs.
+~
+2097674 9216 0 E
+X5 0 0 0 0 0 1d1+88 1d13
+50 1250
+9 9 2
+BareHandAttack: 8
+E
+T 2052
+#2085
+Shaladar kobold priest~
+Shaladar the Priest of Sluurm~
+A priest dressed in green stands here.
+~
+   Shaladar wears deep, swamp green robes about his small kobold form.  On
+his head is tatooed a large slug face, that of Sluurm.
+~
+2098698 9216 0 E
+X5 0 0 0 0 0 1d1+88 1d13
+50 1250
+9 9 1
+E
+T 2052
+#2086
+ooze beast creature Shothlah~
+Shothlah the ooze beast~
+A large oozing creature stands here.
+~
+   Shothlah is a diminutive humanoid with a unique skin problem; it doesn't
+have any.  In place of skin, Shothlah has a thick layer of disgusting black
+ooze that bubbles as it drips to the floor.
+~
+139310 9224 0 E
+X5 0 0 0 0 0 1d1+88 1d13
+50 1250
+9 9 0
+E
+T 2052
+#2087
+zombie bear~
+the zombie bear~
+The animated remains of a bear stands here.
+~
+   Patches of mottled fur and skin hang from the huge form of a once mighty
+bear.  Its eyes gaze at you blankly, devoid of life.  From its mouth, a thick
+black ooze drips, collecting on the floor in a large, disgusting puddle.
+~
+13808138 9216 0 E
+X3 0 0 0 0 0 1d1+54 1d7
+30 750
+9 9 0
+BareHandAttack: 8
+E
+#2088
+golem bone skeleton~
+the bone golem~
+A large four armed skeleton stands here.
+~
+   This skeleton stands about nine feet tall and has four arms attached to
+its torso.  From its eyes an eerie blue light glows.
+~
+8565258 9216 0 E
+X4 0 0 0 0 0 1d1+71 1d10
+40 1000
+9 9 0
+E
+#2089
+Karakan Priest Kobold~
+Karakan~
+A small, withered kobold stands here.
+~
+   The form of Karakan is extremely small, and seemingly withered.  Her
+small kobold bones are so tightly wrapped in her skin that they seem almost
+to show. . .
+~
+2097674 9216 0 E
+X5 0 0 0 0 0 1d1+88 1d13
+50 1250
+9 9 2
+E
+T 2052
+#2090
+Helga woman~
+Helga~
+A large burly woman stands here.
+~
+   Helga is an exceptionally well built specimen of the human race.  Her
+muscles bulge from beneath her prison garb.  She has brown hair and dark
+skin.  Her eyes gleam with a fanatic religious zeal.
+~
+201326924 1024 0 E
+X3 0 0 0 0 0 1d1+54 1d7
+30 750
+9 9 2
+E
+T 2090
+#2091
+Brela kobold priest~
+Brela the dark priest~
+A black robed kobold stands here.
+~
+   Brela appears to be a middle aged female kobold priest of darkness.
+Her skin has been painted black and her teeth blackened by decay.  Her
+face has many wrinkles caused by her continuous frowning.
+~
+3598 9216 0 E
+X3 0 0 0 0 0 1d1+54 1d7
+30 750
+9 9 2
+E
+T 2052
+#2092
+Youlit kobold~
+Youlit~
+A scrawny little kobold is standing here.
+~
+   Youlit the kobold appears extremely small, even by kobold standards.  He
+has two small horns on his head, and two large red eyes.  He appears to be
+a cross between a small child and a dog.  He appears very thin.
+~
+142 1024 0 E
+X2 0 0 0 0 0 1d1+37 1d4
+20 500
+9 9 1
+BareHandAttack: 4
+E
+T 2051
+#2093
+bat WyrmsDrool~
+WyrmsDrool~
+An exceptionally large bat is flapping around this room.
+~
+   WyrmsDrool appears to be a large version of the standard cave bat.  Unlike
+the standard bat however, WyrmsDrool appears to be very aware of his
+surroundings, and the danger you pose to him.  He seems blessed with an
+intelligence that makes you wonder just how natural a bat he is...
+~
+8392760 0 0 E
+X4 0 0 0 0 0 1d1+71 1d10
+40 1000
+9 9 2
+BareHandAttack: 10
+E
+#2094
+Bingellytut kobold king~
+Bingellytut~
+A kobold robed in royal garb stands here.
+~
+   Bingellytut the kobold king stands no taller than the normal kobold,
+his horns are no sharper, teeth no pointier and muscles no bigger.  The main
+feature distinguishing him from others of his kind, is his clear, scarless
+skin.  Apparently, he gained his prestigious position through cunning and
+trickery, not by might.
+~
+4108 263168 0 E
+X5 0 0 0 0 0 1d1+88 1d13
+50 1250
+9 9 1
+E
+#2095
+thoul guard~
+a thoul guard~
+A large thoul guard dutifully watches this area.
+~
+   The thoul looks like a cross between a hideous ghoul and a menacing
+troll.  He seems extremely well suited for his task, needing little or
+no sleep due to his heritage.  He has greenish black skin and pure white
+pupiless eyes.
+~
+4200458 1024 0 E
+X4 0 0 0 0 0 1d1+71 1d10
+40 1000
+9 9 1
+BareHandAttack: 8
+E
+#2096
+trainer Yigglin kobold~
+Yigglin the boar trainer~
+A tidy kobold stands here.
+~
+   Yigglin is a very tidy kobold, especially when compared to others of
+his race.  His tiny shirt is neatly tucked into his belt, although he
+doesnt wear anything below that.  Yigglin's teeth are very pointy and
+his horns polished.  He seems to grin quite a bit.
+~
+16779406 1024 0 E
+X3 0 0 0 0 0 1d1+54 1d7
+30 750
+9 9 1
+BareHandAttack: 4
+E
+T 2052
+#2097
+Galurg shaman kobold~
+Galurg the Large, kobold shaman~
+An enormously fat kobold shaman sits here chanting.
+~
+   Galurg is a kobold of simply massive porportions.  The sight of this
+morbidly obesse kobold coupled with his stench reminds you of a large pile
+of runny dung.  His gaping mouth, as it chants unholy words, releases a
+visible putrid stench.
+~
+2099726 9216 0 E
+X4 0 0 0 0 0 1d1+71 1d10
+40 1000
+9 9 1
+BareHandAttack: 6
+E
+T 2052
+#2098
+Grulag kobold shaman~
+Grulag, the kobold shaman~
+An old kobold shaman chants ominously here.
+~
+   Grulags withered diminutive form stands only two feet high, hunched.
+Her skin has either been stained black by oils or hideous dark rituals.
+Even the characteristic red eyes of this kobold have been turned to darkness
+in the pursuit of some dark gods favour.
+~
+2099214 9216 0 E
+X4 0 0 0 0 0 1d1+71 1d10
+40 1000
+9 9 2
+BareHandAttack: 8
+E
+T 2052
+#2099
+kobold trainer Grunel~
+Grunel, the kobold trainer~
+A burly kobold trainer practices his tactics here.
+~
+   Grunel the Kobold trainer proudly displays many scars on his body.
+One of his little horns was removed, and all that remains is a large
+patch.  He has black-grey skin and very red eyes.  He appears, like
+all kobolds, to be a cross between an ugly halfling and a dog of some
+sort.
+~
+4618 1024 0 E
+X3 0 0 0 0 0 1d1+54 1d7
+30 750
+9 9 1
+BareHandAttack: 13
+E
+$

@@ -1,0 +1,66 @@
+#500
+Outside Of A Forest~
+   You are just outside of a well-traveled forest path.  Looking ahead, you see
+nothing but a dense wilderness of large trees and plant life.  For a moment,
+you think you can make out something in the distance, but you are not sure what
+it is.  Maybe you should turn back...    
+~
+5 0 3
+D0
+   You see a path through the forest up ahead.  You can almost make out
+something in the far distance, maybe you should investigate further.    
+~
+~
+0 0 501
+E
+forest wilderness~
+   It is a beautiful looking forest.  Trees of all ages cover the area and
+obscure your view of the path beyond, yet the sight of them is remarkable.    
+~
+S
+#501
+On A Path Through The Forest~
+   You thought you heard some rustling coming from here, but maybe it was just
+an animal of some sort.  Looking around the trail, you can see nothing but
+heavy brush and trees that tower into the sky.  The path continues to the
+north, and to the south.    
+~
+5 0 3
+D0
+~
+~
+0 0 502
+D2
+~
+~
+0 0 500
+S
+#502
+At A Crossroad In The Path~
+   You are in a dense forest, on a rugged dirt path into the heart of the
+wilderness.  There is a crossroads here; the trail goes both east and west, and
+to the south.  Strangely, you see no sign of any sort.    
+~
+5 0 3
+D0
+~
+~
+0 0 503
+D2
+~
+~
+0 0 501
+S
+#503
+Behind A Tree~
+   You come to a small clearing behind a tree.  It seems that you are somewhat
+sheltered here.  Vines and wildlife seem to surround the clearing, as if
+protecting the forest.  You can see no wait out but to the south.    
+~
+5 0 3
+D2
+~
+~
+0 0 502
+S
+$~

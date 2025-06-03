@@ -1,0 +1,12 @@
+JarikSolo (Jul 17) [ 1204] scan is broke
+Dummy    (Sep 17) [ 2059] Editing a room, going into script mode (while there are scripts in there), exiting the mode, quitting redit and not saving the room will result in a crash next time you redit that room.
+Ace      (Oct  3) [  100] blink social (idea is full! =P)
+Storm    (Oct  3) [ 1204] Make social searching come after command searching.
+Storm    (Oct  3) [  400] Creating a new zone puts New Zone in the socials list dumbass.
+JarikSolo (Oct  3) [  100] good job stomo
+Mike     (Oct  4) [ 1204] Mortal builders requires immortal exits command for their zones.
+Mike     (Oct  8) [  102] What happened to the date command?
+Mike     (Oct  8) [ 1204] malloc.c missing or something, weird crashes result
+Thraken  (Jul  7) [ 2300] 22hp 100mp 83mv (2328) > build off Intangible players cannot build!
+Storm    (Jul 12) [ 1000] one coin per building junk
+Storm    (Nov 12) [  100] you go from -8 to 8hp on a tick.. should die.

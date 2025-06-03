@@ -1,0 +1,4 @@
+setenv  TMPDIR /home3/home/seadog/mysql
+setenv  MYSQL_UNIX_PORT /home3/home/seadog/mysql/mysqld.sock
+setenv  MYSQL_TCP_PORT 4001
+

@@ -1,0 +1,870 @@
+#1400
+Along the pathway~
+   You are walking along a partially paved pathway.  The road is fairly smooth
+with the exception of a stone or two in the road.  You can feel a cool breeze
+that seems to be pushing you ahead.  To your left and right, you see nothing
+but a dense forest.  You can journey forward, or go back.    
+~
+14 32768 2
+D0
+~
+~
+0 0 1401
+O
+~
+~
+~
+~
+0 0 -1
+S
+#1401
+Along the pathway~
+   You are walking along a half paved pathway.  You see the basic shape of a
+castle up ahead.  The wind changes direction as it blows in your face.  On the
+left and right, you see a dense forest.  It looks like that this pathway was
+just cut right into a big forest.    
+~
+14 32768 2
+D0
+~
+~
+0 0 1402
+D2
+~
+~
+0 0 1400
+S
+#1402
+Along the pathway~
+   You are walking along a path.  The walkway is more paved and you can see a
+clearer view of the castle up ahead.  You see that the castle is damaged from
+warfare.  Your mind wonders what is going on and what happened.  Curiousity and
+instinct tell you to wander further, but your sense of reason tells you to go
+back.    
+~
+14 32768 2
+D0
+~
+~
+0 0 1403
+D2
+~
+~
+0 0 1401
+S
+#1403
+Castle Gates~
+   You are standing in front of a barren castle.  You can see breaks in the
+castle walls from where a possible ballista or boulder was hurled.  The torches
+that are around the upper castle are not lit.  On the ground you see what looks
+like cat fur.  As you look at the castle gate, a sinking feeling enters your
+stomach.    
+~
+14 32768 2
+D0
+~
+~
+0 0 1404
+D2
+~
+~
+0 0 1402
+S
+#1404
+Castle Entrance~
+   You walk into the destroyed castle.  The banners on the walls are torn, as
+if a mob of felines ran their sharp claws through them.  You can smell the
+stench of rotting flesh which is making your stomach churn.  You see cat hairs
+all over the floor, and kittens eating human corpses with blood all over their
+mouths.  To your left and right, you see stairwells leading to the top of the
+castle.  To the north is the castle's great hall.  To the south is the exit out
+of the castle.    
+~
+14 32768 0
+D0
+~
+~
+0 0 1405
+D1
+~
+~
+0 0 1409
+D2
+~
+~
+0 0 1403
+D3
+~
+~
+0 0 1408
+S
+#1405
+The Great Hall~
+   You are walking down the castle's hall.  To the sides you see shattered
+stained glass windows.  The bits and pieces of glass litter the floor.  Also
+you see cat hairs spread out throughout the hall.  Your mind starts to wonder
+what happened here.    
+~
+14 32776 0
+D0
+~
+~
+0 0 1406
+D2
+~
+~
+0 0 1404
+S
+#1406
+Great Hall~
+   You are walking down the castle's great hall.  There is glass all over the
+place from the broken windows to your left and right.  More human corpses
+litter the place and are covered with cat hairs.  The stench of the corpses are
+making you nauseous!  To the north you see a throne room.  To the south you see
+the way out of this unsightly place!    
+~
+14 32776 0
+D0
+~
+~
+0 0 1407
+D2
+~
+~
+0 0 1405
+S
+#1407
+Throne Room~
+   You enter the castle's Throne Room.  Here is where the King of the castle
+would sit.  The throne in front of you seats a human corpse.  Something inside
+you senses that this was the former king of this castle, and you don't want to
+stick around to see what happens next.  You begin to see kittens crawling
+around the throne devouring the corpse.    
+~
+14 32776 0
+D2
+~
+~
+0 0 1406
+S
+#1408
+West stairwell~
+   Right in front of you is a stone flight of steps that takes you to the upper
+reaches of the castle.  To the east is the castle's main entrance.  To the
+north, west, south are the dull stone walls of the castle.  You notice cat
+hairs covering the floor.    
+~
+14 32776 0
+D1
+~
+~
+0 0 1404
+D4
+~
+~
+0 0 1410
+S
+#1409
+East Stairwell~
+   Right in front of you is a stone stairwell that takes you to the upper
+reaches of the castle.  To the west is the castle's main entrance.  To the
+east, north, and south are the dull stone walls of the castle.  You notice cat
+hairs all over the floor.    
+~
+14 32776 0
+D3
+~
+~
+0 0 1404
+D4
+~
+~
+0 0 1411
+S
+#1410
+West Stairwell Upper Level~
+   There is a stone stairwell that leads you to the lower reaches of the
+castle.  As you look around you see a lead to the balcony to the east.  To the
+west, north and south you see nothing but dull grey stone walls.  You see more
+cat fur on the ground.    
+~
+14 32776 0
+D1
+~
+~
+0 0 1412
+D5
+~
+~
+0 0 1408
+S
+#1411
+East Stairwell Upper Level~
+   There is a stone stairwell leading to the lower reaches of the castle.  To
+the west is a balcony.  To the north, south and east are dull grey stone walls.
+You see more cat fur on the ground.  You can sense the hostility here as blood
+is splattered all over the walls.  There is a note on the wall.    
+~
+14 32776 0
+D3
+~
+~
+0 0 1412
+D5
+~
+~
+0 0 1409
+E
+Note Paper~
+   The note reads, "Here Kitty Kitty Kitty...  ROAR!  " and is written in what
+appears to be human blood.    
+~
+S
+#1412
+Upper Balcony~
+   The upper balcony is just a platform that is uncovered from any stone walls
+or any other obstructions.  It is simply a place where guards can stand to
+watch for invaders.    
+~
+14 32768 0
+D0
+~
+~
+0 0 1414
+D1
+~
+~
+0 0 1411
+D2
+~
+~
+0 0 1413
+D3
+~
+~
+0 0 1410
+S
+#1413
+Beyond the Balcony~
+   You think you're superman?!?  You are falling 25 feet onto the pavement
+right below the balcony!  If luck smiles upon you, you won't land on your neck
+and kill yourself!  As you are falling, you see the ground coming closer and
+closer at you.    
+~
+14 32772 0
+S
+T 1400
+#1414
+Training Room~
+   This is a training room for the castle's guards.  The place is a total mess.
+On the walls you see blood and weapon racks with no weapons in them!  On the
+ground next to the walls, you see dead guards with weapons stuck in them!  
+Red, grey, black, white, yellow cat hairs are everywhere!    
+~
+14 32776 0
+D0
+~
+~
+0 0 1415
+D1
+~
+~
+0 0 1417
+D2
+~
+~
+0 0 1412
+D3
+~
+~
+0 0 1416
+S
+#1415
+Training Room~
+   You are in the training room.  The place is a total disaster.  Everywhere
+you look, there is blood and gore everywhere.  It's splattered on the walls.  
+It's dripping on the floor.  In fact, your foot is wet from a dead guard's
+blood.  You are standing in the center of this large training room.  The air is
+littered with cat hairs and it makes you want to sneeze.    
+~
+14 32776 0
+D0
+~
+~
+0 0 1420
+D1
+~
+~
+0 0 1419
+D2
+~
+~
+0 0 1414
+D3
+~
+~
+0 0 1418
+S
+#1416
+Training Room~
+   You are in the southwest corner of the training room.  This area isn't as
+bloody as the rest of the room.  No corpses lay here, no blood is on the ground
+or the walls here.  However, there are cat hairs just littering the floor.  No
+matter where you go in this room, you cannot escape the stench of human
+corpses.    
+~
+14 32776 0
+D0
+~
+~
+0 0 1418
+D1
+~
+~
+0 0 1414
+S
+#1417
+Training Room~
+   You are in the southeastern area of the training room.  There is more blood
+and gore all over the floor, the walls, and piled up along the perimeter of the
+room.  The cat hairs you see just make you wonder how big these cats are!  
+There is a note on the wall.    
+~
+14 32776 0
+D0
+~
+~
+0 0 1419
+D3
+~
+~
+0 0 1414
+E
+Note Paper Wall~
+   The note reads: Iron Claw Pride was here.  We did this to show that no idiot
+human could shout here kittykittykitty and get away with it!  Terral is our
+leader, and he is the best hunter of all Parthan.    
+~
+S
+#1418
+Training Room~
+   You are in the training room of the castle.  The central western area of the
+room is moderately filled with the filth of war.  You can tell from the looks
+of these corpses that whatever attacked them were extremely angry!  The faces
+of the corpses are scratched to bits!  You can barely tell what they looked
+like when they were alive.  There is blood splattered on the wall, and it is
+also dripping on the floor.    
+~
+14 32776 0
+D0
+~
+~
+0 0 1422
+D1
+~
+~
+0 0 1415
+D2
+~
+~
+0 0 1416
+S
+#1419
+Training Room~
+   You are in the central eastern area of the training room.  The wall rests a
+lit torch, and above it is a message.  The corpses here are stacked somewhat
+neatly for easier passage through the room.  The blood is flowing on the floor
+from all the carnage that happened in this room.    
+~
+14 32768 0
+D0
+~
+~
+0 0 1421
+D2
+~
+~
+0 0 1417
+D3
+~
+~
+0 0 1415
+E
+wall message torch~
+Above the torch on the wall, "PARTHANS RULE" is written.. in human blood!
+~
+S
+#1420
+Training Room~
+   You are in the castle's training room.  There is a weapon rack here with no
+weapons in it.  On the north wall you see a wooden door.  Blood and gore are
+everywhere in this area of the room.  The weapons that were on this rack have
+been unsheathed and inserted into the bodies of the corpses.  Some weapons also
+litter the floor, but they are all broken.    
+~
+14 32776 0
+D0
+~
+door~
+1 0 1423
+D1
+~
+~
+0 0 1421
+D2
+~
+~
+0 0 1415
+D3
+~
+~
+0 0 1422
+S
+#1421
+Training Room~
+   You are in the Training Room of the castle.  The northeastern area of the
+room is littered with human body parts, blood, and corpses.  The stench from
+the corpses still lingers in the air.  Blood is smeared all over the walls.  
+The thought of this heinous act makes your stomach turn.    
+~
+14 32776 0
+D2
+~
+~
+0 0 1419
+D3
+~
+~
+0 0 1420
+S
+#1422
+Training Room~
+   You are in the Training Room of the Castle.  The northwestern area of the
+room reeks from the stench of human corpses rotting.  The blood all over the
+walls and floor just make you want to vomit.  Cat hairs litter the floor and
+are airborne.  You experience some getting caught in your throat as you
+breathe.    
+~
+14 32776 0
+D1
+~
+~
+0 0 1420
+D2
+~
+~
+0 0 1418
+S
+#1423
+Castle Walkway~
+   You are in the Castle Walkway.  You see towers to your left and right.  You
+also see a stone set of stairs leading you down to the lower reaches of the
+castle.  The air is fresher than what is inside the training room.  However,
+you see more cat hairs on the ground and tracks of it lead east and west.    
+~
+14 32776 0
+D1
+~
+~
+0 0 1426
+D2
+~
+door~
+1 0 1420
+D3
+~
+~
+0 0 1424
+D5
+~
+~
+0 0 1428
+S
+#1424
+Western Tower~
+   You are at the western tower of the castle.  You can go up to the top of the
+tower, or you can go east back to the castle walkway.  The floor is covered
+with cat hair, and the trail of cat hair leads up the stone stairwell around
+the tower.  Your lungs rejoice as they receive the fresh air blowing in from
+the north.    
+~
+14 32776 0
+D1
+~
+~
+0 0 1423
+D4
+~
+~
+0 0 1425
+S
+#1425
+Inside the Western Tower~
+   You are inside the western tower of the castle.  The view is great up here,
+but the dead guard lying here isn't as great of a sight.  It seems that the
+Parthans like to finish a job well, even by killing the tower guards.    
+~
+14 32776 0
+D5
+~
+~
+0 0 1424
+S
+#1426
+Eastern Tower~
+   You are at the eastern tower of the castle.  The trail of cat hairs leads up
+the spiral staircase into the tower.  Your instinct tells you to act like a cat
+and cure your curiousity.  The fresh air that you breathe reminds you of what
+you may experience inside the tower.    
+~
+14 32776 0
+D3
+~
+~
+0 0 1423
+D4
+~
+~
+0 0 1427
+S
+#1427
+Inside the Eastern Tower~
+   You are inside the eastern tower of the castle.  Ironically, there is no
+blood or gore in this tower.  Instead, there is just a little black and white
+kitten sitting on the guard chair, looking at you.  The view is great up here,
+like the view from the western tower.  You can see the forest that surrounds
+the castle and how dense it is.    
+~
+14 32776 0
+D5
+~
+~
+0 0 1426
+E
+cat kitten kitty kittycat~
+The kitten looks at you and utters the words '..meow..'
+~
+S
+#1428
+The Dungeon~
+   This is the dungeon of the castle.  The walls are wet and damp.  You also
+notice algae growing all over the walls.  You also see a jail cell where many
+human corpses are locked in.  The air is humid from the wetness on the walls.
+The room is lit from torches mounted on the northern, eastern, and western
+walls.    
+~
+14 32776 0
+D1
+~
+~
+0 0 1429
+D4
+~
+~
+0 0 1423
+S
+#1429
+Stairwell~
+   This is the dungeon's stairwell.  It is made of stone and leads down into a
+dark place.  Your curiousity tells you to go, but your instinct tells you not
+to.  You can go back and run away or go down the stairs to encounter an
+experience that you've never felt before!    
+~
+14 32780 0
+D3
+~
+~
+0 0 1428
+D5
+~
+~
+0 0 1430
+S
+#1430
+Castle Crypt -- Level 1~
+   You are in a dark room.  Everything around you is pitch black, in exception
+to the objects around you that the brightness of your light hits.  To your left
+and right are walls of bone.  Skulls, limbs, rib cages, and many others are
+embedded into the walls of this massive area.  In front of you is pitch
+blackness.  Perhaps you should continue?  Perhaps you should go back up and
+leave?    
+~
+14 32777 0
+D0
+~
+~
+0 0 1431
+D2
+~
+~
+0 0 1440
+D4
+~
+~
+0 0 1429
+S
+#1431
+Castle Crypt -- Level 1~
+   You are in the crypt of the castle.  This place is where all the disposed
+dead end up.  You can smell the stench of rotting flesh.  It's stronger than
+what you smelled before.  The walls on your left and right are still just
+bones.  In front of you is pitch blackness.    
+~
+14 32777 0
+D0
+~
+~
+0 0 1432
+D2
+~
+~
+0 0 1430
+S
+#1432
+Castle Crypt -- Level 1~
+   You are in the castle crypt.  This is the place where all the disposed dead
+end up.  The stench of rotting flesh is stronger than what it was when you were
+in the castle.  The walls on the left and right are made of bone, and in front
+of you is pitch blackness.    
+~
+14 32777 0
+D0
+~
+~
+0 0 1433
+D2
+~
+~
+0 0 1431
+S
+#1433
+Castle Crypt -- Level 1~
+   You are at a cross roads in the castle's crypt.  To the north is a wall of
+bone, while to the west, east, and south is pitch blackness.  The stench of
+rotten flesh lingers in the air.  The idea of such a place existing is making
+your skin crawl.    
+~
+14 32777 0
+D1
+~
+~
+0 0 1435
+D2
+~
+~
+0 0 1432
+D3
+~
+~
+0 0 1434
+S
+#1434
+Castle Crypt -- Level 1~
+   You are at a stairwell in the castle's crypt.  The stairwell is made of
+stone, as it leads to who knows what lies below!  You can go down this spiral
+stairwell or you can turn tail and go back home.  The stench of rotting flesh
+is stronger here than it was when you entered the crypt.    
+~
+14 9 0
+D1
+~
+~
+0 0 1433
+S
+#1435
+Castle Crypt -- Level 1~
+   You are in the castle's crypt.  The walls to the left and right are made of
+bone and in front of you lies pitch blackness.  The bones on the wall are
+changing from the normal white color to a more reddish color.  The reddish
+color on the bones gets deeper and deeper as you proceed eastward.  The stench
+of rotting flesh lingers in the air.    
+~
+14 9 0
+D0
+~
+~
+0 0 1437
+D1
+~
+~
+0 0 1436
+D3
+~
+~
+0 0 1433
+S
+#1436
+Castle Crypt -- Level 1~
+   You are in the castle's crypt.  The area you are in is dark in exception to
+where you stand that your light illuminates.  You smell death all around you.
+It feels damp and humid all around you.  The walls to your left and right feel
+close to you as claustrophobia starts to kick in.  You are at a dead end.  
+Perhaps a very dead end.    
+~
+14 9 0
+D3
+~
+~
+0 0 1435
+S
+#1437
+Castle Crypt -- Level 1~
+   You are in the dark crypt underneath the castle.  There is evidence of mass
+death all around the area.  Your teeth start to chatter as you hear the sounds
+of ripped flesh all around you.  The sound of movement makes you wonder what
+lies around the corner.  The walls around the place are made of bone, and the
+bones are starting to have a deeper red color as you proceed through the crypt.
+  
+~
+14 9 0
+D0
+~
+~
+0 0 1438
+D2
+~
+~
+0 0 1435
+S
+#1438
+Castle Crypt -- Level 1~
+   You are in the dark cavern-like crypt underneath the castle.  The room is
+dark in exception to where your light illuminates.  The walls seem to come
+closer and closer as you journey onward.  The sight of the bone structured
+walls and the stench of rotting flesh and death are making you nauseous.    
+~
+14 9 0
+D1
+You shine your light eastward and see nothing in front of you.. not even ground to walk on!
+~
+~
+0 0 1439
+D2
+~
+~
+0 0 1437
+E
+e east~
+Nothing.
+~
+S
+#1439
+The Death Pit~
+   You just fell many many miles to what seems to be your death.  Fortunately
+for you, you only land on your neck and lose control of all your limbs.  But
+the zombies around you are about to fix that.  They are eating you alive!  You
+can feel their teeth sink into your flesh.  Soon you'll be dead..  And you'll
+become one of THEM...  The undead..    
+~
+14 7 0
+S
+#1440
+Castle Crypt~
+   You are in the dark crypt of the castle.  The walls are made of bones that
+reek of death.  You wonder what could have made such a hideous sight.  Ahead of
+you is pure darkness.  Behind you is pure darkness.  You can hear the rattling
+of bones and the moans of disturbed souls in the distance.  You feel a chill
+run down your back as you think of what you could encounter in this kind of
+place.  There are stairs leading down to another level of the crypt.    
+~
+14 32777 0
+D0
+~
+~
+0 0 1430
+D5
+~
+~
+0 0 1441
+S
+#1441
+Castle Crypt Level 2~
+   You're another level deeper into the castle's crypt.  The area around you is
+very dark.  The area is very open, as you don't see any walls around you.  The
+moans of zombies echo through the room and send a direct shock through your
+spine.  The stench of rotting flesh fills your nostrils and makes you want to
+vomit.    
+~
+14 32777 0
+D0
+~
+~
+0 0 1442
+D1
+~
+~
+0 0 1444
+D3
+~
+~
+0 0 -1
+D4
+~
+~
+0 0 1440
+S
+#1442
+Castle Crypt Level 2~
+   You're in a large dark room in the second level of the crypt.  You see no
+walls around you, and it's pitch black around you.  The moaning of zombies, the
+clicking and clattering of skeletons, and the smell of rotting flesh is enough
+to make you scared.    
+~
+14 9 0
+D1
+~
+~
+0 0 1443
+D2
+~
+~
+0 0 1441
+S
+#1443
+Castle Crypt Level 2~
+   You're in a large dark room in the second level of the crypt.  You see no
+walls around you, and it's pitch black around you.  The moaning of zombies, the
+clicking and clattering of skeletons, and the smell of rotting flesh is enough
+to make you scared.    
+~
+14 9 0
+D2
+~
+~
+0 0 1444
+D3
+~
+~
+0 0 1442
+S
+#1444
+Castle Crypt Level 2~
+   You're in a large dark room in the second level of the crypt.  You see no
+walls around you, and it's pitch black around you.  The moaning of zombies, the
+clicking and clattering of skeletons, and the smell of rotting flesh is enough
+to make you scared.    
+~
+14 9 0
+D0
+~
+~
+0 0 1443
+D1
+~
+~
+0 0 -1
+D3
+~
+~
+0 0 1441
+S
+#1445
+Castle Crypt Level 2~
+   You're in a large dark room in the second level of the crypt.  You see no
+walls around you, and it's pitch black around you.  The moaning of zombies, the
+clicking and clattering of skeletons, and the smell of rotting flesh is enough
+to make you scared.    
+~
+14 9 0
+S
+$~

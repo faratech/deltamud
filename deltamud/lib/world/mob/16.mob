@@ -1,0 +1,145 @@
+#1600
+large rat monster~
+the large mountain rat~
+A large mountain rat stares at you with hungry eyes.
+~
+   You find yourself studying a sickly looking rodent.  It makes your stomach
+turn as you look into its red, hungry eyes.  This rat is two feet in length.  
+Slobber drips from its large fangs, signifying that it is hungry...  He seems
+to want you as his main course.    
+~
+74 0 -18 E
+X15 0 0 0 0 0 1d1+258 1d43
+150 3750
+9 9 1
+BareHandAttack: 4
+E
+#1601
+disgruntled beggar monster~
+the disgruntled beggar~
+A dirty beggar squats here with his hand out waiting for a donation.
+~
+   This man is a poor sight before you.  His rags are draped loosely around his
+weary body.  His eyes are timid and sad.  You think you can hear his stomach
+rumbling with hunger.  He grins at you with rotten teeth in hopes of a
+donation...    
+~
+74 0 0 E
+X16 0 0 0 0 0 1d1+275 1d46
+160 4000
+9 9 1
+BareHandAttack: 13
+E
+#1602
+fat troll woman monster~
+the fat troll woman~
+A fat Troll woman stands here poking the fire.
+~
+   This Troll is quite large, not to mention ugly.  Her face is covered in
+warts and dirt.  Her hair hangs in tangles from her scalp, looking much like a
+ruined mop.  She grins nastily at you with yellow, rotting teeth...  Her eyes
+bloodshot red.  She pokes the fire with a long, thin stick.    
+~
+74 0 -400 E
+X18 0 0 0 0 0 1d1+309 1d52
+180 4500
+9 9 2
+BareHandAttack: 7
+E
+#1603
+young troll wanderer monster~
+the young troll traveler~
+A young Troll traveler stands here scuffing his feet.
+~
+   This Troll looks unusually thin.  His clothing sags around his waist making
+him look somehow comical.  Despite his goofy appearance, his facial features
+are quite menacing.  His brows bend inward into a scowl.  Large canine teeth
+jut from his upper jaw and drip with drool.  His nose is large and warty...  
+His eyes burn red as he stares into you.  It seems he doesn't like you.    
+~
+72 0 -341 E
+X14 0 0 0 0 0 1d1+241 1d40
+140 3500
+9 9 1
+E
+#1604
+berserking troll monster~
+the berserker troll~
+A Berserker Troll stands here threatening you.
+~
+   The sight before you is a sight to behold.  He is clad in a grey and blue
+highland kilt, a large leather belt is strapped around his waist.  His muscles
+bulg from beneath his clothing.  Fire burns in his eyes and it seems that it
+also burns in his heart.  He doesn't like you...  You don't like him...  His
+teeth clench ready for battle.    
+~
+4194392 0 -540 E
+X20 0 0 0 0 0 1d1+343 1d58
+200 5000
+9 9 1
+BareHandAttack: 10
+E
+#1605
+young troll monster~
+the young troll~
+A young Troll mumbling gibberish to himself.
+~
+   You gaze upon a very young Troll.  Although he is a youngster, he stands
+about 5 feet 6 inches tall and looks fairly strong.  He mumbles softly to
+himself, almost inaudibly to your ears.  He looks ugly...  Yet innocent at the
+same time...  You rethink your thoughts when he promptly raises his middle
+finger at you and mouths a swear.  That's a Troll for you.    
+~
+74 0 -340 E
+X15 0 0 0 0 0 1d1+258 1d43
+150 3750
+9 9 1
+E
+#1606
+skeleton warrior pile of bones monster~
+the skeleton warrior~
+A pile of bones.
+~
+   This pile of bones seems to rattle as you gaze at it...  Makes you somewhat
+uneasy.    
+~
+4194394 0 -900 E
+X19 0 0 0 0 0 1d1+326 1d55
+190 4750
+9 9 0
+E
+#1607
+Dwarven swaying ghoul monster~
+the dwarven ghoul~
+A disgusting Ghoul sways back and forth seemingly stuck to the earth.
+~
+   A Ghoul stands before you swaying to and fro like a sickly plant swaying in
+the breeze.  The skin is rotted to the point of near absence.  An eye seems to
+be missing from one of the eye sockets of this dead creature.  The form is of
+Dwarven origin...  Perhaps the former inhabitants of this land.  Crusted blood
+coats the edges of its mouth as well as its along the forearms and hands.  
+Pale, dirty rags hang shredded over the dead being's body.
+~
+32874 0 -890 E
+X16 0 0 0 0 0 1d1+275 1d46
+160 4000
+9 9 0
+E
+#1608
+rock spider monster~
+the rock spider~
+A rock spider crawls about the ground.
+~
+   This spider before you is quite large.  It's total body width with legs is
+approximately .5 meters in diameter.  The legs are long and gangly, rippled
+with gray hair and scratches.  The head stares at you hungrily with eigth deep
+black eyes that seem to continue forever.  It's fangs snap together as it
+thinks of its next meal...    
+~
+74 0 0 E
+X0 0 0 0 0 0 1d1+0 1d1
+0 0
+9 9 0
+BareHandAttack: 4
+E
+$

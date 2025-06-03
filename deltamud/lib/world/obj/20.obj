@@ -1,0 +1,627 @@
+#2000
+leather vest~
+a crude leather vest~
+A vest made of leather is lying here.~
+~
+9 4096 9
+0 0 0 0 35 35
+7 5 0
+L 1
+E
+leather vest~
+   The leather vest is made from the boiled skin of some long dead animal.  It
+provides better protection than normal clothing but due to its poor
+craftsmanship it doesn't look like it will last long.
+~
+A
+17 -8
+#2001
+cap leather~
+a leather cap~
+A cap made of leather is lying here.~
+~
+9 0 17
+6 0 0 0 25 25
+3 3 0
+L 1
+E
+cap~
+   This is a small leather cap of relatively decent craftsmanship.
+~
+#2002
+shield~
+a wooden shield~
+A wooden shield is lying here.~
+~
+9 4096 513
+6 0 0 0 25 25
+0 0 0
+L 1
+E
+shield~
+   This shield is made of six planks of wood held together by
+a metal frame.
+~
+#2003
+pants leather~
+a pair of leather pants~
+A pair of pants is lying here.~
+~
+9 0 33
+4 0 0 0 20 20
+4 2 0
+L 1
+E
+pants~
+   The crude leather that these pants are made of was once the skin of
+some animal.  They are fairly tough and should provide some protection
+from harm.
+~
+#2004
+boots leather~
+a pair of leather boots~
+A pair of leather boots is lying here.~
+~
+9 0 65
+2 0 0 0 20 20
+2 1 0
+L 1
+E
+boots~
+   These boots are not very comfortable, but their hard leather shell
+should be able to protect your feet from a little harm.
+~
+#2005
+gloves~
+a pair of crude leather gloves~
+A pair of leather gloves is lying here.~
+~
+9 0 129
+2 0 0 0 20 20
+1 1 0
+L 1
+E
+gloves~
+   The crude leather these gloves were made of limits their flexibility,
+but in turn offers your hands some minor protection.
+~
+#2006
+belt leather~
+a leather belt~
+A leather belt is lying here.~
+~
+9 0 2049
+2 0 0 0 20 20
+3 1 0
+L 1
+E
+belt~
+   This is a thick leather belt with a large metal buckle.  Normally you
+would use this to keep your trousers in place, but because of its large
+size it could also be used to protect your mid-section.
+~
+#2007
+wristband~
+a leather wristband~
+A wristband made of leather is lying here.~
+~
+9 0 4097
+1 0 0 0 15 15
+1 1 0
+L 1
+E
+wristband~
+   This is a small strap of leather used to support your wrist.  It
+also helps to protect your wrist from harm.
+~
+#2008
+cape~
+a short cape~
+A short cape is lying here.~
+~
+9 0 32769
+2 0 0 0 20 20
+4 1 0
+L 1
+E
+cape~
+   This short cape is made of a thick black material.  It
+provides you with warmth and a little bit of protection.
+~
+#2009
+mask~
+a bone mask~
+A mask of bone is lying here.~
+~
+9 0 131073
+2 0 0 0 15 15
+4 1 0
+L 1
+E
+mask~
+   Made from the skull of a large goat, this mask looks to serve
+a ceremonial purpose of some kind.  Still, it could probably help
+block attacks aimed at your face. . .
+~
+#2010
+dagger~
+a dagger~
+A dagger is lying here.~
+~
+5 8192 8193
+0 1 4 14 15 15
+2 1 0
+E
+dagger~
+   This small dagger has a 3 inch blade and no hand guard.
+Its hilt is made of bone, and it doesnt look to well crafted.
+~
+#2011
+torch~
+a torch~
+A torch is lying here.~
+~
+1 0 1
+0 0 -1 0 0 0
+3 0 0
+E
+torch~
+   This is a big log that you can light on fire to help you see in
+the dark.
+~
+#2012
+blade~
+a small, rusty blade~
+A small blade is lying here.~
+~
+5 8192 8193
+0 1 4 3 10 10
+2 0 0
+L 2
+E
+blade~
+   This blade is about an inch long, and is covered in rust.
+~
+#2013
+club stick~
+a wooden club~
+A wooden club is lying here.~
+~
+5 0 8193
+0 1 4 5 15 15
+4 0 0
+E
+club stick~
+   This is a large piece of wood that can be used for bashing things.
+It came from a tree, like most wood.
+~
+#2014
+anklet~
+a copper anklet~
+A metallic anklet is lying here.~
+~
+9 64 65537
+0 0 0 0 30 30
+1 2 0
+L 3
+E
+anklet~
+   The anklet is made of copper and is worn on your ankle.  It is a copper
+ring, bearing an odd black rune on its clasp.
+~
+A
+14 5
+A
+13 5
+#2015
+ankle brace~
+a leather ankle brace~
+A leather brace is lying here.~
+~
+9 0 65537
+2 0 0 0 30 30
+2 2 0
+L 3
+E
+brace~
+   The brace appears to be a support worn on your ankle.  It looks like
+it could protect your ankle, and make it slightly more comfortable to
+move around.
+~
+A
+14 5
+#2016
+pendant~
+a bronze pendant~
+A pendant is lying here.~
+~
+9 64 5
+2 0 0 0 30 30
+1 3 0
+L 3
+E
+pendant~
+   This pendant pulsates with a faint blue light.  It is made of
+bronze.
+~
+A
+13 5
+#2017
+ring~
+a black ring~
+A black ring is lying here.~
+~
+9 64 3
+2 0 0 0 30 30
+1 2 0
+L 3
+E
+ring~
+   This ring is made of some black metal and bears a grey sigil.
+~
+A
+12 5
+#2018
+ring~
+a green ring~
+A green ring is lying here.~
+~
+9 64 3
+2 0 0 0 30 30
+1 2 0
+L 3
+E
+ring~
+   This green ring appears to be made of dead plants.  It has a small
+flower on it which seems to live off the vitality of the ring.
+~
+A
+13 5
+#2019
+bracers~
+a pair of purple bracers~
+A pair of bracers is lying here.~
+~
+9 0 257
+5 0 0 0 30 30
+3 3 0
+L 3
+E
+bracers~
+   These bracers are made of a purple cloth and bare the name of Elandra
+on them.  They are worn on your arms and help to protect you from harm.
+~
+#2020
+blade~
+a rusty blade~
+A rusty blade is lying here.~
+~
+5 0 8193
+0 1 4 3 15 15
+2 0 0
+L 1
+E
+blade~
+   This blade looks very similar to a shaving razor, and is encrusted by
+rust.
+~
+#2038
+bible book~
+a blackened book~
+A black, fire scorched book is lying here.~
+~
+9 512 16385
+0 0 0 0 35 35
+3 0 0
+L 5
+E
+book bible~
+   This book appears to be a bible for some unholy religion.  In its pages
+are enclosed many dark chants.
+~
+A
+12 3
+A
+13 3
+A
+14 3
+#2039
+shield~
+a wooden shield~
+A green wooden shield is lying here.~
+~
+9 4096 513
+3 0 0 0 0 0
+4 0 0
+E
+shield~
+   This wooden shield has been painted green, and has a large
+holy symbol of Elestra engraved in its surface.
+~
+#2040
+crudgel bone~
+a bone crudgel~
+A large bone is lying here.~
+~
+5 0 8193
+0 1 7 5 0 0
+4 0 0
+L 3
+E
+bone crudgel~
+   This crudgel is basically a large femur taken from a dead animal.
+~
+#2041
+dagger bone~
+a bone dagger~
+A bone dagger is lying here.~
+~
+5 8192 8193
+0 1 7 14 20 20
+2 1 0
+#2042
+whip leather~
+a leather whip~
+A leather whip is lying here.~
+~
+5 0 8193
+0 1 4 2 15 15
+1 1 0
+#2043
+staff black oak~
+a black oak staff~
+A black oak staff is lying here.~
+~
+5 0 8193
+0 2 4 5 25 25
+2 2 0
+E
+sigil~
+   The red sigil appears to be an infinity symbol, slashed multiple times
+and scorched by flame.
+~
+E
+staff oak~
+   This black staff was made from the wood of an ancient dead tree.  Its wood
+has been tainted black by a dark ritual performed by its previous owner.  On
+its hilt is carved a single, red sigil.
+~
+#2044
+pendant holy symbol~
+a black pendant~
+A small pendant is lying here.~
+~
+12 512 5
+0 0 0 0 10 10
+2 0 0
+E
+pendant~
+   The chain of the pendant is made of a solid black metal.  From
+it dangles a black holy symbol.  It's cold surface seems oddly
+repulsive to the touch.
+~
+E
+holy symbol~
+   The symbol on this pendant is that of a white cackling skull with
+glowing blue eyes.
+~
+A
+13 10
+#2045
+bone incense powder bag~
+a bag of powdered incense~
+A small bag is lying here.~
+~
+12 0 16385
+0 0 0 0 0 0
+2 0 0
+T 2095
+E
+bag incense~
+   This small white bag is filled with powdered bone incense, and is probably
+burned during a dark ritual to a dark god.
+~
+#2046
+dagger~
+a long, pointy dagger~
+A pointy dagger is lying here.~
+~
+5 8192 8193
+0 1 6 14 20 20
+3 1 0
+L 3
+E
+dagger~
+   This dagger is extremely long and pointy, as though designed to be plunged into someone else's back.
+~
+#2047
+sword short~
+a short sword~
+A short sword is lying here.~
+~
+5 12288 8193
+0 1 6 14 35 35
+6 2 0
+L 3
+E
+sword~
+   This short sword has a two foot long blade and a black handle.
+~
+#2048
+grey staff~
+a grey staff~
+A grey staff has been left here.~
+~
+5 0 8193
+0 3 3 5 0 0
+6 2 0
+E
+staff~
+   This grey staff is made of the twisted branch of a dead tree.  On its shaft are carved many odd runes.
+~
+#2049
+whip~
+a leather whip~
+A leather whip has been left on the ground here.~
+~
+5 0 8193
+0 1 7 2 35 35
+2 1 0
+L 2
+E
+whip~
+   This whip is basically a long piece of leather that ends in a tiny barb.
+~
+#2050
+canteen~
+a canteen~
+A water canteen is lying here.~
+~
+17 0 1
+10 10 0 0 0 0
+15 0 0
+E
+stick~
+   You see a canteen made from an animals gut.
+~
+#2090
+throne~
+a small throne~
+A small copper throne has been set into the ground here.~
+~
+12 0 0
+0 0 0 0 0 0
+99 0 0
+E
+throne~
+   This copper throne emits a faint glow as you stare at it.  The
+workmanship of the throne is fairly poor; there are many rough edges
+and crude curves.  On one of the thrones arms is a small crystal lever.
+~
+#2091
+slop food~
+a pile of boar food~
+A pile of boar food has been dropped here.~
+~
+19 0 1
+2 0 0 0 0 0
+3 0 0
+E
+food~
+   The food appears to be a mix of meats, grains and other unidentifiable organic material.
+~
+#2092
+barrel~
+a barrel~
+A large barrel is lying here.~
+~
+15 0 0
+10 0 -1 0 0 0
+0 0 0
+E
+barrel~
+   You see that the barrel is made of wood, and held together by cheap metal.
+~
+#2093
+trough~
+a water trough~
+A water trough is lying here.~
+~
+17 0 0
+5 4 0 0 0 0
+20 0 0
+E
+trough~
+   The trough is a long, narrow, open rectangle made of wood that
+holds water for animals.
+~
+#2094
+gem pebble~
+a small pebble~
+A small pebble is lying here.~
+~
+8 0 1
+0 0 0 0 0 0
+1 1 0
+L 1
+E
+pebble~
+   This pebble appears to be an extremely small, and very dirty, gem.
+It could be worth something in a store.
+~
+#2095
+stream~
+a tiny stream~
+A tiny stream is flowing through this area.~
+~
+23 0 0
+12 12 0 1 0 0
+99 0 0
+E
+stream water~
+   The stream has a very weak current, and is of no real threat to anyone.
+Judging from the color of the soil surrounding it, you would guess that it
+is used as a waste removal system.
+~
+#2096
+corpse rat~
+a rat corpse~
+A dead rat is lying here.~
+~
+13 0 16385
+0 0 0 0 0 0
+0 0 0
+E
+corpse rat~
+   The rat's corpse is partly decayed, and VERY smelly.
+~
+#2097
+junk pile~
+a pile of junk~
+A pile of junk is slowly rotting here.~
+~
+15 0 0
+100 0 -1 0 0 0
+99 0 0
+E
+junk pile~
+   By the look of it, this pile of junk has been sitting here for quite some
+time.  Many small flies circle the pile, picking at some decomposing material
+within.  It is possible that there may be something of minor worth within the
+heap, but it wouldn't smell too good.
+~
+A
+2 -10
+#2098
+Altar~
+an Altar of Bone~
+A large altar made of bone is lying here.~
+~
+12 0 0
+0 0 0 0 0 0
+30 0 0
+T 2091
+E
+altar~
+   The white material this altar was initially made of, bone, has been
+turned red by the sacrifices made on it.  Blood streaks drip down the
+sides of the altar forming little pools on the floor.  A large spike is
+located in the middle of the altars flat, bed-like top.  You guess that
+corpses are impaled on the spike to gain the altars favour.
+~
+#2099
+Altar~
+the altar of fire~
+A large red altar sits in this room.~
+~
+12 1 0
+0 0 0 0 0 0
+100 0 0
+E
+altar~
+   Made of blackrock, the altar is about the size of a full grown human.
+Around the edges of the altar are engraved many small, glowing red sigils.
+In the center of the altars surface are two small depressions that look like
+footprints . . .
+~
+$~

@@ -1,0 +1,45 @@
+#1400
+Glowing Rod~
+a glowing rod~
+A glowing rod lies on the ground.~
+Nothing.
+~
+1 0 1
+0 0 168 0 0 0
+4 1000 100
+c 0
+#1401
+corpse~
+a corpse~
+A corpse is lying on the ground, rotting.~
+Nothing.
+~
+12 0 0
+0 0 0 0 0 0
+999 0 0
+c 0
+E
+Corpse guard dead~
+   This is the corpse of a dead human guard.  He has brown hair and blue
+lifeless eyes.  His skin is pale white due to the fact its been lying there for
+a while.    
+~
+#1402
+chainmail mail~
+the rusty chainmail~
+A rusted up chainmail is lying on the ground.~
+Nothing.
+~
+9 0 9
+0 0 0 0 4 10
+10 50 1
+c 0
+L 10
+E
+chain mail chainmail rust rusty rusted~
+   This piece of chainmail lying here is brown and rusted.  Perhaps it has had
+too much contact with water..  Or another liquid?    
+~
+A
+17 -13
+$~

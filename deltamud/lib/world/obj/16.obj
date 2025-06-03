@@ -1,0 +1,185 @@
+#1600
+ripped shirt~
+a ripped shirt~
+A ripped shirt is lying here in a heap.~
+   There is nothing special about this piece of rags.  It is soiled beyond
+cleaning.  Not only is it dirty, but it smells of animal dung and aged milk.  
+
+~
+9 4 9
+1 0 0 0 1 1
+0 5 1
+L 1
+#1601
+fire~
+a fire~
+A campfire leaping with flames.~
+It's a &rFIRE&W...it looks like it could hurt...perhaps.
+~
+15 0 0
+55 0 -1 0 0 0
+0 0 0
+L 15
+E
+fire~
+A &rFIRE&W...It's Hot.
+~
+#1602
+stick weapon~
+a stick~
+A stick.~
+   It is a stick.  This stick is arms length and strong.    
+~
+5 4 8193
+0 2 8 2 0 0
+1 50 2
+L 17
+#1603
+flaming stick weapon~
+a flaming stick~
+A flaming stick.~
+   A stick that's on fire.  It's about arms length and durable.  Looks somewhat
+weakened by the fire though...    
+~
+5 4 8193
+0 2 7 2 0 0
+1 35 0
+L 15
+E
+flaming stick weapon~
+   A stick that's on fire.  It's about arms length and durable.  Looks somewhat
+weakened by the fire though...    
+~
+#1604
+stone hammer weapon~
+a stone hammer~
+A stone hammer is lying on the ground.~
+   The handle of this weapon/tool is wooden, carved designs line the shaft.  
+The head is made of a polished granite stone.  It seems to glisten as you look
+at it's well crafted form.    
+~
+5 4 1
+1 2 8 7 8 8
+4 90 10
+L 17
+#1605
+sickle weapon~
+a bloody sickle~
+A bloody sickle lies here.~
+Nothing.
+~
+5 68104 8193
+2 3 6 3 5 9
+5 100 11
+L 19
+E
+bloody sickle weapon~
+   This sickle is covered in blood.  The blade is long and thin...  The perfect
+slashing weapon.  This item releases and aura of uneasiness...  Its origin
+coming from demonic forces.    
+~
+#1606
+muddy puddle fountain~
+a muddy puddle~
+A muddy puddle corrupting the serenity of the mountain.~
+~
+23 0 0
+8 2 12 1 0 0
+7 0 0
+E
+muddy puddle fountain~
+   This is a nasty looking puddle filled with mud and ashes.  Doesn't look all
+that tempting...  But it might quench your thirst.    
+~
+#1607
+black bladed scimitar weapon~
+a black bladed scimitar~
+A black bladed scimitar lays gleaming on the floor.~
+   This weapon is deadly looking...  The handle is wrapped tightly with a grey
+leather, a black obsidian stone is at the base of the hilt.  The blade is long
+and menacing.  It's as if you can feel its dark presence in the room, its
+forever angry being.    
+~
+5 0 8193
+1 4 5 3 5 6
+6 250 40
+L 20
+E
+black bladed scimitar weapon~
+   This weapon is deadly looking...  The handle is wrapped tightly with a grey
+leather, a black obsidian stone is at the base of the hilt.  The blade is long
+and menacing.  It's as if you can feel its dark presence in the room, its
+forever angry being.    
+~
+#1608
+grey kilt armor cloth clothes~
+a grey kilt~
+A raggedy grey kilt.~
+   The kilt you now stare at is long and pleated.  It sports a rugged looking
+grey/red/blue plaid that gives it a down to earth feel.  The cloth itself is
+rather rough but well made.  This item will not wear out so easily.    
+~
+9 0 33
+0 0 0 0 8 10
+4 300 42
+L 20
+E
+grey kilt armor cloth clothes~
+   THe kilt you now stare at is long and pleated.  It sports a rugged looking
+grey/red/blue plaid that gives it a down to earth feel.  The cloth itself is
+rather rough but well made.  This item will not wear out so easily.    
+~
+#1609
+leather waist satchel pouch container pack~
+a leather waist satchel~
+A leather waist satchel is lying here.~
+   This satcheld is small and made of leather.  It is tough with a reinforced
+wooden interior.  The fur of an animal covers the top and hangs loosely in the
+front.  This looks quite the handy item.    
+~
+15 0 2049
+20 1 -1 0 3 3
+1 35 2
+L 1
+E
+leather waist satchel pouch container pack~
+   This satcheld is small and made of leather.  It is tough with a reinforced
+wooden interior.  The fur of an animal covers the top and hangs loosely in the
+front.  This looks quite the handy item.    
+~
+#1610
+chewing tobacco food~
+some chewing tobacco~
+Some unchewed chewing tobacco is lying strewn about here.~
+   This is a pile of chewing tobacco.  It's black and shredded.  It smells like
+pretty good...  Somehow minty.  You could try eating it...  But it might taste
+nasty.    
+~
+19 0 1
+4 0 0 1 0 0
+0 18 1
+E
+chewing tobacco food~
+   This is a pile of chewing tobacco.  It's black and shredded.  It smells like
+pretty good...  Somehow minty.  You could try eating it...  But it might taste
+nasty.    
+~
+#1611
+spitoon hat cap helmet~
+a nasty looking spitoon~
+A nasty looking spitoon covered in spit.~
+~
+9 0 17
+0 0 0 0 4 6
+3 123 3
+#1699
+stone key~
+a stone key~
+A stone key is lying here.~
+   This is a stone key, well crafted with runes all over it.  It seems to emit
+a soft glow.  It seems to be extremely old...    
+~
+18 0 1
+0 0 0 0 0 0
+0 0 0
+$~

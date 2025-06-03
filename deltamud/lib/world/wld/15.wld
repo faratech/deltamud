@@ -1,0 +1,339 @@
+#1500
+The Base of the Hill~
+   You are standing at the base of a dark, slighty slopped hill.  Towards the
+top against the dark horizon you see a large church protruding in the darkness.
+Before the church and all along the hill is the graveyard associated with the
+Christians of the area.  The population of the small town isn't great, and the
+people are all vague and distant to the outsiders.    
+~
+15 4 4
+D0
+~
+~
+0 0 1501
+D2
+~
+~
+0 0 1511
+S
+#1501
+Along the Hilled Path~
+   You are walking along the path on the hill that leads towards the old
+church.  The path itself is an old cobblestone, but from lack of maintenence,
+weeds and other things have sprouted between the stones.  Around you, you are
+seeing the grave's of the citizens of this village.  There are many it seems
+for such a small town.    
+~
+15 4 4
+D0
+~
+~
+0 0 1506
+D1
+~
+~
+0 0 1503
+D2
+~
+~
+0 0 1500
+D3
+~
+~
+0 0 1502
+S
+#1502
+Part of the Cemetary~
+   As you walk along the paths between the nubbed down tombstones, you realize
+that none of the graves have any flowers or markings on them, and the last date
+of death that you see is almost 20 years prior to the current date.  All the
+graves are overgrown and the tombstones themselves have vines crawling up the
+sides of them.    
+~
+15 0 4
+D0
+~
+~
+0 0 1505
+D1
+~
+~
+0 0 1501
+S
+#1503
+Part of the Cemetary~
+   As you walk along the paths between the nubbed down tombstones, you realize
+that none of the graves have any flowers or markings on them, and the last date
+of death that you see is almost 20 years prior to the current date.  All the
+graves are overgrown and the tombstones themselves have vines crawling up the
+sides of them.    
+~
+15 0 4
+D0
+~
+~
+0 0 1504
+D3
+~
+~
+0 0 1501
+S
+#1504
+Part of the Cemetary~
+   As you walk along the paths between the nubbed down tombstones, you realize
+that none of the graves have any flowers or markings on them, and the last date
+of death that you see is almost 20 years prior to the current date.  All the
+graves are overgrown and the tombstones themselves have vines crawling up the
+sides of them.    
+~
+15 0 5
+D2
+~
+~
+0 0 1503
+D3
+~
+~
+0 0 1506
+S
+T 1500
+#1505
+Part of the Cemetary~
+   As you walk along the paths between the nubbed down tombstones, you realize
+that none of the graves have any flowers or markings on them, and the last date
+of death that you see is almost 20 years prior to the current date.  All the
+graves are overgrown and the tombstones themselves have vines crawling up the
+sides of them.    
+~
+15 0 0
+D1
+~
+~
+0 0 1506
+D2
+~
+~
+0 0 1502
+S
+#1506
+The Steps Before the Church~
+   A large cross dominates your view as you walk the steps into the church.  
+Two statues on each side of the steps depict several scenes from the bible.  
+The church itself on the outside shows signs of a large fire that burned on the
+right half of it.  Two large doors block the passage forward.    
+~
+15 4 0
+D0
+~
+door~
+1 0 1507
+D1
+~
+~
+0 0 1504
+D2
+~
+~
+0 0 1501
+D3
+~
+~
+0 0 1505
+S
+#1507
+The Church Foyer~
+   Two large satanic crosses hang from the ceiling above, suspended by rusted
+chains.  Rats dart back and forth, causing scratching noises on the creaky and
+warped wood.  The smell of death is in here, worse than outside.  North you see
+a worship altar, and closed doors welcome you to your east and west.    
+~
+15 8 0
+D0
+~
+~
+0 0 1508
+D1
+~
+door~
+1 0 1510
+D2
+~
+~
+0 0 1506
+D3
+The door that once was houses here lies in ruin.  It has been burnt all the way back to it's hinges.
+~
+~
+0 0 1509
+S
+#1508
+The Church Altar~
+   Odd reddish light penetrates the stained glass windows that tower above you.
+When you look up bats flutter out and some dust floats to the ground.  Parts of
+the glass are broken, filled by a dark light.  Below you on the carpet is a
+large satan star.  South of here is the main foyer.    
+~
+15 8 0
+D2
+~
+~
+0 0 1507
+S
+#1509
+The Church Library~
+   This room, which once houses all of the churches bibles and different tomes,
+is now gone.  From the looks of the room, it appears to have been burned from a
+fire started from the inside.  Above you, shards of glass are lying
+precariously on the edge of the hole in the roof, and you can also hear a faint
+set of scuffling on the roof.    
+~
+15 128 0
+D1
+~
+~
+0 0 1507
+S
+#1510
+Church Reception Room~
+   In it's better days, this room was used as a gathering hall for the members
+of this particular church.  Old sofa's and tables are sprawled across the room,
+with cobwebs and loads of dust on them.  Rat nests infest the old couch
+coushins, along with disgusting moss.  The light filtering through the room is
+bent and deformed from prisms made from crashed glass and mirrors.  To the west
+is the main foyer.    
+~
+15 8 0
+D3
+~
+door~
+1 0 1507
+S
+#1511
+A Stone Path~
+You are in an unfinished room.
+~
+15 0 0
+D0
+~
+~
+0 0 1500
+D3
+~
+~
+0 0 1512
+S
+#1512
+A Stone Path~
+You are in an unfinished room.
+~
+15 0 0
+D1
+~
+~
+0 0 1511
+D2
+~
+~
+0 0 1513
+S
+#1513
+A Stone Path~
+You are in an unfinished room.
+~
+15 0 0
+D0
+~
+~
+0 0 1512
+D3
+~
+~
+0 0 1514
+S
+#1514
+A Stone Path~
+You are in an unfinished room.
+~
+15 0 0
+D1
+~
+~
+0 0 1513
+D2
+~
+~
+0 0 1515
+S
+#1515
+A Stone Path~
+You are in an unfinished room.
+~
+15 0 0
+D0
+~
+~
+0 0 1514
+D2
+~
+~
+0 0 1518
+D3
+~
+~
+0 0 1516
+S
+#1516
+A Rundown Cottage~
+You are in an unfinished room.
+~
+15 0 0
+D1
+~
+~
+0 0 1515
+D4
+~
+~
+0 0 1517
+S
+#1517
+The Attic~
+You are in an unfinished room.
+~
+15 0 0
+D5
+~
+~
+0 0 1516
+S
+#1518
+A Stone Path~
+You are in an unfinished room.
+~
+15 0 0
+D0
+~
+~
+0 0 1515
+D2
+~
+~
+0 0 1519
+S
+#1519
+The Town Square~
+You are in an unfinished room.
+~
+15 0 0
+D0
+~
+~
+0 0 1518
+S
+#1520
+Making a room~
+You are in an unfinished room.
+~
+15 0 0
+S
+$~

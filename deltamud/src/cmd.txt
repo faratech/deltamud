@@ -1,0 +1,5 @@
+;          addsnow  delsnow  handbook pfileclean 
+rename shutdow    shutdown   skillset stopauc teleport      
+uptime
+
+cmdreroll

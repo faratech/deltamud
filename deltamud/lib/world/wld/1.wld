@@ -1,0 +1,1166 @@
+#100
+The Temple Of Itrius~
+   You are in the ancient Temple of Itrius, one of the great marvels of the
+world and the center of the city.  You're in the center of the temple, near the
+altar.  You feel as though you are sheltered here from the outside world,
+probably because the temple is built out of bronze, gold and stain-glass.  
+There is an area for people to come, sit, and worship their deity.  There are
+exists in all directions.    
+~
+1 1048732 1
+D0
+~
+~
+0 0 107
+D1
+~
+~
+0 0 101
+D2
+~
+~
+0 0 110
+D3
+~
+~
+0 0 104
+S
+#101
+Main Street~
+   The street is lined with various merchants, travelers, and all sorts of
+people.  The great creations of the world are all around you.  This is truly
+civilization.  You are surrounded by gardens.  Just to the north of here is the
+Garden of Cailia, and to the south lies the Garden of Eros.    
+~
+1 0 1
+D0
+~
+~
+0 0 143
+D1
+~
+~
+0 0 102
+D2
+~
+~
+0 0 145
+D3
+~
+~
+0 0 100
+S
+#102
+Main Street~
+   The main street is made out of cobblestone and leads west to the Temple of
+Itrius.  Just to the north of here is a thatched-roof cottage inn.  The smell
+of delicious pastries and baked bread is coming from the south.  You see that a
+bakery is right over there.  The street continues in both directions.    
+~
+1 0 1
+D0
+~
+~
+0 0 150
+D1
+~
+~
+0 0 103
+D2
+~
+~
+0 0 151
+D3
+~
+~
+0 0 101
+S
+#103
+Main Street~
+   You're on Main Street, there seems to be some kind of goods being sold to
+the north in a large wooden shop.  There seems to be some kind of guild to the
+south, but you suppose you would have to get closer to see exactly what it is.
+Just to the east of here is the east guard tower.    
+~
+1 0 1
+D0
+~
+~
+0 0 152
+D1
+~
+~
+0 0 136
+D2
+~
+~
+0 0 153
+D3
+~
+~
+0 0 102
+S
+#104
+Main Street~
+   The street is lined with various merchants, travelers, and all sorts of
+people.  The great creations of the world are all around you.  This is truly
+civilization.  You are surrounded by gardens.  Just to the north of here is the
+Garden of Elissa, and to the south lies the Garden of Velouria.    
+~
+1 0 1
+D0
+~
+~
+0 0 142
+D1
+~
+~
+0 0 100
+D2
+~
+~
+0 0 144
+D3
+~
+~
+0 0 105
+S
+#105
+Main Street~
+   The main street is made out of cobblestone and leads east to the Temple of
+Itrius.  Just to the north of here is the donation hall.  There is quite a
+crowd coming from the bank to the south.  The street continues in both
+directions.    
+~
+1 0 1
+D0
+~
+~
+0 0 146
+D1
+~
+~
+0 0 104
+D2
+~
+~
+0 0 147
+D3
+~
+~
+0 0 106
+S
+#106
+Main Street~
+   You're on Main Street, theres some kind of guild to the north, but you
+suppose you would have to get closer to see exactly what it is.  Looking to the
+south you see the royal flag of Anacreon.  Ah, the post office.  Just to the
+west of here is the east guard tower.    
+~
+1 0 1
+D0
+   Its a building constructed out of stone with a wooden roof.  There seems to
+be a sign, you can barely make it out: "Artisan"
+~
+~
+0 0 148
+D1
+~
+~
+0 0 105
+D2
+~
+~
+0 0 149
+D3
+~
+~
+0 0 131
+S
+#107
+Anjanas Road~
+   You are on a road just north of the Temple of Itrius; one of the few parts
+of the city that give you a clear impression of nature.  There are several
+beautiful trees here.  Some small paths to the east and west lead out to a few
+of the city gardens.    
+~
+1 0 1
+D0
+~
+~
+0 0 108
+D1
+~
+~
+0 0 143
+D2
+~
+~
+0 0 100
+D3
+~
+~
+0 0 142
+S
+#108
+Anjanas Road~
+   You are on a road just south of the castle gates.  The road goes both ways,
+to the north and to the south.  The sides of several buildings prevent passage
+to the east and west.  This road looks as if it has been traveled quite well.
+~
+1 0 1
+D0
+~
+~
+0 0 109
+D2
+~
+~
+0 0 107
+S
+#109
+Before The Castle Gates~
+   You stand before the castle gates in Itrius.  The royal castle of Anacreon
+looks distant, even from here.  The powerful gates prevent access from
+unauthorized intruders and are often closed to the public.  There are roads to
+the east and west of here leading to several homes and government buildings.  
+~
+1 0 1
+D1
+~
+~
+0 0 125
+D2
+~
+~
+0 0 108
+D3
+~
+~
+0 0 121
+S
+#110
+Commoner's Square~
+   You are just south of the Temple of Itrius.  There are several merchants
+here and there bartering for goods, and the usual citizens coming and going.  
+You particularly notice an assortment of fine plants and flowers that have been
+growing here.  There are some tables and chairs here as well.  Small paths
+trail off to the east and west to several of the city's gardens.    
+~
+1 0 1
+D0
+~
+~
+0 0 100
+D1
+~
+~
+0 0 145
+D2
+~
+~
+0 0 111
+D3
+~
+~
+0 0 144
+E
+flower flowers plant plants~
+   The town and city planners have planted assortments of roses, marigolds,
+daffodils, and daisies here.  They are quite beautiful.    
+~
+S
+#111
+Anjanas Road~
+   You are on a single plot of road just south of the commoner's square.  The
+cobblestone seems to be heavily traveled in this area.  You can see the
+ever-lasting hustle and bustle of the Market Square just to the south of here.
+~
+1 0 1
+D0
+~
+~
+0 0 110
+D2
+~
+~
+0 0 112
+S
+#112
+Market Plaza~
+   You are at the market plaza, just north of the southern gate of Itrius.  
+People from every different walk of life have come here.  Some of them are
+bartering, buying, and selling goods.  The occasional crowd seems to gather
+regardless of day or night.    
+~
+1 0 1
+D0
+~
+~
+0 0 111
+D1
+~
+~
+0 0 117
+D2
+~
+~
+0 0 141
+D3
+~
+~
+0 0 113
+S
+#113
+Otus Avenue~
+   You are on a cobblestone road just west of the Market Plaza.  You notice a
+large sandstone building just to the north of here, it's roof appears to be
+made out of a white plaster that seems to resemble marble.    
+~
+1 0 1
+D0
+~
+~
+0 0 160
+D1
+~
+~
+0 0 112
+D3
+~
+~
+0 0 114
+S
+#114
+Otus Avenue~
+   You are on a cobblestone road that spans to the east and west in both
+directions.  There is a medium sized home just to the north of here constructed
+out of wood and stone.  It is surrounded by a small fresh vegetable garden.  
+~
+1 0 1
+D0
+~
+~
+0 0 161
+D1
+~
+~
+0 0 113
+D3
+~
+~
+0 0 115
+S
+#115
+Otus Avenue~
+   You are on a road just east of the southwest guard tower.  There seems to be
+a shagged looking wooden house just to the north of here.  You notice two
+lanterns attached on either side of the door.    
+~
+1 0 1
+D0
+~
+~
+0 0 162
+D1
+~
+~
+0 0 114
+D3
+~
+~
+0 0 116
+S
+#116
+Under The Southwest Guard Tower~
+   You are under the southwest guard tower of Itrius.  A ladder leads up to the
+top of the tower.  The southern towers provide a line of defense against
+possible invasions or raids and are guarded night and day.  Nestor Road and
+Otus Avenue intersect here.    
+~
+1 8 1
+D0
+~
+~
+0 0 133
+D1
+~
+~
+0 0 115
+S
+#117
+Otus Avenue~
+   You are on a cobblestone road just east of the Market Square.  There is an
+odd looking house just to the north of here, which you suspect is probably the
+home of one of the many inhabitants of this fine city.    
+~
+1 0 1
+D0
+~
+~
+0 0 163
+D1
+~
+~
+0 0 118
+D3
+~
+~
+0 0 112
+S
+#118
+Otus Avenue~
+   You are on a road that spans east and west in both directions.  There is a
+thatch-roofed building just to the north of here, with a rather pleasant sign
+on the door which reads "Armory".    
+~
+1 0 1
+D0
+~
+~
+0 0 164
+D1
+~
+~
+0 0 119
+D3
+~
+~
+0 0 117
+S
+#119
+Otus Avenue~
+   You're on a cobblestone road that leads east and west.  You can see the
+southeast guard tower just to the east of here.  There seems to be a large
+stone-and-platter house to the north but you can't quite figure out what it is.
+~
+1 0 1
+D0
+~
+~
+0 0 165
+D1
+~
+~
+0 0 120
+D3
+~
+~
+0 0 118
+S
+#120
+Under The Southeast Guard Tower~
+   You're on an intersection between Otus Avenue and Nero Road, right
+underneath the southeast guard tower.  The tower is made out of stone and
+there's some stairs leading up from here.  You can go west or north from here.
+~
+1 8 1
+D0
+~
+~
+0 0 138
+D3
+~
+~
+0 0 119
+S
+#121
+Hathgar Drive~
+   You are on a cobblestone road just west of the castle gates.  You see a
+large round wooden encampment just to the south of here.  Several city guards
+seem to be training around here.    
+~
+1 0 1
+D1
+~
+~
+0 0 109
+D2
+~
+~
+0 0 154
+D3
+~
+~
+0 0 122
+S
+#122
+Hathgar Drive~
+   You are on a cobblestone road that leads to the east and west.  There seems
+to be a small house to the south of here.  Besides the occasional chirping of
+birds and rustle of trees, you don't see anything unusual around here.    
+~
+1 0 1
+D1
+~
+~
+0 0 121
+D2
+~
+~
+0 0 155
+D3
+~
+~
+0 0 123
+S
+#123
+Hathgar Drive~
+   You are on a road just north of a rather archaic looking building.  The
+outside of the building seems to be made out of stone and platter.  There is a
+large round wooden door here that looks as older then the tree it might have
+been cut from.    
+~
+1 0 1
+D1
+~
+~
+0 0 122
+D2
+~
+~
+0 0 156
+D3
+~
+~
+0 0 124
+S
+#124
+Under The Northwest Guard Tower~
+   You are under the northwest guard tower of Itrius.  A ladder leads up to the
+top of the tower, one of four.  The northern towers provide a healthy view of
+the city for many city officials and law-enforcing city guards.  Nestor Road
+and Hathgar Drive intersect here.    
+~
+1 8 1
+D1
+~
+~
+0 0 123
+D2
+~
+~
+0 0 129
+S
+#125
+Hathgar Drive~
+   You are on a cobblestone road just east of the castle gates.  A small stone
+building with a wooden roof is just to the south of here.  A bellowing smoke
+stack is coming out of the roof, polluting the air around here.  The road
+continues to the east and west.    
+~
+1 0 1
+D1
+~
+~
+0 0 126
+D2
+~
+~
+0 0 157
+D3
+~
+~
+0 0 109
+S
+#126
+Hathgar Drive~
+   You are on a cobblestone road that continues to the east and west in both
+directions.  There is a lengthy marble building just to the south of here, but
+the entrance seems to be further to the east.    
+~
+1 0 1
+D1
+~
+~
+0 0 127
+D3
+~
+~
+0 0 125
+S
+#127
+Hathgar Drive~
+   You are on a road just north of what appears to be a lengthy building made
+out of marble.  There is a large gold banner a few feet above the entrance that
+reads "City Hall of Itrius, Provisional Government".    
+~
+1 0 1
+D1
+~
+~
+0 0 128
+D2
+~
+~
+0 0 159
+D3
+~
+~
+0 0 126
+S
+#128
+Under The Northeast Guard Tower~
+   You're on an intersection between Hedgar Drive and Nero Road, right
+underneath the northeast guard tower.  The tower is made out of stone and
+there's some stairs leading up from here.  You can go west or south from here.
+~
+1 8 1
+D2
+~
+~
+0 0 134
+D3
+~
+~
+0 0 127
+S
+#129
+Nestor Road~
+   You're on a cobblestone road that leads to the north and south.  Just to the
+north of here lies the northwest guard tower.  Shrubs and bushes grow on the
+side of the road here.    
+~
+1 0 1
+D0
+~
+~
+0 0 124
+D2
+~
+~
+0 0 130
+S
+#130
+Nestor Road~
+   You're on a road just north of the west guard tower.  The road is made out
+of cobblestone and is well paved.  You see nothing out of the ordinary.    
+~
+1 0 1
+D0
+~
+~
+0 0 129
+D2
+~
+~
+0 0 131
+S
+#131
+Under The West Guard Tower~
+   You're underneath the west guard tower on Main Street.  The tower is made
+out of stone and there are stairs leading upward.  The city gates are just to
+the west of here, and Main Street continues east.  You are sheltered from the
+weather here.    
+~
+1 8 1
+D0
+~
+~
+0 0 130
+D1
+~
+~
+0 0 106
+D2
+~
+~
+0 0 132
+D3
+~
+~
+0 0 139
+S
+#132
+Nestor Road~
+   You are on a road just north of a rather archaic looking building.  The
+outside of the building seems to be made out of stone and platter.  There is a
+large round wooden door here that looks as older then the tree it might have
+been cut from.    
+~
+1 0 1
+D0
+~
+~
+0 0 131
+D2
+~
+~
+0 0 133
+S
+#133
+Nestor Road~
+   You are on a cobblestone road just north of the southwest guard tower.  
+There are some daffodils growing here.  You see nothing else out of the
+ordinary.    
+~
+1 0 1
+D0
+~
+~
+0 0 132
+D2
+~
+~
+0 0 116
+S
+#134
+Nero Road~
+   You are on a side street leading north and south.  All you can see to the
+south of here is road, and to the north you can see the northeast guard tower.
+The side of some building is just to the west of here.  It looks like the
+entrance is to the northwest.    
+~
+1 0 1
+D0
+~
+~
+0 0 128
+D2
+~
+~
+0 0 135
+S
+#135
+Nero Road~
+   You are on a side street leading north and south.  All you can see to the
+north of here is road, and to the south you can see the east guard tower.  The
+side of some building is just to the west of here.  It looks like the entrance
+is to the southwest.    
+~
+1 0 1
+D0
+~
+~
+0 0 134
+D2
+~
+~
+0 0 136
+S
+#136
+Under The East Guard Tower~
+   You're underneath the east guard tower on Main Street.  The tower is made
+out of stone and there are stairs leading upward.  The city gates are just to
+the east of here, and Main Street continues west.  You are sheltered from the
+weather here.    
+~
+1 8 1
+D0
+~
+~
+0 0 135
+D1
+~
+~
+0 0 140
+D2
+~
+~
+0 0 137
+D3
+~
+~
+0 0 103
+S
+#137
+Nero Road~
+   You are on a side street leading north and south.  All you can see to the
+south of here is road, and to the north you can see the east guard tower.  The
+side of some building is just to the west of here.  It looks like the entrance
+is to the northwest.    
+~
+1 0 1
+D0
+~
+~
+0 0 136
+D2
+~
+~
+0 0 138
+S
+#138
+Nero Road~
+   You are on a side street leading north and south.  There's road to the north
+of here.  The side of some building is just to the west of here.  You assume
+you could get to the entrance by heading southwest.    
+~
+1 0 1
+D0
+~
+~
+0 0 137
+D2
+~
+~
+0 0 120
+S
+#139
+Inside The West Gate~
+   You are inside the west gate of the city of Itrius, capitol of Anacreon.  
+To the east you can see the guard tower and the rest of the city.  You can see
+wilderness from beyond the gates to the west.    
+~
+1 0 1
+D1
+~
+~
+0 0 131
+D3
+~
+~
+0 0 2000000
+S
+#140
+Inside The East Gate~
+   You are inside the east gate of the city of Itrius, capitol of Anacreon.  
+To the west you can see the guard tower and the rest of the city.  You can see
+wilderness from beyond the gates to the east.    
+~
+1 0 1
+D1
+~
+~
+0 0 2000000
+D3
+~
+~
+0 0 136
+S
+#141
+Inside The South Gate~
+   You are inside the southern gates of the city of Itrius.  The gates and
+surrounding areas are protected and watched day and night by the royal guard.
+From here you can either go to the north or south.    
+~
+1 0 1
+D0
+~
+~
+0 0 112
+D2
+~
+~
+0 0 2000000
+S
+#142
+Garden Of Elissa~
+   You are in one of the four gardens of Itrius.  The garden of Elissa is full
+of some of the most amazing ferns and exotic plant life that you have ever
+seen.  It is as if by some divine magic that these beautiful flowers and exotic
+plants of every variety could grow in this climate.    
+~
+1 0 1
+D1
+~
+~
+0 0 107
+D2
+~
+~
+0 0 104
+S
+#143
+Garden Of Cailia~
+   The garden of Cailia is clearly dedicated to the neutral deity of the same
+name.  This garden is almost cold.  There are some beautiful pine trees and a
+pond of ice, in the middle of a busy city.  It is somehow enchanting.    
+~
+1 0 1
+D2
+~
+~
+0 0 101
+D3
+~
+~
+0 0 107
+S
+#144
+Garden Of Velouria~
+   The garden of Velouria is filled with moist plants and beautiful hedges.  
+There is a strange breeze, and when you listen closely you can almost hear the
+sound of wind chimes.  There is a strange feeling in the air here, although you
+can't quite pinpoint it.    
+~
+1 0 1
+D0
+~
+~
+0 0 104
+D1
+~
+~
+0 0 110
+S
+#145
+Garden Of Eros~
+   You are in the garden of Eros.  The serene feeling of this garden seems to
+put your heart at ease.  There are beautiful dandelions and lilacs growing
+here.  You can hear the sounds of wildlife so clearly.    
+~
+1 0 1
+D0
+~
+~
+0 0 101
+D3
+~
+~
+0 0 110
+S
+#146
+The Donation Hall~
+   The donation hall was setup by the local city government to provide the
+homeless and those in need with supplies to survive.  Whenever someone donates
+something, it appears here.  For more information, you might want to type 'help
+donate'.    
+~
+1 8 1
+D2
+~
+~
+0 0 105
+S
+#147
+The Bank Of Itrius~
+   The bank floor is embroidered with the seal of the Bank of Anacreon.  
+Everyone in town knows the story of this great bank company, which has been
+around for thousands of years.  Even some towns outside of the kingdom are
+rumored to have banks from this company in them.    
+~
+1 24 1
+D0
+~
+~
+0 0 105
+S
+#148
+The Artisan Guild~
+   This building seems to be well furnished.  The room is large, and on the
+floor is one of the finest rugs you have ever seen sewn in your life.  
+Strangely enough, noone is here.    
+~
+1 8 1
+D2
+~
+~
+0 0 106
+S
+#149
+The Post Office~
+   The post office was established in major cities around the kingdom so that
+the royal guard could communicate quickly.  This office seems to be bustling
+with activity as usual.    
+~
+1 8 1
+D0
+~
+~
+0 0 106
+S
+#150
+The Village Inn~
+   You guess that this inn has been here for awhile, and that's why its called
+the Village Inn.  Thinking about it now, its kind of hard to imagine Itrius
+being anything but a large bustling city.  You can rent here for the night by
+typing 'rent'.  For more info see: help rent
+~
+1 8 1
+D2
+~
+~
+0 0 102
+S
+#151
+The Bakery~
+   The bakery is almost a dream come true.  The wood of the building itself
+reminds you of something like a magic house made out of cinnamon and sugar.  
+The sight of the delicious pastries and bread lure you forward.  You can't help
+but think what a wonderful place this is.    
+~
+1 8 1
+D0
+~
+~
+0 0 102
+S
+#152
+The General Store~
+   This shop seems to be selling various goods that come in and out of the city
+through merchants and traders.  If you needed to, you could probably sell some
+items here too.    
+~
+1 8 1
+D2
+~
+~
+0 0 103
+S
+#153
+The Cleric Guild~
+   This is a very odd building, with some kind of strange holy or runic symbols
+placed the wall to the south.  You can faintly smell the scent of some kind of
+incense, but for some reason, this place is empty.    
+~
+1 8 1
+D0
+~
+~
+0 0 103
+S
+#154
+Cityguard Barracks~
+   You are in the city guard barracks in Itrius.  The city guards of this town
+do not live in the barracks, but come here often to supply themselves, rest,
+and train.  New city guards are sent here directly from a kingdom-run
+university somewhere outside of this region.    
+~
+1 8 1
+D0
+~
+~
+0 0 121
+S
+#155
+In A Small Cottage~
+   You are in someone's house.  This is a small one-room cottage with a bed,
+dinner table, and fireplace.  You feel cozy and at peace here, although
+somewhat uncomfortable being in someone else's house.    
+~
+1 8 1
+D0
+~
+~
+0 0 122
+S
+#156
+Mage Guild~
+You are in an unfinished room.
+~
+1 8 1
+D0
+~
+~
+0 0 123
+S
+#157
+The Forge~
+   You find yourself inside the midst of a sweltering forge.  The fires burn
+from the molten ovens.  You feel a sense of importance here.  The weapon smiths
+of old carved the legendary magic swords at this very location centuries ago.
+Sadly, you can only pretend that maybe some of the spirit of those days has
+remained in this historic building, which is now run by a simple smith from out
+of town.    
+~
+1 8 1
+D0
+~
+~
+0 0 125
+S
+#158
+Mayor's Office~
+   The mayor's office is filled with bookshelves and a finely woven carpet.  
+An elegant desk, which seems to be made out of oak, is in the middle of the
+room.  There is an oil lamp on top of it.  Papers and business paraphernalia
+are all around.    
+~
+1 8 1
+D1
+~
+~
+0 0 159
+S
+#159
+City Hall~
+   You are in the city hall of Itrius.  The local government here runs city
+events and takes care of city matters.  The mayor of Itrius is designated
+directly by the king of Anacreon.  The mayor's office is just to the west of
+here.    
+~
+1 8 1
+D0
+~
+~
+0 0 127
+D3
+~
+~
+0 0 158
+S
+#160
+The Library~
+   You are in the old city library.  Many people come here to read up on
+literature, or to take a break.  A fine carpet expands outwards from the center
+of the room to the vast collection of books stored in old wooden shelves.    
+~
+1 8 1
+D2
+~
+~
+0 0 113
+S
+#161
+In A Cozy House~
+   You are in someone's house.  A pot of fresh stew is on a stove towards the
+east wall.  There are several doors, which you assume, might lead to other
+parts of the house.  But it would be quite criminal and against your better
+judgment to intrude further.    
+~
+1 8 1
+D2
+~
+~
+0 0 114
+S
+#162
+Thief Guild~
+   You are in a run-down old building.  Dust is everywhere, and some spider
+webs.  You don't really see anyone here, oddly enough.  Quite strange.    
+~
+1 8 1
+D2
+~
+~
+0 0 115
+S
+#163
+In An Empty House~
+   You are in an empty house which lacks furniture of any kind.  It looks
+rather new and refurbished.  One might conclude that whoever lived here has
+moved out, and that the house is now vacant for now.    
+~
+1 8 1
+D2
+~
+~
+0 0 117
+S
+#164
+The Armory~
+   You are in the splendid city armory.  Along the walls behind the counter you
+can see nothing but different armors of all variety and assortment.  Majestic
+plate mail, silver garments, and coifs.  You see everything you could possibly
+want.  Of course, only some of it is for sale.    
+~
+1 8 1
+D2
+~
+~
+0 0 118
+S
+#165
+Warrior Guild~
+   You are in a strong looking building; the interior is made out of both a
+combination of stone and wood.  There are weapon marks on the wooden floor, but
+strangely, no one is here.    
+~
+1 8 1
+D2
+~
+~
+0 0 119
+S
+$~

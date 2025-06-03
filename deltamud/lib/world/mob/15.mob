@@ -1,0 +1,27 @@
+#1500
+skeleton undead~
+the skeleton~
+A skeleton groans with his untimely awakening
+~
+   Just bones...  You can see right through him.  He looks mean.    
+~
+57416 1024 0 E
+X7 42 36 36 36 36 1d1+122 1d19
+70 2860
+9 9 1
+BareHandAttack: 5
+E
+#1501
+bat~
+a bat~
+A vampire bat is perched here.
+~
+Vile creatures of disgusting porportions..    
+~
+213002 0 0 E
+X5 75 75 75 75 75 1d1+88 1d13
+50 1830
+9 9 1
+BareHandAttack: 4
+E
+$

@@ -1,0 +1,19 @@
+#1100
+worm giant glowing~
+the giant worm~
+A giant glowing worm stands here.
+~
+   A skin covered with a glowing slime, the worm-like creature is an
+interesting specimen indeed.  It is a very long creature, you estimate it's
+height at or about seven feel, but it only stands showing the upper four feet
+of it's body.  On the creatures body are small wrinkles in it's skin, one every
+about five inches, making you believe that it could actually be longer than
+seven feet if it ever stretched out.    
+~
+24586 0 5 E
+X5 0 0 0 0 0 1d1+88 1d13
+0 1250
+9 9 0
+BareHandAttack: 6
+E
+$
