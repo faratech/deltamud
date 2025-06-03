@@ -1,75 +1,104 @@
-Jun  3 05:17:07 :: Quick boot mode -- rent check supressed.
-Jun  3 05:17:07 :: Using lib as data directory.
-Jun  3 05:17:07 :: Running game on port 4000.
-Jun  3 05:17:07 :: Finding player limit.
-Jun  3 05:17:07 :: Setting player limit to 300 using rlimit.
-Jun  3 05:17:07 :: Opening mother connection.
-Jun  3 05:17:07 :: Binding to all IP interfaces on this host.
-Jun  3 05:17:07 :: Boot db -- BEGIN.
-Jun  3 05:17:07 :: Resetting the game time:
-Jun  3 05:17:07 ::    Current Gametime: 0H 2D 0M 32523Y.
-Jun  3 05:17:07 :: Reading news, credits, help, bground, info & motds.
-Jun  3 05:17:07 :: Loading zone table.
-Jun  3 05:17:07 :: Loading triggers and generating index.
-Jun  3 05:17:07 :: Loading rooms.
-Jun  3 05:17:07 :: Renumbering rooms.
-Jun  3 05:17:07 :: Checking start rooms.
-Jun  3 05:17:07 :: Loading mobs and generating index.
-Jun  3 05:17:07 :: Loading objs and generating index.
-Jun  3 05:17:07 :: Renumbering zone table.
-Jun  3 05:17:07 :: Loading surface map.
-Jun  3 05:17:07 :: Loading shops.
-Jun  3 05:17:07 :: Loading help entries.
-Jun  3 05:17:07 :: Initializing connection to mySQL database server...
-Jun  3 05:17:07 :: Generating player index.
-Jun  3 05:17:07 :: Loading players database.
-Jun  3 05:17:07 ::    5 players in database.
-Jun  3 05:17:07 :: Loading fight messages.
-Jun  3 05:17:07 :: Loading social messages.
-Jun  3 05:17:07 :: Social table contains 106 socials.
-Jun  3 05:17:07 :: Command info rebuilt, 449 total commands.
-Jun  3 05:17:07 :: Assigning function pointers:
-Jun  3 05:17:07 ::    Mobiles.
-Jun  3 05:17:07 :: SYSERR: Attempt to assign spec to non-existant mob #4800
-Jun  3 05:17:07 :: SYSERR: Attempt to assign spec to non-existant mob #4801
-Jun  3 05:17:07 :: SYSERR: Attempt to assign spec to non-existant mob #4802
-Jun  3 05:17:07 ::    Shopkeepers.
-Jun  3 05:17:07 ::    Objects.
-Jun  3 05:17:07 ::    Rooms.
-Jun  3 05:17:07 ::    Spells.
-Jun  3 05:17:07 :: Assigning spell and skill levels.
-Jun  3 05:17:07 :: Auction system reset.
-Jun  3 05:17:07 :: Sorting command list and spells.
-Jun  3 05:17:07 :: Booting mail system.
-Jun  3 05:17:07 ::    0 bytes read.
-Jun  3 05:17:07 ::    Mail file read -- 0 messages.
-Jun  3 05:17:07 :: Reading banned site and invalid-name list.
-Jun  3 05:17:07 :: Resetting Limbo - Internal (rooms 0-99).
-Jun  3 05:17:07 :: Resetting The City of Itrius (rooms 100-199).
-Jun  3 05:17:07 :: Resetting ST2 (rooms 200-299).
-Jun  3 05:17:07 :: Resetting ST3 (rooms 300-399).
-Jun  3 05:17:07 :: Resetting The Jail (messed up) (rooms 400-499).
-Jun  3 05:17:07 :: Resetting Meiden Forest (rooms 500-599).
-Jun  3 05:17:07 :: Resetting Oranthalon (Methus) (rooms 600-699).
-Jun  3 05:17:07 :: Resetting New Zone (Infinitie) (rooms 700-1099).
-Jun  3 05:17:07 :: Resetting The Mystery (Ace) (rooms 1100-1199).
-Jun  3 05:17:07 :: Resetting God Simplex (rooms 1200-1299).
-Jun  3 05:17:07 :: Resetting Castle In Ruins (Uther) (rooms 1300-1499).
-Jun  3 05:17:07 :: Resetting Jarik's Zone - maybe he won't abandon this one (rooms 1500-1599).
-Jun  3 05:17:07 :: Resetting Mountain Ruins (Balthazaar) (rooms 1600-1699).
-Jun  3 05:17:07 :: Resetting The Kobold Caves (Lorr) (rooms 1700-2099).
-Jun  3 05:17:07 :: Resetting Goblin Outpost/Forest/Manner (Lorr) (rooms 2100-2199).
-Jun  3 05:17:07 :: Resetting Drunamour Keep (Walker) (rooms 2200-2299).
-Jun  3 05:17:07 :: Resetting Surface Map (rooms 2300-2000000).
-Jun  3 05:17:07 :: Booting houses.
-Jun  3 05:17:07 :: House control file does not exist.
-Jun  3 05:17:07 :: Booting clans.
-Jun  3 05:17:07 :: Booting clans . . .
-Jun  3 05:17:07 :: Done.
-Jun  3 05:17:07 :: Boot db -- DONE.
-Jun  3 05:17:07 :: Signal trapping.
-Jun  3 05:17:07 :: Entering game loop.
-Jun  3 05:17:07 :: No connections.  Going to sleep.
-Jun  3 05:17:22 :: New connection.  Waking up.
-Jun  3 05:17:52 :: Losing descriptor without char.
-Jun  3 05:17:52 :: No connections.  Going to sleep.
+Jun  3 07:25:02 :: Quick boot mode -- rent check supressed.
+Jun  3 07:25:02 :: Using lib as data directory.
+Jun  3 07:25:02 :: Running game on port 4000.
+Jun  3 07:25:02 :: Finding player limit.
+Jun  3 07:25:02 :: Setting player limit to 300 using rlimit.
+Jun  3 07:25:02 :: Opening mother connection.
+Jun  3 07:25:02 :: Binding to all IP interfaces on this host.
+Jun  3 07:25:02 :: Boot db -- BEGIN.
+Jun  3 07:25:02 :: Resetting the game time:
+Jun  3 07:25:02 ::    Current Gametime: 0H 2D 0M 32523Y.
+Jun  3 07:25:02 :: Reading news, credits, help, bground, info & motds.
+Jun  3 07:25:02 :: Loading zone table.
+Jun  3 07:25:02 :: Loading triggers and generating index.
+Jun  3 07:25:02 :: Loading rooms.
+Jun  3 07:25:02 :: Renumbering rooms.
+Jun  3 07:25:02 :: Checking start rooms.
+Jun  3 07:25:02 :: Loading mobs and generating index.
+Jun  3 07:25:02 :: Loading objs and generating index.
+Jun  3 07:25:02 :: Renumbering zone table.
+Jun  3 07:25:02 :: Loading surface map.
+Jun  3 07:25:02 :: Loading shops.
+Jun  3 07:25:02 :: Loading help entries.
+Jun  3 07:25:02 :: Initializing connection to mySQL database server...
+Jun  3 07:25:02 :: Generating player index.
+Jun  3 07:25:02 :: Loading players database.
+Jun  3 07:25:02 ::    5 players in database.
+Jun  3 07:25:02 :: Loading fight messages.
+Jun  3 07:25:02 :: Loading social messages.
+Jun  3 07:25:02 :: Social table contains 106 socials.
+Jun  3 07:25:02 :: Command info rebuilt, 449 total commands.
+Jun  3 07:25:02 :: Assigning function pointers:
+Jun  3 07:25:02 ::    Mobiles.
+Jun  3 07:25:02 :: SYSERR: Attempt to assign spec to non-existant mob #4800
+Jun  3 07:25:02 :: SYSERR: Attempt to assign spec to non-existant mob #4801
+Jun  3 07:25:02 :: SYSERR: Attempt to assign spec to non-existant mob #4802
+Jun  3 07:25:02 ::    Shopkeepers.
+Jun  3 07:25:02 ::    Objects.
+Jun  3 07:25:02 ::    Rooms.
+Jun  3 07:25:02 ::    Spells.
+Jun  3 07:25:02 :: Assigning spell and skill levels.
+Jun  3 07:25:02 :: Auction system reset.
+Jun  3 07:25:02 :: Sorting command list and spells.
+Jun  3 07:25:02 :: Booting mail system.
+Jun  3 07:25:02 ::    0 bytes read.
+Jun  3 07:25:02 ::    Mail file read -- 0 messages.
+Jun  3 07:25:02 :: Reading banned site and invalid-name list.
+Jun  3 07:25:02 :: Resetting Limbo - Internal (rooms 0-99).
+Jun  3 07:25:02 :: Resetting The City of Itrius (rooms 100-199).
+Jun  3 07:25:02 :: Resetting ST2 (rooms 200-299).
+Jun  3 07:25:02 :: Resetting ST3 (rooms 300-399).
+Jun  3 07:25:02 :: Resetting The Jail (messed up) (rooms 400-499).
+Jun  3 07:25:02 :: Resetting Meiden Forest (rooms 500-599).
+Jun  3 07:25:02 :: Resetting Oranthalon (Methus) (rooms 600-699).
+Jun  3 07:25:02 :: Resetting New Zone (Infinitie) (rooms 700-1099).
+Jun  3 07:25:02 :: Resetting The Mystery (Ace) (rooms 1100-1199).
+Jun  3 07:25:02 :: Resetting God Simplex (rooms 1200-1299).
+Jun  3 07:25:02 :: Resetting Castle In Ruins (Uther) (rooms 1300-1499).
+Jun  3 07:25:02 :: Resetting Jarik's Zone - maybe he won't abandon this one (rooms 1500-1599).
+Jun  3 07:25:02 :: Resetting Mountain Ruins (Balthazaar) (rooms 1600-1699).
+Jun  3 07:25:02 :: Resetting The Kobold Caves (Lorr) (rooms 1700-2099).
+Jun  3 07:25:02 :: Resetting Goblin Outpost/Forest/Manner (Lorr) (rooms 2100-2199).
+Jun  3 07:25:02 :: Resetting Drunamour Keep (Walker) (rooms 2200-2299).
+Jun  3 07:25:02 :: Resetting Surface Map (rooms 2300-2000000).
+Jun  3 07:25:02 :: Booting houses.
+Jun  3 07:25:02 :: House control file does not exist.
+Jun  3 07:25:02 :: Booting clans.
+Jun  3 07:25:02 :: Booting clans . . .
+Jun  3 07:25:02 :: Done.
+Jun  3 07:25:02 :: Boot db -- DONE.
+Jun  3 07:25:02 :: Signal trapping.
+Jun  3 07:25:02 :: Entering game loop.
+Jun  3 07:25:02 :: No connections.  Going to sleep.
+Jun  3 07:25:25 :: New connection.  Waking up.
+Jun  3 07:25:27 :: DEBUG: After loading/fixing Mike - gold: 1000, bank_gold: 0
+Jun  3 07:25:28 :: DEBUG: Checking password upgrade for Mike, current hash: 'Mi6BSnIOL9', length: 10
+Jun  3 07:25:28 :: DEBUG: Password needs upgrade for Mike
+Jun  3 07:25:28 :: DEBUG: Generated new hash for Mike: '$5$USfTtCCkwZbJiEPb$6QWcChtkkSEITwb671hsH.GfJMQ6iX4aYneZHhcciA6'
+Jun  3 07:25:28 :: Upgrading password security for Mike
+Jun  3 07:25:28 :: DEBUG: About to save character Mike
+Jun  3 07:25:28 :: WARNING: Large value in column 15 (last_logon): 1748935528
+Jun  3 07:25:28 :: Clamping last_logon to 1000000000 (was 1748935528)
+Jun  3 07:25:28 :: WARNING: Large value in column 24 (bank_gold): 1073741824000000000
+Jun  3 07:25:28 :: Clamping bank_gold to 0 (was 1073741824000000000)
+Jun  3 07:25:28 :: WARNING: Large value in column 46 (pref): 1616933360
+Jun  3 07:25:28 :: Clamping pref to 0 (was 1616933360)
+Jun  3 07:25:28 :: WARNING: Large value in column 63 (retreat_level): 450971566080
+Jun  3 07:25:28 :: Clamping retreat_level to 0 (was 450971566080)
+Jun  3 07:25:28 :: WARNING: Large value in column 69 (godcmds1): 2147483647
+Jun  3 07:25:28 :: Clamping godcmds1 to 0 (was 2147483647)
+Jun  3 07:25:28 :: DEBUG: Character saved successfully to database
+Jun  3 07:25:28 :: DEBUG: Skipped save for character Mike
+Jun  3 07:25:28 :: Mike [127.000.000.001] has connected.
+Jun  3 07:26:17 :: Mike entering game with no equipment.
+Jun  3 07:26:17 :: WARNING: Large value in column 15 (last_logon): 1748935577
+Jun  3 07:26:17 :: Clamping last_logon to 1000000000 (was 1748935577)
+Jun  3 07:26:17 :: WARNING: Large value in column 24 (bank_gold): 1073741824000000000
+Jun  3 07:26:17 :: Clamping bank_gold to 0 (was 1073741824000000000)
+Jun  3 07:26:17 :: WARNING: Large value in column 46 (pref): 1616933360
+Jun  3 07:26:17 :: Clamping pref to 0 (was 1616933360)
+Jun  3 07:26:17 :: WARNING: Large value in column 63 (retreat_level): 450971566080
+Jun  3 07:26:17 :: Clamping retreat_level to 0 (was 450971566080)
+Jun  3 07:26:17 :: WARNING: Large value in column 69 (godcmds1): 2147483647
+Jun  3 07:26:17 :: Clamping godcmds1 to 0 (was 2147483647)
+Jun  3 07:26:17 :: DEBUG: Character saved successfully to database

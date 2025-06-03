@@ -1893,12 +1893,8 @@ nanny (struct descriptor_data *d, char *arg)
 	close_socket (d);
       else
 	{
-	  /* Temporary: Test original CircleMUD password verification */
-	  sprintf (buf, "DEBUG: Testing password '%s' against stored '%s'", arg, GET_PASSWD (d->character));
-	  mudlog (buf, NRM, LVL_IMPL, TRUE);
-	  
-	  /* Try original CircleMUD method: direct string comparison */
-	  if (strcmp(arg, GET_PASSWD (d->character)) != 0)
+	  /* Use secure password verification with backward compatibility */
+	  if (!verify_password(arg, GET_PASSWD (d->character), GET_NAME (d->character)))
 	    {
 	      sprintf (buf, "Bad PW: %s [%s]", GET_NAME (d->character), d->host);
 	      mudlog (buf, BRF, LVL_GOD, TRUE);
@@ -1948,7 +1944,7 @@ nanny (struct descriptor_data *d, char *arg)
 	      
 	      save_char (d->character, NOWHERE);
 	      
-	      sprintf (buf, "DEBUG: Successfully saved character %s", GET_NAME (d->character));
+	      sprintf (buf, "DEBUG: Skipped save for character %s", GET_NAME (d->character));
 	      mudlog (buf, NRM, LVL_IMPL, TRUE);
 	    } else {
 	      sprintf (buf, "DEBUG: Failed to generate new hash for %s", GET_NAME (d->character));

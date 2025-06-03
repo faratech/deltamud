@@ -423,13 +423,21 @@ int insert_player_entry (struct char_data *ch) {
 
   if (!ch || !ch->player_specials) return 0;
   
-  /* Temporary fix: Skip saving if gold values are corrupted */
-  if (ch->points.gold > 1000000000 || ch->points.gold < -1000000000 ||
-      ch->points.bank_gold > 1000000000 || ch->points.bank_gold < -1000000000) {
-    log("WARNING: Skipping save due to corrupted character data (gold values)");
-    return 1; /* Return success to avoid crashes */
+  /* Fix corrupted gold values before saving */
+  if (ch->points.gold > 1000000000 || ch->points.gold < -1000000000) {
+    sprintf(buf, "WARNING: Fixing corrupted gold value for %s: %d -> 0", GET_NAME(ch), ch->points.gold);
+    log(buf);
+    ch->points.gold = 0;
+  }
+  
+  if (ch->points.bank_gold > 1000000000 || ch->points.bank_gold < -1000000000) {
+    sprintf(buf, "WARNING: Fixing corrupted bank_gold value for %s: %d -> 0", GET_NAME(ch), ch->points.bank_gold);
+    log(buf);
+    ch->points.bank_gold = 0;
   }
 
+  /* Always reinitialize querystring to avoid using stale data */
+  querybuild = 0;
   if (!querybuild) {
     init_querystring(ch, 0);
     querybuild=1;
@@ -484,7 +492,49 @@ int insert_player_entry (struct char_data *ch) {
     if (!columnptrs[i].ptr || !TYPECAST(i, *columnptrs[i].ptr) || (columnptrs[i].type==1 && !*((char **)columnptrs[i].ptr)))
       sprintf(tmpstr, "%sNULL", mode==MODE_UPDATE ? mkqueryset(querystring[i]) : "," );
     else switch (columnptrs[i].type) {
-      case 0: sprintf(tmpstr, "%s%ld",  mode==MODE_UPDATE ? mkqueryset(querystring[i]) : ",", TYPECAST(i, *columnptrs[i].ptr)); break;
+      case 0: 
+        {
+          long value = TYPECAST(i, *columnptrs[i].ptr);
+          /* Log large values to find which column is corrupted */
+          if (value > 1000000000 || value < -1000000000) {
+            char logbuf[256];
+            sprintf(logbuf, "WARNING: Large value in column %d (%s): %ld", i, querystring[i], value);
+            log(logbuf);
+            /* Clamp all large values to reasonable defaults */
+            if (strcmp(querystring[i], "bank_gold") == 0 || 
+                strcmp(querystring[i], "gold") == 0) {
+              sprintf(logbuf, "Clamping %s to 0 (was %ld)", querystring[i], value);
+              log(logbuf);
+              value = 0;
+            } else if (strcmp(querystring[i], "retreat_level") == 0 ||
+                       strcmp(querystring[i], "recall_level") == 0) {
+              sprintf(logbuf, "Clamping %s to 0 (was %ld)", querystring[i], value);
+              log(logbuf);
+              value = 0;
+            } else if (strcmp(querystring[i], "pref") == 0 ||
+                       strcmp(querystring[i], "pref2") == 0 ||
+                       strcmp(querystring[i], "godcmds1") == 0 ||
+                       strcmp(querystring[i], "godcmds2") == 0 ||
+                       strcmp(querystring[i], "godcmds3") == 0 ||
+                       strcmp(querystring[i], "godcmds4") == 0) {
+              sprintf(logbuf, "Clamping %s to 0 (was %ld)", querystring[i], value);
+              log(logbuf);
+              value = 0;
+            } else if (strcmp(querystring[i], "last_logon") == 0 && value > 2000000000) {
+              /* Clamp to current time if way too large */
+              value = time(0);
+              sprintf(logbuf, "Clamping %s to current time (was %ld)", querystring[i], value);
+              log(logbuf);
+            } else {
+              /* For any other large values, clamp to INT_MAX/2 */
+              sprintf(logbuf, "Clamping %s to 1000000000 (was %ld)", querystring[i], value);
+              log(logbuf);
+              value = (value > 0) ? 1000000000 : -1000000000;
+            }
+          }
+          sprintf(tmpstr, "%s%ld",  mode==MODE_UPDATE ? mkqueryset(querystring[i]) : ",", value);
+        }
+        break;
       case 1:
         mysql_escape_string(buf2, *((char **)columnptrs[i].ptr), strlen(*((char **)columnptrs[i].ptr)));
         sprintf(tmpstr, "%s'%s'", mode==MODE_UPDATE ? mkqueryset(querystring[i]) : ",", buf2);
@@ -530,6 +580,8 @@ struct char_data *retrieve_player_entry (char *name, struct char_data *ch) {
   if (ch->player_specials == NULL)
     CREATE (ch->player_specials, struct player_special_data, 1);
 
+  /* Always reinitialize querystring to avoid using stale data */
+  querybuild = 0;
   if (!querybuild) {
     init_querystring(ch, 0);
     querybuild=1;
@@ -613,6 +665,26 @@ struct char_data *retrieve_player_entry (char *name, struct char_data *ch) {
   mysql_free_result(result);
   dbmodify_player_affects(ch, MODE_RETRIEVE);
   dbmodify_player_skills(ch, MODE_RETRIEVE);
+  
+  /* Fix corrupted values IMMEDIATELY after loading from database */
+  /* The huge bank_gold value suggests memory corruption or uninitialized memory */
+  if (ch->points.bank_gold != 0 && (ch->points.bank_gold > 1000000000 || ch->points.bank_gold < -1000000000)) {
+    sprintf(buf, "WARNING: Fixing corrupted bank_gold value on load for %s: %d -> 0", GET_NAME(ch), ch->points.bank_gold);
+    log(buf);
+    ch->points.bank_gold = 0;
+  }
+  
+  if (ch->points.gold > 1000000000 || ch->points.gold < -1000000000) {
+    sprintf(buf, "WARNING: Fixing corrupted gold value on load for %s: %d -> 0", GET_NAME(ch), ch->points.gold);
+    log(buf);
+    ch->points.gold = 0;
+  }
+  
+  /* Log gold values after fixing */
+  sprintf(buf, "DEBUG: After loading/fixing %s - gold: %d, bank_gold: %d", 
+          GET_NAME(ch), ch->points.gold, ch->points.bank_gold);
+  log(buf);
+  
   return ch;
 }
 

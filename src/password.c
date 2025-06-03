@@ -80,7 +80,18 @@ int verify_password(const char *password, const char *stored_hash, const char *u
     if (strlen(stored_hash) == 13 || strlen(stored_hash) == 10) {
         /* Legacy DES password verification */
         result = crypt(password, stored_hash);
-        return (result && strcmp(result, stored_hash) == 0) ? 1 : 0;
+        
+        /* Handle both 10-character truncated and full 13-character DES hashes */
+        if (result) {
+            if (strlen(stored_hash) == 10) {
+                /* Compare only first 10 characters for truncated hashes */
+                return (strncmp(result, stored_hash, 10) == 0) ? 1 : 0;
+            } else {
+                /* Full comparison for 13-character hashes */
+                return (strcmp(result, stored_hash) == 0) ? 1 : 0;
+            }
+        }
+        return 0;
     }
     
     /* Check if this is a SHA-256 hash (starts with $5$) */
