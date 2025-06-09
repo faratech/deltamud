@@ -27,6 +27,7 @@ deltamud/bin/wld2html
 
 # Logs and temporary files
 *.log
+syslog
 syslog*
 *.tmp
 *.temp
