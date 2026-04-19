@@ -126,6 +126,7 @@ async fn main() -> Result<()> {
     let _game_handle = tokio::spawn(async move {
         let mut game = game::Game::new(game_world, game_db);
         game.load_text_files(&lib_path).await;
+        game.prime_zones();
         if let Err(e) = game.run(game_rx).await {
             eprintln!("Game loop error: {}", e);
         }

@@ -334,95 +334,228 @@ impl FileLoader {
         Ok(())
     }
     
+    /// Parse a mobile file in DeltaMUD/CircleMUD format.
+    /// Mirrors C reference /web/deltamud/src/db.c:1043-1340
+    /// (parse_simple_mob, parse_enhanced_mob, parse_mobile).
+    ///
+    /// File layout per mob block:
+    ///   #VNUM
+    ///   keyword(s)~
+    ///   short-desc~
+    ///   long-desc lines
+    ///   ~
+    ///   detailed description lines
+    ///   ~
+    ///   ACTION_FLAGS AFF_FLAGS ALIGNMENT LETTER   (LETTER = S or E)
+    ///   <stats line>                              (classic 9-number OR `X`-prefixed 11-number)
+    ///   GOLD EXP
+    ///   POS DEFAULT_POS SEX
+    ///   [optional espec keyword lines, terminated by a lone 'E']
+    ///   [optional T... trigger lines, skipped for Tier-0]
+    ///
+    /// Per-mob errors log and skip instead of aborting the whole file,
+    /// so one bad entry doesn't sink the zone.
     fn load_mobile_file(world: &mut World, path: &Path) -> Result<()> {
-        let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
-        let mut line = String::new();
-        
-        while reader.read_line(&mut line)? > 0 {
-            if line.starts_with('#') {
-                let vnum: MobVnum = line[1..].trim().parse()?;
-                
-                // Read keywords
-                line.clear();
-                reader.read_line(&mut line)?;
-                let keywords = line.trim_end_matches('~').to_string();
-                
-                // Read short description
-                line.clear();
-                reader.read_line(&mut line)?;
-                let short_desc = line.trim_end_matches('~').to_string();
-                
-                // Read long description
-                let mut long_desc = String::new();
-                loop {
-                    line.clear();
-                    reader.read_line(&mut line)?;
-                    if line.contains('~') {
-                        long_desc.push_str(line.trim_end_matches('~'));
-                        break;
-                    }
-                    long_desc.push_str(&line);
-                }
-                
-                // Read detailed description
-                let mut description = String::new();
-                loop {
-                    line.clear();
-                    reader.read_line(&mut line)?;
-                    if line.contains('~') {
-                        description.push_str(line.trim_end_matches('~'));
-                        break;
-                    }
-                    description.push_str(&line);
-                }
-                
-                // Read mob stats
-                line.clear();
-                reader.read_line(&mut line)?;
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                
-                let level = parts.get(2).unwrap_or(&"1").parse::<u8>()?.max(1);
-                let hitpoints = parts.get(4).unwrap_or(&"10").parse()?;
-                
-                // Read more stats
-                line.clear();
-                reader.read_line(&mut line)?;
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                
-                let gold = parts.get(0).unwrap_or(&"0").parse()?;
-                let experience = parts.get(1).unwrap_or(&"100").parse()?;
-                
-                // Read position
-                line.clear();
-                reader.read_line(&mut line)?;
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                
-                let position = parts.get(0).unwrap_or(&"8").parse::<u8>()?;
-                let default_pos = parts.get(1).unwrap_or(&"8").parse::<u8>()?;
-                let sex = parts.get(2).unwrap_or(&"0").parse::<u8>()?;
-                
-                let mob = MobileProto {
-                    vnum,
-                    name: keywords,
-                    short_desc,
-                    long_desc,
-                    description,
-                    level,
-                    hitpoints,
-                    experience,
-                    gold,
-                    position: unsafe { std::mem::transmute(position.min(9)) },
-                    default_pos: unsafe { std::mem::transmute(default_pos.min(9)) },
-                    sex: unsafe { std::mem::transmute(sex.min(2)) },
-                };
-                
-                world.mob_protos.insert(vnum, mob);
+        let contents = std::fs::read_to_string(path)?;
+        let lines: Vec<&str> = contents.lines().collect();
+        let mut i = 0;
+        let mut parsed = 0usize;
+        let mut failed = 0usize;
+
+        while i < lines.len() {
+            let trimmed = lines[i].trim();
+            // Terminator for the whole file.
+            if trimmed == "$~" || trimmed == "$" {
+                break;
             }
-            line.clear();
+            if !trimmed.starts_with('#') {
+                i += 1;
+                continue;
+            }
+            let vnum: MobVnum = match trimmed[1..].trim().parse() {
+                Ok(v) => v,
+                Err(_) => { i += 1; continue; }
+            };
+            i += 1;
+            let start = i;
+            match Self::parse_single_mob(vnum, &lines, &mut i) {
+                Ok(proto) => {
+                    world.mob_protos.insert(vnum, proto);
+                    parsed += 1;
+                }
+                Err(e) => {
+                    warn!("mob #{} in {:?} skipped: {}", vnum, path.file_name().unwrap_or_default(), e);
+                    failed += 1;
+                    // Advance to the next '#' or end — parse may have left
+                    // the cursor anywhere.
+                    if i <= start { i = start; }
+                    while i < lines.len() {
+                        let t = lines[i].trim();
+                        if t.starts_with('#') || t == "$" || t == "$~" { break; }
+                        i += 1;
+                    }
+                }
+            }
         }
-        
+
+        if parsed + failed > 0 {
+            info!("{:?}: {} mobs parsed, {} failed", path.file_name().unwrap_or_default(), parsed, failed);
+        }
         Ok(())
+    }
+
+    fn parse_single_mob(vnum: MobVnum, lines: &[&str], i: &mut usize) -> Result<MobileProto> {
+        let name = Self::read_tilde_string(lines, i)?;
+        let short_desc = Self::read_tilde_string(lines, i)?;
+        let long_desc = Self::read_tilde_string(lines, i)?;
+        let description = Self::read_tilde_string(lines, i)?;
+
+        // Flag line: ACTION_FLAGS AFF_FLAGS ALIGNMENT LETTER
+        // We don't need flags for Tier-0; we just need the type letter to
+        // know whether an espec block follows.
+        let flag_line = Self::next_content_line(lines, i)
+            .ok_or_else(|| anyhow::anyhow!("missing flag line"))?;
+        let flag_parts: Vec<&str> = flag_line.split_whitespace().collect();
+        if flag_parts.len() < 4 {
+            return Err(anyhow::anyhow!("flag line has {} fields, need 4", flag_parts.len()));
+        }
+        let letter = flag_parts[3].chars().next().unwrap_or('S').to_ascii_uppercase();
+
+        // Stats line: either classic (9 numbers with dice) or X-prefixed
+        // (11 numbers, DeltaMUD extended). The only field we currently
+        // persist is level.
+        let stats_line = Self::next_content_line(lines, i)
+            .ok_or_else(|| anyhow::anyhow!("missing stats line"))?;
+        let level = Self::extract_level(stats_line)?;
+
+        // Gold + experience line.
+        let ge_line = Self::next_content_line(lines, i)
+            .ok_or_else(|| anyhow::anyhow!("missing gold/exp line"))?;
+        let ge: Vec<i64> = ge_line.split_whitespace()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        let gold = *ge.get(0).unwrap_or(&0) as i32;
+        let experience = *ge.get(1).unwrap_or(&100);
+
+        // Position / default_pos / sex.
+        let pos_line = Self::next_content_line(lines, i)
+            .ok_or_else(|| anyhow::anyhow!("missing position line"))?;
+        let pos_parts: Vec<i32> = pos_line.split_whitespace()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        let position = (*pos_parts.get(0).unwrap_or(&8)).clamp(0, 9) as u8;
+        let default_pos = (*pos_parts.get(1).unwrap_or(&8)).clamp(0, 9) as u8;
+        let sex = (*pos_parts.get(2).unwrap_or(&0)).clamp(0, 2) as u8;
+
+        // Hitpoints: when the stats line has Hd+H notation, C stores the
+        // base of that dice roll in points.hit. Extract approximately.
+        let hitpoints = Self::extract_hitpoints(stats_line).unwrap_or(10);
+
+        // Enhanced: skip until a lone 'E' line (end of espec section).
+        // We don't persist espec values for Tier-0; that's a later polish.
+        if letter == 'E' {
+            while *i < lines.len() {
+                let t = lines[*i].trim();
+                *i += 1;
+                if t == "E" { break; }
+                if t.starts_with('#') || t == "$" || t == "$~" {
+                    // Ran off the end of the mob without an E — recover.
+                    *i -= 1;
+                    break;
+                }
+            }
+        }
+
+        // Skip any trailing DG trigger lines ('T ...') until next '#' or EOF.
+        while *i < lines.len() {
+            let t = lines[*i].trim();
+            if t.starts_with('T') && t.len() > 1 && !t.starts_with("This") {
+                // Consume trigger header line + its body until the next
+                // terminator. DG format: 'T <vnum>' then the body. For
+                // Tier-0 we just skip; DG parsing is a separate milestone.
+                *i += 1;
+            } else {
+                break;
+            }
+        }
+
+        Ok(MobileProto {
+            vnum,
+            name,
+            short_desc,
+            long_desc,
+            description,
+            level,
+            hitpoints,
+            experience,
+            gold,
+            position: unsafe { std::mem::transmute::<u8, Position>(position) },
+            default_pos: unsafe { std::mem::transmute::<u8, Position>(default_pos) },
+            sex: unsafe { std::mem::transmute::<u8, Gender>(sex) },
+        })
+    }
+
+    /// Read a tilde-terminated string block. Accepts either inline `~`
+    /// (same line) or a lone `~` on a subsequent line.
+    fn read_tilde_string(lines: &[&str], i: &mut usize) -> Result<String> {
+        let mut out = String::new();
+        while *i < lines.len() {
+            let raw = lines[*i];
+            *i += 1;
+            if let Some(pos) = raw.find('~') {
+                if !out.is_empty() { out.push('\n'); }
+                out.push_str(&raw[..pos]);
+                return Ok(out);
+            }
+            if !out.is_empty() { out.push('\n'); }
+            out.push_str(raw);
+        }
+        Err(anyhow::anyhow!("unterminated ~-string"))
+    }
+
+    /// Next non-empty line, advancing the cursor past it.
+    fn next_content_line<'a>(lines: &'a [&'a str], i: &mut usize) -> Option<&'a str> {
+        while *i < lines.len() {
+            let line = lines[*i];
+            *i += 1;
+            if !line.trim().is_empty() {
+                return Some(line);
+            }
+        }
+        None
+    }
+
+    /// Extract the mob level from either classic or X-prefixed stats line.
+    /// Both formats put level first: classic `LEVEL thac0 ac ...` or
+    /// `XLEVEL power mpower defense mdefense technique ...`.
+    fn extract_level(stats_line: &str) -> Result<u8> {
+        let first = stats_line.trim().split_whitespace().next()
+            .ok_or_else(|| anyhow::anyhow!("empty stats line"))?;
+        let digits = first.trim_start_matches('X').trim_start_matches('x');
+        let level: i32 = digits.parse()
+            .map_err(|_| anyhow::anyhow!("bad level token {:?}", first))?;
+        Ok(level.clamp(0, 200) as u8)
+    }
+
+    /// Pull the hit-point base out of a stats line's Hd+H dice field.
+    /// Both classic and X formats end with `... Hd+H ...`; we try the
+    /// first dice-notation token and read the `+N` or `Nd` value.
+    fn extract_hitpoints(stats_line: &str) -> Option<i32> {
+        for tok in stats_line.split_whitespace() {
+            if let Some(_d_pos) = tok.find('d') {
+                // Parse NdM+K — use K as HP base if present, else NxM as rough.
+                let (n_part, rest) = tok.split_once('d')?;
+                let (m_part, plus_part) = match rest.split_once('+') {
+                    Some((m, p)) => (m, Some(p)),
+                    None => (rest, None),
+                };
+                let n: i32 = n_part.parse().ok()?;
+                let m: i32 = m_part.parse().ok()?;
+                let k: i32 = plus_part.and_then(|p| p.parse().ok()).unwrap_or(0);
+                return Some(k + n * (m.max(1) + 1) / 2);
+            }
+        }
+        None
     }
     
     fn load_objects(world: &mut World, path: &Path) -> Result<()> {

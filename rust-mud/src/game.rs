@@ -59,6 +59,21 @@ impl Game {
         }
     }
 
+    /// Run an initial reset pass on every zone so the world is populated
+    /// before any player connects. Matches CircleMUD boot behaviour (see
+    /// /web/deltamud/src/db.c reset_time_zones).
+    pub fn prime_zones(&mut self) {
+        let zone_numbers: Vec<i32> = self.world.read().zones.iter().map(|z| z.number).collect();
+        let mut total_mobs = 0u32;
+        let mut total_objs = 0u32;
+        for zn in zone_numbers {
+            let summary = self.world.write().reset_zone(zn);
+            total_mobs += summary.mobs_spawned;
+            total_objs += summary.objs_spawned;
+        }
+        info!("Initial zone prime: +{} mobs, +{} objs", total_mobs, total_objs);
+    }
+
     async fn send_to_char(&self, ch_id: u64, msg: &str) -> Result<()> {
         for conn in self.connections.values() {
             if let Some(conn_ch) = &conn.character {
@@ -427,8 +442,32 @@ impl Game {
                         }
                     }
 
-                    let start_room = ch.read().player.hometown;
-                    self.world.read().move_character(ch.clone(), start_room)?;
+                    let preferred = ch.read().player.hometown;
+                    let ch_name_snapshot = ch.read().get_name().to_string();
+                    let start_room = {
+                        let world = self.world.read();
+                        if world.get_room(preferred).is_some() {
+                            preferred
+                        } else {
+                            // Fallback: lowest loaded room >= 100 (zone 0
+                            // is reserved for Limbo/utility in CircleMUD).
+                            // Fall all the way back to any room if nothing
+                            // higher than Limbo loaded.
+                            world.rooms.keys().filter(|v| **v >= 100).min().copied()
+                                .or_else(|| world.rooms.keys().min().copied())
+                                .unwrap_or(0)
+                        }
+                    };
+                    let move_err = {
+                        self.world.read().move_character(ch.clone(), start_room)
+                            .err()
+                            .map(|e| e.to_string())
+                    };
+                    if let Some(err) = move_err {
+                        warn!("failed to place {} into room {}: {}", ch_name_snapshot, start_room, err);
+                        conn.send_line("The world has no rooms loaded. Please contact an admin.").await?;
+                        return Ok(());
+                    }
 
                     conn.send_line("\r\n&YWelcome to DeltaMUD!&n\r\n").await?;
                     conn.state = ConnectionState::Playing;
@@ -806,12 +845,32 @@ impl Game {
             }
         };
 
+        // Verify the destination actually exists before broadcasting the
+        // departure — stale exits pointing to unloaded rooms are common
+        // in partial world loads and must not crash the game loop.
+        if self.world.read().get_room(to_room_vnum).is_none() {
+            if let Some(conn) = self.connections.get(&conn_id) {
+                conn.send_line("That exit leads nowhere.").await?;
+            }
+            return Ok(());
+        }
+
         if let Some(room) = &old_room {
             let msg = format!("{} leaves {}.", ch_name, dir_name);
             self.act_to_room(room, ch_id, &msg).await?;
         }
 
-        self.world.read().move_character(ch_arc.clone(), to_room_vnum)?;
+        let move_err = self.world.read()
+            .move_character(ch_arc.clone(), to_room_vnum)
+            .err()
+            .map(|e| e.to_string());
+        if let Some(err) = move_err {
+            warn!("move_character failed dir={} to_room={}: {}", dir_name, to_room_vnum, err);
+            if let Some(conn) = self.connections.get(&conn_id) {
+                conn.send_line("Something blocks your path.").await?;
+            }
+            return Ok(());
+        }
 
         let new_room = ch_arc.read().in_room.as_ref().and_then(|w| w.upgrade());
         if let Some(room) = &new_room {
