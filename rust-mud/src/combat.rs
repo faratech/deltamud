@@ -1,8 +1,18 @@
 use crate::character::Character;
+use crate::room::Room;
 use crate::types::*;
 use std::sync::Arc;
 use parking_lot::RwLock;
 use rand::Rng;
+
+/// Signal emitted by combat when a victim drops to death in-round.
+/// Game::process_combat collects these while holding a world *read* lock,
+/// then processes them after releasing it (corpse creation needs write).
+pub struct DeathResult {
+    pub victim: Arc<RwLock<Character>>,
+    pub room: Arc<RwLock<Room>>,
+    pub is_npc: bool,
+}
 
 // Combat-related constants
 pub const PULSE_VIOLENCE: u64 = 3;  // 3 seconds between combat rounds
@@ -73,39 +83,47 @@ impl Combat {
         }
     }
     
-    pub fn perform_violence(attacker: Arc<RwLock<Character>>) -> Vec<String> {
+    pub fn perform_violence(attacker: Arc<RwLock<Character>>) -> (Vec<String>, Option<DeathResult>) {
         let mut messages = Vec::new();
-        
+        let mut death: Option<DeathResult> = None;
+
         // Get fighting target
         let target = {
             let att = attacker.read();
             match &att.fighting {
                 Some(weak) => weak.upgrade(),
-                None => return messages,
+                None => return (messages, death),
             }
         };
-        
+
         if let Some(victim) = target {
             // Check if victim is still alive and in same room
             let can_attack = {
                 let att = attacker.read();
                 let vic = victim.read();
-                
+
                 vic.position != Position::Dead &&
                 att.in_room.as_ref().and_then(|r| r.upgrade()).map(|r| r.read().number) ==
                 vic.in_room.as_ref().and_then(|r| r.upgrade()).map(|r| r.read().number)
             };
-            
+
             if can_attack {
                 let damage_msg = Combat::hit(attacker.clone(), victim.clone());
                 messages.push(damage_msg);
-                
+
                 // Check if victim died
                 let victim_dead = victim.read().points.hit <= 0;
                 if victim_dead {
                     messages.push(Combat::death_cry(victim.clone()));
-                    Combat::die(victim);
+                    // Capture the victim's current room BEFORE we mutate
+                    // anything (Combat::die clears fighting but not in_room).
+                    let room_arc = victim.read().in_room.as_ref().and_then(|w| w.upgrade());
+                    let is_npc = victim.read().is_npc;
+                    Combat::die(victim.clone());
                     Combat::stop_fighting(&mut attacker.write());
+                    if let Some(room) = room_arc {
+                        death = Some(DeathResult { victim, room, is_npc });
+                    }
                 }
             } else {
                 Combat::stop_fighting(&mut attacker.write());
@@ -113,8 +131,8 @@ impl Combat {
         } else {
             Combat::stop_fighting(&mut attacker.write());
         }
-        
-        messages
+
+        (messages, death)
     }
     
     pub fn hit(attacker: Arc<RwLock<Character>>, victim: Arc<RwLock<Character>>) -> String {
@@ -252,40 +270,41 @@ impl Combat {
         "You hear someone's death cry.".to_string()
     }
     
+    /// Clear the victim's fighting state so no one else in-round continues
+    /// targeting them. The heavier work — corpse creation, extracting NPCs,
+    /// respawning PCs — runs in Game::handle_death (which holds the World
+    /// write lock). See /web/deltamud/src/fight.c:387-424 for the C
+    /// reference (raw_kill/die/death_cry/gain_exp). Tier-0 deliberately
+    /// defers: DG death trigger, EXP penalty, blood, full death_cry to
+    /// adjacent rooms. Those land with DG Scripts and Tier-2 polish.
     fn die(victim: Arc<RwLock<Character>>) {
         let mut vic = victim.write();
-        
-        // Clear fighting
         vic.fighting = None;
-        
-        // If NPC, remove from world
-        if vic.is_npc {
-            // TODO: Create corpse, transfer equipment
-            // TODO: Remove from world
-        } else {
-            // Player death
-            vic.position = Position::Dead;
-            // TODO: Create corpse, move to death room
-            // For now, just respawn at temple
-            vic.points.hit = 1;
-            vic.points.mana = 1;
-            vic.points.move_points = 1;
-            vic.position = Position::Standing;
-        }
+        vic.position = Position::Dead;
     }
     
     pub fn can_kill(ch: &Character, victim: &Character) -> Result<(), String> {
+        use crate::room::RoomFlags;
         if ch.id == victim.id {
             return Err("You can't attack yourself!".to_string());
         }
-        
+
         if victim.is_immortal() {
             return Err("You cannot attack immortals!".to_string());
         }
-        
-        // Check room flags
-        // TODO: Check PEACEFUL rooms
-        
+
+        // Refuse combat in PEACEFUL rooms (immortals exempt, matching C
+        // /web/deltamud/src/fight.c:843,1273).
+        if !ch.is_immortal() {
+            if let Some(room) = ch.in_room.as_ref().and_then(|w| w.upgrade()) {
+                if room.read().room_flags.contains(RoomFlags::PEACEFUL) {
+                    return Err(
+                        "This room just has such a peaceful, easy feeling...".to_string(),
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 }

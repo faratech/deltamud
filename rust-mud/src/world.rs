@@ -7,6 +7,31 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use anyhow::{Result, anyhow};
 
+/// A single parsed zone reset command. Mirrors CircleMUD's `reset_com`
+/// struct (see /web/deltamud/src/db.h:111-119) but uses a Rust enum
+/// so each command carries only its meaningful arguments. The `if_flag`
+/// field drives CircleMUD's chaining rule: when set, the command only
+/// runs if the preceding one in this reset pass succeeded — this is
+/// what lets M→E→E→E chains equip the freshly-loaded mob without
+/// equipping stray mobs of the same vnum that happened to be in-world.
+#[derive(Debug, Clone)]
+pub enum ResetCmd {
+    /// Load a mobile (NPC) into a room. Sets "last mob" for subsequent G/E.
+    LoadMob { if_flag: bool, mob_vnum: MobVnum, max_count: i32, room_vnum: RoomVnum },
+    /// Load an object into a room. Sets "last obj" for subsequent P.
+    LoadObjInRoom { if_flag: bool, obj_vnum: ObjVnum, max_count: i32, room_vnum: RoomVnum },
+    /// Give an object to the last-loaded mob.
+    GiveObjToMob { if_flag: bool, obj_vnum: ObjVnum, max_count: i32 },
+    /// Equip the last-loaded mob with an object at a wear position.
+    EquipMob { if_flag: bool, obj_vnum: ObjVnum, max_count: i32, wear_pos: usize },
+    /// Nest an object inside another object (by vnum of the container).
+    PutObjInObj { if_flag: bool, obj_vnum: ObjVnum, max_count: i32, container_vnum: ObjVnum },
+    /// Remove an object of a given vnum from a room if present.
+    RemoveObj { if_flag: bool, room_vnum: RoomVnum, obj_vnum: ObjVnum },
+    /// Force a door into open (0) / closed (1) / closed+locked (2) state.
+    Door { if_flag: bool, room_vnum: RoomVnum, direction: usize, state: i32 },
+}
+
 // Zone structure
 #[derive(Debug, Clone)]
 pub struct Zone {
@@ -20,6 +45,7 @@ pub struct Zone {
     pub max_level: Level,
     pub map_x: Option<i32>,
     pub map_y: Option<i32>,
+    pub reset_commands: Vec<ResetCmd>,
 }
 
 // Mobile (NPC) prototype
@@ -193,6 +219,231 @@ impl World {
         }
         None
     }
+
+    /// Count live NPC instances by prototype vnum. Recomputed on each
+    /// zone reset per advisor guidance — simpler than tracking create/
+    /// destroy sites and the O(n) cost is negligible on a 15-min cadence.
+    pub fn count_mobs_by_vnum(&self) -> HashMap<MobVnum, i32> {
+        let mut counts = HashMap::new();
+        for ch in self.characters.values() {
+            let ch = ch.read();
+            if ch.is_npc {
+                *counts.entry(ch.nr).or_insert(0) += 1;
+            }
+        }
+        counts
+    }
+
+    /// Count live object instances by prototype vnum.
+    pub fn count_objs_by_vnum(&self) -> HashMap<ObjVnum, i32> {
+        let mut counts = HashMap::new();
+        for obj in self.objects.values() {
+            let obj = obj.read();
+            *counts.entry(obj.item_number).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    /// Execute a zone's reset_commands once. Mirrors CircleMUD's
+    /// reset_zone() (see /web/deltamud/src/db.c:1973-2134). Returns
+    /// a summary suitable for logging (count of mobs/objs/doors
+    /// actually acted on).
+    pub fn reset_zone(&mut self, zone_number: i32) -> ResetSummary {
+        let commands: Vec<ResetCmd> = match self.zones.iter().find(|z| z.number == zone_number) {
+            Some(z) => z.reset_commands.clone(),
+            None => return ResetSummary::default(),
+        };
+
+        let mut mob_counts = self.count_mobs_by_vnum();
+        let mut obj_counts = self.count_objs_by_vnum();
+
+        let mut last_cmd: bool = false;
+        let mut last_mob: Option<Arc<RwLock<Character>>> = None;
+        let mut last_obj: Option<Arc<RwLock<Object>>> = None;
+        let mut summary = ResetSummary::default();
+
+        for cmd in &commands {
+            // if_flag chaining: skip if this command is gated on the prior
+            // command's success and the prior one failed (or was skipped).
+            let (if_flag, _is_mob_start) = match cmd {
+                ResetCmd::LoadMob { if_flag, .. } => (*if_flag, true),
+                ResetCmd::LoadObjInRoom { if_flag, .. } => (*if_flag, false),
+                ResetCmd::GiveObjToMob { if_flag, .. } => (*if_flag, false),
+                ResetCmd::EquipMob { if_flag, .. } => (*if_flag, false),
+                ResetCmd::PutObjInObj { if_flag, .. } => (*if_flag, false),
+                ResetCmd::RemoveObj { if_flag, .. } => (*if_flag, false),
+                ResetCmd::Door { if_flag, .. } => (*if_flag, false),
+            };
+            if if_flag && !last_cmd {
+                continue;
+            }
+            // Reset chain state when starting a fresh (non-chained) command.
+            if !if_flag {
+                last_mob = None;
+                last_obj = None;
+            }
+
+            match cmd {
+                ResetCmd::LoadMob { mob_vnum, max_count, room_vnum, .. } => {
+                    let live = mob_counts.get(mob_vnum).copied().unwrap_or(0);
+                    if live >= *max_count {
+                        last_cmd = false;
+                        continue;
+                    }
+                    match self.load_mobile(*mob_vnum) {
+                        Ok(mob_arc) => {
+                            if let Some(room) = self.get_room(*room_vnum) {
+                                room.write().add_character(Arc::downgrade(&mob_arc));
+                                mob_arc.write().in_room = Some(Arc::downgrade(&room));
+                                *mob_counts.entry(*mob_vnum).or_insert(0) += 1;
+                                summary.mobs_spawned += 1;
+                                last_mob = Some(mob_arc);
+                                last_cmd = true;
+                            } else {
+                                self.remove_character(mob_arc.read().id);
+                                last_cmd = false;
+                            }
+                        }
+                        Err(_) => last_cmd = false,
+                    }
+                }
+                ResetCmd::LoadObjInRoom { obj_vnum, max_count, room_vnum, .. } => {
+                    let live = obj_counts.get(obj_vnum).copied().unwrap_or(0);
+                    if live >= *max_count {
+                        last_cmd = false;
+                        continue;
+                    }
+                    match self.load_object(*obj_vnum) {
+                        Ok(obj_arc) => {
+                            if let Some(room) = self.get_room(*room_vnum) {
+                                room.write().contents.push(obj_arc.clone());
+                                obj_arc.write().in_room = Some(Arc::downgrade(&room));
+                                *obj_counts.entry(*obj_vnum).or_insert(0) += 1;
+                                summary.objs_spawned += 1;
+                                last_obj = Some(obj_arc);
+                                last_cmd = true;
+                            } else {
+                                self.remove_object(obj_arc.read().id);
+                                last_cmd = false;
+                            }
+                        }
+                        Err(_) => last_cmd = false,
+                    }
+                }
+                ResetCmd::GiveObjToMob { obj_vnum, max_count, .. } => {
+                    let live = obj_counts.get(obj_vnum).copied().unwrap_or(0);
+                    if live >= *max_count || last_mob.is_none() {
+                        last_cmd = false;
+                        continue;
+                    }
+                    match self.load_object(*obj_vnum) {
+                        Ok(obj_arc) => {
+                            if let Some(mob) = &last_mob {
+                                obj_arc.write().carried_by = Some(Arc::downgrade(mob));
+                                mob.write().carrying.push(obj_arc.clone());
+                                *obj_counts.entry(*obj_vnum).or_insert(0) += 1;
+                                summary.objs_spawned += 1;
+                                last_obj = Some(obj_arc);
+                                last_cmd = true;
+                            }
+                        }
+                        Err(_) => last_cmd = false,
+                    }
+                }
+                ResetCmd::EquipMob { obj_vnum, max_count, wear_pos, .. } => {
+                    let live = obj_counts.get(obj_vnum).copied().unwrap_or(0);
+                    if live >= *max_count || last_mob.is_none() || *wear_pos >= NUM_WEARS {
+                        last_cmd = false;
+                        continue;
+                    }
+                    match self.load_object(*obj_vnum) {
+                        Ok(obj_arc) => {
+                            if let Some(mob) = &last_mob {
+                                obj_arc.write().worn_by = Some(Arc::downgrade(mob));
+                                obj_arc.write().worn_on = Some(*wear_pos);
+                                mob.write().equipment[*wear_pos] = Some(obj_arc.clone());
+                                *obj_counts.entry(*obj_vnum).or_insert(0) += 1;
+                                summary.objs_spawned += 1;
+                                last_obj = Some(obj_arc);
+                                last_cmd = true;
+                            }
+                        }
+                        Err(_) => last_cmd = false,
+                    }
+                }
+                ResetCmd::PutObjInObj { obj_vnum, max_count, container_vnum, .. } => {
+                    let live = obj_counts.get(obj_vnum).copied().unwrap_or(0);
+                    if live >= *max_count {
+                        last_cmd = false;
+                        continue;
+                    }
+                    // Find an existing container instance by vnum.
+                    let container = self.objects.values()
+                        .find(|o| o.read().item_number == *container_vnum)
+                        .cloned();
+                    let container = match container {
+                        Some(c) => c,
+                        None => { last_cmd = false; continue; }
+                    };
+                    match self.load_object(*obj_vnum) {
+                        Ok(obj_arc) => {
+                            obj_arc.write().in_obj = Some(Arc::downgrade(&container));
+                            container.write().contains.push(obj_arc.clone());
+                            *obj_counts.entry(*obj_vnum).or_insert(0) += 1;
+                            summary.objs_spawned += 1;
+                            last_obj = Some(obj_arc);
+                            last_cmd = true;
+                        }
+                        Err(_) => last_cmd = false,
+                    }
+                }
+                ResetCmd::RemoveObj { room_vnum, obj_vnum, .. } => {
+                    if let Some(room) = self.get_room(*room_vnum) {
+                        let mut room = room.write();
+                        let before = room.contents.len();
+                        room.contents.retain(|o| o.read().item_number != *obj_vnum);
+                        summary.objs_removed += (before - room.contents.len()) as u32;
+                        last_cmd = true;
+                    } else {
+                        last_cmd = false;
+                    }
+                }
+                ResetCmd::Door { room_vnum, direction, state, .. } => {
+                    if let Some(room) = self.get_room(*room_vnum) {
+                        if let Some(exit) = room.write().exits.get_mut(*direction).and_then(|e| e.as_mut()) {
+                            // exit_info bits: 1=CLOSED, 2=LOCKED (matches CircleMUD EX_*).
+                            exit.exit_info = match *state {
+                                0 => 0,          // open
+                                1 => 1,          // closed
+                                2 => 1 | 2,      // closed & locked
+                                _ => exit.exit_info,
+                            };
+                            summary.doors_set += 1;
+                            last_cmd = true;
+                        } else {
+                            last_cmd = false;
+                        }
+                    } else {
+                        last_cmd = false;
+                    }
+                }
+            }
+        }
+
+        if let Some(z) = self.zones.iter_mut().find(|z| z.number == zone_number) {
+            z.age = 0;
+        }
+
+        summary
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ResetSummary {
+    pub mobs_spawned: u32,
+    pub objs_spawned: u32,
+    pub objs_removed: u32,
+    pub doors_set: u32,
 }
 
 // World loading functions would go here

@@ -281,11 +281,9 @@ impl Commands {
                             
                             Combat::start_fighting(ch.clone(), person.clone());
                             messages.push("You attack!".to_string());
-                            
-                            // Perform first attack
-                            let combat_msgs = Combat::perform_violence(ch);
-                            messages.extend(combat_msgs);
-                            
+                            // The actual swing runs next PULSE_VIOLENCE tick
+                            // via Game::process_combat, which also handles
+                            // death/corpse events properly.
                             return messages;
                         }
                     }

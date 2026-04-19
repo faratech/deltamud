@@ -1,4 +1,4 @@
-use crate::world::{World, Zone, MobileProto, ObjectProto};
+use crate::world::{World, Zone, MobileProto, ObjectProto, ResetCmd};
 use crate::room::{Room, Exit, RoomFlags};
 use crate::object::{WearFlags, ExtraFlags};
 use crate::types::*;
@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use anyhow::Result;
-use log::info;
+use log::{info, warn};
 
 pub struct FileLoader;
 
@@ -40,79 +40,182 @@ impl FileLoader {
         let index_path = path.join("index");
         let file = File::open(&index_path)?;
         let reader = BufReader::new(file);
-        
+
         for line in reader.lines() {
             let line = line?;
             if line == "$" {
                 break;
             }
-            
+
             let zone_file = path.join(&line);
-            FileLoader::load_zone_file(world, &zone_file)?;
+            if let Err(e) = FileLoader::load_zone_file(world, &zone_file) {
+                warn!("Failed to load zone {:?}: {}", zone_file.file_name().unwrap_or_default(), e);
+            }
         }
-        
+
         Ok(())
     }
     
     fn load_zone_file(world: &mut World, path: &Path) -> Result<()> {
         let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
-        let mut line = String::new();
-        
-        while reader.read_line(&mut line)? > 0 {
-            if line.starts_with('#') {
-                let zone_num: i32 = line[1..].trim().parse()?;
-                
-                // Read zone name
-                line.clear();
-                reader.read_line(&mut line)?;
-                let name = line.trim_end_matches('~').to_string();
-                
-                // Read zone data
-                line.clear();
-                reader.read_line(&mut line)?;
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                
-                let top = parts.get(0).unwrap_or(&"0").parse()?;
-                let lifespan = parts.get(1).unwrap_or(&"30").parse()?;
-                let reset_mode = parts.get(2).unwrap_or(&"2").parse()?;
-                
-                let zone = Zone {
-                    number: zone_num,
-                    name,
-                    lifespan,
-                    age: 0,
-                    top,
-                    reset_mode,
-                    min_level: 0,
-                    max_level: 50,
-                    map_x: None,
-                    map_y: None,
-                };
-                
-                world.zones.push(zone);
+        let reader = BufReader::new(file);
+        let lines: Vec<String> = reader.lines().collect::<std::io::Result<_>>()?;
+        let mut i = 0;
+
+        while i < lines.len() {
+            let hdr = lines[i].trim();
+            if !hdr.starts_with('#') {
+                i += 1;
+                continue;
             }
-            line.clear();
+            let zone_num: i32 = match hdr[1..].trim().parse() {
+                Ok(v) => v,
+                Err(_) => { i += 1; continue; }
+            };
+            i += 1;
+
+            // Zone name (may span single line, ~-terminated)
+            let name = lines.get(i).map(|s| s.trim_end_matches('~').trim().to_string())
+                .unwrap_or_default();
+            i += 1;
+
+            // Optional "builders" line — tilde-terminated in most formats but
+            // some DeltaMUD zones skip it. Peek: if the next line looks
+            // numeric (header of 3 numbers), treat it as the data line.
+            let maybe_builders = lines.get(i).map(|s| s.trim());
+            let builders_is_data = maybe_builders
+                .map(|s| s.split_whitespace().all(|t| t.parse::<i32>().is_ok()) && s.split_whitespace().count() >= 3)
+                .unwrap_or(false);
+            if !builders_is_data {
+                i += 1;
+            }
+
+            // Zone header: top lifespan reset_mode [optional levels/status]
+            let parts: Vec<&str> = lines.get(i).map(|s| s.split_whitespace().collect())
+                .unwrap_or_default();
+            let top: i32 = parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let lifespan: i32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(30);
+            let reset_mode: i32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(2);
+            i += 1;
+
+            // Optional level-range line (not always present). Skip if it
+            // looks like numbers without a trailing reset command.
+            if let Some(next) = lines.get(i) {
+                let first = next.trim().chars().next();
+                let is_reset = matches!(first, Some(c) if "MOGEPRD*".contains(c));
+                if !is_reset && !next.trim().is_empty() && !next.trim().starts_with('S') && !next.trim().starts_with('$') {
+                    // Probably the level/status line — skip.
+                    i += 1;
+                }
+            }
+
+            // Reset commands until 'S' or '$'.
+            let mut reset_commands = Vec::new();
+            while i < lines.len() {
+                let raw = lines[i].trim();
+                i += 1;
+                if raw.is_empty() || raw.starts_with('*') {
+                    continue;
+                }
+                let first_char = raw.chars().next().unwrap();
+                if first_char == 'S' || first_char == '$' {
+                    break;
+                }
+                if let Some(cmd) = Self::parse_reset_command(raw) {
+                    reset_commands.push(cmd);
+                } else {
+                    warn!("zone {} unparseable reset cmd: {:?}", zone_num, raw);
+                }
+            }
+
+            world.zones.push(Zone {
+                number: zone_num,
+                name,
+                lifespan,
+                age: 0,
+                top,
+                reset_mode,
+                min_level: 0,
+                max_level: 50,
+                map_x: None,
+                map_y: None,
+                reset_commands,
+            });
         }
-        
+
         Ok(())
+    }
+
+    fn parse_reset_command(raw: &str) -> Option<ResetCmd> {
+        let parts: Vec<&str> = raw.split_whitespace().collect();
+        if parts.is_empty() {
+            return None;
+        }
+        let cmd = parts[0].chars().next()?;
+        let i32_at = |idx: usize| parts.get(idx).and_then(|s| s.parse::<i32>().ok());
+        let if_flag = i32_at(1).unwrap_or(0) != 0;
+        match cmd {
+            'M' => Some(ResetCmd::LoadMob {
+                if_flag,
+                mob_vnum: i32_at(2)?,
+                max_count: i32_at(3)?,
+                room_vnum: i32_at(4)?,
+            }),
+            'O' => Some(ResetCmd::LoadObjInRoom {
+                if_flag,
+                obj_vnum: i32_at(2)?,
+                max_count: i32_at(3)?,
+                room_vnum: i32_at(4)?,
+            }),
+            'G' => Some(ResetCmd::GiveObjToMob {
+                if_flag,
+                obj_vnum: i32_at(2)?,
+                max_count: i32_at(3)?,
+            }),
+            'E' => Some(ResetCmd::EquipMob {
+                if_flag,
+                obj_vnum: i32_at(2)?,
+                max_count: i32_at(3)?,
+                wear_pos: i32_at(4)? as usize,
+            }),
+            'P' => Some(ResetCmd::PutObjInObj {
+                if_flag,
+                obj_vnum: i32_at(2)?,
+                max_count: i32_at(3)?,
+                container_vnum: i32_at(4)?,
+            }),
+            'R' => Some(ResetCmd::RemoveObj {
+                if_flag,
+                room_vnum: i32_at(2)?,
+                obj_vnum: i32_at(3)?,
+            }),
+            'D' => Some(ResetCmd::Door {
+                if_flag,
+                room_vnum: i32_at(2)?,
+                direction: i32_at(3)? as usize,
+                state: i32_at(4)?,
+            }),
+            _ => None,
+        }
     }
     
     fn load_rooms(world: &mut World, path: &Path) -> Result<()> {
         let index_path = path.join("index");
         let file = File::open(&index_path)?;
         let reader = BufReader::new(file);
-        
+
         for line in reader.lines() {
             let line = line?;
             if line == "$" {
                 break;
             }
-            
+
             let room_file = path.join(&line);
-            FileLoader::load_room_file(world, &room_file)?;
+            if let Err(e) = FileLoader::load_room_file(world, &room_file) {
+                warn!("Failed to load rooms {:?}: {}", room_file.file_name().unwrap_or_default(), e);
+            }
         }
-        
+
         Ok(())
     }
     
@@ -223,7 +326,9 @@ impl FileLoader {
             }
             
             let mob_file = path.join(&line);
-            FileLoader::load_mobile_file(world, &mob_file)?;
+            if let Err(e) = FileLoader::load_mobile_file(world, &mob_file) {
+                warn!("Failed to load mobs {:?}: {}", mob_file.file_name().unwrap_or_default(), e);
+            }
         }
         
         Ok(())
@@ -332,7 +437,9 @@ impl FileLoader {
             }
             
             let obj_file = path.join(&line);
-            FileLoader::load_object_file(world, &obj_file)?;
+            if let Err(e) = FileLoader::load_object_file(world, &obj_file) {
+                warn!("Failed to load objs {:?}: {}", obj_file.file_name().unwrap_or_default(), e);
+            }
         }
         
         Ok(())

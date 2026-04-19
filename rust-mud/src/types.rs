@@ -99,3 +99,7 @@ pub const WEAR_HOLD: usize = 17;
 pub const WEAR_FLOAT: usize = 18;
 pub const WEAR_FACE: usize = 19;
 pub const NUM_WEARS: usize = 20;
+
+// Sentinel vnum for dynamically created objects (corpses, money, etc.)
+// that have no prototype. Matches CircleMUD NOTHING convention.
+pub const NOTHING: i32 = -1;

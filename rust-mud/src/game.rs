@@ -3,8 +3,9 @@ use crate::world::World;
 use crate::room::Room;
 use crate::types::*;
 use crate::character::Character;
+use crate::object::{ExtraFlags, Object, ObjectType, WearFlags};
 use crate::DatabaseInterface;
-use crate::combat::{Combat, PULSE_VIOLENCE};
+use crate::combat::{Combat, DeathResult, PULSE_VIOLENCE};
 use crate::magic::affect_update;
 use crate::commands::Commands;
 use std::collections::HashMap;
@@ -15,12 +16,19 @@ use tokio::time::{interval, Duration};
 use anyhow::Result;
 use log::{info, warn, error};
 
+/// Corpse decay timers in pulses (1 pulse ≈ 1 game second).
+/// Matches CircleMUD defaults: NPCs decay fast, PCs linger long enough
+/// to allow a corpse-retrieval run. See /web/deltamud/src/config.c.
+const CORPSE_NPC_TIMER: i32 = 5;
+const CORPSE_PC_TIMER: i32 = 60;
+
 pub struct Game {
     world: Arc<RwLock<World>>,
     database: Arc<dyn DatabaseInterface>,
     connections: HashMap<u64, Connection>,
     next_conn_id: u64,
     violence_timer: u64,
+    zone_age_tick: u64,
     motd: String,
 }
 
@@ -32,6 +40,7 @@ impl Game {
             connections: HashMap::new(),
             next_conn_id: 1,
             violence_timer: 0,
+            zone_age_tick: 0,
             motd: String::new(),
         }
     }
@@ -897,40 +906,207 @@ impl Game {
             }
         }
         
-        // Zone resets every 15 minutes (9000 ticks)
-        static mut ZONE_TIMER: u64 = 0;
-        unsafe {
-            ZONE_TIMER += 1;
-            if ZONE_TIMER >= 9000 {
-                ZONE_TIMER = 0;
-                // TODO: Implement zone resets
+        // Zone resets: increment each zone's age; when age >= lifespan
+        // (minutes) and reset_mode allows it, run reset_zone. Tick is
+        // 100ms so 600 ticks = 1 minute. Matches CircleMUD zone aging
+        // semantics (see /web/deltamud/src/db.c `zone_update`).
+        self.zone_age_tick += 1;
+        if self.zone_age_tick >= 600 {
+            self.zone_age_tick = 0;
+            self.tick_zone_ages();
+        }
+
+        Ok(())
+    }
+
+    fn tick_zone_ages(&mut self) {
+        // Reset mode:
+        //   0 = never reset
+        //   1 = reset only if no PC is currently in the zone
+        //   2 = reset regardless (default)
+        // Walk zones in two passes to avoid simultaneous mutable+immutable
+        // borrows of `world`: first compute which zones are ready (with an
+        // immutable view to check PC-in-zone), then take a write lock to
+        // age them + run resets.
+        let (ready, all_ages_to_bump): (Vec<i32>, Vec<i32>) = {
+            let world = self.world.read();
+            let mut ready = Vec::new();
+            let mut all = Vec::new();
+            for zone in &world.zones {
+                if zone.reset_mode == 0 {
+                    continue;
+                }
+                all.push(zone.number);
+                // age+1 is the value after the bump we're about to apply.
+                if zone.age + 1 >= zone.lifespan {
+                    let pcs_inside = if zone.reset_mode == 1 {
+                        let top = zone.top;
+                        let low = zone.number * 100;
+                        world.characters.values().any(|ch| {
+                            let ch = ch.read();
+                            !ch.is_npc && ch.in_room.as_ref()
+                                .and_then(|w| w.upgrade())
+                                .map(|r| {
+                                    let v = r.read().number;
+                                    v >= low && v <= top
+                                })
+                                .unwrap_or(false)
+                        })
+                    } else { false };
+                    if zone.reset_mode == 2 || !pcs_inside {
+                        ready.push(zone.number);
+                    }
+                }
+            }
+            (ready, all)
+        };
+
+        {
+            let mut world = self.world.write();
+            for zn in &all_ages_to_bump {
+                if let Some(zone) = world.zones.iter_mut().find(|z| z.number == *zn) {
+                    zone.age += 1;
+                }
             }
         }
-        
-        Ok(())
+
+        for zone_num in ready {
+            let summary = self.world.write().reset_zone(zone_num);
+            if summary.mobs_spawned + summary.objs_spawned > 0 {
+                info!("Zone {} reset: +{} mobs, +{} objs, -{} objs, {} doors",
+                    zone_num, summary.mobs_spawned, summary.objs_spawned,
+                    summary.objs_removed, summary.doors_set);
+            }
+        }
     }
     
     async fn process_combat(&mut self) -> Result<()> {
-        // Collect combat messages in a separate scope to ensure world guard is dropped
-        let combat_messages = {
+        // Phase 1: run combat rounds under a world read lock; collect both
+        // per-attacker messages and any death events to process after release.
+        let (combat_messages, deaths) = {
             let world = self.world.read();
-            let mut combat_messages = Vec::new();
-            
+            let mut combat_messages: Vec<(Arc<RwLock<Character>>, Vec<String>)> = Vec::new();
+            let mut deaths: Vec<DeathResult> = Vec::new();
+
             for (_, ch) in &world.characters {
                 if ch.read().fighting.is_some() {
-                    let messages = Combat::perform_violence(ch.clone());
+                    let (messages, death) = Combat::perform_violence(ch.clone());
                     combat_messages.push((ch.clone(), messages));
+                    if let Some(d) = death {
+                        deaths.push(d);
+                    }
                 }
             }
-            
-            combat_messages
-        }; // world guard is dropped here
-        
-        // Send combat messages to appropriate players
+
+            (combat_messages, deaths)
+        };
+
+        // Phase 2: deliver combat round messages.
         for (ch, messages) in combat_messages {
             let ch_id = ch.read().id;
             for msg in messages {
                 self.send_to_char(ch_id, &msg).await?;
+            }
+        }
+
+        // Phase 3: process death events (needs world write lock for corpse
+        // objects and character extraction).
+        for event in deaths {
+            self.handle_death(event).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn handle_death(&mut self, event: DeathResult) -> Result<()> {
+        let DeathResult { victim, room, is_npc } = event;
+
+        let (victim_id, victim_name) = {
+            let v = victim.read();
+            (v.id, v.get_name().to_string())
+        };
+
+        // Broadcast the death so everyone in the room sees it.
+        let death_msg = format!("{} is dead! R.I.P.", victim_name);
+        self.act_to_room(&room, u64::MAX, &death_msg).await?;
+
+        // Build the corpse object and move the victim's carried/worn items
+        // into it. Mirrors /web/deltamud/src/fight.c:287-347 (make_corpse).
+        let corpse = {
+            let mut world = self.world.write();
+            let mut corpse = Object::new(
+                NOTHING,
+                "corpse".to_string(),
+                format!("the corpse of {}", victim_name),
+            );
+            corpse.description = format!("The corpse of {} is lying here.", victim_name);
+            corpse.obj_type = ObjectType::Container;
+            corpse.wear_flags = WearFlags::TAKE;
+            corpse.extra_flags = ExtraFlags::NO_DONATE;
+            corpse.values.value[0] = 0; // can't be used as normal container
+            corpse.values.value[3] = 1; // corpse flag
+            corpse.timer = if is_npc { CORPSE_NPC_TIMER } else { CORPSE_PC_TIMER };
+
+            let carrying;
+            let mut unworn: Vec<Arc<RwLock<Object>>> = Vec::new();
+            {
+                let mut v = victim.write();
+                carrying = std::mem::take(&mut v.carrying);
+                for slot in v.equipment.iter_mut() {
+                    if let Some(obj) = slot.take() {
+                        unworn.push(obj);
+                    }
+                }
+            }
+            for obj in &carrying {
+                let mut o = obj.write();
+                o.carried_by = None;
+                o.worn_by = None;
+                o.worn_on = None;
+            }
+            for obj in &unworn {
+                let mut o = obj.write();
+                o.carried_by = None;
+                o.worn_by = None;
+                o.worn_on = None;
+            }
+            corpse.contains = carrying;
+            corpse.contains.extend(unworn);
+
+            let corpse_arc = world.create_object(corpse);
+            let corpse_weak = Arc::downgrade(&corpse_arc);
+            for obj in &corpse_arc.read().contains {
+                obj.write().in_obj = Some(corpse_weak.clone());
+            }
+            corpse_arc.write().in_room = Some(Arc::downgrade(&room));
+            corpse_arc
+        };
+        room.write().contents.push(corpse);
+
+        if is_npc {
+            // Remove the NPC from the room and from the world table.
+            room.write().remove_character(victim_id);
+            self.world.write().remove_character(victim_id);
+        } else {
+            // PC: move to mortal start room, restore 1 HP, stand.
+            let start_room = victim.read().player.hometown;
+            room.write().remove_character(victim_id);
+            self.world.read().move_character(victim.clone(), start_room)?;
+            {
+                let mut v = victim.write();
+                v.points.hit = 1;
+                v.points.mana = v.points.max_mana.min(1);
+                v.points.move_points = v.points.max_move.min(1);
+                v.position = Position::Standing;
+            }
+            self.send_to_char(victim_id, "You feel your life slipping away...").await?;
+            self.send_to_char(victim_id, "You awaken in a new place, feeling weak.").await?;
+            // Re-show the room for the freshly-respawned player.
+            let conn_id = self.connections.iter()
+                .find(|(_, c)| c.character.as_ref().map(|ch| ch.read().id) == Some(victim_id))
+                .map(|(id, _)| *id);
+            if let Some(cid) = conn_id {
+                self.do_look(cid, String::new()).await?;
             }
         }
 
