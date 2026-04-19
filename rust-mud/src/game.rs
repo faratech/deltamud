@@ -639,18 +639,31 @@ impl Game {
                         }
                     }
                     
-                    // Collect people in room
+                    // Collect people in room using each character's own
+                    // room-display string (NPC long_desc or PC title line).
                     let mut people = Vec::new();
                     for person_weak in &room.people {
                         if let Some(person) = person_weak.upgrade() {
                             let person = person.read();
                             if person.id != ch_id {
-                                people.push(person.get_title());
+                                people.push(person.display_in_room());
                             }
                         }
                     }
-                    
-                    Some((room_name, room_desc, exits, people))
+
+                    // Collect objects in room using their short_description.
+                    let mut objects = Vec::new();
+                    for obj_arc in &room.contents {
+                        let obj = obj_arc.read();
+                        let label = if !obj.description.is_empty() {
+                            obj.description.clone()
+                        } else {
+                            format!("{} is here.", obj.short_description)
+                        };
+                        objects.push(label);
+                    }
+
+                    Some((room_name, room_desc, exits, people, objects))
                 } else {
                     None
                 }
@@ -662,24 +675,30 @@ impl Game {
         };
         
         // Now send messages without holding any locks
-        if let Some((room_name, room_desc, exits, people)) = room_data {
+        if let Some((room_name, room_desc, exits, people, objects)) = room_data {
             // Room name
             conn.send_line(&format!("&c{}&n", room_name)).await?;
-            
+
             // Room description
             conn.send_line(&room_desc).await?;
-            
+
             // Exits
             if !exits.is_empty() {
                 conn.send_line(&format!("&g[ Exits: {} ]&n", exits.join(" "))).await?;
             }
-            
-            // People in room
-            for person_title in people {
-                conn.send_line(&format!("{} is here.", person_title)).await?;
+
+            // Objects on the ground (before people so corpses show).
+            for line in &objects {
+                conn.send_line(line).await?;
+            }
+
+            // People in the room — each line is already a formatted
+            // full sentence from display_in_room().
+            for line in &people {
+                conn.send_line(line).await?;
             }
         }
-        
+
         Ok(())
     }
     

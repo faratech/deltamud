@@ -137,20 +137,23 @@ impl Combat {
     
     pub fn hit(attacker: Arc<RwLock<Character>>, victim: Arc<RwLock<Character>>) -> String {
         let mut rng = rand::thread_rng();
-        
-        // Calculate hit chance
+
+        // Hit roll formula: CircleMUD stores AC as AC*10 so an unarmored
+        // mob has points.armor=100 and an armored mob has less. Dividing
+        // by 10 yields the effective AC used against THAC0.
         let thac0 = Combat::calculate_thac0(&attacker.read());
-        let ac = victim.read().points.armor;
+        let ac_effective = (victim.read().points.armor / 10) as i16;
         let hitroll = attacker.read().points.hitroll;
-        
-        let roll = rng.gen_range(1..=20);
-        let needed = thac0 - ac;
-        
-        if roll == 1 || (roll < 20 && roll < needed - hitroll) {
-            // Miss
+
+        let roll = rng.gen_range(1..=20) as i16;
+        let needed = thac0 - ac_effective - hitroll;
+
+        // Natural 1 is always a miss, natural 20 always a hit. Otherwise
+        // the roll must meet or exceed `needed`.
+        let miss = roll == 1 || (roll < 20 && roll < needed);
+        if miss {
             Combat::damage_message(&attacker.read(), &victim.read(), 0, DamageType::Hit)
         } else {
-            // Hit - calculate damage
             let damage = Combat::calculate_damage(attacker.clone());
             Combat::do_damage(attacker, victim, damage, DamageType::Hit)
         }
@@ -239,7 +242,7 @@ impl Combat {
         Combat::damage_message(&attacker.read(), &victim.read(), damage, damage_type)
     }
     
-    fn damage_message(_attacker: &Character, _victim: &Character, damage: i32, _damage_type: DamageType) -> String {
+    fn damage_message(attacker: &Character, victim: &Character, damage: i32, _damage_type: DamageType) -> String {
         let severity = match damage {
             0 => "miss",
             1..=3 => "scratch",
@@ -258,11 +261,19 @@ impl Combat {
             53..=99 => "PULVERIZE",
             _ => "*** ANNIHILATE ***",
         };
-        
+
+        // Render names. For NPCs, short_desc is "the goblin" / "a baker";
+        // for PCs it's just the name. CircleMUD's act() $n/$N placeholders
+        // do the same, but since we send one string to each viewer here,
+        // we resolve to attacker-first-person when the attacker is the
+        // reader. That nuance lives in game.rs — this function just emits
+        // a sentence in third person with proper names substituted.
+        let a = attacker.display_for_others();
+        let v = victim.display_for_others();
         if damage == 0 {
-            format!("$n tries to hit $N but misses.")
+            format!("{} tries to hit {} but misses.", a, v)
         } else {
-            format!("$n {}s $N! [{}]", severity, damage)
+            format!("{} {}s {}! [{}]", a, severity, v, damage)
         }
     }
     

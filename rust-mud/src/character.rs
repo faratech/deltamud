@@ -63,16 +63,25 @@ pub struct Affect {
 pub struct Character {
     pub id: u64,
     pub nr: MobVnum,  // -1 for players
-    
+
     // Location
     pub in_room: Option<Weak<RwLock<Room>>>,
     pub was_in_room: Option<Weak<RwLock<Room>>>,
-    
+
     // Core data
     pub player: PlayerData,
     pub real_abils: Abilities,
     pub aff_abils: Abilities,
     pub points: CharPoints,
+
+    // NPC display strings (None for PCs). short_desc is how the mob is
+    // referenced in third-person text ("the baker"); long_desc is the
+    // line shown when it's standing in a room ("A baker is preparing an
+    // oven."); description is shown on `look <mob>`. These preserve the
+    // distinction from CircleMUD's char_player_data layout.
+    pub short_desc: Option<String>,
+    pub long_desc: Option<String>,
+    pub npc_description: Option<String>,
     
     // Inventory and equipment
     pub carrying: Vec<Arc<RwLock<Object>>>,
@@ -145,11 +154,14 @@ impl Character {
             is_npc: false,
             act_flags: 0,
             affect_flags: 0,
+            short_desc: None,
+            long_desc: None,
+            npc_description: None,
             created_at: now,
             last_logon: now,
         }
     }
-    
+
     pub fn new_npc(nr: MobVnum) -> Self {
         let now = Utc::now();
         Character {
@@ -183,11 +195,14 @@ impl Character {
             is_npc: true,
             act_flags: 0,
             affect_flags: 0,
+            short_desc: None,
+            long_desc: None,
+            npc_description: None,
             created_at: now,
             last_logon: now,
         }
     }
-    
+
     pub fn get_name(&self) -> &str {
         &self.player.name
     }
@@ -248,8 +263,40 @@ impl Character {
             is_npc: self.is_npc,
             act_flags: self.act_flags,
             affect_flags: self.affect_flags,
+            short_desc: self.short_desc.clone(),
+            long_desc: self.long_desc.clone(),
+            npc_description: self.npc_description.clone(),
             created_at: self.created_at,
             last_logon: self.last_logon,
         }
+    }
+
+    /// How the character should be referenced in third-person text
+    /// ("the baker", "Alpha the Mighty"). For NPCs this is the mob's
+    /// short_desc (falls back to name if absent). For PCs it's the
+    /// title-formatted name.
+    pub fn display_for_others(&self) -> String {
+        if self.is_npc {
+            if let Some(s) = &self.short_desc {
+                if !s.is_empty() { return s.clone(); }
+            }
+            self.player.name.clone()
+        } else {
+            self.get_title()
+        }
+    }
+
+    /// How the character appears when standing in a room. NPCs get
+    /// their long_desc (pre-formatted "X is here." line). PCs get a
+    /// default "<title> is here." line.
+    pub fn display_in_room(&self) -> String {
+        if self.is_npc {
+            if let Some(long) = &self.long_desc {
+                // long_desc from CircleMUD comes with its own punctuation
+                // and trailing newline; trim once for consistency.
+                return long.trim_end().to_string();
+            }
+        }
+        format!("{} is here.", self.display_for_others())
     }
 }

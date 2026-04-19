@@ -180,16 +180,26 @@ impl World {
     pub fn load_mobile(&mut self, vnum: MobVnum) -> Result<Arc<RwLock<Character>>> {
         let proto = self.mob_protos.get(&vnum)
             .ok_or_else(|| anyhow!("Mobile {} doesn't exist", vnum))?;
-        
+
         let mut mob = Character::new_npc(vnum);
         mob.player.name = proto.name.clone();
         mob.player.level = proto.level;
-        mob.points.hit = proto.hitpoints;
-        mob.points.max_hit = proto.hitpoints;
+        mob.points.hit = proto.hitpoints.max(1);
+        mob.points.max_hit = mob.points.hit;
+        // CircleMUD stores AC*10 internally. A mob with no AC data
+        // effectively has AC 10 (unarmored); use 100 as the stored value
+        // so the THAC0 formula lands near CircleMUD baseline. Without
+        // this, mobs have AC 0 and level-1 PCs hit only on a natural 19+.
+        if mob.points.armor == 0 {
+            mob.points.armor = 100;
+        }
         mob.points.gold = proto.gold;
         mob.points.exp = proto.experience;
         mob.position = proto.position;
-        
+        mob.short_desc = Some(proto.short_desc.clone());
+        mob.long_desc = Some(proto.long_desc.clone());
+        mob.npc_description = Some(proto.description.clone());
+
         Ok(self.create_character(mob))
     }
     
