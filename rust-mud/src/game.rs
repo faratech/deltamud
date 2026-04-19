@@ -1,5 +1,6 @@
 use crate::connection::{Connection, ConnectionState, GameMessage};
 use crate::world::World;
+use crate::room::Room;
 use crate::types::*;
 use crate::character::Character;
 use crate::DatabaseInterface;
@@ -12,7 +13,7 @@ use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 use anyhow::Result;
-use log::{info, error};
+use log::{info, warn, error};
 
 pub struct Game {
     world: Arc<RwLock<World>>,
@@ -20,6 +21,7 @@ pub struct Game {
     connections: HashMap<u64, Connection>,
     next_conn_id: u64,
     violence_timer: u64,
+    motd: String,
 }
 
 impl Game {
@@ -30,9 +32,57 @@ impl Game {
             connections: HashMap::new(),
             next_conn_id: 1,
             violence_timer: 0,
+            motd: String::new(),
         }
     }
-    
+
+    pub async fn load_text_files(&mut self, lib_path: &str) {
+        let motd_path = std::path::Path::new(lib_path).join("text").join("motd");
+        match tokio::fs::read_to_string(&motd_path).await {
+            Ok(s) => {
+                info!("Loaded MOTD from {}", motd_path.display());
+                self.motd = s;
+            }
+            Err(e) => {
+                warn!("Could not read MOTD at {}: {}", motd_path.display(), e);
+                self.motd = "Welcome to DeltaMUD!".to_string();
+            }
+        }
+    }
+
+    async fn send_to_char(&self, ch_id: u64, msg: &str) -> Result<()> {
+        for conn in self.connections.values() {
+            if let Some(conn_ch) = &conn.character {
+                if conn_ch.read().id == ch_id {
+                    conn.send_line(msg).await?;
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn act_to_room(
+        &self,
+        room: &Arc<RwLock<Room>>,
+        exclude_ch_id: u64,
+        msg: &str,
+    ) -> Result<()> {
+        let recipients: Vec<u64> = {
+            let room = room.read();
+            room.people
+                .iter()
+                .filter_map(|w| w.upgrade())
+                .map(|ch| ch.read().id)
+                .filter(|id| *id != exclude_ch_id)
+                .collect()
+        };
+        for id in recipients {
+            self.send_to_char(id, msg).await?;
+        }
+        Ok(())
+    }
+
     pub async fn run(&mut self, mut game_rx: mpsc::Receiver<GameMessage>) -> Result<()> {
         info!("Game loop starting...");
         
@@ -87,17 +137,26 @@ impl Game {
                 
                 // Save character after connection is removed
                 if let Some(ch) = char_to_save {
-                    // Extract all needed data before any async operations
-                    let (ch_id, is_npc, name) = {
+                    // Snapshot character state (stripping !Send Weak refs) before spawning.
+                    let (ch_for_save, is_npc, ch_id, name) = {
                         let ch_guard = ch.read();
-                        (ch_guard.id, ch_guard.is_npc, ch_guard.get_name().to_string())
+                        (
+                            ch_guard.clone_for_save(),
+                            ch_guard.is_npc,
+                            ch_guard.id,
+                            ch_guard.get_name().to_string(),
+                        )
                     };
-                    
+
                     if !is_npc && ch_id > 0 {
-                        // For now, just log that we would save the player
-                        // In production, this should be queued for async save
-                        info!("Player {} disconnected, would save to database", name);
-                        // TODO: Implement proper async save without Send issues
+                        let db = self.database.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = db.save_player(&ch_for_save).await {
+                                warn!("Failed to save player {}: {}", name, e);
+                            } else {
+                                info!("Saved player {} on disconnect", name);
+                            }
+                        });
                     }
                 }
             }
@@ -129,6 +188,9 @@ impl Game {
             }
             ConnectionState::GetRace => {
                 self.handle_get_race(conn_id, input).await?;
+            }
+            ConnectionState::ReadMotd => {
+                self.handle_read_motd(conn_id, input).await?;
             }
             ConnectionState::Menu => {
                 self.handle_menu(conn_id, input).await?;
@@ -307,9 +369,22 @@ impl Game {
         if let Some(ch) = &conn.character {
             ch.write().player.race = race;
         }
-        
-        // TODO: Show MOTD
-        conn.state = ConnectionState::Menu;
+
+        conn.send_line(&self.motd).await?;
+        conn.send_line("").await?;
+        conn.send_line("&YPress ENTER to continue...&n").await?;
+        conn.state = ConnectionState::ReadMotd;
+        Ok(())
+    }
+
+    async fn handle_read_motd(&mut self, conn_id: u64, _input: String) -> Result<()> {
+        if let Some(conn) = self.connections.get_mut(&conn_id) {
+            conn.state = ConnectionState::Menu;
+            conn.send_line("").await?;
+            conn.send_line("&cMenu&n").await?;
+            conn.send_line("  &Y0&n) Quit").await?;
+            conn.send_line("  &Y1&n) Enter the game").await?;
+        }
         Ok(())
     }
     
@@ -324,24 +399,31 @@ impl Game {
             Some('1') => {
                 // Enter game
                 if let Some(ch) = &conn.character {
-                    // Save new character to database if needed
-                    let needs_save = ch.read().id == 0;
-                    if needs_save {
-                        let _password = conn.temp_password.clone().unwrap_or_default();
-                        let ch_name = ch.read().get_name().to_string();
-                        // For now, skip actual database save to avoid Send issues
-                        // TODO: Implement proper async save
-                        info!("Would create new player: {}", ch_name);
-                        // Assign a temporary ID
-                        ch.write().id = 1000; // Temporary ID for testing
+                    let needs_create = ch.read().id == 0;
+                    if needs_create {
+                        let password = conn.temp_password.clone().unwrap_or_default();
+                        let (ch_for_create, ch_name) = {
+                            let ch_read = ch.read();
+                            (ch_read.clone_for_save(), ch_read.get_name().to_string())
+                        };
+                        match self.database.create_player(&ch_for_create, &password).await {
+                            Ok(new_id) => {
+                                ch.write().id = new_id;
+                                info!("Created new player {} with id {}", ch_name, new_id);
+                            }
+                            Err(e) => {
+                                warn!("Failed to create player {}: {}", ch_name, e);
+                                ch.write().id = self.next_conn_id.wrapping_add(1_000_000);
+                            }
+                        }
                     }
-                    
+
                     let start_room = ch.read().player.hometown;
                     self.world.read().move_character(ch.clone(), start_room)?;
-                    
+
                     conn.send_line("\r\n&YWelcome to DeltaMUD!&n\r\n").await?;
                     conn.state = ConnectionState::Playing;
-                    
+
                     // Look at room
                     self.do_look(conn_id, "".to_string()).await?;
                 }
@@ -407,9 +489,21 @@ impl Game {
                     }
                     
                     // Communication
-                    "say" => Commands::do_say(&ch.read(), &world, &args),
-                    "tell" => Commands::do_tell(&ch.read(), &world, &args),
-                    "shout" => Commands::do_shout(&ch.read(), &world, &args),
+                    "say" => {
+                        drop(world);
+                        self.do_say(conn_id, args).await?;
+                        return Ok(());
+                    }
+                    "tell" => {
+                        drop(world);
+                        self.do_tell(conn_id, args).await?;
+                        return Ok(());
+                    }
+                    "shout" => {
+                        drop(world);
+                        self.do_shout(conn_id, args).await?;
+                        return Ok(());
+                    }
                     
                     // Information
                     "who" => Commands::do_who(&ch.read(), &world, &args),
@@ -428,7 +522,11 @@ impl Game {
                         drop(world);
                         Commands::do_kill(ch.clone(), &self.world.read(), &args)
                     }
-                    "flee" => Commands::do_flee(&mut ch.write(), &world, &args),
+                    "flee" => {
+                        drop(world);
+                        self.do_flee(conn_id).await?;
+                        return Ok(());
+                    }
                     
                     // Magic
                     "cast" | "c" => {
@@ -544,81 +642,224 @@ impl Game {
             }
             return Ok(());
         }
-        
-        let conn = self.connections.get(&conn_id).unwrap();
-        if let Some(ch) = &conn.character {
-            let ch = ch.read();
-            
-            // Send to self
+
+        let (ch_id, ch_name, room) = match self.connections.get(&conn_id).and_then(|c| c.character.as_ref()) {
+            Some(ch) => {
+                let ch_read = ch.read();
+                let room = ch_read.in_room.as_ref().and_then(|w| w.upgrade());
+                (ch_read.id, ch_read.get_name().to_string(), room)
+            }
+            None => return Ok(()),
+        };
+
+        if let Some(conn) = self.connections.get(&conn_id) {
             conn.send_line(&format!("You say, '{}'", args)).await?;
-            
-            // Send to room
-            if let Some(room_weak) = &ch.in_room {
-                if let Some(room) = room_weak.upgrade() {
-                    let room = room.read();
-                    for other_weak in &room.people {
-                        if let Some(other) = other_weak.upgrade() {
-                            let other = other.read();
-                            if other.id != ch.id {
-                                // Find connection for other character
-                                for (_, other_conn) in &self.connections {
-                                    if let Some(other_ch) = &other_conn.character {
-                                        if other_ch.read().id == other.id {
-                                            other_conn.send_line(&format!("{} says, '{}'", 
-                                                ch.get_name(), args)).await?;
-                                        }
-                                    }
-                                }
-                            }
-                        }
+        }
+
+        if let Some(room) = room {
+            let msg = format!("{} says, '{}'", ch_name, args);
+            self.act_to_room(&room, ch_id, &msg).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn do_tell(&mut self, conn_id: u64, args: String) -> Result<()> {
+        let mut parts = args.splitn(2, char::is_whitespace);
+        let target_name = parts.next().unwrap_or("").trim().to_string();
+        let message = parts.next().unwrap_or("").trim().to_string();
+
+        if target_name.is_empty() || message.is_empty() {
+            if let Some(conn) = self.connections.get(&conn_id) {
+                conn.send_line("Tell whom what?").await?;
+            }
+            return Ok(());
+        }
+
+        let (speaker_id, speaker_name) = match self.connections.get(&conn_id).and_then(|c| c.character.as_ref()) {
+            Some(ch) => {
+                let ch = ch.read();
+                (ch.id, ch.get_name().to_string())
+            }
+            None => return Ok(()),
+        };
+
+        let target = self.world.read().find_character_by_name(&target_name);
+        match target {
+            Some(target_ch) => {
+                let target_id = target_ch.read().id;
+                if target_id == speaker_id {
+                    if let Some(conn) = self.connections.get(&conn_id) {
+                        conn.send_line("You can't tell yourself anything.").await?;
                     }
+                    return Ok(());
+                }
+                let display_name = target_ch.read().get_name().to_string();
+                if let Some(conn) = self.connections.get(&conn_id) {
+                    conn.send_line(&format!("You tell {}, '{}'", display_name, message)).await?;
+                }
+                self.send_to_char(target_id, &format!("{} tells you, '{}'", speaker_name, message)).await?;
+            }
+            None => {
+                if let Some(conn) = self.connections.get(&conn_id) {
+                    conn.send_line("No one by that name here.").await?;
                 }
             }
         }
-        
         Ok(())
     }
-    
-    async fn do_move(&mut self, conn_id: u64, direction: usize) -> Result<()> {
-        let conn = self.connections.get(&conn_id).unwrap();
-        
-        if let Some(ch) = &conn.character {
-            let ch_clone = ch.clone();
-            
-            // Check if movement is possible and get destination
-            let move_result = {
+
+    async fn do_shout(&mut self, conn_id: u64, args: String) -> Result<()> {
+        if args.trim().is_empty() {
+            if let Some(conn) = self.connections.get(&conn_id) {
+                conn.send_line("Shout what?").await?;
+            }
+            return Ok(());
+        }
+
+        let (speaker_id, speaker_name) = match self.connections.get(&conn_id).and_then(|c| c.character.as_ref()) {
+            Some(ch) => {
                 let ch = ch.read();
-                if let Some(room_weak) = &ch.in_room {
-                    if let Some(room) = room_weak.upgrade() {
-                        let room = room.read();
-                        if let Some(exit) = room.get_exit(direction) {
-                            Some(exit.to_room)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
+                (ch.id, ch.get_name().to_string())
+            }
+            None => return Ok(()),
+        };
+
+        if let Some(conn) = self.connections.get(&conn_id) {
+            conn.send_line(&format!("You shout, '{}'", args)).await?;
+        }
+
+        let recipients: Vec<u64> = self.connections.values()
+            .filter(|c| matches!(c.state, ConnectionState::Playing))
+            .filter_map(|c| c.character.as_ref().map(|ch| ch.read().id))
+            .filter(|id| *id != speaker_id)
+            .collect();
+
+        let msg = format!("{} shouts, '{}'", speaker_name, args);
+        for id in recipients {
+            self.send_to_char(id, &msg).await?;
+        }
+        Ok(())
+    }
+
+    async fn do_move(&mut self, conn_id: u64, direction: usize) -> Result<()> {
+        let dir_name = match direction {
+            NORTH => "north",
+            EAST => "east",
+            SOUTH => "south",
+            WEST => "west",
+            UP => "up",
+            DOWN => "down",
+            _ => return Ok(()),
+        };
+        let opposite_dir = match direction {
+            NORTH => "south",
+            EAST => "west",
+            SOUTH => "north",
+            WEST => "east",
+            UP => "below",
+            DOWN => "above",
+            _ => "nowhere",
+        };
+
+        let (ch_arc, ch_id, ch_name, old_room) = {
+            let conn = match self.connections.get(&conn_id) {
+                Some(c) => c,
+                None => return Ok(()),
             };
-            
-            // Process movement result
-            match move_result {
-                Some(to_room) => {
-                    self.world.read().move_character(ch_clone, to_room)?;
-                    self.do_look(conn_id, "".to_string()).await?;
-                }
-                None => {
+            let ch = match &conn.character {
+                Some(ch) => ch.clone(),
+                None => return Ok(()),
+            };
+            let (id, name, old_room) = {
+                let ch_read = ch.read();
+                let old_room = ch_read.in_room.as_ref().and_then(|w| w.upgrade());
+                (ch_read.id, ch_read.get_name().to_string(), old_room)
+            };
+            (ch, id, name, old_room)
+        };
+
+        let to_room_vnum = match &old_room {
+            Some(room) => match room.read().get_exit(direction) {
+                Some(exit) => Some(exit.to_room),
+                None => None,
+            },
+            None => None,
+        };
+
+        let to_room_vnum = match to_room_vnum {
+            Some(v) => v,
+            None => {
+                if let Some(conn) = self.connections.get(&conn_id) {
                     conn.send_line("You can't go that way.").await?;
                 }
+                return Ok(());
             }
+        };
+
+        if let Some(room) = &old_room {
+            let msg = format!("{} leaves {}.", ch_name, dir_name);
+            self.act_to_room(room, ch_id, &msg).await?;
         }
-        
+
+        self.world.read().move_character(ch_arc.clone(), to_room_vnum)?;
+
+        let new_room = ch_arc.read().in_room.as_ref().and_then(|w| w.upgrade());
+        if let Some(room) = &new_room {
+            let msg = format!("{} arrives from the {}.", ch_name, opposite_dir);
+            self.act_to_room(room, ch_id, &msg).await?;
+        }
+
+        self.do_look(conn_id, String::new()).await?;
         Ok(())
     }
-    
+
+    async fn do_flee(&mut self, conn_id: u64) -> Result<()> {
+        use rand::seq::SliceRandom;
+
+        let (ch_arc, fighting, exits) = match self.connections.get(&conn_id).and_then(|c| c.character.as_ref()) {
+            Some(ch) => {
+                let ch_read = ch.read();
+                let fighting = ch_read.fighting.is_some();
+                let exits: Vec<usize> = ch_read.in_room.as_ref()
+                    .and_then(|w| w.upgrade())
+                    .map(|room| {
+                        let room = room.read();
+                        (0..room.exits.len())
+                            .filter(|i| room.exits[*i].is_some())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (ch.clone(), fighting, exits)
+            }
+            None => return Ok(()),
+        };
+
+        if !fighting {
+            if let Some(conn) = self.connections.get(&conn_id) {
+                conn.send_line("You aren't fighting anyone.").await?;
+            }
+            return Ok(());
+        }
+
+        let chosen = exits.choose(&mut rand::thread_rng()).copied();
+        match chosen {
+            Some(dir) => {
+                Combat::stop_fighting(&mut ch_arc.write());
+                if let Some(conn) = self.connections.get(&conn_id) {
+                    conn.send_line("You flee in panic!").await?;
+                }
+                self.do_move(conn_id, dir).await?;
+            }
+            None => {
+                if let Some(conn) = self.connections.get(&conn_id) {
+                    conn.send_line("PANIC! You couldn't escape!").await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn do_quit(&mut self, conn_id: u64) -> Result<()> {
         if let Some(conn) = self.connections.get_mut(&conn_id) {
             conn.send_line("Goodbye!").await?;
@@ -688,20 +929,11 @@ impl Game {
         // Send combat messages to appropriate players
         for (ch, messages) in combat_messages {
             let ch_id = ch.read().id;
-            
-            // Find connection for this character
-            for (_, conn) in &self.connections {
-                if let Some(conn_ch) = &conn.character {
-                    if conn_ch.read().id == ch_id {
-                        for msg in messages {
-                            conn.send_line(&msg).await?;
-                        }
-                        break;
-                    }
-                }
+            for msg in messages {
+                self.send_to_char(ch_id, &msg).await?;
             }
         }
-        
+
         Ok(())
     }
     

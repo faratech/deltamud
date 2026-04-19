@@ -201,12 +201,12 @@ pub async fn handle_client(
             Ok(0) => break, // EOF
             Ok(_) => {
                 let input = line.trim().to_string();
-                if !input.is_empty() {
-                    game_tx.send(GameMessage::Input {
-                        conn_id,
-                        input,
-                    }).await?;
-                }
+                // Pass empty lines through too — Enter on a prompt (MOTD, etc.)
+                // is meaningful. Command handlers guard against empty input.
+                game_tx.send(GameMessage::Input {
+                    conn_id,
+                    input,
+                }).await?;
             }
             Err(_) => break,
         }

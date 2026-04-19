@@ -10,79 +10,9 @@ use parking_lot::RwLock;
 pub struct Commands;
 
 impl Commands {
-    // Communication commands
-    pub fn do_say(ch: &Character, _world: &World, args: &str) -> Vec<String> {
-        let mut messages = Vec::new();
-        
-        if args.is_empty() {
-            messages.push("Say what?".to_string());
-            return messages;
-        }
-        
-        messages.push(format!("You say, '{}'", args));
-        
-        // Send to room
-        if let Some(room_weak) = &ch.in_room {
-            if let Some(room) = room_weak.upgrade() {
-                let room = room.read();
-                for other_weak in &room.people {
-                    if let Some(other) = other_weak.upgrade() {
-                        let other = other.read();
-                        if other.id != ch.id {
-                            // Message would be sent to other player's connection
-                        }
-                    }
-                }
-            }
-        }
-        
-        messages
-    }
-    
-    pub fn do_tell(_ch: &Character, world: &World, args: &str) -> Vec<String> {
-        let mut messages = Vec::new();
-        let parts: Vec<&str> = args.split_whitespace().collect();
-        
-        if parts.len() < 2 {
-            messages.push("Tell whom what?".to_string());
-            return messages;
-        }
-        
-        let target_name = parts[0];
-        let message = parts[1..].join(" ");
-        
-        if let Some(target) = world.find_character_by_name(target_name) {
-            let target = target.read();
-            messages.push(format!("You tell {}, '{}'", target.get_name(), message));
-            // Send to target: format!("{} tells you, '{}'", ch.get_name(), message)
-        } else {
-            messages.push("They aren't here.".to_string());
-        }
-        
-        messages
-    }
-    
-    pub fn do_shout(ch: &Character, world: &World, args: &str) -> Vec<String> {
-        let mut messages = Vec::new();
-        
-        if args.is_empty() {
-            messages.push("Shout what?".to_string());
-            return messages;
-        }
-        
-        messages.push(format!("You shout, '{}'", args));
-        
-        // Send to all players in the world
-        for (_, other_ch) in &world.characters {
-            let other = other_ch.read();
-            if other.id != ch.id && !other.is_npc {
-                // Send: format!("{} shouts, '{}'", ch.get_name(), args)
-            }
-        }
-        
-        messages
-    }
-    
+    // do_say, do_tell, do_shout, do_flee live on Game (see game.rs) because
+    // they need access to Game::connections to reach other players' sockets.
+
     // Information commands
     pub fn do_who(_ch: &Character, world: &World, _args: &str) -> Vec<String> {
         let mut messages = Vec::new();
@@ -364,43 +294,6 @@ impl Commands {
         }
         
         messages.push("They aren't here.".to_string());
-        messages
-    }
-    
-    pub fn do_flee(ch: &mut Character, _world: &World, _args: &str) -> Vec<String> {
-        let mut messages = Vec::new();
-        
-        if ch.fighting.is_none() {
-            messages.push("You're not fighting anyone!".to_string());
-            return messages;
-        }
-        
-        // Find a random exit
-        if let Some(room_weak) = &ch.in_room {
-            if let Some(room) = room_weak.upgrade() {
-                let room = room.read();
-                
-                let mut exits = Vec::new();
-                for (i, exit) in room.exits.iter().enumerate() {
-                    if exit.is_some() {
-                        exits.push(i);
-                    }
-                }
-                
-                if !exits.is_empty() {
-                    use rand::seq::SliceRandom;
-                    let mut rng = rand::thread_rng();
-                    if let Some(&_dir) = exits.choose(&mut rng) {
-                        Combat::stop_fighting(ch);
-                        messages.push("You flee in panic!".to_string());
-                        // TODO: Actually move character
-                        return messages;
-                    }
-                }
-            }
-        }
-        
-        messages.push("PANIC! You couldn't escape!".to_string());
         messages
     }
     
