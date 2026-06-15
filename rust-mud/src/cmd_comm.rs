@@ -1053,9 +1053,11 @@ pub fn do_gen_comm(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
     }
 
     if gmote {
-        // do_gmote consumes the gossip-channel social. Not yet ported; the
-        // gossip-channel broadcast of the social would go here.
-        let _gtext = argument.strip_prefix('@').unwrap_or(argument);
+        // act.comm.c: gemote (or gossip with a leading '@') dispatches the
+        // remainder to do_gmote, which emits the resolved social over the
+        // gossip channel. Strip the leading '@' as C does.
+        let gtext = argument.strip_prefix('@').unwrap_or(argument).to_string();
+        crate::cmd_social::do_gmote(g, ch, &gtext, 1);
         return;
     }
 

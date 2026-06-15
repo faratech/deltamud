@@ -439,13 +439,14 @@ fn finish_editor(g: &mut GameState, conn: ConnId, terminator: i32) {
                             .and_then(|c| g.get_char(c))
                             .map(|c| c.player.name.clone())
                             .unwrap_or_default();
-                        mudlog(g, &format!("OLC: {} saves '{}'.", name, path.display()), LVL_GOD);
+                        mudlog(g, &format!("OLC: {} saves '{}'.", name, path.display()), crate::syslog::CMP, LVL_GOD);
                         send_to_q(g, conn, "Saved.\r\n");
                     }
                     Err(_) => {
                         mudlog(
                             g,
                             &format!("SYSERR: Can't write file '{}'.", path.display()),
+                            crate::syslog::CMP,
                             LVL_IMPL,
                         );
                     }
@@ -1448,9 +1449,13 @@ pub fn do_skillset(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
     let ch_name = g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default();
     let vict_name = g.get_char(vict).map(|c| c.player.name.clone()).unwrap_or_default();
+    // C: mudlog(buf2, BRF, -1, TRUE) — the -1 level suppresses the immortal
+    // echo (file-only). syslog::mudlog takes an unsigned threshold and always
+    // echoes; LVL_IMMORT keeps the echo gated to immortals.
     mudlog(
         g,
         &format!("{} changed {}'s {} to {}.", ch_name, vict_name, skill_name(skill), value),
+        crate::syslog::BRF,
         LVL_IMMORT,
     );
 
@@ -1464,21 +1469,10 @@ pub fn do_skillset(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     );
 }
 
-/// mudlog substitute — broadcast to immortals at or above `min_level` (the
-/// on-disk syslog file is a documented gap shared with the other modules).
-fn mudlog(g: &mut GameState, line: &str, min_level: u8) {
-    let formatted = format!("[ {} ]\r\n", line);
-    let imms: Vec<CharId> = g
-        .players_by_name
-        .values()
-        .copied()
-        .filter(|&id| {
-            g.get_char(id)
-                .map(|c| c.player.level >= min_level && c.player.level >= LVL_IMMORT)
-                .unwrap_or(false)
-        })
-        .collect();
-    for id in imms {
-        g.send_to_char(id, &formatted);
-    }
+/// mudlog — delegate to the shared `syslog::mudlog`, which writes the on-disk
+/// `<lib>/syslog` line and echoes it to online immortals filtered by their
+/// PRF_LOG syslog level (C utils.c mudlog). `log_type` is the C OFF/BRF/NRM/
+/// PFT/CMP class for this message.
+fn mudlog(g: &mut GameState, line: &str, log_type: u8, min_level: u8) {
+    crate::syslog::mudlog(g, line, log_type, min_level);
 }

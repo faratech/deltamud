@@ -12,11 +12,12 @@
 // C would with empty data, and are documented in the manifest):
 //   * WAIT_STATE: wired — the offensive skills below call g.set_wait_state and
 //     the heartbeat drains queued player input through the descriptor wait gate.
-//   * Arena (IS_ARENACOMBATANT / GET_ARENAFLEETIMER / LASTFIGHTING / match_over
-//     / trans_to_preproom) and gain_exp are not ported: a live PC is never an
-//     arena combatant (the state defaults off), so flee always takes the
-//     non-arena branch; the exp-loss is computed and reported but gain_exp is
-//     applied directly to points.exp here.
+//   * Arena flee: wired via arena.rs. do_flee uses minlevel=1 for arena
+//     combatants (else 15) and calls arena::arena_flee_start, which mirrors C's
+//     IS_ARENACOMBATANT branch (LASTFIGHTING / GET_ARENAFLEETIMER, flee-recall
+//     timer, no exp loss). match_over / trans_to_preproom are commented out in
+//     the C source too, so they are intentionally absent. Non-arena fleers take
+//     the gain_exp(-loss) branch as in C.
 //   * pk gating: pk_allowed is false (config), so PC-vs-PC requires murder, as
 //     in C. check_killer (combat::check_killer) is wired at the murder sites and
 //     inside set_fighting/damage, flagging PLR_KILLER in jurisdicted areas.
@@ -553,8 +554,8 @@ pub fn do_flee(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
     }
 
     let was_fighting = fighting(g, ch);
-    // IS_ARENACOMBATANT(ch) is always false in the port -> minlevel = 15.
-    let minlevel: Level = 15;
+    // IS_ARENACOMBATANT(ch) ? minlevel = 1 : minlevel = 15 (act.offensive.c).
+    let minlevel: Level = if crate::arena::is_arena_combatant(ch) { 1 } else { 15 };
 
     for _ in 0..6 {
         let attempt = g.rng.number(0, (NUM_OF_DIRS - 1) as i32) as usize;
@@ -579,14 +580,20 @@ pub fn do_flee(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
             g.send_to_char(ch, "You flee head over heels.\r\n");
             if was_fighting.is_some() && !is_npc(g, ch) && get_level(g, ch) >= minlevel {
                 if let Some(wf) = was_fighting {
-                    let loss = (get_max_hit(g, wf) - get_hit(g, wf)) as i64 * get_level(g, wf) as i64;
-                    // Non-arena branch (arena state never set in the port).
-                    gain_exp(g, ch, -loss);
-                    let msg = format!(
-                        "&RYou lost {} experience points for fleeing!&n\r\n",
-                        numdisplay(loss)
-                    );
-                    g.send_to_char(ch, &msg);
+                    // Arena branch: arena_flee_start mirrors C's IS_ARENACOMBATANT
+                    // path (flee-recall timer, no exp loss; match_over/
+                    // trans_to_preproom are #commented-out in C too). It returns
+                    // false for a non-arena fleer, who takes the gain_exp path.
+                    if !crate::arena::arena_flee_start(g, ch, wf) {
+                        let loss =
+                            (get_max_hit(g, wf) - get_hit(g, wf)) as i64 * get_level(g, wf) as i64;
+                        gain_exp(g, ch, -loss);
+                        let msg = format!(
+                            "&RYou lost {} experience points for fleeing!&n\r\n",
+                            numdisplay(loss)
+                        );
+                        g.send_to_char(ch, &msg);
+                    }
                 }
             }
         } else {

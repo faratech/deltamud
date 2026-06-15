@@ -9,7 +9,8 @@
 //!    byte minimum_position;
 //!    void (*command_pointer)(...);
 //!    long minimum_level;
-//!    long godcmd;                  // god-flag bitvector (not modelled here)
+//!    long godcmd;                  // god-flag bitvector (modelled: see godcmd /
+//!                                  // godcmd_set on the Rust command entry)
 //!    int subcmd;
 //! };
 //! ```
@@ -28,9 +29,11 @@
 //! * `min_level` is the numeric C `minimum_level`. Mortal commands use `0`.
 //!   God commands in C store a negative *flag-class sentinel* in this slot
 //!   (`GOD_CMD` = -1, `GOD_CMD2` = -2, `GOD_CMD3` = -5; the godcmd bitvector
-//!   field, not modelled here, then selects the specific permission). Because
-//!   the effective gate for every one of those is "must be an immortal", we
-//!   record the numeric `LVL_IMMORT` (101) here. See `LVL_IMMORT` below.
+//!   field — modelled here as the `godcmd`/`godcmd_set` entry fields — then
+//!   selects the specific permission). Because the effective level gate for
+//!   every one of those is "must be an immortal", we record the numeric
+//!   `LVL_IMMORT` (101) here and let the godcmd bit do the fine-grained gating.
+//!   See `LVL_IMMORT` below.
 //! * `subcmd` is the numeric `SCMD_*` value, inlined as an integer.
 
 use crate::types::Position;

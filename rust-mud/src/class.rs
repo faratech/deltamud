@@ -16,10 +16,10 @@
 //     get_race_max}`.
 //   * `con_app` / `wis_app` / `training_pts` are reproduced here (they are
 //     class-table neighbours and `advance_level`/`do_start` are class code in
-//     C); `limits.rs` currently degrades the con-hit / wis-practice / training
-//     award to 0 because it predates this module — the accessors below
-//     (`con_app_hitp`, `wis_app_bonus`, `training_pts`) are the wiring point to
-//     un-degrade it later (see manifest gaps).
+//     C). `limits.rs::advance_level` is fully wired to them: the constitution
+//     hit bonus (CON_APP[GET_CON].hitp), the practice award (wis_app.bonus),
+//     and the per-level training sessions (training_pts[GET_LEVEL]) are all
+//     applied, so the level-up gains match C — no longer degraded to 0.
 //
 // HISTORICAL NOTE on the THAC0 / saving-throw / title tables: this DeltaMUD
 // fork *deleted* the stock CircleMUD `thaco[][]`, `saving_throws[][]`, and
@@ -127,8 +127,8 @@ pub fn class_abbrev(class: Class) -> &'static str {
 }
 
 /// `class_name_i(i)` / `class_abbrev_i(i)` — index by raw `int` class (e.g. an
-/// NPC or a parse result), degrading to "Undefined"/"--" out of range like the
-/// rest of the port.
+/// NPC or a parse result). Out-of-range indices are bounds-guarded to
+/// "Undefined"/"--" (a safer guard than C, which indexes the table blindly).
 pub fn class_name_i(class: i32) -> &'static str {
     if (0..NUM_CLASSES as i32).contains(&class) {
         PC_CLASS_TYPES[class as usize]
@@ -334,7 +334,8 @@ const SAVE_CURVES: [[(i32, i32); NUM_SAVES]; NUM_CLASSES] = [
 
 /// `saving_throws(class, save_type, level)` — the save number for a class at a
 /// level in one of the five SAVING_* categories. Lower is better. Out-of-range
-/// class/save degrade to the warrior/PARA slot; floors at 0.
+/// class/save are bounds-guarded to the warrior/PARA slot (a safer guard than
+/// C, which indexes the table blindly); floors at 0.
 pub fn saving_throws(class: i32, save_type: usize, level: i32) -> i32 {
     let cidx = if (0..NUM_CLASSES as i32).contains(&class) {
         class as usize

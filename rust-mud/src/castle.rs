@@ -25,10 +25,11 @@
 //   * pulse / room-watch logic (banzaii, paths, sparring …) operates on `me`.
 //   * block_way inspects the acting `ch` and the typed direction in `cmd`.
 //
-// THE CASTLE IS OPTIONAL CONTENT. The shipped DeltaMUD world does not include
-// zone 150, so every finder degrades to "nobody here" and these procs become
-// silent no-ops, exactly as CircleMUD does when the zone is absent. The port
-// is faithful so the procs come alive the moment the zone is loaded.
+// THE CASTLE IS OPTIONAL (CONDITIONAL) CONTENT. The shipped DeltaMUD world does
+// not include zone 150, so the finders resolve to "nobody here" and these procs
+// are faithful no-ops on absent content — exactly CircleMUD's conditional-
+// content behaviour, not a port gap. The port is complete, so the procs come
+// alive the moment the zone is loaded.
 
 use crate::act::{act, ActArg, To};
 use crate::combat::{hit, set_fighting};

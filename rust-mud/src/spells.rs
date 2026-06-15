@@ -3,12 +3,15 @@
 // routine signature `fn(&mut GameState, level, ch, victim, obj)` and is invoked
 // from magic::call_magic's MAG_MANUAL switch.
 //
-// Arena is not yet ported, so its branches in the location-changing spells
-// (recall/home/retreat/summon/portal) no-op exactly where the C code's arena
-// branches would fire. House ownership IS modelled (house.rs), so spell_home
-// teleports the caster to their owned house via house::house_for_owner();
-// recall/retreat still degrade to hometown / "must rent first" semantics.
-// Documented in the gaps manifest.
+// Arena is ported (arena.rs), so the arena branches in the location-changing
+// spells are live: spell_recall and spell_home call arena::arena_recall (a
+// combatant concedes / is rebounded to the prep room, an observer bounces to
+// the observatory), and spell_summon / spell_portal enforce the arena-boundary
+// guard via arena::arena_stat. spell_retreat's arena branch is dead code in C
+// too (load_room is hard-coded 0, so the "must rent first" check always fires
+// first), so it stays a faithful "must rent first" no-op. House ownership IS
+// modelled (house.rs): spell_home teleports the caster to their owned house via
+// house::house_for_owner().
 
 use crate::act::{act, ActArg, To};
 use crate::character::Affect;
@@ -230,6 +233,13 @@ pub fn spell_recall(g: &mut GameState, _level: i32, _ch: CharId, victim: Option<
     }
     // RIDING/RIDDEN_BY mount checks unported (no mount field); skipped.
 
+    // Arena branch (spells.c): a combatant who recalls concedes / is rebounded
+    // to the prep room, an observer bounces to the observatory. arena_recall
+    // emits the disappear/appear acts and look itself, so return when handled.
+    if crate::arena::arena_recall(g, victim) {
+        return;
+    }
+
     act(g, "$n disappears.", true, victim, None, ActArg::None, To::Room);
     g.char_from_room(victim);
     let dest = recall_room(g, victim).unwrap_or(0);
@@ -284,7 +294,19 @@ pub fn spell_summon(g: &mut GameState, level: i32, ch: CharId, victim: Option<Ch
         return;
     }
     // Zone status_mode gate unported (no status field on Zone); never blocks.
-    // Arena gates unported; never blocks.
+
+    // Arena gates (spells.c): summon may not bridge the arena boundary — block
+    // if exactly one of caster/victim is currently in the arena.
+    let v_in_arena = crate::arena::arena_stat(victim) != crate::arena::ARENA_NOT;
+    let ch_in_arena = crate::arena::arena_stat(ch) != crate::arena::ARENA_NOT;
+    if v_in_arena && !ch_in_arena {
+        g.send_to_char(ch, "Your target is in the arena right now.\r\nEldrich magic obstructs thee!\r\n");
+        return;
+    }
+    if !v_in_arena && ch_in_arena {
+        g.send_to_char(ch, "You're in the arena right now whereas your target is not.\r\nEldrich magic obstructs thee!\r\n");
+        return;
+    }
 
     if mob_flagged(g, victim, MOB_AGGRESSIVE) {
         act(g, "As the words escape your lips and $N travels\r\nthrough time and space towards you, you realize that $E is\r\naggressive and might harm you, so you wisely send $M back.", false, ch, None, ActArg::Char(victim), To::Char);
@@ -780,6 +802,17 @@ pub fn spell_portal(g: &mut GameState, level: i32, ch: CharId, victim: Option<Ch
         g.send_to_char(ch, "You cannot travel to the gods!\n");
         return;
     }
+    // Arena gates (spells.c): a portal may not bridge the arena boundary.
+    let v_in_arena = crate::arena::arena_stat(victim) != crate::arena::ARENA_NOT;
+    let ch_in_arena = crate::arena::arena_stat(ch) != crate::arena::ARENA_NOT;
+    if v_in_arena && !ch_in_arena {
+        g.send_to_char(ch, "Your target is in the arena right now.\r\nEldrich magic obstructs thee!\r\n");
+        return;
+    }
+    if !v_in_arena && ch_in_arena {
+        g.send_to_char(ch, "You're in the arena right now whereas your target is not.\r\nEldrich magic obstructs thee!\r\n");
+        return;
+    }
     let v_flags = g.room(v_room).room_flags;
     if v_flags.bits() & ROOM_NOMAGIC != 0 {
         g.send_to_char(ch, "Your target is protected against your magic.\n\r");
@@ -886,8 +919,15 @@ pub fn spell_home(g: &mut GameState, _level: i32, ch: CharId, victim: Option<Cha
         return;
     }
 
-    // Arena combatant / observer branches (arena unported) are skipped; the
-    // generic teleport-out / teleport-in path moves the caster home.
+    // Arena combatant / observer branches (spells.c): a participant casting
+    // home is rebounded to the prep room / observatory via arena_recall. NOTE:
+    // arena_recall emits "$n disappears." for the combatant branch, whereas
+    // C's spell_home combatant branch goes straight to match_over without a
+    // leave-act; the destination/concede semantics are identical.
+    if crate::arena::arena_recall(g, ch) {
+        return;
+    }
+
     act(g, "$n magically teleports out.", false, ch, None, ActArg::None, To::Room);
     g.char_from_room(ch);
     g.char_to_room(ch, dest);

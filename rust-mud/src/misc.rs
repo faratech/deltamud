@@ -329,24 +329,11 @@ fn clean_pfile(g: &mut GameState) {
     }
 }
 
-/// mudlog(line, NRM, LVL_IMPL, TRUE) equivalent: broadcast to every playing
-/// implementor-level immortal (the C mudlog immortal-channel side; the on-disk
-/// syslog file is not written, matching the rest of the Rust port).
+/// mudlog(line, NRM, LVL_IMPL, TRUE) — delegate to the shared `syslog::mudlog`,
+/// which writes the on-disk `<lib>/syslog` line and echoes it to online
+/// implementor-level immortals (filtered by their PRF_LOG syslog level).
 fn mudlog_imp(g: &mut GameState, line: &str) {
-    let formatted = format!("[ {} ]\r\n", line);
-    let imms: Vec<CharId> = g
-        .players_by_name
-        .values()
-        .copied()
-        .filter(|&id| {
-            g.get_char(id)
-                .map(|c| c.player.level >= LVL_IMPL)
-                .unwrap_or(false)
-        })
-        .collect();
-    for id in imms {
-        g.send_to_char(id, &formatted);
-    }
+    crate::syslog::mudlog(g, line, crate::syslog::NRM, LVL_IMPL);
 }
 
 // ===========================================================================

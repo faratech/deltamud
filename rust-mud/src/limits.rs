@@ -24,7 +24,7 @@
 
 use crate::act::{act, ActArg, To};
 use crate::object::ObjectType;
-use crate::room::SectorType;
+use crate::room::{RoomFlags, SectorType};
 use crate::state::GameState;
 use crate::types::*;
 
@@ -70,10 +70,8 @@ const ITEM_HP_REGEN: i32 = 25;
 const ITEM_MP_REGEN: i32 = 26;
 const ITEM_MV_REGEN: i32 = 27;
 
-// structs.h room-flag bit positions (ROOM_*). The shared `RoomFlags` bitflags
-// stop at ARENA(1<<15) and do not define these, so we test the raw bitvector.
-const ROOM_BAD_REGEN_BIT: u32 = 17;
-const ROOM_GOOD_REGEN_BIT: u32 = 20;
+// structs.h ROOM_BAD_REGEN(1<<17) / ROOM_GOOD_REGEN(1<<20) — now defined on the
+// shared `RoomFlags` bitflags, so the regen logic below uses the typed flags.
 
 // utils.h MUD-time constants (used by age()).
 const SECS_PER_MUD_HOUR: i64 = 75;
@@ -85,11 +83,10 @@ const SECS_PER_MUD_YEAR: i64 = 17 * SECS_PER_MUD_MONTH;
 // Small accessors mirroring the C macros, with the contract's storage layout.
 // ---------------------------------------------------------------------------
 
-/// Raw room-flag bit test against the underlying bitvector (works for flags
-/// not modeled by the `RoomFlags` type, e.g. GOOD_REGEN / BAD_REGEN).
-fn room_flag_bit(g: &GameState, rnum: RoomRnum, bit: u32) -> bool {
+/// Typed room-flag test (mirrors C's ROOM_FLAGGED).
+fn room_flagged(g: &GameState, rnum: RoomRnum, flag: RoomFlags) -> bool {
     match g.room_opt(rnum) {
-        Some(r) => (r.room_flags.bits() & (1u32 << bit)) != 0,
+        Some(r) => r.room_flags.contains(flag),
         None => false,
     }
 }
@@ -203,10 +200,10 @@ pub fn mana_gain(g: &GameState, ch: CharId) -> i32 {
         gain >>= 2;
     }
     if let Some(rnum) = in_room {
-        if room_flag_bit(g, rnum, ROOM_GOOD_REGEN_BIT) {
+        if room_flagged(g, rnum, RoomFlags::GOOD_REGEN) {
             gain += gain * 2;
         }
-        if room_flag_bit(g, rnum, ROOM_BAD_REGEN_BIT) {
+        if room_flagged(g, rnum, RoomFlags::BAD_REGEN) {
             gain = 0;
         }
     }
@@ -255,10 +252,10 @@ pub fn hit_gain(g: &GameState, ch: CharId) -> i32 {
         gain >>= 2;
     }
     if let Some(rnum) = in_room {
-        if room_flag_bit(g, rnum, ROOM_GOOD_REGEN_BIT) {
+        if room_flagged(g, rnum, RoomFlags::GOOD_REGEN) {
             gain += gain * 2;
         }
-        if room_flag_bit(g, rnum, ROOM_BAD_REGEN_BIT) {
+        if room_flagged(g, rnum, RoomFlags::BAD_REGEN) {
             gain = 0;
         }
     }
@@ -301,10 +298,10 @@ pub fn move_gain(g: &GameState, ch: CharId) -> i32 {
         gain >>= 2;
     }
     if let Some(rnum) = in_room {
-        if room_flag_bit(g, rnum, ROOM_GOOD_REGEN_BIT) {
+        if room_flagged(g, rnum, RoomFlags::GOOD_REGEN) {
             gain += gain * 2;
         }
-        if room_flag_bit(g, rnum, ROOM_BAD_REGEN_BIT) {
+        if room_flagged(g, rnum, RoomFlags::BAD_REGEN) {
             gain = 0;
         }
     }
@@ -585,9 +582,11 @@ pub fn gain_exp(g: &mut GameState, ch: CharId, gain: i64) {
 }
 
 /// gain_exp_regardless (limits.c): uncapped XP grant that can level a PC all the
-/// way to LVL_IMPL (used by immortal set/restore). LVL_GETSTUFF reward
-/// (do_oldbie) degrades to the message-only path; the oldbie equipment loader is
-/// not ported (see manifest gaps).
+/// way to LVL_IMPL (used by immortal set/restore). At LVL_GETSTUFF the C code
+/// calls do_oldbie + the reward message; do_oldbie is marked "disabled in the
+/// code" by its own author comment (and the equivalent block in the normal
+/// gain_exp path is `//`-commented out), so the starter-gear loop is treated as
+/// off. The reward message still fires, matching the enabled (message) behavior.
 pub fn gain_exp_regardless(g: &mut GameState, ch: CharId, gain: i64) {
     let is_npc = g.get_char(ch).map(|c| c.is_npc).unwrap_or(true);
     if is_npc {
@@ -632,8 +631,10 @@ pub fn gain_exp_regardless(g: &mut GameState, ch: CharId, gain: i64) {
             "&m[&YINFO&m]&n {} has advanced to level {}!\r\n",
             name, new_level
         ));
-        // LVL_GETSTUFF == 3: do_oldbie loads starter gear (not ported). The
-        // reward message still fires so the player experience matches.
+        // LVL_GETSTUFF == 3: C calls do_oldbie (starter gear), but do_oldbie is
+        // author-marked "disabled in the code" and the same block is commented
+        // out in the normal gain_exp path, so the gear loop is intentionally
+        // off. The reward message still fires, matching the enabled behavior.
         if new_level == 3 {
             g.send_to_char(
                 ch,

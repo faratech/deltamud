@@ -1099,7 +1099,8 @@ fn do_stat_object(g: &mut GameState, ch: CharId, j: ObjId) {
         return;
     }
     let (vnum, short, namelist, ldesc, otype, wear, bitvector, extra, weight, cost, rent, timer,
-         minlvl, loc, contained_in, carried_by, worn_by, values, contains, affects) = {
+         minlvl, loc, contained_in, carried_by, worn_by, values, contains, affects,
+         curr_slots, total_slots) = {
         let o = match g.get_obj(j) {
             Some(o) => o,
             None => return,
@@ -1125,6 +1126,8 @@ fn do_stat_object(g: &mut GameState, ch: CharId, j: ObjId) {
             o.values,
             o.contains.clone(),
             o.affects.clone(),
+            o.curr_slots, // GET_OBJ_CSLOTS
+            o.total_slots, // GET_OBJ_TSLOTS
         )
     };
 
@@ -1221,8 +1224,9 @@ fn do_stat_object(g: &mut GameState, ch: CharId, j: ObjId) {
             values[0], values[1], values[2], values[3]
         ),
     };
-    // GET_OBJ_CSLOTS / TSLOTS (quality slots) not modelled -> 0/0.
-    g.send_to_char(ch, &format!("{}\r\nQuality: [{}] [{}]\r\n", detail, 0, 0));
+    // act.wizard.c do_stat_object: "Quality: [%d] [%d]" with
+    // GET_OBJ_CSLOTS / GET_OBJ_TSLOTS (obj_flags.curr_slots / total_slots).
+    g.send_to_char(ch, &format!("{}\r\nQuality: [{}] [{}]\r\n", detail, curr_slots, total_slots));
 
     // Contents.
     if !contains.is_empty() {

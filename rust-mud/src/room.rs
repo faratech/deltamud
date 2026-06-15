@@ -82,10 +82,18 @@ bitflags::bitflags! {
         const PRIVATE = 1 << 9;
         const GODROOM = 1 << 10;
         const HOUSE = 1 << 11;
+        // NOTE: bits 12-15 below carry DeltaMUD-custom *names* that differ from
+        // the C structs.h ROOM_* meanings (C has HOUSE_CRASH/ATRIUM/OLC/BFS_MARK
+        // at 12-15). Callers that need the C semantics test these bits raw; see
+        // cmd_movement.rs / house.rs headers. Do not "fix" the names here without
+        // auditing every raw-bit workaround.
         const NO_RECALL = 1 << 12;
         const NO_SUMMON = 1 << 13;
         const NO_CLAN = 1 << 14;
         const ARENA = 1 << 15;
+        // structs.h ROOM_BAD_REGEN / ROOM_GOOD_REGEN (limits.c regen logic).
+        const BAD_REGEN = 1 << 17;
+        const GOOD_REGEN = 1 << 20;
     }
 }
 
