@@ -18,13 +18,14 @@
 // (`OnceLock<Mutex<..>>`) keyed by nothing — they are process-global tables,
 // exactly like C's `ban_list` / `invalid_list` file-scope globals.
 //
-// Contract-gap policy (documented, never stubbed): C's mudlog writes a syslog
-// file *and* an immortal channel; we reproduce the immortal-channel side (no
-// syslog-file layer in the port yet — same gap cmd_wizard.rs documents). The
-// command logic and every output string are reproduced 1:1.
+// Logging: C's `mudlog` writes the on-disk syslog file *and* echoes the line to
+// online immortals; we call the shared `crate::syslog::mudlog`, which does both
+// (the file lives at `<lib>/syslog`, matching C's LOGFILE/DFLT_DIR). The command
+// logic and every output string are reproduced 1:1.
 
 use crate::interpreter::{any_one_arg, one_argument};
 use crate::state::GameState;
+use crate::syslog::{mudlog, NRM};
 use crate::types::*;
 use std::sync::{Mutex, OnceLock};
 
@@ -39,9 +40,6 @@ const XNAME_FILE_REL: &str = "misc/xnames";
 // MAX_INVALID_NAMES (ban.c) — guard rail mirrored for parity logging only.
 const MAX_INVALID_NAMES: usize = 200;
 
-// Syslog severity used by mudlog (utils.h NRM). The immortal-channel mudlog we
-// reproduce ignores the BRF/CMP nuance, but we keep the value for fidelity.
-const NRM: u8 = 2;
 
 // ---------------------------------------------------------------------------
 // BanType — the four ban severities (db.h BAN_NOT/BAN_NEW/BAN_SELECT/BAN_ALL),
@@ -442,25 +440,6 @@ pub fn valid_name_in(g: &GameState, newname: &str) -> bool {
 // Immortal verbs
 // ===========================================================================
 
-/// mudlog substitute — see cmd_wizard.rs: send the line to every playing
-/// immortal at or above `min_level`. (Documented gap: no on-disk syslog file.)
-fn mudlog(g: &mut GameState, line: &str, min_level: u8) {
-    let formatted = format!("[ {} ]\r\n", line);
-    let imms: Vec<CharId> = g
-        .players_by_name
-        .values()
-        .copied()
-        .filter(|&id| {
-            g.get_char(id)
-                .map(|c| c.player.level >= min_level && c.player.level >= LVL_IMMORT)
-                .unwrap_or(false)
-        })
-        .collect();
-    for id in imms {
-        g.send_to_char(id, &formatted);
-    }
-}
-
 /// GET_INVIS_LEV(ch): the actor's invisibility level (Character::invis_level).
 fn invis_lev(g: &GameState, ch: CharId) -> u8 {
     g.get_char(ch)
@@ -590,8 +569,7 @@ pub fn do_ban(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         ban_type.as_str()
     );
     let level = LVL_GOD.max(invis_lev(g, ch));
-    let _ = NRM;
-    mudlog(g, &log, level);
+    mudlog(g, &log, NRM, level);
     g.send_to_char(ch, "Site banned.\r\n");
 }
 
@@ -633,7 +611,7 @@ pub fn do_unban(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         node.site
     );
     let level = LVL_GOD.max(invis_lev(g, ch));
-    mudlog(g, &log, level);
+    mudlog(g, &log, NRM, level);
 }
 
 // ---------------------------------------------------------------------------

@@ -229,13 +229,17 @@ fn spell_mana_params(spellnum: i32) -> Option<(i32, i32, i32)> {
 
 /// CircleMUD mag_manacost (spell_parser.c): the per-cast mana for `spellnum`
 /// at this character's level. min_level[class] for every brewable/scribable
-/// spell is LVL_IMMORT (101). AFF_AUTUS halving is not modelled (the affect
-/// flag is not yet ported), matching the current rust-mud affect set.
+/// spell is LVL_IMMORT (101). If the caster is affected by mana autus
+/// (AFF_AUTUS), the cost is halved (`mana >>= 1`), matching the C.
 fn mag_manacost(g: &GameState, ch: CharId, spellnum: i32) -> i32 {
     let level = g.get_char(ch).map(|c| c.player.level as i32).unwrap_or(1);
     let (mana_max, mana_min, mana_change) = spell_mana_params(spellnum).unwrap_or((0, 0, 0));
     let computed = mana_max - mana_change * (level - LVL_IMMORT as i32);
-    computed.max(mana_min)
+    let mut mana = computed.max(mana_min);
+    if g.get_char(ch).map(|c| c.affect_flags & crate::flags::AFF_AUTUS != 0).unwrap_or(false) {
+        mana >>= 1;
+    }
+    mana
 }
 
 // ---------------------------------------------------------------------------

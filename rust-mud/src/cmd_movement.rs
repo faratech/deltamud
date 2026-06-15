@@ -9,12 +9,12 @@
 // looked up by id every time.
 //
 // Contract gaps (see manifest `helpers_needed`/`notes`): the Rust Room has no
-// `linkrnum`/`linkmapnum`, `ROOM_WALL`/`ROOM_IMPROOM`/`ROOM_ATRIUM`, weather,
-// map-mv, mounts (RIDING/RIDDEN_BY) or follow-group plumbing beyond the
-// `master`/`followers` fields, and there is no skill-roll / damage path wired
-// in yet. Those branches are implemented against the data that exists; the
-// pieces with no representable backing are handled the way the surrounding C
-// code degrades (e.g. an absent door keyword -> "door").
+// `linkrnum`/`linkmapnum`, `ROOM_WALL`/`ROOM_IMPROOM`, weather, or map-mv
+// plumbing. ROOM_ATRIUM (C bit 1<<13) IS honoured for house gating via raw bits
+// — the Rust RoomFlags bitfield mislabels that bit as NO_SUMMON, so it is tested
+// with room_is_atrium() rather than the named variant (see house.rs header for
+// the collision). Pieces with no representable backing are handled the way the
+// surrounding C code degrades (e.g. an absent door keyword -> "door").
 
 use crate::act::{act, ActArg, To};
 use crate::constants;
@@ -35,6 +35,11 @@ const AFF_CHAINED: i64 = 1 << 24;
 
 // PRF2_INTANGIBLE (structs.h): ghosting immortals don't burn move (1 << 9).
 const PRF2_INTANGIBLE: i64 = 1 << 9;
+
+// ROOM_ATRIUM (structs.h, C bit 1<<13 — "the door to a house"). The Rust
+// RoomFlags bitfield names this bit NO_SUMMON, so the house-gating code tests it
+// raw via room_is_atrium() to stay C-accurate (see house.rs header).
+const ROOM_ATRIUM: u32 = 1 << 13;
 
 // CONT_* container value-1 bits (structs.h), used for container doors.
 const CONT_CLOSEABLE: i32 = 1 << 0;
@@ -79,6 +84,12 @@ const FLAGS_DOOR: [i32; 6] = [
 
 /// has_boat: can the char walk on no-swim water? (AFF_WATERWALK, immortal, or
 /// an ITEM_BOAT in inventory / worn). DeltaMUD also allows non-wearable boats.
+/// True if the room at `rnum` carries ROOM_ATRIUM (raw bit; the named RoomFlags
+/// variant for this bit is NO_SUMMON, hence the raw test).
+fn room_is_atrium(g: &GameState, rnum: RoomRnum) -> bool {
+    g.room_opt(rnum).map(|r| r.room_flags.bits() & ROOM_ATRIUM != 0).unwrap_or(false)
+}
+
 fn has_boat(g: &GameState, ch: CharId) -> bool {
     let c = match g.get_char(ch) {
         Some(c) => c,
@@ -260,6 +271,16 @@ fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check
     // Godroom gating (LVL_GRGOD): mortals/low gods can't pass.
     if (level as u8) < LVL_GRGOD && g.room(to_rnum).room_flags.contains(RoomFlags::GODROOM) {
         g.send_to_char(ch, "You aren't godly enough to use that room!\r\n");
+        return false;
+    }
+
+    // Atrium / private-house gating (act.movement.c): when leaving a ROOM_ATRIUM
+    // (the public approach to a house), a non-owner / non-guest cannot step into
+    // the private house room. House_can_enter consults the house-control table.
+    // The ATRIUM bit (C 1<<13) is the bit the Rust RoomFlags bitfield names
+    // NO_SUMMON, so it is tested raw here (see house.rs header for the collision).
+    if room_is_atrium(g, rnum) && !crate::house::house_can_enter(g, ch, exit.to_room) {
+        g.send_to_char(ch, "That's private property -- no trespassing!\r\n");
         return false;
     }
 
@@ -1008,7 +1029,15 @@ fn do_special_move(g: &mut GameState, ch: CharId) -> bool {
 
     // NOTE: ROOM_WALL / ROOM_IMPROOM (C bits 18 / 16) gates are omitted to match
     // do_simple_move — the Rust RoomFlags bitfield does not model those bits
-    // (see this module's header). Atrium/House gating is likewise not modelled.
+    // (see this module's header).
+    //
+    // Atrium / private-house gating (act.movement.c): leaving a ROOM_ATRIUM into
+    // a private house is blocked for non-owners/non-guests. ATRIUM is C bit 1<<13
+    // (named NO_SUMMON in the Rust RoomFlags bitfield), so it is tested raw.
+    if room_is_atrium(g, rnum) && !crate::house::house_can_enter(g, ch, se.to_room) {
+        g.send_to_char(ch, "That's private property -- no trespassing!\r\n");
+        return false;
+    }
     if (riding.is_some() || ridden_by.is_some()) && g.room(to_rnum).room_flags.contains(RoomFlags::TUNNEL) {
         g.send_to_char(ch, "There isn't enough room there, while mounted.\r\n");
         return false;

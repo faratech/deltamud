@@ -3,9 +3,11 @@
 // routine signature `fn(&mut GameState, level, ch, victim, obj)` and is invoked
 // from magic::call_magic's MAG_MANUAL switch.
 //
-// Arena and house-ownership are not yet ported, so the location-changing spells
-// (recall/home/retreat/summon/portal) degrade to the player's hometown /
-// same-room semantics exactly where the C code's arena and house branches no-op.
+// Arena is not yet ported, so its branches in the location-changing spells
+// (recall/home/retreat/summon/portal) no-op exactly where the C code's arena
+// branches would fire. House ownership IS modelled (house.rs), so spell_home
+// teleports the caster to their owned house via house::house_for_owner();
+// recall/retreat still degrade to hometown / "must rent first" semantics.
 // Documented in the gaps manifest.
 
 use crate::act::{act, ActArg, To};
@@ -840,13 +842,58 @@ pub fn spell_portal(g: &mut GameState, level: i32, ch: CharId, victim: Option<Ch
 // ===========================================================================
 // spell_home (spells.c)
 // ===========================================================================
-pub fn spell_home(g: &mut GameState, _level: i32, ch: CharId, _victim: Option<CharId>, _obj: Option<ObjId>) {
-    // House-ownership table unported, so a player never owns a house; the C
-    // routine fails here for everyone without a house — before it would teleport
-    // them to their owned house room (real_room(homenum)). Note C also computes
-    // mortal_start_room[GET_HOME(ch)] (the MORTAL_START_ROOM table, ported above)
-    // but never uses it for the destination, so nothing is lost by failing here.
-    g.send_to_char(ch, "The spell fails because you don't own a house!\r\n");
+pub fn spell_home(g: &mut GameState, _level: i32, ch: CharId, victim: Option<CharId>, _obj: Option<ObjId>) {
+    // SPELL_HOME is TAR_CHAR_ROOM | TAR_SELF_ONLY, so victim == ch; fall back to
+    // ch if the dispatcher passes None.
+    let victim = victim.unwrap_or(ch);
+
+    // Find the house this caster owns (house_control[i].owner == GET_IDNUM(ch),
+    // last match wins — spells.c). homenum == 0 / None means "no house owned".
+    let idnum = g.get_char(ch).map(|c| c.idnum).unwrap_or(-1);
+    let homenum = match crate::house::house_for_owner(idnum) {
+        Some(v) => v,
+        None => {
+            g.send_to_char(ch, "The spell fails because you don't own a house!\r\n");
+            return;
+        }
+    };
+
+    // Mount check (RIDING(victim) || RIDDEN_BY(victim)).
+    let on_mount = g
+        .get_char(victim)
+        .map(|c| c.riding.is_some() || c.ridden_by.is_some())
+        .unwrap_or(false);
+    if on_mount {
+        g.send_to_char(ch, "The spell fails because your victim is atop a mount.\r\n");
+        return;
+    }
+
+    // Resolve the destination room (real_room(homenum)). C computes the
+    // mortal_start_room fallback too but never uses it for the destination, so
+    // the owned-house room is the only teleport target.
+    let dest = match g.real_room(homenum) {
+        Some(r) => r,
+        None => {
+            // House vnum no longer maps to a real room — treat as no house.
+            g.send_to_char(ch, "The spell fails because you don't own a house!\r\n");
+            return;
+        }
+    };
+
+    // Already home?
+    if g.get_char(ch).and_then(|c| c.in_room) == Some(dest) {
+        g.send_to_char(ch, "The spell fails because you're already at home!\r\n");
+        return;
+    }
+
+    // Arena combatant / observer branches (arena unported) are skipped; the
+    // generic teleport-out / teleport-in path moves the caster home.
+    act(g, "$n magically teleports out.", false, ch, None, ActArg::None, To::Room);
+    g.char_from_room(ch);
+    g.char_to_room(ch, dest);
+    act(g, "$n suddenly appears in the room.", false, ch, None, ActArg::None, To::Room);
+    look_at_room(g, ch, false);
+    g.send_to_char(ch, "\r\nAhhhh... Home Sweet Home!\r\n");
 }
 
 // ===========================================================================

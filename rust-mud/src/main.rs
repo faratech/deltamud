@@ -82,6 +82,7 @@ mod spec_procs;
 mod spell_parser;
 mod spells;
 mod state;
+mod syslog;
 mod types;
 mod weather;
 mod world;
@@ -136,7 +137,20 @@ async fn main() -> Result<()> {
         .init();
 
     info!("DeltaMUD (Rust) starting...");
-    let config = Config::from_env();
+    let mut config = Config::from_env();
+
+    // Faithful port of the C `-s` command-line flag (comm.c:272 `no_specials = 1`,
+    // "Suppressing assignment of special routines."). The Rust port has no full
+    // argv parser, so we scan argv for the single flag the conversion task needs:
+    // any of `-s`/`-q` enables no_specials (the env var MUD_NO_SPECIALS does the
+    // same). When set, shop data + spec-proc func tables are not booted and the
+    // MOB_SPEC pulse call is gated, exactly as C's `if (!no_specials)` guards.
+    for arg in std::env::args().skip(1) {
+        if arg == "-s" || arg == "-q" {
+            config.no_specials = true;
+            info!("Suppressing assignment of special routines (no_specials).");
+        }
+    }
 
     let db: Arc<dyn DatabaseInterface> = if config.use_mock_db {
         info!("Using in-memory mock database");
@@ -179,8 +193,12 @@ async fn main() -> Result<()> {
     // lookup as a fallback since they are not in the static command table.
     cmd_social::boot_socials(Some(&format!("{}/misc/socials", config.lib_path)));
 
-    // Content/economy subsystem boot (Batch 11).
-    shop::boot_shops(&config.lib_path);
+    // Content/economy subsystem boot (Batch 11). Shop data load mirrors C's
+    // DB_BOOT_SHP, which boot_world() skips under no_specials (db.c:261
+    // `if (!no_specials) index_boot(DB_BOOT_SHP)`).
+    if !config.no_specials {
+        shop::boot_shops(&config.lib_path);
+    }
     clan::boot_clans(&config.lib_path);
     boards::boot_boards(&config.lib_path);
     ban::boot_ban(&config.lib_path);
@@ -209,7 +227,13 @@ async fn main() -> Result<()> {
 
     // Build the vnum->special-procedure tables (spec_assign.c assign_*). Must
     // come after shops/boards/mail so their data is available to the procs.
-    spec_assign::assign_specs();
+    // C's boot_db() gates the whole assign_mobiles/shopkeepers/objects/rooms
+    // block on `if (!no_specials)` (db.c:317); skipping it here leaves every
+    // spec table empty, so the interpreter's special() walk and the MOB_SPEC
+    // pulse both find nothing to dispatch — exactly the C behaviour.
+    if !config.no_specials {
+        spec_assign::assign_specs();
+    }
 
     let lib_path = config.lib_path.clone();
     let (game_tx, game_rx) = mpsc::channel(256);

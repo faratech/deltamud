@@ -65,7 +65,7 @@ struct BupAffects {
     aff_flags: i64,
     affected: Vec<crate::character::Affect>,
     wimp_level: i32,
-    recall_level: i32, // GET_RECALL_LEV — not modelled on Character; tracked here
+    recall_level: i32, // BUP_RECALL_LEV — GET_RECALL_LEV stashed while in the arena
 }
 
 #[derive(Default, Clone)]
@@ -445,10 +445,11 @@ pub fn bup_affects(g: &mut GameState, ch: CharId) {
             aff_flags: c.affect_flags,
             affected: std::mem::take(&mut c.affected),
             wimp_level: c.wimp_level,
-            recall_level: 0, // GET_RECALL_LEV not modelled on Character; 0 default
+            recall_level: c.recall_level, // BUP_RECALL_LEV(ch) = GET_RECALL_LEV(ch)
         };
         c.affect_flags = 0;
         c.wimp_level = 0;
+        c.recall_level = 0;
         saved
     } else {
         return;
@@ -473,7 +474,7 @@ pub fn restore_bup_affects(g: &mut GameState, ch: CharId) {
             c.affect_flags = s.aff_flags;
             c.affected = s.affected;
             c.wimp_level = s.wimp_level;
-            let _ = s.recall_level; // GET_RECALL_LEV restore (no Character field)
+            c.recall_level = s.recall_level; // GET_RECALL_LEV = BUP_RECALL_LEV
         }
     }
     g.affect_total(ch);

@@ -214,6 +214,45 @@ fn find_room_by_id(g: &GameState, id: i64) -> Option<RoomRnum> {
     g.real_room(vnum)
 }
 
+/// cdsr() (maputils.c) — "coordinate destination string -> rnum". The string is
+/// a run of digits optionally split by a single lowercase 'x' separating an X
+/// and Y map coordinate (e.g. "12x34"). A bare number is treated as a vnum.
+/// Returns None (the C NOWHERE/-1) on any malformed string or out-of-range
+/// coordinate. Coordinates are NOT wrapped here (the C rejects out-of-range),
+/// unlike map_coords_to_rnum — but the bounds check below guarantees the wrap
+/// loops in that helper are no-ops, so it resolves identically.
+fn cdsr(g: &GameState, string: &str) -> Option<RoomRnum> {
+    let mut xf = false;
+    let mut x: i32 = -1;
+    let mut tmp = String::new();
+    for ch in string.chars() {
+        if ch.is_ascii_digit() {
+            tmp.push(ch);
+        } else if ch == 'x' && !xf {
+            if tmp.is_empty() {
+                return None; // No X coordinate supplied.
+            }
+            xf = true;
+            x = atoi(&tmp);
+            tmp.clear();
+        } else {
+            return None;
+        }
+    }
+    if tmp.is_empty() {
+        return None; // No (Y) coordinate supplied.
+    }
+    if !xf {
+        // Argument was entirely a number -> assume a vnum, return the rnum.
+        return g.real_room(atoi(&tmp) as RoomVnum);
+    }
+    let y = atoi(&tmp);
+    if x < 1 || x > g.max_map_x || y < 1 || y > g.max_map_y {
+        return None;
+    }
+    g.map_coords_to_rnum(x, y)
+}
+
 // ---------------------------------------------------------------------------
 // Whole-world visible-char / visible-obj finders (C get_char_vis(NULL, …) /
 // get_obj_vis(NULL, …)) used by wteleport. NULL viewer => no visibility gate.
@@ -483,8 +522,10 @@ fn do_wteleport(g: &mut GameState, room: RoomRnum, argument: &str) {
         return;
     }
 
-    // Resolve the destination (cdsr() is not modelled — returns NOWHERE).
-    let target: Option<RoomRnum> = if let Some(id) = parse_uid(&arg2) {
+    // Resolve the destination. C tries cdsr() (coordinate/vnum shortcut) first.
+    let target: Option<RoomRnum> = if let Some(r) = cdsr(g, &arg2) {
+        Some(r)
+    } else if let Some(id) = parse_uid(&arg2) {
         find_room_by_id(g, id)
     } else if let Some(ch) = get_char_vis_world(g, &arg2) {
         g.get_char(ch).and_then(|c| c.in_room)

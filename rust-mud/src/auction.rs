@@ -25,6 +25,7 @@
 
 use crate::act::{act, ActArg, To};
 use crate::state::GameState;
+use crate::syslog::{mudlog, CMP};
 use crate::types::*;
 use std::sync::{Mutex, OnceLock};
 
@@ -426,7 +427,7 @@ pub fn auction_update(g: &mut GameState) {
                 sname, short, bname, bid, s
             );
             if get_level(g, bidder) >= LVL_IMMORT || get_level(g, sid) >= LVL_IMMORT {
-                mudlog(g, &watch, LVL_IMPL);
+                mudlog(g, &watch, CMP, LVL_IMPL);
             }
             if let Some(c) = g.get_char_mut(sid) {
                 c.points.gold += bid as i32;
@@ -445,27 +446,6 @@ pub fn auction_update(g: &mut GameState) {
 fn bump_ticks() {
     let mut a = auction().lock().unwrap();
     a.ticks += 1;
-}
-
-/// mudlog substitute — mirrors the cmd_wizard.rs version: the C mudlog writes
-/// the syslog file and the immortal channel; we have no syslog file layer, so
-/// reproduce the immortal-channel side (send the line to every playing immortal
-/// at >= `min_level`). The on-disk syslog write is a documented gap.
-fn mudlog(g: &mut GameState, line: &str, min_level: u8) {
-    let formatted = format!("[ {} ]\r\n", line);
-    let imms: Vec<CharId> = g
-        .players_by_name
-        .values()
-        .copied()
-        .filter(|&id| {
-            g.get_char(id)
-                .map(|c| c.player.level >= min_level && c.player.level >= LVL_IMMORT)
-                .unwrap_or(false)
-        })
-        .collect();
-    for id in imms {
-        g.send_to_char(id, &formatted);
-    }
 }
 
 // ---------------------------------------------------------------------------

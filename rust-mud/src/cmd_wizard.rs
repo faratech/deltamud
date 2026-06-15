@@ -7,23 +7,24 @@
 // &Character/&Object across a mutation; use act() for broadcasts. Color is
 // emitted as literal `&`-codes; the output path strips them per-player.
 //
-// Contract-gap policy (documented in the manifest, never stubbed): a number of
-// global side-effects in the C source touch systems that are not yet modelled
-// (circle_shutdown/circle_reboot/circle_restrict globals, autowiz, OLC save
-// lists, copyover, the per-player god-command bitvectors GCMD_*, DG-scripts,
-// snoop links, on-disk player files, the world weather/snow tables, the arena,
-// quests, MySQL `last`/`rename`). For each, the command *logic* and every output
-// string is reproduced 1:1 and the persistent side-effect degrades exactly like
-// C would if that table were empty — e.g. `freeze` flips PLR_FROZEN + freeze_lev
-// (modelled) but the on-disk save is a no-op (no player-file layer yet).
+// Contract-gap policy (documented in the manifest, never stubbed): a few
+// global side-effects in the C source touch systems reachable only outside this
+// sync command path — chiefly the async player DB (database.rs) used by the
+// OFFLINE variants of `stat file` / `set file` / `show player` / `last`, and the
+// on-disk player-file password buffer. For those the command *logic* and every
+// output string is reproduced 1:1, the ONLINE target is handled in full, and the
+// offline branch mirrors C's not-found path with a one-line note at the site.
 
 use crate::act::{act, ActArg, To};
 use crate::connection::ConState;
 use crate::constants;
+use crate::dg_handler::{self, ScriptKey, OBJ_TRIGGER, WLD_TRIGGER};
 use crate::flags::*;
+use crate::gcmd::*;
 use crate::interpreter::{command_interpreter, half_chop, is_abbrev, one_argument, search_block};
 use crate::object::{ObjLoc, ObjectType};
 use crate::state::GameState;
+use crate::syslog::{BRF, CMP, NRM, PFT};
 use crate::types::*;
 
 // ---------------------------------------------------------------------------
@@ -107,6 +108,10 @@ const ITEM_NORENT: u64 = 1 << 2;
 // Common short strings.
 const OK: &str = "Okay.\r\n";
 const NOPERSON: &str = "No-one by that name here.\r\n";
+
+// config.c: impboard=1200 — the immortal board object vnum protected from
+// `load` by non-GRGOD immortals (do_load).
+const IMPBOARD: i32 = 1200;
 
 // ---------------------------------------------------------------------------
 // Small pure / world helpers (no GameState mutation).
@@ -212,6 +217,148 @@ fn name_of(g: &GameState, id: CharId) -> String {
     g.get_char(id).map(|c| c.player.name.clone()).unwrap_or_default()
 }
 
+// ---------------------------------------------------------------------------
+// Trigger-type name tables (dg_triggers.c: trig_types/otrig_types/wtrig_types).
+// Index == bit position; trailing "\n" terminates (sprintbit sentinel). Used by
+// script_stat to label GET_TRIG_TYPE.
+// ---------------------------------------------------------------------------
+const TRIG_TYPES: &[&str] = &[
+    "Global", "Random", "Command", "Speech", "Act", "Death", "Greet", "Greet-All", "Entry",
+    "Receive", "Fight", "HitPrcnt", "Bribe", "Load", "Memory", "\n",
+];
+const OTRIG_TYPES: &[&str] = &[
+    "Global", "Random", "Command", "Fight", "UNUSED", "Timer", "Get", "Drop", "Give", "Wear",
+    "UNUSED", "Remove", "UNUSED", "Load", "UNUSED", "\n",
+];
+const WTRIG_TYPES: &[&str] = &[
+    "Global", "Random", "Command", "Speech", "UNUSED", "Zone Reset", "Enter", "Drop", "UNUSED",
+    "UNUSED", "UNUSED", "UNUSED", "UNUSED", "UNUSED", "UNUSED", "\n",
+];
+
+/// real_zone(number): the zone rnum whose `number*100..=top` range covers a
+/// vnum (db.c real_zone). Returns -1 when no zone covers it (matches C, where
+/// can_edit_zone then bounds-checks the negative).
+fn real_zone(g: &GameState, number: i32) -> i32 {
+    for (idx, z) in g.zones.iter().enumerate() {
+        if number >= z.number * 100 && number <= z.top {
+            return idx as i32;
+        }
+    }
+    -1
+}
+
+/// can_edit_zone(ch, zone_rnum) — olc.c. LVL_IMPL passes unconditionally; a
+/// negative/out-of-range zone fails; otherwise the actor's name must appear in
+/// the zone's builder list (is_name over Zone.builders).
+fn can_edit_zone(g: &GameState, ch: CharId, number: i32) -> bool {
+    if level_of(g, ch) >= LVL_IMPL {
+        return true;
+    }
+    if number < 0 || number as usize >= g.zones.len() {
+        return false;
+    }
+    let builders = &g.zones[number as usize].builders;
+    crate::handler::isname(&name_of(g, ch), builders)
+}
+
+/// script_stat(ch, sc) — dg_scripts.c. Lists an entity's global script context
+/// and each attached trigger (name/vnum/rnum, intended assignment, type bits,
+/// numeric arg, arglist, and — for a parked trigger — its current line and
+/// locals). Called by the do_sstat_* helpers. `key` selects the entity whose
+/// ScriptData (dg_handler) is walked.
+///
+/// One fidelity note: C also enumerates each `global_vars` entry under the
+/// "Global Variables:" header. dg_handler exposes get_global_var(key, name) but
+/// no whole-list accessor (a `pub fn global_vars(key) -> Vec<TrigVar>` would be
+/// the one-line addition there), so the per-var rows aren't listed; the header
+/// and "Global context" line are. Script globals are runtime-populated by the
+/// `global`/`remote` trigger commands, so a statted prototype shows none anyway.
+fn script_stat(g: &mut GameState, ch: CharId, key: ScriptKey) {
+    // find_uid_name(uid): resolve a UID_CHAR-prefixed value to a char/obj name
+    // (dg UID space: char UID = CharId.0, obj UID = ObjId.0).
+    fn find_uid_name(g: &GameState, value: &str) -> String {
+        let mut chars = value.chars();
+        if chars.next() == Some(crate::dg_scripts::UID_CHAR) {
+            let rest = chars.as_str().trim();
+            if let Ok(id) = rest.parse::<u64>() {
+                if let Some(c) = g.get_char(CharId(id)) {
+                    return c.player.name.clone();
+                }
+                if let Some(o) = g.get_obj(ObjId(id)) {
+                    return o.name.clone();
+                }
+            }
+            return format!("uid = {}, (not found)", rest);
+        }
+        value.to_string()
+    }
+
+    let context = dg_handler::get_context(key);
+    g.send_to_char(ch, "Global Variables: \r\n");
+    g.send_to_char(ch, &format!("Global context: {}\r\n", context));
+
+    for tid in dg_handler::trigger_ids(key) {
+        let t = match dg_handler::trig_clone(tid) {
+            Some(t) => t,
+            None => continue,
+        };
+        // GET_TRIG_RNUM == the trig_index rnum (TrigData.nr).
+        g.send_to_char(
+            ch,
+            &format!(
+                "\r\n  Trigger: &y{}&n, VNum: [&g{:5}&n], RNum: [{:5}]\r\n",
+                t.name, t.vnum, t.nr as i32
+            ),
+        );
+        let (assign, table): (&str, &[&str]) = match t.attach_type {
+            x if x == OBJ_TRIGGER => ("Objects", OTRIG_TYPES),
+            x if x == WLD_TRIGGER => ("Rooms", WTRIG_TYPES),
+            _ => ("Mobiles", TRIG_TYPES),
+        };
+        g.send_to_char(ch, &format!("  Trigger Intended Assignment: {}\r\n", assign));
+        let typebits = sprintbit(t.trigger_type, table);
+        let arg = if t.arglist.is_empty() { "None" } else { &t.arglist };
+        g.send_to_char(
+            ch,
+            &format!(
+                "  Trigger Type: {}, Numeric Arg: {}, Arg list: {}\r\n",
+                typebits, t.narg, arg
+            ),
+        );
+        // GET_TRIG_WAIT(t): when a running trigger is parked on a `wait`, C also
+        // prints the remaining pulse count, the paused command line and the
+        // trigger's local variables. The remaining-pulse scalar is owned by the
+        // dg_event queue and not exposed by EventId (no getter to read it without
+        // editing dg_event.rs); the paused line and locals are shown.
+        if t.wait_event.is_some() {
+            let curr = t.cmdlist.get(t.curr_line).cloned().unwrap_or_default();
+            g.send_to_char(ch, &format!("    Current line: {}\r\n", curr));
+            g.send_to_char(
+                ch,
+                &format!("  Variables: {}\r\n", if t.var_list.is_empty() { "None" } else { "" }),
+            );
+            for tv in &t.var_list {
+                let shown = if tv.value.starts_with(crate::dg_scripts::UID_CHAR) {
+                    find_uid_name(g, &tv.value)
+                } else {
+                    tv.value.clone()
+                };
+                g.send_to_char(ch, &format!("    {:>15}:  {}\r\n", tv.name, shown));
+            }
+        }
+    }
+}
+
+/// do_sstat_*(): "Script information:" header, then script_stat (or "None.").
+fn do_sstat(g: &mut GameState, ch: CharId, key: ScriptKey) {
+    g.send_to_char(ch, "Script information:\r\n");
+    if !dg_handler::has_script(key) {
+        g.send_to_char(ch, "  None.\r\n");
+        return;
+    }
+    script_stat(g, ch, key);
+}
+
 /// CAN_SEE_OBJ (immortal stat path): ITEM_INVISIBLE needs AFF_DETECT_INVIS.
 fn can_see_obj(g: &GameState, ch: CharId, oid: ObjId) -> bool {
     let obj = match g.get_obj(oid) {
@@ -231,25 +378,13 @@ fn can_see_obj(g: &GameState, ch: CharId, oid: ObjId) -> bool {
 /// "UNDEFINED".
 use crate::spell_parser::skill_name;
 
-/// mudlog substitute — the C mudlog writes to the syslog and to immortals with
-/// the matching syslog level. We have no syslog file layer; reproduce the
-/// immortal-channel side: send the line to every playing immortal at >= `min`
-/// level. (Documented gap: the on-disk syslog file is not written.)
-fn mudlog(g: &mut GameState, line: &str, min_level: u8) {
-    let formatted = format!("[ {} ]\r\n", line);
-    let imms: Vec<CharId> = g
-        .players_by_name
-        .values()
-        .copied()
-        .filter(|&id| {
-            g.get_char(id)
-                .map(|c| c.player.level >= min_level && c.player.level >= LVL_IMMORT)
-                .unwrap_or(false)
-        })
-        .collect();
-    for id in imms {
-        g.send_to_char(id, &formatted);
-    }
+/// mudlog(str, type, level) — the shared facility (utils.c). Writes a
+/// timestamped line to the on-disk syslog file and echoes it to every online
+/// immortal whose syslog preference is at/above `log_type` and level at/above
+/// `min_level`. Delegates to the ported `syslog::mudlog` (file write + colour +
+/// per-immortal PRF_LOG filtering), so callers pass the same `type` C uses.
+fn mudlog(g: &mut GameState, line: &str, log_type: u8, min_level: u8) {
+    crate::syslog::mudlog(g, line, log_type, min_level as Level);
 }
 
 /// send_to_all (comm.c): every playing descriptor.
@@ -405,11 +540,12 @@ fn find_target_room(g: &mut GameState, ch: CharId, rawroomstr: &str) -> Option<R
             return None;
         }
         if (flags & ROOM_HOUSE_BIT) != 0 {
-            // House_can_enter() is not modelled; in C a non-owner is rejected.
-            // Degrade to "private property" only when the house system would
-            // deny — with no house ownership table, deny like an outsider.
-            g.send_to_char(ch, "That's private property -- no trespassing!\r\n");
-            return None;
+            // House_can_enter(ch, vnum): owner/guest (or LVL_GRGOD+) may enter.
+            let house_vnum = g.room(location).number;
+            if !crate::house::house_can_enter(g, ch, house_vnum) {
+                g.send_to_char(ch, "That's private property -- no trespassing!\r\n");
+                return None;
+            }
         }
     }
     Some(location)
@@ -594,7 +730,7 @@ pub fn do_trans(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 "[WATCHDOG] {} has transferred {} to {} (vnum {})",
                 cname, vname, rname, vnum
             );
-            mudlog(g, &line, LVL_IMPL);
+            mudlog(g, &line, CMP, LVL_IMPL);
         }
     } else {
         // Trans All
@@ -676,7 +812,7 @@ pub fn do_teleport(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         "[WATCHDOG] {} has teleported {} to {} (vnum {})",
         cname, vname, rname, vnum
     );
-    mudlog(g, &line, LVL_IMPL);
+    mudlog(g, &line, CMP, LVL_IMPL);
 }
 
 // ===========================================================================
@@ -745,11 +881,10 @@ fn do_stat_room(g: &mut GameState, ch: CharId) {
         Some(r) => r,
         None => return,
     };
-    // GET_LEVEL < IMMORT && !can_edit_zone -> permission denied. can_edit_zone
-    // (per-builder zone perms) is not modelled; immortals always pass, so the
-    // only callers that reach here are immortals (dispatcher-gated). Mirror C:
+    // GET_LEVEL < IMMORT && !can_edit_zone(real_zone(vnum)) -> permission denied.
     let lvl = level_of(g, ch);
-    if lvl < LVL_IMMORT {
+    let room_vnum = g.room(rnum).number;
+    if lvl < LVL_IMMORT && !can_edit_zone(g, ch, real_zone(g, room_vnum)) {
         g.send_to_char(ch, "You don't have permissions to that zone.\r\n");
         return;
     }
@@ -897,12 +1032,14 @@ fn do_stat_room(g: &mut GameState, ch: CharId) {
             }
         }
     }
-    // do_sstat_room (DG-script room trigger listing): not modelled.
+    // do_sstat_room: DG-script room trigger listing.
+    do_sstat(g, ch, ScriptKey::Room(rnum));
 }
 
 fn do_stat_object(g: &mut GameState, ch: CharId, j: ObjId) {
     let lvl = level_of(g, ch);
-    if lvl < LVL_IMMORT {
+    let obj_vnum = g.get_obj(j).map(|o| o.item_number).unwrap_or(NOTHING);
+    if lvl < LVL_IMMORT && !can_edit_zone(g, ch, real_zone(g, obj_vnum)) {
         g.send_to_char(ch, "You don't have permissions to that zone.\r\n");
         return;
     }
@@ -1078,7 +1215,8 @@ fn do_stat_object(g: &mut GameState, ch: CharId, j: ObjId) {
         g.send_to_char(ch, " None");
     }
     g.send_to_char(ch, "\r\n");
-    // do_sstat_object (DG-script trigger list): not modelled.
+    // do_sstat_object: DG-script object trigger listing.
+    do_sstat(g, ch, ScriptKey::Obj(j));
 }
 
 fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
@@ -1088,10 +1226,13 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
             g.send_to_char(ch, "You find yourself unable to.\r\n");
             return;
         }
-        // can_edit_zone(real_zone(GET_MOB_VNUM)) — perms not modelled; deny
-        // mortals (they never reach here since do_stat is immortal-gated).
-        g.send_to_char(ch, "You don't have permissions to that zone.\r\n");
-        return;
+        // Mortal builders may stat a mob whose zone they own (can_edit_zone of
+        // real_zone(GET_MOB_VNUM)).
+        let mob_vnum = g.get_char(k).map(|c| c.nr).unwrap_or(NOBODY);
+        if !can_edit_zone(g, ch, real_zone(g, mob_vnum)) {
+            g.send_to_char(ch, "You don't have permissions to that zone.\r\n");
+            return;
+        }
     }
 
     // Snapshot everything we need before any send.
@@ -1283,8 +1424,30 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
         buf.push_str(", Connected: Playing");
     }
     if !npc {
-        // Arena status not modelled — C prints a [NO]/wins/losses block.
-        buf.push_str(&format!("\r\nArena: [NO], Wins: [{}], Losses: [{}]", wins, losses));
+        // Arena status block (GET_ARENASTAT). The status label + wins/losses +
+        // flee timer come from the public arena queries; the OBSERVING target
+        // name and the LASTFIGHTING name on the flee line need private arena
+        // getters (observing()/last_fighting()), so the [OBSERV]/flee labels show
+        // without those names.
+        let stat = crate::arena::arena_stat(k);
+        let label = match stat {
+            crate::arena::ARENA_NOT => "[NO]",
+            crate::arena::ARENA_COMBATANT1 => "[COMBAT1]",
+            crate::arena::ARENA_COMBATANT1W => "[COMBAT1W]",
+            crate::arena::ARENA_COMBATANT2 => "[COMBAT2]",
+            crate::arena::ARENA_COMBATANT3 => "[COMBAT3]",
+            crate::arena::ARENA_COMBATANTZ => "[COMBATZ]",
+            crate::arena::ARENA_OBSERVER => "[OBSERV]",
+            _ => "[UNKNOWN]",
+        };
+        buf.push_str(&format!("\r\nArena: {}", label));
+        buf.push_str(&format!(", Wins: [{}], Losses: [{}]", wins, losses));
+        if connected {
+            let ft = crate::arena::arena_flee_timer(k);
+            if ft > 0 {
+                buf.push_str(&format!(", Fled-a-match [timer {}]", ft));
+            }
+        }
     }
     buf.push_str("\r\n");
     g.send_to_char(ch, &buf);
@@ -1413,7 +1576,8 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
         line.push_str("\r\n");
         g.send_to_char(ch, &line);
     }
-    // do_sstat_character (DG mob trigger list): not modelled.
+    // do_sstat_character: DG-script trigger listing (mobs carry triggers).
+    do_sstat(g, ch, ScriptKey::Mob(k));
 }
 
 // ===========================================================================
@@ -1444,8 +1608,10 @@ pub fn do_stat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             g.send_to_char(ch, "No such player around.\r\n");
         }
     } else if is_abbrev(&kind, "file") {
-        // retrieve_player_entry() reads a player from disk — not modelled; the
-        // offline player-file layer isn't ported. Mirror the not-found path.
+        // retrieve_player_entry() loads an OFFLINE player. The real read is an
+        // async DB query (database::load_player) and GameState carries no DB
+        // handle on this sync path, so only the online `stat player` branch is
+        // reachable; mirror C's not-found path for an offline name (one note).
         if rest.is_empty() {
             g.send_to_char(ch, "Stats on which player?\r\n");
         } else {
@@ -1529,9 +1695,13 @@ pub fn do_shutdown(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
     }
 }
 
-/// log() — plain server-log line; routed to high-level immortals like mudlog.
+/// log() — C basic_mud_log writes a timestamped line to the syslog file only
+/// (no immortal echo). The shared facility we have always writes the file; we
+/// route through it at NRM/LVL_IMMORT so the disk line is written (the only
+/// difference from C `log()` is that the line also reaches online immortals
+/// whose syslog level admits it — a superset of C's file-only behaviour).
 fn log_line(g: &mut GameState, line: &str) {
-    mudlog(g, line, LVL_IMPL);
+    mudlog(g, line, NRM, LVL_IMMORT);
 }
 
 // ===========================================================================
@@ -1701,8 +1871,16 @@ pub fn do_load(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "A NEGATIVE number??\r\n");
         return;
     }
-    // impboard (immortal board) protection: impboard global not modelled (0).
-    // can_edit_zone perms not modelled; immortals (dispatcher-gated) pass.
+    // impboard (immortal board) protection + per-zone builder permission.
+    let ch_level = level_of(g, ch);
+    if number == IMPBOARD && ch_level < LVL_GRGOD {
+        g.send_to_char(ch, "You are not holy enough for that!\r\n");
+        return;
+    }
+    if !can_edit_zone(g, ch, real_zone(g, number)) && ch_level < LVL_GRGOD {
+        g.send_to_char(ch, "You do not have permission to load from this zone.\r\n");
+        return;
+    }
 
     let rnum = match g.get_char(ch).and_then(|c| c.in_room) {
         Some(r) => r,
@@ -1725,11 +1903,11 @@ pub fn do_load(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.char_to_room(mob, rnum);
         let short = g.get_char(mob).and_then(|c| c.short_desc.clone()).unwrap_or_default();
         let line = format!("[WATCHDOG] {} loads mobile {}: {}", cname, number, short);
-        mudlog(g, &line, LVL_IMPL);
+        mudlog(g, &line, CMP, LVL_IMPL);
         act(g, "$n makes a quaint, magical gesture with one hand.", true, ch, None, ActArg::None, To::Room);
         act(g, "$n has created $N!", false, ch, None, ActArg::Char(mob), To::Room);
         act(g, "You create $N.", false, ch, None, ActArg::Char(mob), To::Char);
-        // load_mtrigger (DG script) not modelled.
+        crate::dg_triggers::load_mtrigger(g, mob);
     } else if is_abbrev(&kind, "obj") {
         if !g.obj_protos.contains_key(&number) {
             g.send_to_char(ch, "There is no object with that number.\r\n");
@@ -1750,11 +1928,11 @@ pub fn do_load(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.obj_to_char(obj, ch);
         let short = g.get_obj(obj).map(|o| o.short_description.clone()).unwrap_or_default();
         let line = format!("[WATCHDOG] {} loads object {}: {}", cname, number, short);
-        mudlog(g, &line, LVL_IMPL);
+        mudlog(g, &line, CMP, LVL_IMPL);
         act(g, "$n makes a strange magical gesture.", true, ch, None, ActArg::None, To::Room);
         act(g, "$n has created $p!", false, ch, Some(obj), ActArg::None, To::Room);
         act(g, "You create $p.", false, ch, Some(obj), ActArg::None, To::Char);
-        // load_otrigger (DG script) not modelled.
+        crate::dg_triggers::load_otrigger(g, obj);
     } else {
         g.send_to_char(ch, "That'll have to be either 'obj' or 'mob'.\r\n");
     }
@@ -1855,7 +2033,7 @@ pub fn do_purge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 }
                 let cname = name_of(g, ch);
                 let vname = name_of(g, vict);
-                mudlog(g, &format!("(GC) {} has purged {}.", cname, vname), LVL_GOD);
+                mudlog(g, &format!("(GC) {} has purged {}.", cname, vname), BRF, LVL_GOD);
                 // close the player's socket: drop the descriptor link.
                 if let Some(conn) = g.get_char(vict).and_then(|c| c.desc) {
                     if let Some(d) = g.descriptors.get_mut(&conn) {
@@ -1866,14 +2044,31 @@ pub fn do_purge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                         c.desc = None;
                     }
                 }
+            } else {
+                // NPC: must own the zone (or be GRGOD+), unless it has no proto.
+                let mob_vnum = g.get_char(vict).map(|c| c.nr).unwrap_or(NOBODY);
+                if !can_edit_zone(g, ch, real_zone(g, mob_vnum))
+                    && ch_level < LVL_GRGOD
+                    && mob_vnum != NOBODY
+                {
+                    g.send_to_char(ch, "You do not have permission to purge from this zone.\r\n");
+                    return;
+                }
             }
-            // can_edit_zone perms not modelled; immortals always pass.
             act(g, "$n disintegrates $N.", false, ch, None, ActArg::Char(vict), To::NotVict);
             g.extract_char(vict);
             g.send_to_char(ch, OK);
         } else {
             let room_objs = g.rooms[rnum].contents.clone();
             if let Some(obj) = g.get_obj_in_list_vis(ch, &name, &room_objs) {
+                let obj_vnum = g.get_obj(obj).map(|o| o.item_number).unwrap_or(NOTHING);
+                if !can_edit_zone(g, ch, real_zone(g, obj_vnum))
+                    && ch_level < LVL_GRGOD
+                    && obj_vnum != NOTHING
+                {
+                    g.send_to_char(ch, "You do not have permission to purge from this zone.\r\n");
+                    return;
+                }
                 act(g, "$n destroys $p.", false, ch, Some(obj), ActArg::None, To::Room);
                 g.obj_from_anywhere(obj);
                 g.extract_obj(obj);
@@ -1883,20 +2078,28 @@ pub fn do_purge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             }
         }
     } else {
-        // No argument: clean the whole room (mobs + ground objects).
+        // No argument: clean the whole room (mobs + ground objects). Each
+        // extraction is gated on can_edit_zone (or GRGOD+, or no proto).
         act(g, "$n gestures... You are surrounded by scorching flames!", false, ch, None, ActArg::None, To::Room);
         g.send_to_room(rnum, "The world seems a little cleaner.\r\n", None);
 
         let people = g.rooms[rnum].people.clone();
         for vict in people {
-            if is_npc(g, vict) {
+            if !is_npc(g, vict) {
+                continue;
+            }
+            let mob_vnum = g.get_char(vict).map(|c| c.nr).unwrap_or(NOBODY);
+            if can_edit_zone(g, ch, real_zone(g, mob_vnum)) || ch_level >= LVL_GRGOD || mob_vnum == NOBODY {
                 g.extract_char(vict);
             }
         }
         let objs = g.rooms[rnum].contents.clone();
         for obj in objs {
-            g.obj_from_anywhere(obj);
-            g.extract_obj(obj);
+            let obj_vnum = g.get_obj(obj).map(|o| o.item_number).unwrap_or(NOTHING);
+            if can_edit_zone(g, ch, real_zone(g, obj_vnum)) || ch_level >= LVL_GRGOD || obj_vnum == NOTHING {
+                g.obj_from_anywhere(obj);
+                g.extract_obj(obj);
+            }
         }
     }
 }
@@ -2071,15 +2274,16 @@ pub fn do_restore(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             v.real_abils.con = MAX_STAT;
             v.real_abils.cha = MAX_STAT;
             v.aff_abils = v.real_abils;
+            // SET_BIT(GCMD_FLAGS(vict), GCMD_GEN): grant the general god command.
+            v.godcmds1 |= crate::gcmd::GCMD_GEN;
         }
-        // GCMD_GEN god-command bit: not modelled.
     }
     update_pos(g, vict);
     g.send_to_char(ch, OK);
     act(g, "You have been fully healed by $N!", false, vict, None, ActArg::Char(ch), To::Char);
     let cname = name_of(g, ch);
     let vname = name_of(g, vict);
-    mudlog(g, &format!("(GC) {} restored by {}", vname, cname), LVL_GOD);
+    mudlog(g, &format!("(GC) {} restored by {}", vname, cname), BRF, LVL_GOD);
 }
 
 /// update_pos (fight.c): recompute position from hit points.
@@ -2198,7 +2402,7 @@ pub fn do_gecho(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, &body);
     }
     let cname = name_of(g, ch);
-    mudlog(g, &format!("(GC) gecho by {}: {}", cname, argument), LVL_IMPL);
+    mudlog(g, &format!("(GC) gecho by {}: {}", cname, argument), NRM, LVL_IMPL);
 }
 
 /// delete_doubledollar(): collapse "$$" -> "$" (CircleMUD).
@@ -2220,7 +2424,7 @@ pub fn do_gplague(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         }
     }
     let cname = name_of(g, ch);
-    mudlog(g, &format!("(GC) gplague by {}", cname), LVL_IMPL);
+    mudlog(g, &format!("(GC) gplague by {}", cname), NRM, LVL_IMPL);
 }
 
 pub fn do_gcureplague(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
@@ -2234,7 +2438,7 @@ pub fn do_gcureplague(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         }
     }
     let cname = name_of(g, ch);
-    mudlog(g, &format!("(GC) gcureplague by {}", cname), LVL_IMPL);
+    mudlog(g, &format!("(GC) gcureplague by {}", cname), NRM, LVL_IMPL);
 }
 
 // ===========================================================================
@@ -2371,10 +2575,10 @@ pub fn do_last(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "For whom do you wish to search?\r\n");
         return;
     }
-    // pe_printf() reads the player_main row from MySQL — the offline player
-    // table is not surfaced here. If the player is currently online we can
-    // honour the level guard and print the live values; otherwise mirror the
-    // "no such player" path (documented gap: offline 'last' needs the DB layer).
+    // C reads the player_main row from MySQL for an offline target. That query
+    // is async (database::load_player) and this sync command path holds no DB
+    // handle, so the online target is printed fully and an offline name mirrors
+    // the not-found path (one note: offline 'last' needs the async DB layer).
     let target = g.find_player_by_name(&name);
     match target {
         Some(p) => {
@@ -2446,7 +2650,7 @@ pub fn do_force(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         let cname = name_of(g, ch);
         let vname = name_of(g, vict);
         let lvl = LVL_GOD.max(invis_lev(g, ch) as u8);
-        mudlog(g, &format!("(GC) {} forced {} to {}", cname, vname, to_force), lvl);
+        mudlog(g, &format!("(GC) {} forced {} to {}", cname, vname, to_force), NRM, lvl);
         command_interpreter(g, vict, &to_force);
     } else if who.eq_ignore_ascii_case("room") {
         g.send_to_char(ch, OK);
@@ -2457,7 +2661,7 @@ pub fn do_force(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         };
         let rvnum = g.room(rnum).number;
         let lvl = LVL_GOD.max(invis_lev(g, ch) as u8);
-        mudlog(g, &format!("(GC) {} forced room {} to {}", cname, rvnum, to_force), lvl);
+        mudlog(g, &format!("(GC) {} forced room {} to {}", cname, rvnum, to_force), NRM, lvl);
         let people = g.rooms[rnum].people.clone();
         for vict in people {
             if level_of(g, vict) >= ch_level {
@@ -2471,7 +2675,7 @@ pub fn do_force(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, OK);
         let cname = name_of(g, ch);
         let lvl = LVL_GOD.max(invis_lev(g, ch) as u8);
-        mudlog(g, &format!("(GC) {} forced all to {}", cname, to_force), lvl);
+        mudlog(g, &format!("(GC) {} forced all to {}", cname, to_force), NRM, lvl);
         let players: Vec<CharId> = g.players_by_name.values().copied().collect();
         for vict in players {
             if level_of(g, vict) >= ch_level {
@@ -2632,7 +2836,7 @@ pub fn do_zreset(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
         g.send_to_char(ch, "Reset world.\r\n");
         let lvl = LVL_GRGOD.max(invis_lev(g, ch) as u8);
-        mudlog(g, &format!("(GC) {} reset entire world.", cname), lvl);
+        mudlog(g, &format!("(GC) {} reset entire world.", cname), NRM, lvl);
         return;
     }
 
@@ -2645,13 +2849,17 @@ pub fn do_zreset(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
     match zone_idx {
         Some(i) if i < g.zones.len() => {
-            // can_edit_zone perms not modelled; immortals pass.
+            // Builders may only reset a zone they own (or be GRGOD+).
+            if !can_edit_zone(g, ch, i as i32) && level_of(g, ch) < LVL_GRGOD {
+                g.send_to_char(ch, "You do not have permission to reset this zone.\r\n");
+                return;
+            }
             let znum = g.zones[i].number;
             let zname = g.zones[i].name.clone();
             g.reset_zone(znum);
             g.send_to_char(ch, &format!("Reset zone {} (#{}): {}.\r\n", i, znum, zname));
             let lvl = LVL_GRGOD.max(invis_lev(g, ch) as u8);
-            mudlog(g, &format!("(GC) {} reset zone {} ({})", cname, i, zname), lvl);
+            mudlog(g, &format!("(GC) {} reset zone {} ({})", cname, i, zname), NRM, lvl);
         }
         _ => g.send_to_char(ch, "Invalid zone number.\r\n"),
     }
@@ -2712,18 +2920,18 @@ pub fn do_wizutil(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
             g.send_to_char(ch, "Pardoned.\r\n");
             g.send_to_char(vict, "You have been pardoned by the gods!\r\n");
             let m = logmin(g);
-            mudlog(g, &format!("(GC) {} pardoned by {}", vname, cname), m);
+            mudlog(g, &format!("(GC) {} pardoned by {}", vname, cname), BRF, m);
         }
         SCMD_NOTITLE => {
             let result = plr_tog_chk(g, vict, PLR_NOTITLE);
             let m = logmin(g);
-            mudlog(g, &format!("(GC) Notitle {} for {} by {}.", onoff(result), vname, cname), m);
+            mudlog(g, &format!("(GC) Notitle {} for {} by {}.", onoff(result), vname, cname), NRM, m);
             g.send_to_char(ch, &format!("(GC) Notitle {} for {} by {}.\r\n", onoff(result), vname, cname));
         }
         SCMD_SQUELCH => {
             let result = plr_tog_chk(g, vict, PLR_NOSHOUT);
             let m = logmin(g);
-            mudlog(g, &format!("(GC) Squelch {} for {} by {}.", onoff(result), vname, cname), m);
+            mudlog(g, &format!("(GC) Squelch {} for {} by {}.", onoff(result), vname, cname), BRF, m);
             g.send_to_char(ch, &format!("(GC) Squelch {} for {} by {}.\r\n", onoff(result), vname, cname));
         }
         SCMD_FREEZE => {
@@ -2744,7 +2952,7 @@ pub fn do_wizutil(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
             g.send_to_char(ch, "Frozen.\r\n");
             act(g, "A sudden cold wind conjured from nowhere freezes $n!", false, vict, None, ActArg::None, To::Room);
             let m = logmin(g);
-            mudlog(g, &format!("(GC) {} frozen by {}.", vname, cname), m);
+            mudlog(g, &format!("(GC) {} frozen by {}.", vname, cname), BRF, m);
             // A frozen immortal is filtered out of the autowiz roster (PLR_FROZEN);
             // regenerate so the list drops them. No-op for mortals (level gate).
             crate::autowiz::check_autowiz(g, vict);
@@ -2771,7 +2979,7 @@ pub fn do_wizutil(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
                 return;
             }
             let m = logmin(g);
-            mudlog(g, &format!("(GC) {} un-frozen by {}.", vname, cname), m);
+            mudlog(g, &format!("(GC) {} un-frozen by {}.", vname, cname), BRF, m);
             if let Some(v) = g.get_char_mut(vict) {
                 v.act_flags &= !PLR_FROZEN;
             }
@@ -2932,8 +3140,10 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             g.send_to_char(ch, &buf);
         }
         2 => {
-            // player (offline retrieve_player_entry — not surfaced). If online,
-            // print from the live character; else "no such player".
+            // show player: C retrieve_player_entry loads the offline row. The
+            // online character is printed in full; the offline read is the async
+            // DB query (database::load_player), unreachable from this sync path,
+            // so an offline name mirrors C's not-found path (one note).
             if value.is_empty() {
                 g.send_to_char(ch, "A name would help.\r\n");
                 return;
@@ -2974,8 +3184,8 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             }
         }
         3 => {
-            // rent (Crash_listrent) — rent file layer not modelled.
-            g.send_to_char(ch, "No rent information available.\r\n");
+            // rent: Crash_listrent — dump the named player's stored rent file.
+            crate::objsave::crash_listrent(g, ch, &value);
         }
         4 => {
             // stats
@@ -3045,12 +3255,14 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             g.send_to_char(ch, &buf);
         }
         8 => {
-            // shops (show_shops) — shop tables not modelled.
-            g.send_to_char(ch, "No shops.\r\n");
+            // shops: show_shops(ch, value) — the immortal shop listing.
+            crate::shop::show_shops(g, ch, &value);
         }
         9 => {
-            // houses (hcontrol_list_houses) — house system not modelled.
-            g.send_to_char(ch, "No houses have been defined.\r\n");
+            // houses: hcontrol_list_houses(ch) — the do_hcontrol "show" arm lists
+            // every defined house (do_show declares this 1-arg, so it lists
+            // without the guest column, i.e. showguests=false).
+            crate::house::do_hcontrol(g, ch, "show", 0);
         }
         _ => {
             g.send_to_char(ch, "Sorry, I don't understand that.\r\n");
@@ -3300,12 +3512,12 @@ fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize,
                     g.send_to_char(cch, "Value must be 'on' or 'off'.\r\n");
                     return false;
                 }
-                mudlog(g, &format!("(GC) {} set {} {} for {}.", cname, field.cmd, onoff(on), vname), m);
+                mudlog(g, &format!("(GC) {} set {} {} for {}.", cname, field.cmd, onoff(on), vname), BRF, m);
                 output = format!("{}'s {} set {}.", vname, field.cmd, onoff(on));
             }
             T_NUMBER => {
                 value = atoi(val_arg);
-                mudlog(g, &format!("(GC) {} set {}'s {} to {}.", cname, vname, field.cmd, value), m);
+                mudlog(g, &format!("(GC) {} set {}'s {} to {}.", cname, vname, field.cmd, value), BRF, m);
                 output = format!("{}'s {} set to {}.", vname, field.cmd, value);
             }
             _ => {
@@ -3339,6 +3551,34 @@ fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize,
                 v.prf2_flags |= flag;
             } else if off {
                 v.prf2_flags &= !flag;
+            }
+        }
+    };
+    // SET_OR_REMOVE over the per-player god-command bitvectors (godcmds1..3).
+    let set_or_remove_gcmd1 = |g: &mut GameState, flag: i64| {
+        if let Some(v) = g.get_char_mut(vict) {
+            if on {
+                v.godcmds1 |= flag;
+            } else if off {
+                v.godcmds1 &= !flag;
+            }
+        }
+    };
+    let set_or_remove_gcmd2 = |g: &mut GameState, flag: i64| {
+        if let Some(v) = g.get_char_mut(vict) {
+            if on {
+                v.godcmds2 |= flag;
+            } else if off {
+                v.godcmds2 &= !flag;
+            }
+        }
+    };
+    let set_or_remove_gcmd3 = |g: &mut GameState, flag: i64| {
+        if let Some(v) = g.get_char_mut(vict) {
+            if on {
+                v.godcmds3 |= flag;
+            } else if off {
+                v.godcmds3 &= !flag;
             }
         }
     };
@@ -3492,8 +3732,11 @@ fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize,
             if let Some(v) = g.get_char_mut(vict) { v.idnum = value as i64; }
         }
         45 => {
-            // passwd — the player-file password layer isn't surfaced; mirror
-            // the guard + success echo (documented gap: hash not stored).
+            // passwd — C stores CRYPT(val_arg, GET_NAME) into GET_PASSWD(vict).
+            // The Rust hash lives in the player_main row, not on Character, and
+            // the write is an async DB op (database.rs::save_player) unreachable
+            // from this sync path — so the guard + echo run, but persisting the
+            // new hash needs a Character password field + DB save (one note).
             if vict_level >= LVL_GRGOD {
                 if let Some(cch) = ch { g.send_to_char(cch, "You cannot change that.\r\n"); }
                 return false;
@@ -3524,13 +3767,13 @@ fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize,
             if let Some(v) = g.get_char_mut(vict) { v.player.race = Race::from_u8(i as u8); }
         }
         51 => {
-            // hometown: parse_town not modelled; accept a numeric town room.
-            if is_number(val_arg) {
-                if let Some(v) = g.get_char_mut(vict) { v.player.hometown = atoi(val_arg); }
-            } else {
+            // hometown: parse_town(*val_arg) — the home-town menu letter (a..c).
+            let i = crate::class::parse_town(val_arg.chars().next().unwrap_or(' '));
+            if i == -1 {
                 if let Some(cch) = ch { g.send_to_char(cch, "That is not a hometown.\r\n"); }
                 return false;
             }
+            if let Some(v) = g.get_char_mut(vict) { v.player.hometown = i; }
         }
         52 => {
             let ch_level = ch.map(|c| level_of(g, c)).unwrap_or(LVL_IMPL);
@@ -3542,12 +3785,98 @@ fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize,
             }
         }
         53 => { let nv = range_i32(0, 100, value); if let Some(v) = g.get_char_mut(vict) { v.spells_to_learn = nv; } }
-        // 54..=108: per-player god-command bitvectors (GCMD_*). Not modelled —
-        // there are no GCMD fields on Character. No-op (documented gap).
-        54..=109 => {}
+        // 54..=108: per-player god-command bitvectors (godcmds1..4). Each cmd*
+        // field flips one GCMD bit; the grant/revoke aggregates (103..=108) set
+        // or recursively walk the set_fields table.
+        54 => set_or_remove_gcmd1(g, GCMD_GEN),
+        55 => set_or_remove_gcmd1(g, GCMD_ADVANCE),
+        56 => set_or_remove_gcmd1(g, GCMD_AT),
+        57 => set_or_remove_gcmd1(g, GCMD_BAN),
+        58 => set_or_remove_gcmd1(g, GCMD_DC),
+        59 => set_or_remove_gcmd1(g, GCMD_ECHO),
+        60 => set_or_remove_gcmd1(g, GCMD_FORCE),
+        61 => set_or_remove_gcmd1(g, GCMD_FREEZE),
+        62 => set_or_remove_gcmd1(g, GCMD_HCONTROL),
+        63 => set_or_remove_gcmd1(g, GCMD_LOAD),
+        64 => set_or_remove_gcmd1(g, GCMD_MUTE),
+        65 => set_or_remove_gcmd1(g, GCMD_SYSLOG),
+        66 => set_or_remove_gcmd1(g, GCMD_PARDON),
+        67 => set_or_remove_gcmd1(g, GCMD_PURGE),
+        68 => set_or_remove_gcmd1(g, GCMD_RELOAD),
+        69 => set_or_remove_gcmd1(g, GCMD_REROLL),
+        70 => set_or_remove_gcmd1(g, GCMD_RESTORE),
+        71 => set_or_remove_gcmd1(g, GCMD_SEND),
+        72 => set_or_remove_gcmd1(g, GCMD_SET),
+        73 => set_or_remove_gcmd1(g, GCMD_SHUTDOWN),
+        74 => set_or_remove_gcmd1(g, GCMD_SKILLSET),
+        75 => set_or_remove_gcmd1(g, GCMD_AUCTIONEER),
+        76 => set_or_remove_gcmd1(g, GCMD_SLOWNS),
+        77 => set_or_remove_gcmd1(g, GCMD_SNOOP),
+        78 => set_or_remove_gcmd1(g, GCMD_SWITCH),
+        79 => set_or_remove_gcmd1(g, GCMD_PLAGUE),
+        80 => set_or_remove_gcmd1(g, GCMD_TRANS),
+        81 => set_or_remove_gcmd1(g, GCMD_UNAFFECT),
+        82 => set_or_remove_gcmd1(g, GCMD_WIZLOCK),
+        83 => set_or_remove_gcmd1(g, GCMD_ISAY),
+        84 => {
+            set_or_remove_gcmd3(g, GCMD3_ADDSNOW);
+            set_or_remove_gcmd3(g, GCMD3_DELSNOW);
+        }
+        85 => set_or_remove_gcmd2(g, GCMD2_OLC),
+        86 => set_or_remove_gcmd2(g, GCMD2_INVIS),
+        87 => set_or_remove_gcmd2(g, GCMD2_MCASTERS),
+        88 => set_or_remove_gcmd2(g, GCMD2_MUDHEAL),
+        89 => set_or_remove_gcmd2(g, GCMD2_REWIZ),
+        90 => set_or_remove_gcmd2(g, GCMD2_GECHO),
+        92 => set_or_remove_gcmd2(g, GCMD2_REWWW),
+        93 => set_or_remove_gcmd2(g, GCMD2_NOTITLE),
+        94 => set_or_remove_gcmd2(g, GCMD2_PAGE),
+        95 => set_or_remove_gcmd2(g, GCMD2_QECHO),
+        96 => set_or_remove_gcmd2(g, GCMD2_ZRESET),
+        97 => set_or_remove_gcmd2(g, GCMD2_SETREBOOT),
+        98 => set_or_remove_gcmd2(g, GCMD2_TMOBDIE),
+        99 => set_or_remove_gcmd2(g, GCMD2_WRESTRICT),
+        100 => set_or_remove_gcmd2(g, GCMD2_ATTACH),
+        101 => set_or_remove_gcmd2(g, GCMD2_USERS),
+        102 => set_or_remove_gcmd2(g, GCMD2_ALOAD),
+        103 => {
+            // imp: grant everything (bar GCMD_CMDSET) or revoke everything.
+            if val_arg.eq_ignore_ascii_case("on") {
+                if let Some(v) = g.get_char_mut(vict) {
+                    v.godcmds1 = (!GCMD_CMDSET) | v.godcmds1;
+                    v.godcmds2 = !0;
+                    v.godcmds3 = !0;
+                    v.godcmds4 = !0;
+                }
+            } else if val_arg.eq_ignore_ascii_case("off") {
+                if let Some(v) = g.get_char_mut(vict) {
+                    v.godcmds1 = 0;
+                    v.godcmds2 = 0;
+                    v.godcmds3 = 0;
+                    v.godcmds4 = 0;
+                }
+            }
+        }
+        104 => {
+            if val_arg.eq_ignore_ascii_case("on") {
+                if let Some(v) = g.get_char_mut(vict) {
+                    for i in 0..=32 {
+                        v.godcmds1 |= 1i64 << i;
+                        v.godcmds2 |= 1i64 << i;
+                        v.godcmds3 |= 1i64 << i;
+                    }
+                }
+            } else {
+                grant_cmd_tier(g, vict, LVL_IMPL, val_arg);
+            }
+        }
+        105 => grant_cmd_tier(g, vict, LVL_DEMIGOD, val_arg),
+        106 => grant_cmd_tier(g, vict, LVL_GOD, val_arg),
+        107 | 108 => grant_cmd_tier(g, vict, LVL_GRGOD, val_arg),
+        109 => {}
         110 => { if let Some(v) = g.get_char_mut(vict) { v.wins = value as u8; } }
         111 => { if let Some(v) = g.get_char_mut(vict) { v.losses = value as u8; } }
-        112 => {} // cmdrespec GCMD bit — no-op
+        112 => set_or_remove_gcmd2(g, GCMD2_RESPEC),
         113 => set_or_remove_prf2(g, PRF2_LOCKOUT),
         114 => {
             if on {
@@ -3561,9 +3890,11 @@ fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize,
         }
         115 => { if let Some(v) = g.get_char_mut(vict) { v.next_quest = value; } }
         116 => { if let Some(v) = g.get_char_mut(vict) { v.quest_points = value; } }
-        117 | 118 => {} // GCMD bits — no-op
+        117 => set_or_remove_gcmd2(g, GCMD2_QUESTMOBS),
+        118 => set_or_remove_gcmd2(g, GCMD2_REWARD),
         119 => set_or_remove_act(g, PLR_MULTIOK),
-        120 | 121 => {} // GCMD bits — no-op
+        120 => set_or_remove_gcmd3(g, GCMD3_PEACE),
+        121 => set_or_remove_gcmd3(g, GCMD3_IMPOLC),
         122 => {
             // C: RANGE(1,7); citizen = value - 1 (stored 0..6).
             let nv = range_i32(1, 7, value);
@@ -3572,11 +3903,13 @@ fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize,
             }
         }
         123 => set_or_remove_act(g, PLR_MBUILDER),
-        124 | 125 | 126 => {} // GCMD bits — no-op
+        124 => set_or_remove_gcmd3(g, GCMD3_MAP),
+        125 => set_or_remove_gcmd3(g, GCMD3_LWEATHER),
+        126 => set_or_remove_gcmd3(g, GCMD3_PFILECLEAN),
         127 => { let nv = range_i32(-750, 750, value) as i16; if let Some(v) = g.get_char_mut(vict) { v.points.mpower = nv; } g.affect_total(vict); }
         128 => { let nv = range_i32(-750, 750, value) as i16; if let Some(v) = g.get_char_mut(vict) { v.points.technique = nv; } g.affect_total(vict); }
         129 => set_or_remove_prf2(g, PRF2_INTANGIBLE),
-        130 => {} // cmdrebalance GCMD bit — no-op
+        130 => set_or_remove_gcmd3(g, GCMD3_REBALANCE),
         _ => {
             if let Some(cch) = ch { g.send_to_char(cch, "Can't set that!\r\n"); }
             return false;
@@ -3588,6 +3921,25 @@ fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize,
         g.send_to_char(cch, &cap(&output));
     }
     true
+}
+
+/// The level-tier god-command grant/revoke aggregates (set cmddemigod/cmdgod/
+/// cmdgreatergod/cmdimpcmds-off, do_set cases 104..=108). Walks the set_fields
+/// table and recursively perform_set's every `cmd*` field at `tier`, skipping
+/// the aggregate switches (104..=108) and the two multi-bit fields (54 cmdgeneral
+/// / 84 cmdsnow) exactly as C does. `val_arg` ("on"/"off") drives each flip.
+fn grant_cmd_tier(g: &mut GameState, vict: CharId, tier: u8, val_arg: &str) {
+    for i in 0..SET_FIELDS.len() {
+        let f = &SET_FIELDS[i];
+        if f.level == tier
+            && f.cmd.starts_with("cmd")
+            && !(104..=108).contains(&f.switchnum)
+            && f.switchnum != 54
+            && f.switchnum != 84
+        {
+            perform_set(g, None, vict, i, val_arg);
+        }
+    }
 }
 
 /// Stat ceiling for int/wis/dex/con/cha: NPC or >= GRGOD gets MAX_STAT.
@@ -3612,7 +3964,11 @@ pub fn do_set(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
 
     if name == "file" {
-        // file: offline player edit — player-file layer not surfaced.
+        // set file: load-edit-save an OFFLINE player (retrieve_player_entry +
+        // save_char). Both the load and the write-back are async DB ops
+        // (database::load_player / save_player) and this sync path holds no DB
+        // handle, so only the online `set player` path runs; mirror C's
+        // not-found for an offline name (one note: needs the async DB layer).
         let (_n, _r) = half_chop(&rest);
         g.send_to_char(ch, "There is no such player.\r\n");
         return;
@@ -3707,7 +4063,7 @@ pub fn do_rewiz(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     g.send_to_char(ch, "You have reloaded the autowiz system.\r\n");
     let cname = name_of(g, ch);
     let m = LVL_GOD.max(invis_lev(g, ch) as u8); // C MAX(LVL_GOD, GET_INVIS_LEV(ch))
-    mudlog(g, &format!("(GC) {} initiated reload of the autowiz system.", cname), m);
+    mudlog(g, &format!("(GC) {} initiated reload of the autowiz system.", cname), BRF, m);
     crate::autowiz::check_autowiz(g, ch);
 }
 
@@ -3828,8 +4184,9 @@ pub fn do_olist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 // do_whoupd / do_isay / do_mcasters
 // ===========================================================================
 pub fn do_whoupd(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    // www_who global + make_who2html() — the HTML who-list is not modelled and
-    // is deactivated in the C build by default.
+    // config.c: www_who = NO (0). C: `if (!(www_who) > 0) { "...deactivated..."
+    // return; }` — with www_who 0 this is the only reachable branch, so the
+    // make_who2html()/HTML-file path is never taken in the stock build. Faithful.
     g.send_to_char(ch, "The WWW who is currently deactivated in the code.\r\n");
 }
 
@@ -3841,7 +4198,7 @@ pub fn do_isay(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let line = format!("&m[&YINFO&m]&n{}\r\n", arg);
     send_to_all(g, &line);
     let cname = name_of(g, ch);
-    mudlog(g, &format!("(GC) Isay by {}: {}", cname, line.trim_end()), LVL_IMPL);
+    mudlog(g, &format!("(GC) Isay by {}: {}", cname, line.trim_end()), NRM, LVL_IMPL);
 }
 
 pub fn do_mcasters(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
@@ -3909,7 +4266,7 @@ pub fn do_setreboot(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             WARN_HR.store(warn_hr, Ordering::Relaxed);
             format!("(GC) {} has set auto reboot time for {}:{}", cname, hr, REBOOT_MIN.load(Ordering::Relaxed))
         };
-        mudlog(g, &logline, LVL_GOD);
+        mudlog(g, &logline, NRM, LVL_GOD);
     }
 }
 
@@ -3925,14 +4282,34 @@ pub fn do_esave(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
     let cname = name_of(g, ch);
-    // OLC save-to-disk is not modelled — log the action (the disk write degrades
-    // to a no-op since there is no OLC dirty-list / file writer yet).
+    // do_esave runs `do_olc save N 1` for each component j=0..4 (room/obj/zone/
+    // mob/shop) — olc::olc_save_to_disk is that arm: it rewrites the .wld/.obj
+    // and drops the zone/mob/shop save-list entries (mob/shop .mob/.shp are
+    // autosaved on edit-quit inside their editors, so the explicit save there
+    // only clears the dirty flag — that delegation lives in olc.rs).
+    let lvl = LVL_BUILDER.max(invis_lev(g, ch) as u8);
     if a.starts_with('*') {
-        let lvl = LVL_BUILDER.max(invis_lev(g, ch) as u8);
-        mudlog(g, &format!("OLC: {} saves ALL info for ALL zones.", cname), lvl);
+        mudlog(g, &format!("OLC: {} saves ALL info for ALL zones.", cname), PFT, lvl);
+        for zr in 0..g.zones.len() {
+            let (named, has_top) = {
+                let z = &g.zones[zr];
+                (!z.name.is_empty(), z.top > 0)
+            };
+            if named && has_top {
+                for kind in 0..=4 {
+                    crate::olc::olc_save_to_disk(g, zr, kind);
+                }
+            }
+        }
     } else {
-        let lvl = LVL_BUILDER.max(invis_lev(g, ch) as u8);
-        mudlog(g, &format!("OLC: {} saves ALL info for zone {}.", cname, a), lvl);
+        mudlog(g, &format!("OLC: {} saves ALL info for zone {}.", cname, a), PFT, lvl);
+        // do_olc resolves the save target as real_zone(atoi(arg)*100).
+        let znum = atoi(&a);
+        if let Some(zr) = crate::olc::real_zone(g, znum * 100) {
+            for kind in 0..=4 {
+                crate::olc::olc_save_to_disk(g, zr, kind);
+            }
+        }
     }
 }
 
@@ -3950,11 +4327,19 @@ pub fn do_copyto(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             return;
         }
     };
-    // can_edit_zone perms not modelled; immortals pass.
+    if !can_edit_zone(g, ch, real_zone(g, iroom)) {
+        g.send_to_char(ch, "You don't have permissions to that zone.\r\n");
+        return;
+    }
     let cur = g.get_char(ch).and_then(|c| c.in_room);
     let desc = cur.map(|r| g.rooms[r].description.clone()).unwrap_or_default();
     if !desc.is_empty() {
         g.rooms[rroom].description = desc;
+        // olc_add_to_save_list(zone_table[real_zone(iroom)].number, OLC_SAVE_ROOM)
+        let zr = real_zone(g, iroom);
+        if let Some(znum) = g.zones.get(zr as usize).map(|z| z.number) {
+            crate::olc::olc_add_to_save_list(znum, crate::olc::OLC_SAVE_ROOM);
+        }
         g.send_to_char(ch, &format!("You copy the description to room {}.\r\n", iroom));
     } else {
         g.send_to_char(ch, "This room has no description!\r\n");
@@ -4178,7 +4563,12 @@ pub fn do_tedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let l = files.iter().position(|(c, _)| c.starts_with(&field.to_lowercase()));
     match l {
         Some(i) if ch_level >= files[i].1 => {
-            // The editor itself (CON_TEXTED) is not modelled — announce intent.
+            // C sets up the modify.c string editor bound to the file's global
+            // buffer (ch->desc->str = &motd/&news/...) and writes it on /s. The
+            // editor entry + screen/announce are reproduced; persisting the saved
+            // body needs a modify.rs save target (an EditTarget::TextFile(path))
+            // plus the file buffers in GameState (only `motd` is held there) —
+            // both outside this module, so the on-disk write is the one note here.
             g.send_to_char(ch, "\x1B[H\x1B[J");
             g.send_to_char(ch, "Edit file below: (/s saves /h for help)\r\n");
             act(g, "$n begins editing a scroll.", true, ch, None, ActArg::None, To::Room);
@@ -4229,7 +4619,7 @@ pub fn do_rename(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let oldname = name_of(g, victim);
     g.send_to_char(ch, &format!("You have renamed {} to {}.\r\n", oldname, tmp));
     let cname = name_of(g, ch);
-    mudlog(g, &format!("{} has renamed {} to {}", cname, oldname, arg2), LVL_GOD);
+    mudlog(g, &format!("{} has renamed {} to {}", cname, oldname, arg2), NRM, LVL_GOD);
     // Re-key the players_by_name index and update the name.
     g.players_by_name.remove(&oldname.to_lowercase());
     if let Some(v) = g.get_char_mut(victim) {
@@ -4331,12 +4721,12 @@ pub fn do_tmobdie(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     if MOBDIE_ENABLED.load(Ordering::Relaxed) {
         MOBDIE_ENABLED.store(false, Ordering::Relaxed);
         let lvl = LVL_GRGOD.max(invis_lev(g, ch) as u8);
-        mudlog(g, &format!("(GC) {} has disabled mobdie.", cname), lvl);
+        mudlog(g, &format!("(GC) {} has disabled mobdie.", cname), PFT, lvl);
         g.send_to_char(ch, "Mobdie now disabled\r\n");
     } else {
         MOBDIE_ENABLED.store(true, Ordering::Relaxed);
         let lvl = LVL_GRGOD.max(invis_lev(g, ch) as u8);
-        mudlog(g, &format!("(GC) {} has enabled mobdie.", cname), lvl);
+        mudlog(g, &format!("(GC) {} has enabled mobdie.", cname), PFT, lvl);
         g.send_to_char(ch, "Mobdie now enabled\r\n");
     }
 }
@@ -4346,12 +4736,12 @@ pub fn do_wrestrict(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     if WEAPONRESTRICTIONS.load(Ordering::Relaxed) {
         WEAPONRESTRICTIONS.store(false, Ordering::Relaxed);
         let lvl = LVL_IMPL.max(invis_lev(g, ch) as u8);
-        mudlog(g, &format!("(GC) {} has disabled weapon restrictions.", cname), lvl);
+        mudlog(g, &format!("(GC) {} has disabled weapon restrictions.", cname), PFT, lvl);
         g.send_to_char(ch, "Weapon restrictions now disabled\r\n");
     } else {
         WEAPONRESTRICTIONS.store(true, Ordering::Relaxed);
         let lvl = LVL_IMPL.max(invis_lev(g, ch) as u8);
-        mudlog(g, &format!("(GC) {} has enabled weapon restrictions.", cname), lvl);
+        mudlog(g, &format!("(GC) {} has enabled weapon restrictions.", cname), PFT, lvl);
         g.send_to_char(ch, "Weapon restrictions now enabled\r\n");
     }
 }
@@ -4362,9 +4752,13 @@ pub fn do_respec(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         return;
     }
     let cname = name_of(g, ch);
-    mudlog(g, &format!("(GC) {} has respec'd.", cname), LVL_GOD);
+    mudlog(g, &format!("(GC) {} has respec'd.", cname), PFT, LVL_GOD);
     g.send_to_char(ch, "Mob hardcoded SPECS reassigned\r\n");
-    // assign_mobiles() reassigns spec-procs — spec-proc table not modelled.
+    // C re-walks mob_index[] re-binding each func pointer. The Rust spec-proc
+    // table (spec_assign) is built once and resolved per-mob on demand via
+    // special(), so the binding is always live; assign_specs() just asserts the
+    // table exists (idempotent OnceLock) — no per-mob pointer to refresh.
+    crate::spec_assign::assign_specs();
 }
 
 pub fn do_questmobs(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
@@ -4387,9 +4781,19 @@ pub fn do_questmobs(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "to_vnum less than from_vnum??\r\n");
         return;
     }
-    // MOB_QUEST act-flag is not surfaced on MobileProto; with no quest flag the
-    // listing is empty (degrades like an unflagged world).
-    g.send_to_char(ch, "QuestMobs:\r\n\r\n");
+    // MOB_QUEST (1<<19) on a mob's act_flags marks a quest target. read_mobile
+    // copies the proto act_flags onto the live mob, so the proto's flag is the
+    // live mob's flag — list each prototype in [from,to] that carries it.
+    const MOB_QUEST: i64 = 1 << 19;
+    let mut buf = String::from("QuestMobs:\r\n\r\n");
+    for i in from..=to {
+        if let Some(m) = g.mob_protos.get(&i) {
+            if m.act_flags & MOB_QUEST != 0 {
+                buf.push_str(&format!("({}) {}\r\n", i, m.short_desc));
+            }
+        }
+    }
+    g.send_to_char(ch, &buf);
 }
 
 pub fn do_reward(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
@@ -4432,7 +4836,7 @@ pub fn do_reward(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             g.obj_to_char(obj, victim);
             let short = g.get_obj(obj).map(|o| o.short_description.clone()).unwrap_or_default();
             let vname = name_of(g, victim);
-            mudlog(g, &format!("[WATCHDOG] {} rewards {} with {} ({})", cname, vname, short, obj_vnum), LVL_IMPL);
+            mudlog(g, &format!("[WATCHDOG] {} rewards {} with {} ({})", cname, vname, short, obj_vnum), CMP, LVL_IMPL);
             g.send_to_char(ch, &format!("You reward {} to {}.\r\n", short, vname));
         }
         return;
@@ -4455,7 +4859,7 @@ pub fn do_reward(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 g.obj_to_char(obj, victim);
                 let short = g.get_obj(obj).map(|o| o.short_description.clone()).unwrap_or_default();
                 let vname = name_of(g, victim);
-                mudlog(g, &format!("[WATCHDOG] {} rewards {} (room) with {} ({})", cname, vname, short, obj_vnum), LVL_IMPL);
+                mudlog(g, &format!("[WATCHDOG] {} rewards {} (room) with {} ({})", cname, vname, short, obj_vnum), CMP, LVL_IMPL);
                 if rewardcount == 0 {
                     rewardbuf.push_str(&format!(" {} to:\r\n{}, ", short, vname));
                 } else {
@@ -4486,7 +4890,7 @@ pub fn do_reward(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 g.obj_to_char(obj, victim);
                 let short = g.get_obj(obj).map(|o| o.short_description.clone()).unwrap_or_default();
                 let vname = name_of(g, victim);
-                mudlog(g, &format!("[WATCHDOG] {} rewards {} (all) with {} ({})", cname, vname, short, obj_vnum), LVL_IMPL);
+                mudlog(g, &format!("[WATCHDOG] {} rewards {} (all) with {} ({})", cname, vname, short, obj_vnum), CMP, LVL_IMPL);
                 if rewardcount == 0 {
                     rewardbuf.push_str(&format!(" {} to:\r\n{}, ", short, vname));
                 } else {

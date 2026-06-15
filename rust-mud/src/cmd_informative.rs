@@ -1369,8 +1369,11 @@ pub fn do_checkbail(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "You're (happily) not serving a jailterm right now.\r\n");
         return;
     }
-    // GET_BAIL_AMT not modelled in the contract -> 0.
-    g.send_to_char(ch, "Bail for this offence has been set at 0 gold coins.\r\n");
+    let bail = g.get_char(ch).map(|c| c.bail_amt).unwrap_or(0);
+    g.send_to_char(
+        ch,
+        &format!("Bail for this offence has been set at {} gold coins.\r\n", bail),
+    );
 }
 
 pub fn do_mcheck(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
@@ -1526,7 +1529,7 @@ pub fn do_status(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         numdisplay((eq_val + inven_val) as i64),
         numdisplay(c.points.bank_gold as i64)
     ));
-    // Arena win/loss table not in the contract -> wins/losses fields.
+    // GET_ARENAWINS / GET_ARENALOSSES (player_specials.saved.wins/losses).
     buf.push_str(&format!(
         "&CArena Wins:&n {:<3}                     &CArena Losses :&n {} \r\n",
         c.wins, c.losses
@@ -1893,8 +1896,7 @@ pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         if who_room && c.in_room != ch_room {
             continue;
         }
-        if who_arena {
-            // Arena combatant table not modelled -> nobody qualifies.
+        if who_arena && !crate::arena::is_arena_combatant(wch) {
             continue;
         }
         if showclass != 0 && (showclass & (1 << (c.player.class as i64))) == 0 {
@@ -1978,6 +1980,12 @@ pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         }
         if c.prf2_flags & PRF2_INTANGIBLE != 0 && c.prf2_flags & PRF2_MBUILDING == 0 {
             line.push_str(" (&Kdead&n)");
+        }
+        if who_arena {
+            line.push_str(&format!(
+                " (Arena Wins/Losses: {}/{})",
+                c.wins, c.losses
+            ));
         }
         if who_fight {
             if let Some(opp) = c.fighting {
@@ -2711,8 +2719,11 @@ pub fn do_forage(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "You cannot forage on this type of terrain!\r\n");
         return;
     }
-    // SKILL_FORAGE proficiency: not modelled on Tier-0 Character skills here.
-    let skill = g.get_char(ch).map(|c| c.skill(0) as i32).unwrap_or(0);
+    // GET_SKILL(ch, SKILL_FORAGE) — proficiency from the skills map.
+    let skill = g
+        .get_char(ch)
+        .map(|c| c.skill(crate::spell_parser::SKILL_FORAGE as u16) as i32)
+        .unwrap_or(0);
     if skill <= 0 {
         g.send_to_char(ch, "You have no idea how to forage!\r\n");
         return;

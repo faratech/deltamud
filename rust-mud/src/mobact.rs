@@ -270,9 +270,9 @@ pub fn mobile_activity(g: &mut GameState) {
         // a func that does nothing and returns 0 — the mob then falls through
         // to default AI, which is exactly how C behaves on a 0 return. So we
         // never strip the bit; we just dispatch the procs that exist.
-        // (`no_specials`, C's -q flag, is not modeled; production runs with
-        // specials enabled.)
-        if mob_flagged(g, ch, MOB_SPEC) && call_mob_spec(g, ch) {
+        // `no_specials` (comm.c, set by the C `-s` flag) gates this exactly as
+        // C does: mobact.c:51 `if (MOB_FLAGGED(ch, MOB_SPEC) && !no_specials)`.
+        if !g.config.no_specials && mob_flagged(g, ch, MOB_SPEC) && call_mob_spec(g, ch) {
             continue; // spec consumed the mob's turn
         }
 

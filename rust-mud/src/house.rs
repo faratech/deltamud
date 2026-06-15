@@ -1322,6 +1322,24 @@ pub fn house_save_all(g: &mut GameState) {
     }
 }
 
+/// house_for_owner(idnum): the vnum of the house owned by `idnum`, or None.
+/// Mirrors spell_home's scan (spells.c): walk the control table and keep the
+/// *last* house whose owner matches, exactly as the C loop overwrites `homenum`
+/// on every match. Used by spell_home to teleport an owner to their house.
+pub fn house_for_owner(idnum: i64) -> Option<RoomVnum> {
+    if idnum < 0 {
+        return None;
+    }
+    let table = houses().lock().unwrap();
+    let mut found: Option<RoomVnum> = None;
+    for h in table.iter() {
+        if h.owner == idnum {
+            found = Some(h.vnum);
+        }
+    }
+    found
+}
+
 /// House_can_enter(ch, house): true if `ch` may enter the house at vnum `house`.
 /// GRGOD+ and non-houses always pass. Consulted by the movement gate.
 pub fn house_can_enter(g: &GameState, ch: CharId, house: RoomVnum) -> bool {

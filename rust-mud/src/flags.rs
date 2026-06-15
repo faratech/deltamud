@@ -16,6 +16,7 @@ pub const AFF_INFRAVISION: i64 = 1 << 10;
 pub const AFF_POISON: i64 = 1 << 11;
 pub const AFF_SLEEP: i64 = 1 << 14;
 pub const AFF_SNEAK: i64 = 1 << 18;
+pub const AFF_AUTUS: i64 = 1 << 20;
 pub const AFF_HIDE: i64 = 1 << 19;
 pub const AFF_CHARM: i64 = 1 << 21;
 

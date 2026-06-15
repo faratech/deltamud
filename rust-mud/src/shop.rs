@@ -50,6 +50,7 @@
 use crate::act::{act, ActArg, To};
 use crate::state::GameState;
 use crate::types::*;
+use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
@@ -261,6 +262,62 @@ static SHOPS: OnceLock<Mutex<Vec<ShopData>>> = OnceLock::new();
 
 fn shops() -> &'static Mutex<Vec<ShopData>> {
     SHOPS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+// ---------------------------------------------------------------------------
+// SHOP_FUNC secondary-spec registry (shop.h SHOP_FUNC + shop.c
+// assign_the_shopkeepers).
+//
+// In C every shop_index[] entry carries a `func` pointer (SHOP_FUNC(i)).
+// assign_the_shopkeepers() runs *after* assign_mobiles(): for each keeper it
+// captures whatever spec the keeper mob already had —
+//   `if (mob_index[SHOP_KEEPER].func) SHOP_FUNC(index) = mob_index[...].func;`
+// — into SHOP_FUNC, then overwrites the keeper's own func with shop_keeper().
+// shop_keeper() then invokes SHOP_FUNC first and, if it returns nonzero, treats
+// the command as consumed. The net effect: a mob that is *both* a shop keeper
+// and an assign_mobiles() spec runs the shop logic as its primary proc and the
+// original spec as a secondary, consulted before any buy/sell/list handling.
+//
+// We mirror this exactly. The keeper's "original" spec is the statically
+// assigned mob spec, i.e. spec_assign::get_mob_spec(keeper_vnum). We build a
+// vnum->SpecFn map (keeper mob vnum -> the captured secondary) lazily the first
+// time shop_keeper() consults it, which is well after both the shop table
+// (boot_shops) and the static mob-spec tables (spec_assign::assign_specs) have
+// been populated. The OnceLock makes the build idempotent and order-independent
+// (get_mob_spec lazily builds its own table if it has not yet).
+//
+// In the shipped DeltaMUD world no shop-keeper vnum is also an assign_mobiles()
+// target, so this map ends up empty — byte-for-byte what C produces (every
+// SHOP_FUNC stays 0). The machinery is faithful regardless: if a future build
+// assigns a spec to a keeper vnum, it is captured and dispatched here.
+type ShopFn = crate::spec_assign::SpecFn;
+
+static SHOP_FUNCS: OnceLock<HashMap<MobVnum, ShopFn>> = OnceLock::new();
+
+/// SHOP_FUNC(shop_nr) lookup, keyed by the shop's keeper mob vnum. Returns the
+/// captured secondary spec, or None when the keeper had no prior spec (the
+/// common case — equivalent to C's SHOP_FUNC == 0).
+fn shop_func(keeper_vnum: MobVnum) -> Option<ShopFn> {
+    SHOP_FUNCS
+        .get_or_init(|| {
+            // assign_the_shopkeepers(): walk every shop, capture the keeper's
+            // existing static spec as its SHOP_FUNC. NOBODY keepers are skipped
+            // exactly as C does (`if (SHOP_KEEPER(index) == NOBODY) continue;`).
+            let mut map: HashMap<MobVnum, ShopFn> = HashMap::new();
+            if let Ok(guard) = shops().lock() {
+                for s in guard.iter() {
+                    if s.keeper == NOBODY {
+                        continue;
+                    }
+                    if let Some(func) = crate::spec_assign::get_mob_spec(s.keeper) {
+                        map.insert(s.keeper, func);
+                    }
+                }
+            }
+            map
+        })
+        .get(&keeper_vnum)
+        .copied()
 }
 
 // ---------------------------------------------------------------------------
@@ -1778,8 +1835,9 @@ fn shopping_list(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_
 /// resolved command index (0 means a non-command tick); `arg` is the remaining
 /// argument. Returns true if the keeper handled the command.
 ///
-/// Wired for the spec-proc dispatcher that lands later. We resolve the shop by
-/// matching the keeper mob's vnum against SHOP_KEEPER, then intercept
+/// Invoked from the spec-proc dispatcher (spec_assign::special). We resolve the
+/// shop by matching the keeper mob's vnum against SHOP_KEEPER, run the keeper's
+/// SHOP_FUNC secondary spec (if any) first, then intercept
 /// steal/buy/sell/value/list.
 pub fn shop_keeper(g: &mut GameState, ch: CharId, me: CharId, cmd: &str, arg: &str) -> bool {
     let keeper = me;
@@ -1793,7 +1851,17 @@ pub fn shop_keeper(g: &mut GameState, ch: CharId, me: CharId, cmd: &str, arg: &s
         None => return false,
     };
 
-    // SHOP_FUNC (secondary spec) is not modeled here (no func registry yet).
+    // SHOP_FUNC(shop_nr): the keeper's secondary spec proc, captured from its
+    // original assign_mobiles() spec by assign_the_shopkeepers(). C calls it
+    // first and, if it returns nonzero, the command is consumed before any of
+    // the default keeper handling runs.
+    //   if (SHOP_FUNC(shop_nr))
+    //     if ((SHOP_FUNC(shop_nr)) (ch, me, cmd, arg)) return (TRUE);
+    if let Some(func) = shop_func(keeper_vnum) {
+        if func(g, ch, keeper, cmd, arg) {
+            return true;
+        }
+    }
 
     if keeper == ch {
         if !cmd.is_empty() {

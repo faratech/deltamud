@@ -35,6 +35,13 @@ pub struct Config {
     pub use_mock_db: bool,
     /// Pinned PRNG seed (MUD_RNG_SEED) for deterministic golden tests.
     pub rng_seed: Option<u64>,
+    /// Suppress assignment of special routines (comm.c `no_specials`, set by the
+    /// C `-s` command-line flag). When true, shop data and all spec-proc
+    /// func-pointer tables are skipped at boot, and the MOB_SPEC pulse call is
+    /// gated off (mobact.c:51 `MOB_FLAGGED(ch, MOB_SPEC) && !no_specials`). The
+    /// Rust port has no argv parser by default, so this is also readable from the
+    /// `MUD_NO_SPECIALS` env var; main.rs additionally honours the `-s` argv flag.
+    pub no_specials: bool,
 }
 
 impl Config {
@@ -54,6 +61,9 @@ impl Config {
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
             rng_seed: env::var("MUD_RNG_SEED").ok().and_then(|s| s.parse().ok()),
+            no_specials: env::var("MUD_NO_SPECIALS")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
         }
     }
 }
@@ -67,6 +77,7 @@ impl Default for Config {
             use_compat_mode: false,
             use_mock_db: true,
             rng_seed: None,
+            no_specials: false,
         }
     }
 }
