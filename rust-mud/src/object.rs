@@ -7,45 +7,73 @@ use crate::types::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ObjectType {
+    // Discriminants MUST equal DeltaMUD structs.h ITEM_* numbers: they are the
+    // value read from .obj files (file_loader) and the index into ITEM_TYPES
+    // (constants.rs, C item_types[]). A previous, sequential numbering silently
+    // mis-typed every non-weapon item (FOOD→OTHER, CONTAINER→FOOD, DRINKCON→
+    // FOUNTAIN, ...) — masked for immortals, who bypass the item-type checks.
     Light = 1,
     Scroll = 2,
     Wand = 3,
     Staff = 4,
     Weapon = 5,
-    Treasure = 6,
-    Armor = 7,
-    Potion = 8,
-    Other = 9,
-    Trash = 10,
-    Container = 11,
-    Note = 12,
-    LiqContainer = 13,
-    Key = 14,
-    Food = 15,
-    Money = 16,
-    Fountain = 17,
+    FireWeapon = 6,
+    Missile = 7,
+    Treasure = 8,
+    Armor = 9,
+    Potion = 10,
+    Worn = 11,
+    Other = 12,
+    Trash = 13,
+    Trap = 14,
+    Container = 15,
+    Note = 16,
+    LiqContainer = 17, // ITEM_DRINKCON
+    Key = 18,
+    Food = 19,
+    Money = 20,
+    Pen = 21,
+    Boat = 22,
+    Fountain = 23,
+    Portal = 24,
+    HpRegen = 25,
+    MpRegen = 26,
+    MvRegen = 27,
+    Atm = 28,
 }
 
 impl ObjectType {
     pub fn from_i32(v: i32) -> ObjectType {
+        use ObjectType::*;
         match v {
-            1 => ObjectType::Light,
-            2 => ObjectType::Scroll,
-            3 => ObjectType::Wand,
-            4 => ObjectType::Staff,
-            5 => ObjectType::Weapon,
-            6 => ObjectType::Treasure,
-            7 => ObjectType::Armor,
-            8 => ObjectType::Potion,
-            10 => ObjectType::Trash,
-            11 => ObjectType::Container,
-            12 => ObjectType::Note,
-            13 => ObjectType::LiqContainer,
-            14 => ObjectType::Key,
-            15 => ObjectType::Food,
-            16 => ObjectType::Money,
-            17 => ObjectType::Fountain,
-            _ => ObjectType::Other,
+            1 => Light,
+            2 => Scroll,
+            3 => Wand,
+            4 => Staff,
+            5 => Weapon,
+            6 => FireWeapon,
+            7 => Missile,
+            8 => Treasure,
+            9 => Armor,
+            10 => Potion,
+            11 => Worn,
+            13 => Trash,
+            14 => Trap,
+            15 => Container,
+            16 => Note,
+            17 => LiqContainer,
+            18 => Key,
+            19 => Food,
+            20 => Money,
+            21 => Pen,
+            22 => Boat,
+            23 => Fountain,
+            24 => Portal,
+            25 => HpRegen,
+            26 => MpRegen,
+            27 => MvRegen,
+            28 => Atm,
+            _ => Other, // 12 and any unknown
         }
     }
 }
@@ -140,7 +168,18 @@ pub struct Object {
     pub level: Level,
     pub timer: i32,
     pub values: [i32; 4],
+    // DeltaMUD "slots" carried in value[4]/value[5] of the .obj values line.
+    pub curr_slots: i32,
+    pub total_slots: i32,
+    // DeltaMUD per-object class restriction (`c` block, stored as class-1) and
+    // minimum use level (`L` block).
+    pub obj_class: i32,
+    pub min_level: i32,
+    // 32-bit affect bitvector (`BV` block).
+    pub bitvector: i64,
     pub affects: Vec<ObjectAffect>,
+    /// Extra descriptions (`E` blocks): (keyword, description).
+    pub ex_descriptions: Vec<(String, String)>,
 }
 
 impl Object {
@@ -163,7 +202,13 @@ impl Object {
             level: 0,
             timer: -1,
             values: [0; 4],
+            curr_slots: 0,
+            total_slots: 0,
+            obj_class: -1,
+            min_level: 0,
+            bitvector: 0,
             affects: Vec::new(),
+            ex_descriptions: Vec::new(),
         }
     }
 

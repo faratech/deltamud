@@ -31,6 +31,7 @@ mod config;
 mod connection;
 mod constants;
 mod database;
+mod database_compat;
 mod deity;
 mod dg_comm;
 mod dg_db_scripts;
@@ -154,6 +155,12 @@ async fn main() -> Result<()> {
     });
     state.rng.srandom(seed);
 
+    // DG Scripts must boot BEFORE the world: the world loader's `T <vnum>` lines
+    // call dg_db_scripts::record_proto, which rejects (and logs "non-existant")
+    // any trigger vnum not yet in trig_index. C orders index_boot(DB_BOOT_TRG)
+    // ahead of WLD/MOB/OBJ for exactly this reason.
+    dg_scripts::boot_dg_scripts(&config.lib_path);
+
     if let Err(e) = file_loader::FileLoader::load_world(&mut state, &config.lib_path).await {
         warn!("World load failed: {} (continuing with whatever loaded)", e);
     }
@@ -172,12 +179,11 @@ async fn main() -> Result<()> {
     auction::boot_auction(&config.lib_path);
     house::house_boot(&mut state);
 
-    // DG Scripts: load trigger prototypes (lib/world/trg), reset runtime trigger
-    // tables + the wait-event queue, then attach prototype triggers to every
-    // already-loaded room (mob/obj triggers attach when an instance is loaded;
-    // the file_loader records the proto bindings via dg_db_scripts::
-    // attach_trigger_to_{mob,obj,room} as it parses the T lines).
-    dg_scripts::boot_dg_scripts(&config.lib_path);
+    // DG Scripts: trigger prototypes were loaded above (before the world). Now
+    // that rooms exist, attach prototype triggers to every already-loaded room
+    // (mob/obj triggers attach when an instance is loaded; the file_loader
+    // recorded the proto bindings via attach_trigger_to_{mob,obj,room} during
+    // world load, which now succeeds because the trig_index is populated).
     dg_db_scripts::assign_room_triggers(&mut state);
 
     // Capture ROOM_DEATH rooms for the dts_are_dumps dump registration (C

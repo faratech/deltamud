@@ -1,12 +1,36 @@
-// Combat (CircleMUD fight.c), id-based. Tier-0 scope: melee rounds in the
-// heartbeat, THAC0 hit resolution, damage + position/death, simple corpse
-// drop. Skills/special attacks land in Batch 5.
+// Combat (DeltaMUD fight.c / utils.c), id-based. Melee rounds in the
+// heartbeat, the DeltaMUD probability/damage model (chance()/dam_multi()),
+// damage + position/death, corpse drop, PK flagging (check_killer).
+//
+// DeltaMUD does NOT use stock CircleMUD THAC0. The to-hit probability,
+// saving throws and damage scaling all come from chance()/dam_multi() in
+// utils.c, driven by technique/dex/str/con/int/wis ability scores vs the
+// power/defense/mpower/mdefense combat ratings. These live here as the
+// canonical `pub fn`s; magic.rs and cmd_offensive.rs both call them (no fork).
 
 use crate::act::{act, ActArg, To};
+use crate::constants::ATTACK_HIT_TEXT;
 use crate::object::{Object, ObjectType, ObjLoc};
-use crate::room::RoomFlags;
+use crate::room::{RoomFlags, SectorType};
+use crate::spell_parser::{MAX_SPELLS, TYPE_UNDEFINED};
 use crate::state::GameState;
 use crate::types::*;
+
+// Attack-type sentinels (spells.h). The weapon verb table is keyed by
+// (attacktype - TYPE_HIT); SKILL_BACKSTAB pierces.
+pub const TYPE_HIT: i32 = 1100;
+pub const TYPE_STAB: i32 = 1114;
+const NUM_ATTACK_TYPES: i32 = 15; // olc.h
+const SKILL_BACKSTAB: u16 = 501;
+
+// PLR_* act-flag bits for PCs (structs.h).
+const PLR_KILLER: i64 = 1 << 0;
+const PLR_THIEF: i64 = 1 << 1;
+
+// config.c — PvP gating (pk_allowed is false on this MUD).
+const PK_ALLOWED: bool = false;
+// Position multiplier hack (fight.c) keys off POS_FIGHTING's ordinal (8).
+const POS_FIGHTING_ORD: i32 = Position::Fighting as i32;
 
 /// May `ch` attack `victim`? (self / immortal / peaceful room.)
 pub fn can_kill(g: &GameState, ch: CharId, victim: CharId) -> Result<(), String> {
@@ -28,14 +52,22 @@ pub fn can_kill(g: &GameState, ch: CharId, victim: CharId) -> Result<(), String>
     Ok(())
 }
 
-/// set_fighting: attacker begins targeting victim (CircleMUD set_fighting).
+/// set_fighting: attacker begins targeting victim (fight.c set_fighting).
 pub fn set_fighting(g: &mut GameState, ch: CharId, victim: CharId) {
+    if ch == victim {
+        return;
+    }
     if g.get_char(ch).and_then(|c| c.fighting).is_some() {
         return;
     }
     if let Some(c) = g.get_char_mut(ch) {
         c.fighting = Some(victim);
         c.position = Position::Fighting;
+    }
+    // PK bookkeeping: on a non-PK MUD, attacking another player in a
+    // jurisdicted, non-peaceful area flags the attacker as a KILLER (fight.c).
+    if !PK_ALLOWED {
+        check_killer(g, ch, victim);
     }
 }
 
@@ -76,77 +108,183 @@ pub fn perform_violence(g: &mut GameState) {
     }
 }
 
-/// Resolve one attack (CircleMUD hit()).
-pub fn hit(g: &mut GameState, ch: CharId, victim: CharId) {
-    let thac0 = calc_thac0(g, ch);
-    let ac = g.get_char(victim).map(|c| (c.points.armor / 10) as i16).unwrap_or(10);
-    let hitroll = g.get_char(ch).map(|c| c.points.hitroll).unwrap_or(0);
-
-    let roll = g.rng.number(1, 20) as i16;
-    let needed = thac0 - ac;
-    let hit_landed = roll != 1 && (roll == 20 || roll >= needed - hitroll);
-
-    if !hit_landed {
-        dam_message(g, 0, ch, victim);
-        return;
-    }
-    let dmg = calc_damage(g, ch);
-    damage(g, ch, victim, dmg);
+/// chance(ch, vict, type) (utils.c): the percent chance ch lands a hit on
+/// vict. type 0 = normal/weapon attack, type 1 = magical attack.
+///   0   = total failure (always misses)
+///   50  = even 50/50
+///   100 = total success (always hits)
+/// Transcribed term-for-term from the C; the same integer truncation applies.
+pub fn chance(g: &GameState, ch: CharId, vict: CharId, ty: i32) -> i32 {
+    let (c_tech, c_dex, c_int) = match g.get_char(ch) {
+        Some(c) => (c.points.technique as i32, c.aff_abils.dex as i32, c.aff_abils.intel as i32),
+        None => return 0,
+    };
+    let (v_tech, v_dex, v_wis) = match g.get_char(vict) {
+        Some(c) => (c.points.technique as i32, c.aff_abils.dex as i32, c.aff_abils.wis as i32),
+        None => return 0,
+    };
+    // sh_int p;  (C uses signed-short arithmetic, fits in i32 here)
+    let mut p: i32 = match ty {
+        0 => (c_tech - v_tech) + (c_dex - v_dex) * 10,
+        1 => (c_tech - v_tech) + (c_int - v_wis) * 10,
+        _ => return 0,
+    };
+    p /= 10; // widen the ranges (-1000..1000 -> -100..100)
+    p = (p + 100) / 2; // 0%..100%
+    p.clamp(0, 100)
 }
 
-fn calc_thac0(g: &GameState, ch: CharId) -> i16 {
+/// dam_multi(ch, vict, type) (utils.c): the damage multiplier ch gets vs vict.
+/// type 0 = normal attack (power/str vs defense/con), type 1 = magical
+/// (mpower/int vs mdefense/wis).
+///
+/// NOTE: the negative branch reproduces the C exactly. In C, `2/300` is
+/// *integer* division and equals 0, so `p = 1 - (2/300)*p` is always 1 for
+/// p < 0. We keep that quirk: an attacker weaker than the defender never drops
+/// below a 1.0 multiplier here (the final `< 0 ? 0` clamp can still apply).
+pub fn dam_multi(g: &GameState, ch: CharId, vict: CharId, ty: i32) -> f32 {
+    let (a_pow, a_mpow, a_str, a_int) = match g.get_char(ch) {
+        Some(c) => (
+            c.points.power as f32,
+            c.points.mpower as f32,
+            c.aff_abils.str as f32,
+            c.aff_abils.intel as f32,
+        ),
+        None => return 1.0,
+    };
+    let (v_def, v_mdef, v_con, v_wis) = match g.get_char(vict) {
+        Some(c) => (
+            c.points.defense as f32,
+            c.points.mdefense as f32,
+            c.aff_abils.con as f32,
+            c.aff_abils.wis as f32,
+        ),
+        None => return 1.0,
+    };
+    let mut p: f32 = match ty {
+        0 => (a_pow - v_def) + (a_str - v_con) * 10.0,
+        1 => (a_mpow - v_mdef) + (a_int - v_wis) * 10.0,
+        _ => return 1.0,
+    };
+    p /= 10.0; // widen the ranges
+    if p >= 0.0 {
+        p = 1.0 + (2.0 * p / 100.0);
+    } else {
+        p *= -1.0;
+        // C: p = 1 - (2/300)*p; 2/300 == 0 in integer math, so this is 1.
+        p = 1.0 - (0.0 * p);
+    }
+    if p < 0.0 {
+        0.0
+    } else {
+        p
+    }
+}
+
+/// GET_ATTACKTYPE(ch) (utils.h): the weapon attack-type for ch — the wielded
+/// weapon's value[3] (+TYPE_HIT), else the mob's BareHandAttack (+TYPE_HIT),
+/// else plain TYPE_HIT.
+pub fn get_attacktype(g: &GameState, ch: CharId) -> i32 {
+    if let Some(w) = g.get_char(ch).and_then(|c| c.equipment[WEAR_WIELD]) {
+        if let Some(o) = g.get_obj(w) {
+            let v3 = o.values[3];
+            if o.is_weapon() && v3 > -1 && v3 < NUM_ATTACK_TYPES {
+                return v3 + TYPE_HIT;
+            }
+            return TYPE_HIT;
+        }
+    }
+    // Bare-handed: NPCs use their prototype BareHandAttack; PCs use TYPE_HIT.
     let c = match g.get_char(ch) {
         Some(c) => c,
-        None => return 20,
+        None => return TYPE_HIT,
     };
-    let lvl = c.player.level as i16;
-    let base = match c.player.class {
-        Class::Warrior => 20 - lvl,
-        Class::MagicUser => 20 - lvl / 3,
-        _ => 20 - lvl * 2 / 3,
-    };
-    base.max(1)
+    if c.is_npc {
+        let at = g.mob_protos.get(&c.nr).map(|p| p.attack_type).unwrap_or(0);
+        if at > -1 && at < NUM_ATTACK_TYPES {
+            return at + TYPE_HIT;
+        }
+    }
+    TYPE_HIT
 }
 
-fn calc_damage(g: &mut GameState, ch: CharId) -> i32 {
-    // Weapon dice or bare hands.
+/// Resolve one attack (fight.c hit()). DeltaMUD: `number(0,100) > chance()`
+/// decides hit vs miss; on a hit, weapon/bare/mob dice + a position multiplier
+/// build the raw damage, which `damage()` then scales by `dam_multi()`.
+pub fn hit(g: &mut GameState, ch: CharId, victim: CharId) {
+    // peaceful-room / same-room sanity is handled by callers and damage(); here
+    // we just resolve the swing as fight.c hit() does.
+    let attacktype = get_attacktype(g, ch);
+
+    let diceroll = g.rng.number(0, 100);
+    let awake = g.get_char(victim).map(|c| c.position > Position::Sleeping).unwrap_or(false);
+
+    // Decide whether this is a hit or a miss.
+    if diceroll > chance(g, ch, victim, 0) && awake {
+        // The attacker missed the victim (0 damage -> miss message).
+        damage_type(g, ch, victim, 0, attacktype);
+        return;
+    }
+
+    // The victim has been hit; now calculate damage.
     let wield = g.get_char(ch).and_then(|c| c.equipment[WEAR_WIELD]);
-    let (n, s) = match wield.and_then(|w| g.get_obj(w)).and_then(|o| o.damage_dice()) {
-        Some((n, s)) if n > 0 && s > 0 => (n, s),
-        _ => (1, 2),
+    let mut dam: i32 = if let Some((n, s)) = wield.and_then(|w| g.get_obj(w)).and_then(|o| o.damage_dice()) {
+        g.rng.dice(n, s)
+    } else {
+        // No weapon: NPCs use prototype damnodice/damsizedice, PCs roll 0..2.
+        let is_npc = g.get_char(ch).map(|c| c.is_npc).unwrap_or(false);
+        if is_npc {
+            let nr = g.get_char(ch).map(|c| c.nr).unwrap_or(NOBODY);
+            let (n, s) = g
+                .mob_protos
+                .get(&nr)
+                .map(|p| (p.damnodice, p.damsizedice))
+                .unwrap_or((0, 0));
+            g.rng.dice(n, s)
+        } else {
+            g.rng.number(0, 2) // max 2 bare-hand damage for players
+        }
     };
-    let mut dmg = g.rng.dice(n, s);
-    if let Some(c) = g.get_char(ch) {
-        dmg += c.points.damroll as i32;
-        dmg += str_damage_bonus(c.real_abils.str);
+
+    // Position multiplier if the victim isn't ready to fight (fight.c hack):
+    //   sitting 1.33x .. mortally 3.00x. Integer math keyed off POS_FIGHTING.
+    let v_pos = g.get_char(victim).map(|c| c.position as i32).unwrap_or(POS_FIGHTING_ORD);
+    if v_pos < POS_FIGHTING_ORD {
+        dam *= 1 + (POS_FIGHTING_ORD - v_pos) / 3;
     }
-    dmg.max(0)
+
+    // At least 1 hp damage per hit.
+    dam = dam.max(1);
+
+    damage_type(g, ch, victim, dam, attacktype);
 }
 
-fn str_damage_bonus(str: i8) -> i32 {
-    match str {
-        i8::MIN..=5 => -4,
-        6..=7 => -3,
-        8..=9 => -2,
-        10..=11 => -1,
-        12..=15 => 0,
-        16 => 1,
-        17 => 2,
-        18 => 3,
-        19..=20 => 4,
-        21..=22 => 5,
-        23..=24 => 6,
-        _ => 7,
-    }
-}
-
-/// Apply damage, update position, handle retaliation and death.
+/// damage(ch, victim, dam) — back-compat entry for callers that don't carry an
+/// attack type (dg scripts, environment damage). Routes to the typed path with
+/// TYPE_UNDEFINED, exactly as C `damage(ch,victim,dam,TYPE_UNDEFINED)` would.
 pub fn damage(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32) {
-    // Apply.
+    damage_type(g, ch, victim, dmg, TYPE_UNDEFINED);
+}
+
+/// do_actual_damage (fight.c): scale the raw damage by dam_multi(), apply it,
+/// emit the weapon/skill damage message, update position, drive retaliation
+/// and death. `attacktype` selects the verb table and the dam_multi flavour.
+pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, attacktype: i32) {
+    // PK flagging on a non-PK MUD (fight.c do_actual_damage).
+    if !PK_ALLOWED {
+        check_killer(g, ch, victim);
+    }
+
+    // Damage multiplier. Spells (1..=MAX_SPELLS) use the magical flavour;
+    // everything else (weapons / skills / undefined) uses the physical one.
+    let mt = if attacktype > 0 && attacktype <= MAX_SPELLS { 1 } else { 0 };
+    let mut dmg = (dmg as f32 * dam_multi(g, ch, victim, mt)) as i32;
+
+    // Clamp to the per-round window and subtract hp.
+    dmg = dmg.clamp(0, 1000);
     if let Some(v) = g.get_char_mut(victim) {
         v.points.hit -= dmg;
     }
-    dam_message(g, dmg, ch, victim);
 
     // A mob remembers a PC who strikes it (mobact memory; fight.c).
     let ch_is_pc = g.get_char(ch).map(|c| !c.is_npc).unwrap_or(false);
@@ -156,6 +294,16 @@ pub fn damage(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32) {
     }
 
     update_position(g, victim);
+
+    // Damage / miss message (weapon verb table for IS_WEAPON attack types).
+    if is_weapon_type(attacktype) {
+        dam_message(g, dmg, ch, victim, attacktype);
+    } else if attacktype == TYPE_UNDEFINED {
+        // Generic strike with no weapon flavour (environment / dg damage):
+        // fall back to the plain TYPE_HIT verb so onlookers still see a hit.
+        dam_message(g, dmg, ch, victim, TYPE_HIT);
+    }
+    // (Spell/skill messages are emitted by the magic subsystem, as in C.)
 
     // Victim retaliates if not already fighting.
     if g.get_char(victim).and_then(|c| c.fighting).is_none()
@@ -167,6 +315,84 @@ pub fn damage(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32) {
     if g.get_char(victim).map(|c| c.position == Position::Dead).unwrap_or(false) {
         die(g, ch, victim);
     }
+}
+
+/// IS_WEAPON(type) (fight.c): TYPE_HIT..TYPE_STAB inclusive (the verb table).
+fn is_weapon_type(attacktype: i32) -> bool {
+    attacktype >= TYPE_HIT && attacktype <= TYPE_STAB
+}
+
+/// check_killer (fight.c): on a non-PK MUD, a player who initiates an attack on
+/// another player in a jurisdicted, non-peaceful area becomes a PLAYER KILLER.
+pub fn check_killer(g: &mut GameState, ch: CharId, vict: CharId) {
+    if ch == vict {
+        return;
+    }
+    let (ch_npc, ch_killer) = match g.get_char(ch) {
+        Some(c) => (c.is_npc, !c.is_npc && c.act_flags & PLR_KILLER != 0),
+        None => return,
+    };
+    let (v_npc, v_killer, v_thief) = match g.get_char(vict) {
+        Some(c) => (
+            c.is_npc,
+            !c.is_npc && c.act_flags & PLR_KILLER != 0,
+            !c.is_npc && c.act_flags & PLR_THIEF != 0,
+        ),
+        None => return,
+    };
+    // Only PC-on-PC, neither party already flagged, attacker not a KILLER.
+    if v_killer || v_thief || ch_killer || ch_npc || v_npc {
+        return;
+    }
+    let room = match g.get_char(ch).and_then(|c| c.in_room) {
+        Some(r) => r,
+        None => return,
+    };
+    // IS_JURISDICTED(room): SECT_CITY || SECT_INSIDE. Skip peaceful rooms.
+    let sect = g.room(room).sector_type;
+    let jurisdicted = matches!(sect, SectorType::City | SectorType::Inside);
+    if !jurisdicted || g.room(room).room_flags.contains(RoomFlags::PEACEFUL) {
+        return;
+    }
+
+    // Flag the killer, drop alignment to the floor, notify.
+    let ch_thief = g.get_char(ch).map(|c| c.act_flags & PLR_THIEF != 0).unwrap_or(false);
+    let log = format!(
+        "PC Killer bit set on {} for initiating attack on {} at {}.",
+        g.get_char(ch).map(|c| c.get_name().to_string()).unwrap_or_default(),
+        g.get_char(vict).map(|c| c.get_name().to_string()).unwrap_or_default(),
+        g.room(room).name.clone(),
+    );
+    if !ch_thief {
+        mudlog(g, &log, LVL_IMMORT);
+    }
+    if let Some(c) = g.get_char_mut(ch) {
+        c.act_flags |= PLR_KILLER;
+        c.alignment = -1000;
+    }
+    g.send_to_char(
+        ch,
+        "This is a jurisdicted area. If you want to be a PLAYER KILLER, so be it...\r\n",
+    );
+}
+
+/// mudlog(): broadcast a brief log line to immortals at/above `min_level`.
+fn mudlog(g: &mut GameState, line: &str, min_level: u8) {
+    let formatted = format!("[ {} ]\r\n", line);
+    let imms: Vec<CharId> = g
+        .players_by_name
+        .values()
+        .copied()
+        .filter(|&id| {
+            g.get_char(id)
+                .map(|c| c.player.level >= min_level && c.player.level >= LVL_IMMORT)
+                .unwrap_or(false)
+        })
+        .collect();
+    for id in imms {
+        g.send_to_char(id, &formatted);
+    }
+    eprintln!("[ {} ]", line);
 }
 
 fn update_position(g: &mut GameState, ch: CharId) {
@@ -269,38 +495,138 @@ fn respawn_pc(g: &mut GameState, victim: CharId) {
     crate::cmd_informative::look_at_room(g, victim, false);
 }
 
-/// Damage messages to char/vict/room (simplified CircleMUD dam_message).
-fn dam_message(g: &mut GameState, dmg: i32, ch: CharId, victim: CharId) {
-    let verb = severity(dmg);
-    if dmg == 0 {
-        act(g, "You miss $N.", false, ch, None, ActArg::Char(victim), To::Char);
-        act(g, "$n misses you.", false, ch, None, ActArg::Char(victim), To::Vict);
-        act(g, "$n misses $N.", false, ch, None, ActArg::Char(victim), To::NotVict);
-        return;
-    }
-    act(g, &format!("You {} $N.", verb), false, ch, None, ActArg::Char(victim), To::Char);
-    act(g, &format!("$n {}s you.", verb), false, ch, None, ActArg::Char(victim), To::Vict);
-    act(g, &format!("$n {}s $N.", verb), false, ch, None, ActArg::Char(victim), To::NotVict);
+/// dam_message (fight.c): the per-weapon-type damage message. The verb
+/// (singular/plural) is chosen from ATTACK_HIT_TEXT by `w_type - TYPE_HIT`;
+/// the severity tier (0..11, by damage) selects the message template. `#w`
+/// and `#W` in the template are replaced with the singular/plural verb.
+fn dam_message(g: &mut GameState, dam: i32, ch: CharId, victim: CharId, w_type: i32) {
+    // `to_room`, `to_char`, `to_victim` templates per severity tier (fight.c).
+    const DAM_WEAPONS: &[(&str, &str, &str)] = &[
+        // 0: miss
+        (
+            "$n tries to #w $N, but misses.",
+            "You try to #w $N, but miss.",
+            "$n tries to #w you, but misses.",
+        ),
+        // 1: 1..27
+        (
+            "$n tickles $N as $e #W $M.",
+            "You tickle $N as you #w $M.",
+            "$n tickles you as $e #W you.",
+        ),
+        // 2: 28..54
+        ("$n barely #W $N.", "You barely #w $N.", "$n barely #W you."),
+        // 3: 55..81
+        ("$n #W $N.", "You #w $N.", "$n #W you."),
+        // 4: 82..108
+        ("$n #W $N hard.", "You #w $N hard.", "$n #W you hard."),
+        // 5: 109..135
+        (
+            "$n #W $N very hard.",
+            "You #w $N very hard.",
+            "$n #W you very hard.",
+        ),
+        // 6: 136..162
+        (
+            "$n #W $N extremely hard.",
+            "You #w $N extremely hard.",
+            "$n #W you extremely hard.",
+        ),
+        // 7: 163..189
+        (
+            "$n massacres $N to small fragments with $s #w.",
+            "You massacre $N to small fragments with your #w.",
+            "$n massacres you to small fragments with $s #w.",
+        ),
+        // 8: 190..216
+        (
+            "$n OBLITERATES $N with $s deadly #w!!",
+            "You OBLITERATE $N with your deadly #w!!",
+            "$n OBLITERATES you with $s deadly #w!!",
+        ),
+        // 9: 217..243
+        (
+            "$n PULVERIZES $N to bits with $s deadly #w!!",
+            "You PULVERIZE $N to bits with your deadly #w!!",
+            "$n PULVERIZES you to bits with $s deadly #w!!",
+        ),
+        // 10: 244..270
+        (
+            "$n VAPORIZES $N with $s deadly #w!!",
+            "You VAPORIZE $N with your deadly #w!!",
+            "$n VAPORIZES you with $s deadly #w!!",
+        ),
+        // 11: > 270
+        (
+            "$n ANNIHILATES $N to smithereens with $s deadly #w!!",
+            "You &RANNIHILATE&Y $N to smithereens with your deadly #w!!",
+            "$n &RANNIHILATES&Y you to smithereens with $s deadly #w!!",
+        ),
+    ];
+
+    // Change to base of the verb table; clamp to a valid index defensively.
+    let idx = (w_type - TYPE_HIT).clamp(0, (ATTACK_HIT_TEXT.len() - 1) as i32) as usize;
+    let (singular, plural) = ATTACK_HIT_TEXT[idx];
+
+    let msgnum = if dam == 0 {
+        0
+    } else if dam <= 27 {
+        1
+    } else if dam <= 54 {
+        2
+    } else if dam <= 81 {
+        3
+    } else if dam <= 108 {
+        4
+    } else if dam <= 135 {
+        5
+    } else if dam <= 162 {
+        6
+    } else if dam <= 189 {
+        7
+    } else if dam <= 216 {
+        8
+    } else if dam <= 243 {
+        9
+    } else if dam <= 270 {
+        10
+    } else {
+        11
+    };
+    let (to_room, to_char, to_victim) = DAM_WEAPONS[msgnum];
+
+    // To onlookers, to the damager (yellow), to the damagee (red).
+    let s = replace_string(to_room, singular, plural);
+    act(g, &s, false, ch, None, ActArg::Char(victim), To::NotVict);
+
+    let s = format!("&Y{}&n", replace_string(to_char, singular, plural));
+    act(g, &s, false, ch, None, ActArg::Char(victim), To::Char);
+
+    let s = format!("&R{}&n", replace_string(to_victim, singular, plural));
+    crate::act::act_sleep(g, &s, false, ch, None, ActArg::Char(victim), To::Vict, true);
 }
 
-fn severity(dmg: i32) -> &'static str {
-    match dmg {
-        0 => "miss",
-        1..=2 => "scratch",
-        3..=4 => "graze",
-        5..=6 => "hit",
-        7..=10 => "injure",
-        11..=14 => "wound",
-        15..=19 => "maul",
-        20..=23 => "decimate",
-        24..=27 => "devastate",
-        28..=31 => "maim",
-        32..=35 => "MUTILATE",
-        36..=39 => "DISEMBOWEL",
-        40..=43 => "MASSACRE",
-        44..=47 => "MANGLE",
-        _ => "* OBLITERATE *",
+/// replace_string (fight.c): substitute `#w`/`#W` with the weapon's singular /
+/// plural verb. `#` followed by anything else is emitted literally.
+fn replace_string(template: &str, singular: &str, plural: &str) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut chars = template.chars();
+    while let Some(c) = chars.next() {
+        if c == '#' {
+            match chars.next() {
+                Some('W') => out.push_str(plural),
+                Some('w') => out.push_str(singular),
+                Some(other) => {
+                    out.push('#');
+                    out.push(other);
+                }
+                None => out.push('#'),
+            }
+        } else {
+            out.push(c);
+        }
     }
+    out
 }
 
 /// flee: try a random exit out of combat (CircleMUD do_flee, simplified).

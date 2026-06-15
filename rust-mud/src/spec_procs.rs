@@ -39,8 +39,8 @@ use crate::act::{act, ActArg, To};
 use crate::flags::*;
 use crate::object::ObjectType;
 use crate::spell_parser::{
-    cast_spell, find_skill_num, skill_name, spell_info, SPELL_BLINDNESS, SPELL_HEAL, SPELL_POISON,
-    SPELL_SLEEP,
+    cast_spell, find_skill_num, skill_name, spell_info, SPELL_BLINDNESS, SPELL_CURE_BLIND,
+    SPELL_HEAL, SPELL_POISON, SPELL_REGEN_MANA, SPELL_REMOVE_CURSE, SPELL_REMOVE_POISON, SPELL_SLEEP,
 };
 use crate::state::GameState;
 use crate::types::*;
@@ -73,6 +73,9 @@ const SCMD_DROP: i32 = 0;
 // the C `GET_OBJ_VAL(i, 3)` for ITEM_CONTAINER means "this is a corpse" in the
 // DeltaMUD corpse model (combat.rs::make_corpse sets values[3]=1).
 const CONTAINER_CORPSE_VAL: usize = 3;
+
+// AFF_WATERWALK (structs.h bit 6) — consulted by the portal's local has_boat.
+const AFF_WATERWALK: i64 = 1 << 6;
 
 // ===========================================================================
 // Small accessor helpers (utils.h macros over GameState).
@@ -1007,6 +1010,467 @@ pub fn janitor(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &str
         return true;
     }
     false
+}
+
+// ===========================================================================
+// puff — the cosmic puff mob (Limbo vnum 1). Random philosophical one-liners on
+// the periodic pulse. C SPECIAL(puff): `if (cmd) return 0;` then number(0,66)
+// selects one of ten `do_say` lines (cases 10..66 fall through to `return 0`).
+// ===========================================================================
+
+/// SPECIAL(puff). Periodic-pulse only (cmd must be empty).
+pub fn puff(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &str) -> bool {
+    if !cmd.is_empty() {
+        return false;
+    }
+    let say = |g: &mut GameState, text: &str| {
+        crate::cmd_comm::do_say(g, ch, text, 0);
+    };
+    match number(g, 0, 66) {
+        0 => {
+            say(g, "The force is strong with this one!");
+            true
+        }
+        1 => {
+            say(g, "If you only knew the POWER of the dark side");
+            true
+        }
+        2 => {
+            say(g, "Read my lips.. no new taxes");
+            true
+        }
+        3 => {
+            say(g, "Whenever I climb I am followed by a dog called Ego");
+            true
+        }
+        4 => {
+            say(g, "I'll sleep when I'm dead");
+            true
+        }
+        5 => {
+            say(
+                g,
+                "My advice to you is get married: if you find a good wife you'll be happy; if not, you'll become a philosopher",
+            );
+            true
+        }
+        6 => {
+            say(g, "We all agree that your theory is crazy, but is it crazy enough?");
+            true
+        }
+        7 => {
+            say(g, "I loved Welmar more than any woman I had ever known");
+            true
+        }
+        8 => {
+            say(g, "The graveyards are full of indispensable men");
+            true
+        }
+        9 => {
+            say(g, "I have an existential map; it has 'you are here' written all over it");
+            true
+        }
+        _ => false,
+    }
+}
+
+// ===========================================================================
+// librarian — the bookstore/library NPC (Itrius vnum 102). Random library-themed
+// emotes on the periodic pulse. C SPECIAL(librarian): `if (cmd) return 0;` then
+// loops over the people in the room, rolling number(0,72) and emoting the first
+// hit (cases 16..72 fall through to `return 0`). The loop variable `vict` is the
+// suggestive-wink target (case 5); it iterates the people list so `vict` is the
+// last person in the room — we mirror that by taking the room's people list.
+// ===========================================================================
+
+/// SPECIAL(librarian). Periodic-pulse only (cmd must be empty).
+pub fn librarian(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &str) -> bool {
+    if !cmd.is_empty() {
+        return false;
+    }
+    let rnum = match in_room(g, ch) {
+        Some(r) => r,
+        None => return false,
+    };
+    // C `for (vict = world[ch->in_room].people; vict; vict = vict->next_in_room)`
+    // executes the switch once *per* person in the room, returning on the first
+    // non-default case. With number() re-rolled each iteration the practical
+    // effect is "emote on a low roll while anyone is present"; `vict` (the wink
+    // target) is whichever person the body is currently on. We iterate the people
+    // list and roll per-person, exactly matching the C control flow.
+    let people = g.room_opt(rnum).map(|r| r.people.clone()).unwrap_or_default();
+    for vict in people {
+        match number(g, 0, 72) {
+            0 => {
+                act(g, "$n says, 'I sell books from all over the land, why not buy one?'", false, ch, None, ActArg::None, To::Room);
+                return true;
+            }
+            1 => {
+                act(g, "$n turns a page in the book she's reading.", false, ch, None, ActArg::None, To::Room);
+                return true;
+            }
+            2 => {
+                act(g, "$n drinks a glass of wine.", false, ch, None, ActArg::None, To::Room);
+                return true;
+            }
+            3 => {
+                act(g, "$n says, 'I'm reading a book about ancient Midgaard.'", false, ch, None, ActArg::None, To::Room);
+                return true;
+            }
+            4 => {
+                act(g, "$n says, 'Thanks for being quiet in the library.'", false, ch, None, ActArg::None, To::Room);
+                return true;
+            }
+            5 => {
+                act(g, "$n winks at $N suggestively.", true, ch, None, ActArg::Char(vict), To::Room);
+                return true;
+            }
+            6 => {
+                act(g, "$n starts sorting new books.", false, ch, None, ActArg::None, To::Room);
+                return true;
+            }
+            7 => {
+                act(g, "$n points at the sign on the wall.", false, ch, None, ActArg::None, To::Room);
+                act(g, "$n says, 'If you're looking for books just type: list'", false, ch, None, ActArg::None, To::Room);
+                return true;
+            }
+            8 => {
+                act(g, "$n says, 'I need a vacation. I'd love to see Jhaden'", false, ch, None, ActArg::None, To::Room);
+                return true;
+            }
+            9 => {
+                act(g, "$n puts several books on a shelf.", false, ch, None, ActArg::None, To::Room);
+                return true;
+            }
+            10 => {
+                act(g, "$n snickers softly.", false, ch, None, ActArg::None, To::Room);
+                return true;
+            }
+            11 => {
+                act(g, "$n says, 'I wish people like you would write books.'", false, ch, None, ActArg::None, To::Room);
+                return true;
+            }
+            12 => {
+                act(g, "$n says, 'I once met AJ Trfiante here long ago.'", false, ch, None, ActArg::None, To::Room);
+                act(g, "$n says, 'It was at the debute of his restraunt'", false, ch, None, ActArg::None, To::Room);
+                return true;
+            }
+            13 => {
+                act(g, "$n seems to be getting tired.", false, ch, None, ActArg::None, To::Room);
+                return true;
+            }
+            14 => {
+                act(g, "$n leaves to a back room.", false, ch, None, ActArg::None, To::Room);
+                act(g, "$n returns with a new pile of books.", false, ch, None, ActArg::None, To::Room);
+                return true;
+            }
+            15 => {
+                act(g, "$n says, 'I love to read. It makes you smart, you know.'", false, ch, None, ActArg::None, To::Room);
+                return true;
+            }
+            _ => {
+                // default: return 0 (the C switch breaks out of the loop body via
+                // `return (0)`), so a default roll stops the whole proc — no more
+                // people are considered. Replicate with an early return.
+                return false;
+            }
+        }
+    }
+    false
+}
+
+// ===========================================================================
+// temple_healer / temple_mana_regenerator (Battle Arena vnums 4801 / 4802).
+// Periodic-pulse temple specs that scan the room and cast restorative spells on
+// the neediest player. They fire only when the mud clock's hour != 0.
+//
+// temple_healer: cure poison, then curse, then blindness (first match each), and
+// finally heal the most-wounded character (lowest HP/MAX_HIT ratio).
+// temple_mana_regenerator: regen the lowest MANA/MAX_MANA character.
+// ===========================================================================
+
+/// SPECIAL(temple_healer). Periodic-pulse only (cmd must be empty).
+pub fn temple_healer(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &str) -> bool {
+    if !cmd.is_empty() {
+        return false;
+    }
+    // if (time_info.hours != 0)
+    if crate::weather::time_now().0 == 0 {
+        return false;
+    }
+    let rnum = match in_room(g, ch) {
+        Some(r) => r,
+        None => return false,
+    };
+    let people = g.room_opt(rnum).map(|r| r.people.clone()).unwrap_or_default();
+
+    // Poison: cure the (last) poisoned person in the room.
+    let mut hitme: Option<CharId> = None;
+    for vict in people.iter().copied() {
+        if g.get_char(vict).map(|c| c.affect_flags & AFF_POISON != 0).unwrap_or(false) {
+            hitme = Some(vict);
+        }
+    }
+    if let Some(v) = hitme {
+        cast_spell(g, ch, Some(v), None, SPELL_REMOVE_POISON);
+        return true;
+    }
+
+    // Curse: remove the (last) cursed person's curse.
+    hitme = None;
+    for vict in people.iter().copied() {
+        if g.get_char(vict).map(|c| c.affect_flags & AFF_CURSE != 0).unwrap_or(false) {
+            hitme = Some(vict);
+        }
+    }
+    if let Some(v) = hitme {
+        cast_spell(g, ch, Some(v), None, SPELL_REMOVE_CURSE);
+        return true;
+    }
+
+    // Blindness: cure the (last) blind person.
+    hitme = None;
+    for vict in people.iter().copied() {
+        if g.get_char(vict).map(|c| c.affect_flags & AFF_BLIND != 0).unwrap_or(false) {
+            hitme = Some(vict);
+        }
+    }
+    if let Some(v) = hitme {
+        cast_spell(g, ch, Some(v), None, SPELL_CURE_BLIND);
+        return true;
+    }
+
+    // Heal the most-wounded (lowest HP/MAX_HIT ratio < 1.0).
+    hitme = None;
+    let mut temp2: f32 = 1.0;
+    for vict in people.iter().copied() {
+        let (hit, maxhit) = g.get_char(vict).map(|c| (c.points.hit, c.points.max_hit)).unwrap_or((0, 0));
+        if maxhit == 0 {
+            continue;
+        }
+        let temp1 = hit as f32 / maxhit as f32;
+        if temp1 < temp2 {
+            temp2 = temp1;
+            hitme = Some(vict);
+        }
+    }
+    if let Some(v) = hitme {
+        cast_spell(g, ch, Some(v), None, SPELL_HEAL);
+        return true;
+    }
+    false
+}
+
+/// SPECIAL(temple_mana_regenerator). Periodic-pulse only (cmd must be empty).
+pub fn temple_mana_regenerator(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &str) -> bool {
+    if !cmd.is_empty() {
+        return false;
+    }
+    if crate::weather::time_now().0 == 0 {
+        return false;
+    }
+    let rnum = match in_room(g, ch) {
+        Some(r) => r,
+        None => return false,
+    };
+    let people = g.room_opt(rnum).map(|r| r.people.clone()).unwrap_or_default();
+
+    // Regen the lowest MANA/MAX_MANA character (ratio < 1.0).
+    let mut hitme: Option<CharId> = None;
+    let mut temp2: f32 = 1.0;
+    for vict in people {
+        let (mana, maxmana) = g.get_char(vict).map(|c| (c.points.mana, c.points.max_mana)).unwrap_or((0, 0));
+        if maxmana == 0 {
+            continue;
+        }
+        let temp1 = mana as f32 / maxmana as f32;
+        if temp1 < temp2 {
+            temp2 = temp1;
+            hitme = Some(vict);
+        }
+    }
+    if let Some(v) = hitme {
+        cast_spell(g, ch, Some(v), None, SPELL_REGEN_MANA);
+        return true;
+    }
+    false
+}
+
+// ===========================================================================
+// portal — the generic portal object (vnum 20). CMD_IS("enter <obj>"): if the
+// named object in the room is THIS portal and its value[1] is a valid room rnum,
+// transport the actor there. C SPECIAL(portal).
+//
+// In C `port->obj_flags.value[1]` is the destination *room rnum* (an index into
+// world[]); we use it the same way as an index into g.rooms. The riding path
+// (RIDING(ch)/has_boat(mount)) is not reachable — DeltaMUD's mount subsystem is
+// not present in this port — so the no-mount water-sector branch is ported 1:1
+// and the riding branch is omitted (noted in W6 report).
+// ===========================================================================
+
+/// has_boat(ch) (act.movement.c) — re-implemented locally (the ported one is
+/// private to cmd_movement). AFF_WATERWALK or immortal grants water passage; a
+/// carried/worn ITEM_BOAT would too, but the port can't distinguish ITEM_BOAT
+/// (same caveat as cmd_movement::has_boat), so boats fall back to those two.
+fn has_boat(g: &GameState, ch: CharId) -> bool {
+    g.get_char(ch)
+        .map(|c| c.affect_flags & AFF_WATERWALK != 0 || (!c.is_npc && c.player.level >= LVL_IMMORT))
+        .unwrap_or(false)
+}
+
+/// SPECIAL(portal). `me` is the portal object.
+pub fn portal(g: &mut GameState, ch: CharId, me: ObjId, cmd: &str, arg: &str) -> bool {
+    if !cmd_is(cmd, "enter") {
+        return false;
+    }
+
+    // one_argument(argument, obj_name).
+    let (obj_name, _) = crate::interpreter::one_argument(arg);
+
+    let rnum = match in_room(g, ch) {
+        Some(r) => r,
+        None => return false,
+    };
+    let contents = g.room_opt(rnum).map(|r| r.contents.clone()).unwrap_or_default();
+    let port = match g.get_obj_in_list_vis(ch, &obj_name, &contents) {
+        Some(p) => p,
+        None => return false,
+    };
+    if port != me {
+        return false;
+    }
+
+    let dest = g.get_obj(port).map(|o| o.values[1]).unwrap_or(0);
+    if dest <= 0 || dest > 32000 {
+        g.send_to_char(ch, "The portal leads nowhere.\n\r");
+        return true;
+    }
+    let dest_rnum = dest as RoomRnum;
+
+    // Water-sector boat requirement (no-mount path only — see header note).
+    let here_water = g.room_opt(rnum).map(|r| r.sector_type == crate::room::SectorType::WaterNoSwim).unwrap_or(false);
+    let there_water = g
+        .rooms
+        .get(dest_rnum)
+        .map(|r| r.sector_type == crate::room::SectorType::WaterNoSwim)
+        .unwrap_or(false);
+    if (here_water || there_water) && !has_boat(g, ch) {
+        g.send_to_char(ch, "You need a boat to go there.\r\n");
+        return true;
+    }
+
+    act(g, "$n enters $p, and vanishes!", false, ch, Some(port), ActArg::None, To::Room);
+    act(g, "You enter $p, and you are transported elsewhere.", false, ch, Some(port), ActArg::None, To::Char);
+    g.char_from_room(ch);
+    g.char_to_room(ch, dest_rnum);
+    crate::cmd_informative::look_at_room(g, ch, false);
+    act(g, "$n appears from the glowing portal!", false, ch, None, ActArg::None, To::Room);
+    true
+}
+
+// ===========================================================================
+// tent — the campsite object (vnum 500). CMD_IS("camp"): while carrying THIS
+// tent on the surface map, the player saves their map coordinates, rent-saves,
+// closes their other connections, and is extracted (camps out of the game).
+// C SPECIAL(tent).
+//
+// ismap(ch->in_room)/rm2x/rm2y: the C map subsystem injects virtual map rooms
+// and derives (x,y) from the room's offset. This port models map rooms instead
+// by tagging real rooms with Room.map_x/map_y (maputils.rs), so `ismap` becomes
+// "the room has map_x/map_y set" and rm2x/rm2y read those fields directly.
+// NOTE: no world currently ships map_x/map_y room tags (the room-injection
+// loader is unported), so in practice this gate is always false and the tent
+// reports "surface map only" — the single noted dependency (see W6 report).
+// ===========================================================================
+
+/// SPECIAL(tent). `me` is the tent object.
+pub fn tent(g: &mut GameState, ch: CharId, me: ObjId, cmd: &str, _arg: &str) -> bool {
+    if !cmd_is(cmd, "camp") {
+        return false;
+    }
+
+    let rnum = match in_room(g, ch) {
+        Some(r) => r,
+        None => return false,
+    };
+
+    // ismap(ch->in_room): is this a surface-map room?
+    let (mapx, mapy) = match g.rooms.get(rnum).map(|r| (r.map_x, r.map_y)) {
+        Some((Some(x), Some(y))) => (x as i64, y as i64),
+        _ => {
+            g.send_to_char(ch, "You may only setup camp on the surface map.\r\n");
+            return true;
+        }
+    };
+
+    // for (obj=ch->carrying; obj; ...) if (obj==me) { ... }
+    let carrying = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    if !carrying.contains(&me) {
+        g.send_to_char(ch, "You carry nothing to setup camp with.\r\n");
+        return true;
+    }
+
+    // Record the camp-out coordinates on the player (saved.mapx / saved.mapy).
+    if let Some(c) = g.get_char_mut(ch) {
+        c.mapx = mapx;
+        c.mapy = mapy;
+    }
+    g.send_to_char(ch, "\r\nYou setup camp and safely fall asleep...\r\n");
+    act(g, "$n sets up camp and leaves the game.", false, ch, None, ActArg::None, To::Room);
+
+    // write_aliases(ch) — alias persistence is handled by the regular save path;
+    // Crash_rentsave(ch, 0) banks the inventory at zero cost.
+    crate::objsave::crash_rentsave(g, ch, 0);
+
+    let name = get_name(g, ch);
+    let rcds = room_vnum(g, rnum);
+    log::info!("{} has camped out of the game. ({})", name, rcds);
+
+    // Close every *other* connection this player has open (C loops descriptor_list
+    // closing duplicate descriptors that share GET_IDNUM(ch)).
+    close_other_connections(g, ch);
+
+    // extract_char(ch): camps the player out. The async save path flushes the
+    // rented inventory + player row; here we drop the in-world entity.
+    if let Some(conn) = g.get_char(ch).and_then(|c| c.desc) {
+        if let Some(d) = g.descriptors.get_mut(&conn) {
+            d.state = crate::connection::ConState::Close;
+        }
+    } else {
+        g.extract_char(ch);
+    }
+    true
+}
+
+/// Close every descriptor for the same player idnum *other* than ch's own (C
+/// tent loop: for each d in descriptor_list, if d != ch->desc and d->character's
+/// idnum == ch's idnum, close_socket(d)). Mirrors do_quit's duplicate-link kill.
+fn close_other_connections(g: &mut GameState, ch: CharId) {
+    let (my_conn, my_idnum) = match g.get_char(ch) {
+        Some(c) => (c.desc, c.idnum),
+        None => return,
+    };
+    let to_close: Vec<ConnId> = g
+        .descriptors
+        .iter()
+        .filter_map(|(&id, d)| {
+            if Some(id) == my_conn {
+                return None;
+            }
+            let cid = d.character?;
+            let idnum = g.get_char(cid).map(|c| c.idnum)?;
+            if idnum == my_idnum {
+                Some(id)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for id in to_close {
+        if let Some(d) = g.descriptors.get_mut(&id) {
+            d.state = crate::connection::ConState::Close;
+        }
+    }
 }
 
 // ===========================================================================

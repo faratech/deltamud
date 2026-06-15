@@ -1581,11 +1581,13 @@ fn call_magic(
     0
 }
 
-/// WAIT_STATE(ch, cycles): impose a command delay. The wait/lag queue isn't on
-/// the Tier-0 Character; this is a no-op placeholder until the action queue is
-/// ported (documented gap), matching C semantics only in that nothing
-/// player-visible changes.
-fn wait_state(_g: &mut GameState, _ch: CharId, _cycles: i32) {}
+/// WAIT_STATE(ch, cycles): impose a command delay (utils.h sets d->wait, which
+/// comm.c decrements per pulse before pulling the next line off d->input). Now
+/// wired: game.rs queues player input per descriptor and the heartbeat drains it
+/// through the wait gate, so this lag is observable exactly as in C.
+fn wait_state(g: &mut GameState, ch: CharId, cycles: i32) {
+    g.set_wait_state(ch, cycles);
+}
 
 /// extract_obj(): detach from wherever it lives, then remove from the arena.
 fn extract_obj_from_world(g: &mut GameState, oid: ObjId) {

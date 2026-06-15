@@ -1,11 +1,15 @@
-// Standard persistence (MySQL via mysql_async). Tier-0 round-trips the core
-// playable fields in an isolated `rust_player` table; Batch 2 reconciles this
-// to the full 83-column `player_main` schema for C-MUD cross-compat.
+// Standard persistence (MySQL via mysql_async).
+//
+// This targets the C-compatible 83-column `player_main` table plus
+// `player_affects` and `player_skills`, so the on-disk format round-trips
+// losslessly and is cross-compatible with the original C DeltaMUD. All
+// row<->Character translation lives in database_compat.rs (the single source
+// of truth for the column set/order); this file only owns the SQL plumbing.
 
 use crate::character::Character;
-use crate::types::*;
+use crate::database_compat as compat;
 use anyhow::Result;
-use mysql_async::{params, prelude::*, Pool, Row};
+use mysql_async::{params, prelude::*, Pool, Row, Value};
 use sha2::{Digest, Sha256};
 
 pub struct Database {
@@ -25,29 +29,53 @@ impl Database {
 
     pub async fn init_tables(&self) -> Result<()> {
         let mut conn = self.pool.get_conn().await?;
+        // DDL mirrors deltamud_schema.sql (player_main / player_affects /
+        // player_skills). CREATE ... IF NOT EXISTS is a no-op against a live
+        // C-MUD database that already has these tables.
         conn.query_drop(
-            r"CREATE TABLE IF NOT EXISTS rust_player (
-                idnum BIGINT AUTO_INCREMENT PRIMARY KEY,
-                name VARCHAR(20) UNIQUE NOT NULL,
-                password VARCHAR(64) NOT NULL,
-                title VARCHAR(80) DEFAULT NULL,
+            r"CREATE TABLE IF NOT EXISTS player_main (
+                idnum INT PRIMARY KEY,
+                name VARCHAR(30) NOT NULL UNIQUE,
                 description TEXT,
-                sex TINYINT DEFAULT 0,
-                class TINYINT DEFAULT 0,
-                race TINYINT DEFAULT 0,
-                level TINYINT DEFAULT 1,
-                hometown INT DEFAULT 3001,
-                weight SMALLINT DEFAULT 150,
-                height SMALLINT DEFAULT 170,
-                hit INT DEFAULT 20, max_hit INT DEFAULT 20,
-                mana INT DEFAULT 100, max_mana INT DEFAULT 100,
-                move_pts INT DEFAULT 80, max_move INT DEFAULT 80,
-                armor INT DEFAULT 100, gold INT DEFAULT 0, bank_gold INT DEFAULT 0,
-                exp BIGINT DEFAULT 0, alignment INT DEFAULT 0,
-                str_ TINYINT DEFAULT 13, intel TINYINT DEFAULT 13, wis TINYINT DEFAULT 13,
-                dex TINYINT DEFAULT 13, con TINYINT DEFAULT 13, cha TINYINT DEFAULT 13,
-                hometown_room INT DEFAULT 3001
-            )",
+                title VARCHAR(80),
+                sex TINYINT, class TINYINT, race TINYINT, deity TINYINT,
+                level TINYINT, hometown INT, birth BIGINT, played BIGINT,
+                weight INT, height INT, pwd VARCHAR(50),
+                last_logon BIGINT, host VARCHAR(80),
+                act BIGINT, str TINYINT, str_add TINYINT, intel TINYINT,
+                wis TINYINT, dex TINYINT, con TINYINT, cha TINYINT,
+                hit INT, max_hit INT, mana INT, max_mana INT, move INT,
+                max_move INT, gold INT, bank_gold INT, exp BIGINT, power INT,
+                mpower INT, defense INT, mdefense INT, technique INT,
+                PADDING0 INT, talks1 INT, talks2 INT, talks3 INT,
+                wimp_level INT, freeze_level TINYINT, invis_level INT,
+                load_room INT, pref BIGINT, bad_pws TINYINT, cond1 TINYINT,
+                cond2 TINYINT, cond3 TINYINT, death_timer INT, citizen INT,
+                training TINYINT, newbie TINYINT, arena INT,
+                spells_to_learn INT, questpoints INT, nextquest INT,
+                countdown INT, questobj INT, questmob INT,
+                recall_level TINYINT, retreat_level TINYINT, trust TINYINT,
+                bail_amt INT, wins INT, losses INT, pref2 BIGINT,
+                godcmds1 BIGINT, godcmds2 BIGINT, godcmds3 BIGINT,
+                godcmds4 BIGINT, clan INT, clan_rank TINYINT, mapx INT,
+                mapy INT, buildmodezone INT, buildmoderoom INT, tloadroom INT,
+                alignment INT, affected_by BIGINT,
+                INDEX idx_name (name), INDEX idx_level (level)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        )
+        .await?;
+        conn.query_drop(
+            r"CREATE TABLE IF NOT EXISTS player_affects (
+                idnum INT NOT NULL, type INT, duration INT, modifier INT,
+                location TINYINT, bitvector BIGINT, INDEX idx_idnum (idnum)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        )
+        .await?;
+        conn.query_drop(
+            r"CREATE TABLE IF NOT EXISTS player_skills (
+                idnum INT NOT NULL, skill INT, learned TINYINT,
+                INDEX idx_idnum (idnum), INDEX idx_skill (skill)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
         )
         .await?;
         Ok(())
@@ -56,7 +84,7 @@ impl Database {
     pub async fn player_exists(&self, name: &str) -> Result<bool> {
         let mut conn = self.pool.get_conn().await?;
         let row: Option<Row> = conn
-            .exec_first("SELECT idnum FROM rust_player WHERE name = ?", (name,))
+            .exec_first("SELECT idnum FROM player_main WHERE name = ?", (name,))
             .await?;
         Ok(row.is_some())
     }
@@ -64,117 +92,145 @@ impl Database {
     pub async fn verify_password(&self, name: &str, password: &str) -> Result<bool> {
         let mut conn = self.pool.get_conn().await?;
         let stored: Option<String> = conn
-            .exec_first("SELECT password FROM rust_player WHERE name = ?", (name,))
+            .exec_first("SELECT pwd FROM player_main WHERE name = ?", (name,))
             .await?;
         Ok(matches!(stored, Some(h) if h == hash_password(password)))
     }
 
-    pub async fn create_player(&self, ch: &Character, password: &str) -> Result<i64> {
+    /// Allocate the next idnum (C uses a top_idnum counter). With an empty
+    /// table the first player is idnum 1 (the Implementor).
+    async fn next_idnum(&self) -> Result<i64> {
         let mut conn = self.pool.get_conn().await?;
-        conn.exec_drop(
-            r"INSERT INTO rust_player
-                (name, password, sex, class, race, level, hometown, weight, height,
-                 hit, max_hit, mana, max_mana, move_pts, max_move, armor, gold, exp,
-                 str_, intel, wis, dex, con, cha)
-              VALUES (:name,:pw,:sex,:class,:race,:level,:hometown,:weight,:height,
-                 :hit,:max_hit,:mana,:max_mana,:move_pts,:max_move,:armor,:gold,:exp,
-                 :str,:intel,:wis,:dex,:con,:cha)",
-            params! {
-                "name" => ch.player.name.clone(),
-                "pw" => hash_password(password),
-                "sex" => ch.player.sex as u8,
-                "class" => ch.player.class as u8,
-                "race" => ch.player.race as u8,
-                "level" => ch.player.level,
-                "hometown" => ch.player.hometown,
-                "weight" => ch.player.weight,
-                "height" => ch.player.height,
-                "hit" => ch.points.hit,
-                "max_hit" => ch.points.max_hit,
-                "mana" => ch.points.mana,
-                "max_mana" => ch.points.max_mana,
-                "move_pts" => ch.points.move_points,
-                "max_move" => ch.points.max_move,
-                "armor" => ch.points.armor,
-                "gold" => ch.points.gold,
-                "exp" => ch.points.exp,
-                "str" => ch.real_abils.str,
-                "intel" => ch.real_abils.intel,
-                "wis" => ch.real_abils.wis,
-                "dex" => ch.real_abils.dex,
-                "con" => ch.real_abils.con,
-                "cha" => ch.real_abils.cha,
-            },
-        )
-        .await?;
-        Ok(conn.last_insert_id().unwrap_or(0) as i64)
+        let max: Option<i64> = conn
+            .query_first("SELECT MAX(idnum) FROM player_main")
+            .await?
+            .flatten();
+        Ok(max.unwrap_or(0) + 1)
+    }
+
+    pub async fn create_player(&self, ch: &Character, password: &str) -> Result<i64> {
+        let idnum = self.next_idnum().await?;
+        let mut stored = ch.clone();
+        stored.idnum = idnum;
+        self.write_player_main(&stored, &hash_password(password)).await?;
+        self.write_skills(&stored).await?;
+        self.write_affects(&stored).await?;
+        Ok(idnum)
     }
 
     pub async fn load_player(&self, name: &str) -> Result<Character> {
         let mut conn = self.pool.get_conn().await?;
         let row: Option<Row> = conn
-            .exec_first("SELECT * FROM rust_player WHERE name = ?", (name,))
+            .exec_first("SELECT * FROM player_main WHERE name = ?", (name,))
             .await?;
         let row = row.ok_or_else(|| anyhow::anyhow!("Player not found"))?;
 
-        let mut ch = Character::new_player(
-            row.get::<String, _>("name").unwrap_or_default(),
-            Class::from_u8(row.get::<i8, _>("class").unwrap_or(3) as u8),
-            Race::from_u8(row.get::<i8, _>("race").unwrap_or(0) as u8),
-        );
-        ch.idnum = row.get::<i64, _>("idnum").unwrap_or(-1);
-        ch.player.sex = Gender::from_u8(row.get::<i8, _>("sex").unwrap_or(0) as u8);
-        ch.player.level = row.get::<u8, _>("level").unwrap_or(1);
-        ch.player.hometown = row.get::<i32, _>("hometown").unwrap_or(3001);
-        ch.player.weight = row.get::<u16, _>("weight").unwrap_or(150) as u8;
-        ch.player.height = row.get::<u16, _>("height").unwrap_or(170) as u8;
-        ch.points.hit = row.get::<i32, _>("hit").unwrap_or(20);
-        ch.points.max_hit = row.get::<i32, _>("max_hit").unwrap_or(20);
-        ch.points.mana = row.get::<i32, _>("mana").unwrap_or(100);
-        ch.points.max_mana = row.get::<i32, _>("max_mana").unwrap_or(100);
-        ch.points.move_points = row.get::<i32, _>("move_pts").unwrap_or(80);
-        ch.points.max_move = row.get::<i32, _>("max_move").unwrap_or(80);
-        ch.points.armor = row.get::<i32, _>("armor").unwrap_or(100) as ArmorClass;
-        ch.points.gold = row.get::<i32, _>("gold").unwrap_or(0);
-        ch.points.bank_gold = row.get::<i32, _>("bank_gold").unwrap_or(0);
-        ch.points.exp = row.get::<i64, _>("exp").unwrap_or(0);
-        ch.alignment = row.get::<i32, _>("alignment").unwrap_or(0);
-        ch.real_abils.str = row.get::<i8, _>("str_").unwrap_or(13);
-        ch.real_abils.intel = row.get::<i8, _>("intel").unwrap_or(13);
-        ch.real_abils.wis = row.get::<i8, _>("wis").unwrap_or(13);
-        ch.real_abils.dex = row.get::<i8, _>("dex").unwrap_or(13);
-        ch.real_abils.con = row.get::<i8, _>("con").unwrap_or(13);
-        ch.real_abils.cha = row.get::<i8, _>("cha").unwrap_or(13);
-        ch.aff_abils = ch.real_abils;
+        let mut ch = compat::player_main_to_character(&row);
+
+        // Merge affects (dbmodify_player_affects MODE_RETRIEVE).
+        let aff_rows: Vec<Row> = conn
+            .exec(
+                "SELECT type,duration,modifier,location,bitvector FROM player_affects WHERE idnum = ?",
+                (ch.idnum,),
+            )
+            .await?;
+        compat::apply_affect_rows(&mut ch, &aff_rows);
+
+        // Merge skills (dbmodify_player_skills MODE_RETRIEVE).
+        let skill_rows: Vec<Row> = conn
+            .exec(
+                "SELECT idnum,skill,learned FROM player_skills WHERE idnum = ?",
+                (ch.idnum,),
+            )
+            .await?;
+        compat::apply_skill_rows(&mut ch, &skill_rows);
+
         Ok(ch)
     }
 
     pub async fn save_player(&self, ch: &Character) -> Result<()> {
+        // The password is never rewritten on a normal save; preserve the
+        // stored hash (C re-supplies ch->player.passwd, which is unchanged).
         let mut conn = self.pool.get_conn().await?;
-        conn.exec_drop(
-            r"UPDATE rust_player SET
-                level=:level, hit=:hit, max_hit=:max_hit, mana=:mana, max_mana=:max_mana,
-                move_pts=:move_pts, max_move=:max_move, armor=:armor, gold=:gold,
-                bank_gold=:bank_gold, exp=:exp, alignment=:alignment, hometown=:hometown
-              WHERE name=:name",
-            params! {
-                "level" => ch.player.level,
-                "hit" => ch.points.hit,
-                "max_hit" => ch.points.max_hit,
-                "mana" => ch.points.mana,
-                "max_mana" => ch.points.max_mana,
-                "move_pts" => ch.points.move_points,
-                "max_move" => ch.points.max_move,
-                "armor" => ch.points.armor,
-                "gold" => ch.points.gold,
-                "bank_gold" => ch.points.bank_gold,
-                "exp" => ch.points.exp,
-                "alignment" => ch.alignment,
-                "hometown" => ch.player.hometown,
-                "name" => ch.player.name.clone(),
-            },
-        )
-        .await?;
+        let pwd: Option<String> = conn
+            .exec_first("SELECT pwd FROM player_main WHERE idnum = ?", (ch.idnum,))
+            .await?;
+        let pwd = pwd.unwrap_or_default();
+        drop(conn);
+        self.write_player_main(ch, &pwd).await?;
+        self.write_skills(ch).await?;
+        self.write_affects(ch).await?;
+        Ok(())
+    }
+
+    // ---- internal write helpers ----------------------------------------
+
+    /// INSERT-or-UPDATE all 83 player_main columns (REPLACE keyed on the unique
+    /// idnum/name), reusing the canonical column set + value order from
+    /// database_compat.rs.
+    async fn write_player_main(&self, ch: &Character, pwd_hash: &str) -> Result<()> {
+        let host = ""; // host string is connection-derived; "" when unknown.
+        let values: Vec<Value> = compat::player_main_values(ch, pwd_hash, host);
+        let cols = compat::PLAYER_MAIN_COLUMNS;
+
+        let collist = cols
+            .iter()
+            .map(|c| format!("`{}`", c))
+            .collect::<Vec<_>>()
+            .join(",");
+        let placeholders = vec!["?"; cols.len()].join(",");
+        let sql = format!("REPLACE INTO player_main ({}) VALUES ({})", collist, placeholders);
+
+        let mut conn = self.pool.get_conn().await?;
+        conn.exec_drop(sql, values).await?;
+        Ok(())
+    }
+
+    /// DELETE + re-INSERT skills>0 (dbmodify_player_skills MODE_DELETE/STORE).
+    async fn write_skills(&self, ch: &Character) -> Result<()> {
+        let mut conn = self.pool.get_conn().await?;
+        conn.exec_drop("DELETE FROM player_skills WHERE idnum = ?", (ch.idnum,))
+            .await?;
+        let rows = compat::skill_rows(ch);
+        if !rows.is_empty() {
+            let params: Vec<_> = rows
+                .into_iter()
+                .map(|(skill, learned)| {
+                    params! { "idnum" => ch.idnum, "skill" => skill, "learned" => learned }
+                })
+                .collect();
+            conn.exec_batch(
+                "INSERT INTO player_skills (idnum,skill,learned) VALUES (:idnum,:skill,:learned)",
+                params,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// DELETE + re-INSERT affects (dbmodify_player_affects MODE_DELETE/STORE).
+    async fn write_affects(&self, ch: &Character) -> Result<()> {
+        let mut conn = self.pool.get_conn().await?;
+        conn.exec_drop("DELETE FROM player_affects WHERE idnum = ?", (ch.idnum,))
+            .await?;
+        let rows = compat::affect_rows(ch);
+        if !rows.is_empty() {
+            let params: Vec<_> = rows
+                .into_iter()
+                .map(|(t, dur, m, loc, bv)| {
+                    params! {
+                        "idnum" => ch.idnum, "type" => t, "duration" => dur,
+                        "modifier" => m, "location" => loc, "bitvector" => bv,
+                    }
+                })
+                .collect();
+            conn.exec_batch(
+                r"INSERT INTO player_affects (idnum,type,duration,modifier,location,bitvector)
+                  VALUES (:idnum,:type,:duration,:modifier,:location,:bitvector)",
+                params,
+            )
+            .await?;
+        }
         Ok(())
     }
 }

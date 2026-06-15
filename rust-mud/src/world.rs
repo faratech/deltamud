@@ -12,11 +12,13 @@ use crate::types::*;
 /// only its meaningful args. `if_flag` drives the M→E→G chaining rule.
 #[derive(Debug, Clone)]
 pub enum ResetCmd {
-    LoadMob { if_flag: bool, mob_vnum: MobVnum, max_count: i32, room_vnum: RoomVnum },
-    LoadObjInRoom { if_flag: bool, obj_vnum: ObjVnum, max_count: i32, room_vnum: RoomVnum },
-    GiveObjToMob { if_flag: bool, obj_vnum: ObjVnum, max_count: i32 },
-    EquipMob { if_flag: bool, obj_vnum: ObjVnum, max_count: i32, wear_pos: usize },
-    PutObjInObj { if_flag: bool, obj_vnum: ObjVnum, max_count: i32, container_vnum: ObjVnum },
+    // `load_chance` is DeltaMUD's per-command probability gate (reset_zone:
+    // `number(1,100) >= arg4`, or arg3 for G). 0 => always loads (legacy zones).
+    LoadMob { if_flag: bool, mob_vnum: MobVnum, max_count: i32, room_vnum: RoomVnum, load_chance: i32 },
+    LoadObjInRoom { if_flag: bool, obj_vnum: ObjVnum, max_count: i32, room_vnum: RoomVnum, load_chance: i32 },
+    GiveObjToMob { if_flag: bool, obj_vnum: ObjVnum, max_count: i32, load_chance: i32 },
+    EquipMob { if_flag: bool, obj_vnum: ObjVnum, max_count: i32, wear_pos: usize, load_chance: i32 },
+    PutObjInObj { if_flag: bool, obj_vnum: ObjVnum, max_count: i32, container_vnum: ObjVnum, load_chance: i32 },
     RemoveObj { if_flag: bool, room_vnum: RoomVnum, obj_vnum: ObjVnum },
     Door { if_flag: bool, room_vnum: RoomVnum, direction: usize, state: i32 },
 }
@@ -25,12 +27,16 @@ pub enum ResetCmd {
 pub struct Zone {
     pub number: i32,
     pub name: String,
+    /// Builder credit line (DeltaMUD `Z.builders`, second tilde-string).
+    pub builders: String,
     pub lifespan: i32,
     pub age: i32,
     pub top: RoomVnum,
     pub reset_mode: i32,
     pub min_level: Level,
     pub max_level: Level,
+    /// DeltaMUD zone-status flag from the optional `lvl1 lvl2 status_mode` line.
+    pub status_mode: i32,
     pub map_x: Option<i32>,
     pub map_y: Option<i32>,
     pub reset_commands: Vec<ResetCmd>,
@@ -50,11 +56,26 @@ pub struct MobileProto {
     pub position: Position,
     pub default_pos: Position,
     pub sex: Gender,
+    pub alignment: i32,
+    /// MOB action flags (ACT_*/MOB_*) from file field 1, with MOB_ISNPC set.
+    pub act_flags: i64,
+    /// MOB affect flags (AFF_*) from file field 2.
+    pub affect_flags: i64,
     pub armor: i32,
     pub hitroll: i16,
     pub damroll: i16,
     pub damnodice: i32,
     pub damsizedice: i32,
+    // DeltaMUD extended combat stats (the `X` stats-line variant).
+    pub power: i16,
+    pub mpower: i16,
+    pub defense: i16,
+    pub mdefense: i16,
+    pub technique: i16,
+    // Espec (enhanced 'E'-format) ability scores; `None` => use NPC defaults.
+    pub abilities: Option<crate::character::Abilities>,
+    // BareHandAttack from the espec block (mob_specials.attack_type).
+    pub attack_type: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +91,15 @@ pub struct ObjectProto {
     pub cost: i32,
     pub rent: i32,
     pub values: [i32; 4],
+    pub curr_slots: i32,
+    pub total_slots: i32,
+    pub obj_class: i32,
+    pub min_level: i32,
+    pub bitvector: i64,
+    /// Stat applies (`A` blocks): location/modifier pairs, up to MAX_OBJ_AFFECT.
+    pub affects: Vec<crate::object::ObjectAffect>,
+    /// Extra descriptions (`E` blocks): (keyword, description).
+    pub ex_descriptions: Vec<(String, String)>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -88,12 +118,19 @@ impl GameState {
         mob.player.name = proto.name.clone();
         mob.player.level = proto.level;
         mob.player.sex = proto.sex;
-        // Default NPC ability scores (CircleMUD mobs default to 11/13; exact
-        // per-mob stats from the .mob enhanced block land in Batch 5).
-        mob.real_abils = crate::character::Abilities {
+        // Espec (enhanced 'E'-format) abilities override the NPC defaults
+        // (CircleMUD mobs otherwise default to 11/13). C applies these in
+        // interpret_espec then copies real_abils -> aff_abils.
+        mob.real_abils = proto.abilities.unwrap_or(crate::character::Abilities {
             str: 13, str_add: 0, intel: 13, wis: 13, dex: 13, con: 13, cha: 13,
-        };
+        });
         mob.aff_abils = mob.real_abils;
+        mob.alignment = proto.alignment;
+        // Action + affect flags from the .mob file (MOB_ISNPC already set by the
+        // loader). Drives mobact (SPEC/SENTINEL/SCAVENGER/AGGRESSIVE/HELPER) and
+        // mob AFF_* state, none of which fired while these were left at 0.
+        mob.act_flags = proto.act_flags;
+        mob.affect_flags = proto.affect_flags;
         mob.position = proto.position;
         mob.points.hit = proto.hitpoints.max(1);
         mob.points.max_hit = mob.points.hit;
@@ -105,6 +142,12 @@ impl GameState {
         mob.points.armor = if proto.armor == 0 { 100 } else { proto.armor as ArmorClass };
         mob.points.hitroll = proto.hitroll;
         mob.points.damroll = proto.damroll;
+        // DeltaMUD extended combat stats (the `X` stats-line variant).
+        mob.points.power = proto.power;
+        mob.points.mpower = proto.mpower;
+        mob.points.defense = proto.defense;
+        mob.points.mdefense = proto.mdefense;
+        mob.points.technique = proto.technique;
         mob.points.gold = proto.gold;
         mob.points.exp = proto.experience;
         mob.short_desc = Some(proto.short_desc);
@@ -127,6 +170,14 @@ impl GameState {
         obj.cost = proto.cost;
         obj.rent = proto.rent;
         obj.values = proto.values;
+        obj.curr_slots = proto.curr_slots;
+        obj.total_slots = proto.total_slots;
+        obj.obj_class = proto.obj_class;
+        obj.min_level = proto.min_level;
+        obj.level = proto.min_level as Level;
+        obj.bitvector = proto.bitvector;
+        obj.affects = proto.affects.clone();
+        obj.ex_descriptions = proto.ex_descriptions.clone();
         let id = self.create_obj(obj);
         crate::dg_db_scripts::assign_triggers(crate::dg_handler::ScriptKey::Obj(id), vnum);
         Some(id)
@@ -196,8 +247,10 @@ impl GameState {
             }
 
             match cmd {
-                ResetCmd::LoadMob { mob_vnum, max_count, room_vnum, .. } => {
-                    if mob_counts.get(mob_vnum).copied().unwrap_or(0) >= *max_count {
+                ResetCmd::LoadMob { mob_vnum, max_count, room_vnum, load_chance, .. } => {
+                    if mob_counts.get(mob_vnum).copied().unwrap_or(0) >= *max_count
+                        || self.rng.number(1, 100) < *load_chance
+                    {
                         last_cmd = false;
                         continue;
                     }
@@ -207,6 +260,7 @@ impl GameState {
                     };
                     if let Some(mob) = self.load_mobile(*mob_vnum) {
                         self.char_to_room(mob, rnum);
+                        crate::dg_triggers::load_mtrigger(self, mob);
                         *mob_counts.entry(*mob_vnum).or_insert(0) += 1;
                         summary.mobs_spawned += 1;
                         last_mob = Some(mob);
@@ -215,8 +269,10 @@ impl GameState {
                         last_cmd = false;
                     }
                 }
-                ResetCmd::LoadObjInRoom { obj_vnum, max_count, room_vnum, .. } => {
-                    if obj_counts.get(obj_vnum).copied().unwrap_or(0) >= *max_count {
+                ResetCmd::LoadObjInRoom { obj_vnum, max_count, room_vnum, load_chance, .. } => {
+                    if obj_counts.get(obj_vnum).copied().unwrap_or(0) >= *max_count
+                        || self.rng.number(1, 100) < *load_chance
+                    {
                         last_cmd = false;
                         continue;
                     }
@@ -226,6 +282,7 @@ impl GameState {
                     };
                     if let Some(obj) = self.load_object(*obj_vnum) {
                         self.obj_to_room(obj, rnum);
+                        crate::dg_triggers::load_otrigger(self, obj);
                         *obj_counts.entry(*obj_vnum).or_insert(0) += 1;
                         summary.objs_spawned += 1;
                         last_obj = Some(obj);
@@ -234,13 +291,17 @@ impl GameState {
                         last_cmd = false;
                     }
                 }
-                ResetCmd::GiveObjToMob { obj_vnum, max_count, .. } => {
-                    if obj_counts.get(obj_vnum).copied().unwrap_or(0) >= *max_count || last_mob.is_none() {
+                ResetCmd::GiveObjToMob { obj_vnum, max_count, load_chance, .. } => {
+                    if obj_counts.get(obj_vnum).copied().unwrap_or(0) >= *max_count
+                        || last_mob.is_none()
+                        || self.rng.number(1, 100) < *load_chance
+                    {
                         last_cmd = false;
                         continue;
                     }
                     if let Some(obj) = self.load_object(*obj_vnum) {
                         self.obj_to_char(obj, last_mob.unwrap());
+                        crate::dg_triggers::load_otrigger(self, obj);
                         *obj_counts.entry(*obj_vnum).or_insert(0) += 1;
                         summary.objs_spawned += 1;
                         last_obj = Some(obj);
@@ -249,9 +310,10 @@ impl GameState {
                         last_cmd = false;
                     }
                 }
-                ResetCmd::EquipMob { obj_vnum, max_count, wear_pos, .. } => {
+                ResetCmd::EquipMob { obj_vnum, max_count, wear_pos, load_chance, .. } => {
                     if obj_counts.get(obj_vnum).copied().unwrap_or(0) >= *max_count
                         || last_mob.is_none()
+                        || self.rng.number(1, 100) < *load_chance
                         || *wear_pos >= NUM_WEARS
                     {
                         last_cmd = false;
@@ -259,6 +321,7 @@ impl GameState {
                     }
                     if let Some(obj) = self.load_object(*obj_vnum) {
                         self.equip_char(last_mob.unwrap(), obj, *wear_pos);
+                        crate::dg_triggers::load_otrigger(self, obj);
                         *obj_counts.entry(*obj_vnum).or_insert(0) += 1;
                         summary.objs_spawned += 1;
                         last_obj = Some(obj);
@@ -267,8 +330,10 @@ impl GameState {
                         last_cmd = false;
                     }
                 }
-                ResetCmd::PutObjInObj { obj_vnum, max_count, container_vnum, .. } => {
-                    if obj_counts.get(obj_vnum).copied().unwrap_or(0) >= *max_count {
+                ResetCmd::PutObjInObj { obj_vnum, max_count, container_vnum, load_chance, .. } => {
+                    if obj_counts.get(obj_vnum).copied().unwrap_or(0) >= *max_count
+                        || self.rng.number(1, 100) < *load_chance
+                    {
                         last_cmd = false;
                         continue;
                     }
@@ -283,6 +348,7 @@ impl GameState {
                     };
                     if let Some(obj) = self.load_object(*obj_vnum) {
                         self.obj_to_obj(obj, container);
+                        crate::dg_triggers::load_otrigger(self, obj);
                         *obj_counts.entry(*obj_vnum).or_insert(0) += 1;
                         summary.objs_spawned += 1;
                         last_obj = Some(obj);

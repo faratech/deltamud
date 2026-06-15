@@ -54,6 +54,10 @@ impl Game {
     pub fn prime_zones(&mut self) {
         let (mobs, objs) = self.state.prime_zones();
         info!("Initial zone prime: +{} mobs, +{} objs", mobs, objs);
+        // C boots the surface map (read_map) which calls init_weather, so the
+        // world starts with MAX_WEATHER storms already on the map. Prime them
+        // here so the weather map shows live storms from the first tick.
+        crate::maputils::prime_weather(&mut self.state);
     }
 
     pub async fn run(&mut self, mut game_rx: mpsc::Receiver<GameMessage>) -> Result<()> {
@@ -100,8 +104,15 @@ impl Game {
                 crate::modify::editor_input(&mut self.state, conn_id, &input);
             } else if crate::olc::in_olc(conn_id) {
                 crate::olc::olc_input(&mut self.state, conn_id, &input);
-            } else if let Some(ch) = self.state.descriptors.get(&conn_id).and_then(|d| d.character) {
-                command_interpreter(&mut self.state, ch, &input);
+            } else {
+                // Gameplay command: queue it instead of dispatching now. The
+                // heartbeat's process_input_queues drains one per pulse once the
+                // descriptor's WAIT_STATE lag (d.wait) expires, and sends the
+                // prompt after the command actually runs.
+                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    d.input_queue.push_back(input);
+                }
+                return;
             }
         } else {
             self.nanny(conn_id, input).await;
@@ -111,6 +122,45 @@ impl Game {
         let st = self.state.descriptors.get(&conn_id).map(|d| d.state);
         if st.is_some() && st != Some(ConState::Close) {
             self.write_prompt(conn_id);
+        }
+    }
+
+    /// Drain one queued command per descriptor whose WAIT_STATE lag has expired
+    /// (C game_loop: `if ((--d->wait) <= 0 && get_from_q(...))`). Decrement every
+    /// playing descriptor's wait each pulse; when it reaches <= 0 and input is
+    /// queued, run one command (resetting wait to 1 first, so a command's own
+    /// WAIT_STATE call overrides it) and send the prompt.
+    fn process_input_queues(&mut self) {
+        let conn_ids: Vec<ConnId> = self.state.descriptors.keys().copied().collect();
+        for cid in conn_ids {
+            let ready = match self.state.descriptors.get_mut(&cid) {
+                Some(d) if d.state == ConState::Playing => {
+                    d.wait = (d.wait - 1).max(-1);
+                    d.wait <= 0 && !d.input_queue.is_empty()
+                }
+                _ => false,
+            };
+            if !ready {
+                continue;
+            }
+            let input = match self.state.descriptors.get_mut(&cid) {
+                Some(d) => {
+                    d.wait = 1;
+                    d.input_queue.pop_front()
+                }
+                None => None,
+            };
+            let input = match input {
+                Some(i) => i,
+                None => continue,
+            };
+            if let Some(ch) = self.state.descriptors.get(&cid).and_then(|d| d.character) {
+                command_interpreter(&mut self.state, ch, &input);
+            }
+            let st = self.state.descriptors.get(&cid).map(|d| d.state);
+            if st.is_some() && st != Some(ConState::Close) {
+                self.write_prompt(cid);
+            }
         }
     }
 
@@ -373,6 +423,10 @@ impl Game {
         self.state.pulse = self.state.pulse.wrapping_add(1);
         let pulse = self.state.pulse;
 
+        // Drain queued player input through the WAIT_STATE gate (C game_loop:
+        // `--d->wait <= 0 && get_from_q(...)`), one command per descriptor.
+        self.process_input_queues();
+
         if pulse % PULSE_VIOLENCE == 0 {
             combat::perform_violence(&mut self.state);
         }
@@ -396,9 +450,15 @@ impl Game {
             crate::limits::point_update(&mut self.state);
             crate::weather::weather_and_time(&mut self.state);
         }
-        // Autoquest update (C: every 60s) and the live auction cascade.
+        // Live surface weather (storms spawn/move/collide/expire) every 30
+        // RL-seconds (comm.c: 30 * PASSES_PER_SEC = 300 pulses).
+        if pulse % 300 == 0 {
+            crate::maputils::weather_activity(&mut self.state);
+        }
+        // Autoquest update + room blood decay (C: every 60s = 600 pulses).
         if pulse % 600 == 0 {
             crate::quest::quest_update(&mut self.state);
+            crate::maputils::blood_update(&mut self.state);
         }
         if pulse % 100 == 0 {
             crate::auction::auction_update(&mut self.state);

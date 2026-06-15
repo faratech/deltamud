@@ -47,6 +47,12 @@ pub struct Descriptor {
     pub outbuf: String,
     /// True when a fresh prompt should be sent after flushing.
     pub need_prompt: bool,
+    /// Command-lag counter (C `d->wait`): the heartbeat decrements it each pulse
+    /// and only pulls the next queued command when it reaches <= 0. WAIT_STATE
+    /// sets it from combat skills/casting to impose command lag.
+    pub wait: i32,
+    /// Queued raw input lines awaiting the wait gate (C `d->input`).
+    pub input_queue: std::collections::VecDeque<String>,
     // Scratch during login / char creation.
     pub temp_name: Option<String>,
     pub temp_password: Option<String>,
@@ -63,6 +69,8 @@ impl Descriptor {
             original: None,
             outbuf: String::new(),
             need_prompt: true,
+            wait: 1,
+            input_queue: std::collections::VecDeque::new(),
             temp_name: None,
             temp_password: None,
         }

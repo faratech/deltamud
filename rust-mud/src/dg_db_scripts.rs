@@ -3,10 +3,10 @@
 // dg_read_trigger, dg_obj_trigger, assign_triggers).
 //
 // The attach_trigger_to_{mob,obj,room} / parse_trigger_line entry points are
-// the contract the world loader calls when it parses `T <vnum>` lines; the
-// loader does not yet do so (it currently skips T lines), so those are dead
-// until that one-line loader change lands. The module exposes the full loader
-// API regardless.
+// the contract the world loader calls when it parses `T <vnum>` lines. The
+// loader wires all three kinds: mob `T` (file_loader.rs, kind 0), room `T`
+// (kind 2), and object `T` (kind 1); assign_triggers() then materialises the
+// prototype triggers onto live instances.
 #![allow(dead_code)]
 //
 // Trigger prototypes live in lib/world/trg/<n>.trg, listed in an `index`

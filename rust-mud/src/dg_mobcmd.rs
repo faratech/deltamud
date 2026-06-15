@@ -1512,11 +1512,11 @@ pub fn script_mem_clear(mob: CharId) {
 // are no-ops (the load still happens; only the freshly-loaded entity's own LOAD
 // trigger doesn't fire until the engine lands and replaces these two lines).
 // ---------------------------------------------------------------------------
-fn fire_load_mtrigger(_g: &mut GameState, _mob: CharId) {
-    // dg_triggers::load_mtrigger(_g, _mob);  // wire when the DG engine lands.
+fn fire_load_mtrigger(g: &mut GameState, mob: CharId) {
+    crate::dg_triggers::load_mtrigger(g, mob);
 }
-fn fire_load_otrigger(_g: &mut GameState, _obj: ObjId) {
-    // dg_triggers::load_otrigger(_g, _obj);  // wire when the DG engine lands.
+fn fire_load_otrigger(g: &mut GameState, obj: ObjId) {
+    crate::dg_triggers::load_otrigger(g, obj);
 }
 
 // ---------------------------------------------------------------------------

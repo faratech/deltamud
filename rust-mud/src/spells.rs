@@ -123,9 +123,11 @@ fn update_pos(g: &mut GameState, victim: CharId) {
     }
 }
 
-/// mag_savingthrow (magic.c) — see magic.rs note; same 50/50 degrade.
-fn mag_savingthrow(g: &mut GameState) -> bool {
-    g.rng.number(0, 100) > 50
+/// mag_savingthrow (magic.c): `number(0,100) > chance(ch, victim, 1)` — the
+/// magic save routes through the same canonical DeltaMUD `chance()` as melee.
+fn mag_savingthrow(g: &mut GameState, ch: CharId, victim: CharId) -> bool {
+    let roll = g.rng.number(0, 100);
+    roll > crate::combat::chance(g, ch, victim, 1)
 }
 
 /// The player's recall destination room rnum (mortal_start_room[GET_HOME]).
@@ -288,7 +290,7 @@ pub fn spell_summon(g: &mut GameState, level: i32, ch: CharId, victim: Option<Ch
         return;
     }
 
-    if mob_flagged(g, victim, MOB_NOSUMMON) || (is_npc(g, victim) && mag_savingthrow(g)) {
+    if mob_flagged(g, victim, MOB_NOSUMMON) || (is_npc(g, victim) && mag_savingthrow(g, ch, victim)) {
         g.send_to_char(ch, "You failed.\r\n");
         return;
     }
@@ -412,7 +414,7 @@ pub fn spell_charm(g: &mut GameState, level: i32, ch: CharId, victim: Option<Cha
         g.send_to_char(ch, "You fail - shouldn't be doing it anyway.\r\n");
     } else if circle_follow(g, victim, ch) {
         g.send_to_char(ch, "Sorry, following in circles can not be allowed.\r\n");
-    } else if mag_savingthrow(g) {
+    } else if mag_savingthrow(g, ch, victim) {
         g.send_to_char(ch, "Your victim resists!\r\n");
     } else {
         if g.get_char(victim).and_then(|c| c.master).is_some() {
@@ -525,25 +527,8 @@ pub fn spell_identify(g: &mut GameState, _level: i32, ch: CharId, victim: Option
 }
 
 fn item_type_name(t: ObjectType) -> &'static str {
-    match t {
-        ObjectType::Light => "LIGHT",
-        ObjectType::Scroll => "SCROLL",
-        ObjectType::Wand => "WAND",
-        ObjectType::Staff => "STAFF",
-        ObjectType::Weapon => "WEAPON",
-        ObjectType::Treasure => "TREASURE",
-        ObjectType::Armor => "ARMOR",
-        ObjectType::Potion => "POTION",
-        ObjectType::Other => "OTHER",
-        ObjectType::Trash => "TRASH",
-        ObjectType::Container => "CONTAINER",
-        ObjectType::Note => "NOTE",
-        ObjectType::LiqContainer => "LIQ CONTAINER",
-        ObjectType::Key => "KEY",
-        ObjectType::Food => "FOOD",
-        ObjectType::Money => "MONEY",
-        ObjectType::Fountain => "FOUNTAIN",
-    }
+    // ObjectType discriminant == C ITEM_* number == ITEM_TYPES index.
+    crate::constants::ITEM_TYPES.get(t as usize).copied().unwrap_or("UNDEFINED")
 }
 
 fn apply_type_name(loc: i32) -> &'static str {
@@ -668,7 +653,7 @@ pub fn spell_fear(g: &mut GameState, level: i32, ch: CharId, _victim: Option<Cha
         if get_level(g, target) >= LVL_IMMORT as i32 {
             continue;
         }
-        if mag_savingthrow(g) {
+        if mag_savingthrow(g, ch, target) {
             let tname = g.get_char(target).map(|c| c.player.name.clone()).unwrap_or_default();
             act(g, &format!("{} is unaffected by the fear!\r\n", tname), true, ch, None, ActArg::None, To::Room);
             g.send_to_char(ch, "Your victim is not afraid of the likes of you!\r\n");

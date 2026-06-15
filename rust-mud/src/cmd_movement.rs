@@ -22,7 +22,7 @@ use crate::flags::*;
 use crate::handler::isname;
 use crate::interpreter::{one_argument, search_block};
 use crate::object::{ObjLoc, ObjectType};
-use crate::room::{EX_CLOSED, EX_ISDOOR, EX_LOCKED, EX_PICKPROOF};
+use crate::room::{EX_CLOSED, EX_HIDDEN, EX_ISDOOR, EX_LOCKED, EX_PICKPROOF};
 use crate::room::{RoomFlags, SectorType};
 use crate::state::GameState;
 use crate::types::*;
@@ -32,6 +32,9 @@ use crate::types::*;
 const AFF_WATERWALK: i64 = 1 << 6;
 const AFF_TAMED: i64 = 1 << 16;
 const AFF_CHAINED: i64 = 1 << 24;
+
+// PRF2_INTANGIBLE (structs.h): ghosting immortals don't burn move (1 << 9).
+const PRF2_INTANGIBLE: i64 = 1 << 9;
 
 // CONT_* container value-1 bits (structs.h), used for container doors.
 const CONT_CLOSEABLE: i32 = 1 << 0;
@@ -182,11 +185,25 @@ fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check
         None => return false,
     };
 
-    // Charmed followers can't bear to leave their master's room.
-    let (aff, master, is_npc, level) = match g.get_char(ch) {
-        Some(c) => (c.affect_flags, c.master, c.is_npc, c.player.level),
+    // Mount state (RIDING/RIDDEN_BY). same_room: the mount/rider shares our room.
+    let (aff, master, is_npc, level, riding, ridden_by) = match g.get_char(ch) {
+        Some(c) => (c.affect_flags, c.master, c.is_npc, c.player.level, c.riding, c.ridden_by),
         None => return false,
     };
+    let same_room = if let Some(m) = riding {
+        g.get_char(m).and_then(|c| c.in_room) == Some(rnum)
+    } else if let Some(r) = ridden_by {
+        g.get_char(r).and_then(|c| c.in_room) == Some(rnum)
+    } else {
+        false
+    };
+
+    // Tamed mobiles being ridden cannot wander off (DAK).
+    if ridden_by.is_some() && same_room && aff & AFF_TAMED != 0 {
+        g.send_to_char(ch, "You've been tamed.  Now act it!\r\n");
+        return false;
+    }
+
     if aff & AFF_CHARM != 0 {
         if let Some(m) = master {
             let same = g.get_char(m).and_then(|c| c.in_room) == Some(rnum);
@@ -203,11 +220,13 @@ fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check
         return false;
     }
 
-    // Boat requirement for no-swim water in either room.
+    // Boat requirement for no-swim water in either room. When riding, the mount
+    // must have a boat too (C: (riding && !has_boat(RIDING(ch))) || !has_boat(ch)).
     let from_sect = g.room(rnum).sector_type;
     let to_sect = g.room(to_rnum).sector_type;
     if from_sect == SectorType::WaterNoSwim || to_sect == SectorType::WaterNoSwim {
-        if !has_boat(g, ch) {
+        let mount_no_boat = riding.map(|m| !has_boat(g, m)).unwrap_or(false);
+        if mount_no_boat || !has_boat(g, ch) {
             g.send_to_char(ch, "You need a boat to go there.\r\n");
             return false;
         }
@@ -222,13 +241,33 @@ fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check
         need_movement *= 2;
     }
 
+    // Riding skill check: a failed SKILL_RIDING roll rears the mount and throws
+    // the rider (act.movement.c). C: GET_SKILL(ch,SKILL_RIDING) < number(1,91) -
+    // number(-4, need_movement).
+    if let Some(mount) = riding {
+        let ride_skill = g.get_char(ch).map(|c| c.skill(SKILL_RIDING)).unwrap_or(0) as i32;
+        if ride_skill < g.rng.number(1, 91) - g.rng.number(-4, need_movement) {
+            act(g, "$N rears backwards, throwing you to the ground.", false, ch, None, ActArg::Char(mount), To::Char);
+            act(g, "You rear backwards, throwing $n to the ground.", false, ch, None, ActArg::Char(mount), To::Vict);
+            act(g, "$N rears backwards, throwing $n to the ground.", false, ch, None, ActArg::Char(mount), To::NotVict);
+            dismount_char(g, ch);
+            let d = g.rng.dice(1, 6);
+            crate::combat::damage(g, ch, ch, d);
+            return false;
+        }
+    }
+
     // Godroom gating (LVL_GRGOD): mortals/low gods can't pass.
     if (level as u8) < LVL_GRGOD && g.room(to_rnum).room_flags.contains(RoomFlags::GODROOM) {
         g.send_to_char(ch, "You aren't godly enough to use that room!\r\n");
         return false;
     }
 
-    // Tunnel rooms hold a single PC.
+    // Tunnel rooms: no room while mounted; otherwise hold a single PC.
+    if (riding.is_some() || ridden_by.is_some()) && g.room(to_rnum).room_flags.contains(RoomFlags::TUNNEL) {
+        g.send_to_char(ch, "There isn't enough room there, while mounted.\r\n");
+        return false;
+    }
     if g.room(to_rnum).room_flags.contains(RoomFlags::TUNNEL) && num_pc_in_room(g, to_rnum) > 1 {
         g.send_to_char(ch, "There isn't enough room there for more than one person!\r\n");
         return false;
@@ -241,27 +280,67 @@ fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check
     // owned by the death/combat batch. Until then, movement into a DT room
     // proceeds (the post-move dt_effect lands with that batch).
 
-    // Exhaustion check (immortals and NPCs exempt; combat batch handles mounts).
-    let cur_move = g.get_char(ch).map(|c| c.points.move_points).unwrap_or(0);
+    // Exhaustion check. When riding, the mount's move is spent instead.
     let is_imm = !is_npc && (level as u8) >= LVL_IMMORT;
-    if cur_move < need_movement && !is_npc && !is_imm {
-        if need_specials_check && master.is_some() {
-            g.send_to_char(ch, "You are too exhausted to follow.\r\n");
-        } else {
-            g.send_to_char(ch, "You are too exhausted.\r\n");
+    if let Some(mount) = riding {
+        let mount_move = g.get_char(mount).map(|c| c.points.move_points).unwrap_or(0);
+        if mount_move < need_movement {
+            g.send_to_char(ch, "Your mount is too exhausted.\r\n");
+            return false;
         }
-        return false;
+    } else {
+        let cur_move = g.get_char(ch).map(|c| c.points.move_points).unwrap_or(0);
+        if cur_move < need_movement && !is_npc {
+            if need_specials_check && master.is_some() {
+                g.send_to_char(ch, "You are too exhausted to follow.\r\n");
+            } else {
+                g.send_to_char(ch, "You are too exhausted.\r\n");
+            }
+            return false;
+        }
     }
 
-    // Deduct movement (mortals only).
-    if !is_imm && !is_npc {
+    // Deduct movement: an unmounted mortal pays from self; a rider's mount pays;
+    // a ridden mob's rider pays (C: PRF2_INTANGIBLE-exempt, immortals exempt).
+    let intangible = g.get_char(ch).map(|c| c.prf2_flags & PRF2_INTANGIBLE != 0).unwrap_or(false);
+    if !is_imm && !intangible && !is_npc && riding.is_none() && ridden_by.is_none() {
         if let Some(c) = g.get_char_mut(ch) {
+            c.points.move_points -= need_movement;
+        }
+    } else if let Some(mount) = riding {
+        if let Some(c) = g.get_char_mut(mount) {
+            c.points.move_points -= need_movement;
+        }
+    } else if let Some(rider) = ridden_by {
+        if let Some(c) = g.get_char_mut(rider) {
             c.points.move_points -= need_movement;
         }
     }
 
-    // Leave broadcast (suppressed under sneak).
-    if aff & AFF_SNEAK == 0 {
+    // Leave broadcast. When riding, "$n rides $N <dir>" (unless either sneaks).
+    let mount_sneak = riding.map(|m| g.get_char(m).map(|c| c.affect_flags & AFF_SNEAK != 0).unwrap_or(false));
+    let rider_sneak = ridden_by.map(|r| g.get_char(r).map(|c| c.affect_flags & AFF_SNEAK != 0).unwrap_or(false));
+    if let Some(mount) = riding {
+        if !mount_sneak.unwrap_or(false) {
+            if aff & AFF_SNEAK != 0 {
+                let msg = format!("$n leaves {}.", DIR_NAMES[dir]);
+                act(g, &msg, true, mount, None, ActArg::None, To::Room);
+            } else {
+                let msg = format!("$n rides $N {}.", DIR_NAMES[dir]);
+                act(g, &msg, true, ch, None, ActArg::Char(mount), To::NotVict);
+            }
+        }
+    } else if let Some(rider) = ridden_by {
+        if aff & AFF_SNEAK == 0 {
+            if rider_sneak.unwrap_or(false) {
+                let msg = format!("$n leaves {}.", DIR_NAMES[dir]);
+                act(g, &msg, true, ch, None, ActArg::None, To::Room);
+            } else {
+                let msg = format!("$n rides $N {}.", DIR_NAMES[dir]);
+                act(g, &msg, true, rider, None, ActArg::Char(ch), To::NotVict);
+            }
+        }
+    } else if aff & AFF_SNEAK == 0 {
         let msg = format!("$n leaves {}.", DIR_NAMES[dir]);
         act(g, &msg, true, ch, None, ActArg::None, To::Room);
     }
@@ -270,16 +349,38 @@ fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check
     g.char_from_room(ch);
     g.char_to_room(ch, to_rnum);
 
+    // Drag the mount/rider along if it shared our origin room.
+    if let Some(mount) = riding {
+        if same_room && g.get_char(mount).and_then(|c| c.in_room) != Some(to_rnum) {
+            g.char_from_room(mount);
+            g.char_to_room(mount, to_rnum);
+        }
+    } else if let Some(rider) = ridden_by {
+        if same_room && g.get_char(rider).and_then(|c| c.in_room) != Some(to_rnum) {
+            g.char_from_room(rider);
+            g.char_to_room(rider, to_rnum);
+        }
+    }
+
     // DG greet triggers: mobs/room react to the arriving actor.
     crate::dg_triggers::greet_mtrigger(g, ch, dir as i32);
     crate::dg_triggers::entry_mtrigger(g, ch);
 
-    // Arrival broadcast (suppressed under sneak). "from the <revdir>" / below /
-    // above, mirroring the C arrival string.
+    // Arrival broadcast (suppressed under sneak), with mount/rider phrasing.
     if aff & AFF_SNEAK == 0 {
         let from = arrival_from(dir);
-        let msg = format!("$n arrives from {}.", from);
-        act(g, &msg, true, ch, None, ActArg::None, To::Room);
+        if riding.is_some() && same_room && !mount_sneak.unwrap_or(false) {
+            let mount = riding.unwrap();
+            let msg = format!("$n arrives from {}, riding $N.", from);
+            act(g, &msg, true, ch, None, ActArg::Char(mount), To::Room);
+        } else if ridden_by.is_some() && same_room && !rider_sneak.unwrap_or(false) {
+            let rider = ridden_by.unwrap();
+            let msg = format!("$n arrives from {}, ridden by $N.", from);
+            act(g, &msg, true, ch, None, ActArg::Char(rider), To::Room);
+        } else if riding.is_none() || (riding.is_some() && !same_room) {
+            let msg = format!("$n arrives from {}.", from);
+            act(g, &msg, true, ch, None, ActArg::None, To::Room);
+        }
     }
 
     // Show the destination to the mover.
@@ -712,21 +813,247 @@ pub fn do_gen_door(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
 // Enter / leave (DeltaMUD city links)
 // ---------------------------------------------------------------------------
 //
-// DeltaMUD's active do_enter/do_leave move between an overworld map room and a
-// city interior via Room.linkrnum / Room.linkmapnum. Those fields are not yet
-// modelled on the Rust Room, so we honor the same control flow: with no link
-// present (the default), report "no visible entrance/exit." When the link
-// fields land, the relocate path is the two-line char_from_room/char_to_room
-// shown in the (commented) C reference.
+// DeltaMUD's do_enter/do_leave move between an overworld surface-map room and a
+// city interior via Room.linkrnum / Room.linkmapnum (act.movement.c). C sets
+// those in maputils.c when the surface-map room block is spliced into world[].
+// The Rust world loader does not splice that block (see maputils.rs), so the
+// links stay None and both commands fall through to "no visible entrance/exit",
+// exactly as C does for an unlinked room (linkrnum<0 / linkmapnum==-1). The
+// relocate path below is fully wired and fires the moment a link is populated.
 
 pub fn do_enter(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    // No Room.linkrnum yet -> no entrance.
-    g.send_to_char(ch, "There is no visible entrance here.\r\n");
+    let toroom = g.get_char(ch).and_then(|c| c.in_room).and_then(|r| g.room(r).linkrnum);
+    let toroom = match toroom {
+        Some(r) => r,
+        None => {
+            g.send_to_char(ch, "There is no visible entrance here.\r\n");
+            return;
+        }
+    };
+    act(g, "$n ventures into the city.", true, ch, None, ActArg::None, To::Room);
+    g.send_to_char(ch, "You venture into the city.\r\n");
+    g.char_from_room(ch);
+    g.char_to_room(ch, toroom);
+    act(g, "$n has arrived.", true, ch, None, ActArg::None, To::Room);
+    if g.get_char(ch).and_then(|c| c.desc).is_some() {
+        crate::commands::look_at_room(g, ch, false);
+    }
 }
 
 pub fn do_leave(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    // No Room.linkmapnum yet -> no exit.
-    g.send_to_char(ch, "There is no visible exit here.\r\n");
+    let toroom = g.get_char(ch).and_then(|c| c.in_room).and_then(|r| g.room(r).linkmapnum);
+    let toroom = match toroom {
+        Some(r) => r,
+        None => {
+            g.send_to_char(ch, "There is no visible exit here.\r\n");
+            return;
+        }
+    };
+    act(g, "$n leaves the city.", true, ch, None, ActArg::None, To::Room);
+    g.send_to_char(ch, "You leave the city.\r\n");
+    g.char_from_room(ch);
+    g.char_to_room(ch, toroom);
+    act(g, "$n has arrived.", true, ch, None, ActArg::None, To::Room);
+    if g.get_char(ch).and_then(|c| c.desc).is_some() {
+        crate::commands::look_at_room(g, ch, false);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Special exits (the `O` block)
+// ---------------------------------------------------------------------------
+//
+// A room special exit is a named custom egress (act.movement.c). When a standing
+// player types its ex_name, special_exit_command() intercepts the input before
+// normal dispatch and moves them through. Ports do_special_move /
+// perform_special_move / special_exit_command 1:1 (the dispatch hook lives in
+// interpreter.rs run_command, mirroring interpreter.c:800).
+
+/// special_exit_command (act.movement.c): if the current room has a special exit
+/// and `cmd` prefix-matches its ex_name, perform the special move. Returns true
+/// if it consumed the command.
+pub fn special_exit_command(g: &mut GameState, ch: CharId, cmd: &str) -> bool {
+    let rnum = match g.get_char(ch).and_then(|c| c.in_room) {
+        Some(r) => r,
+        None => return false,
+    };
+    let ex_name = match g.room(rnum).special_exit.as_ref().and_then(|se| se.ex_name.clone()) {
+        Some(n) if !n.is_empty() => n,
+        _ => return false,
+    };
+    let cmd = cmd.trim();
+    if cmd.is_empty() {
+        return false;
+    }
+    // C: strn_cmp(cmd, ex_name, strlen(ex_name)) — the typed word must begin
+    // with the full ex_name.
+    if cmd.len() >= ex_name.len() && cmd[..ex_name.len()].eq_ignore_ascii_case(&ex_name) {
+        perform_special_move(g, ch, true);
+        return true;
+    }
+    false
+}
+
+/// perform_special_move (act.movement.c): validate the special exit (presence /
+/// closed / hidden), then do_special_move, dragging followers.
+fn perform_special_move(g: &mut GameState, ch: CharId, _need_specials_check: bool) -> bool {
+    let rnum = match g.get_char(ch).and_then(|c| c.in_room) {
+        Some(r) => r,
+        None => return false,
+    };
+    if g.get_char(ch).map(|c| c.fighting.is_some()).unwrap_or(false) {
+        return false;
+    }
+    let se = match g.room(rnum).special_exit.clone() {
+        Some(se) => se,
+        None => {
+            g.send_to_char(ch, "Alas, you cannot go that way...\r\n");
+            return false;
+        }
+    };
+    if se.to_room == NOWHERE {
+        g.send_to_char(ch, "Alas, you cannot go that way...\r\n");
+        return false;
+    }
+    if se.exit_info & EX_CLOSED != 0 {
+        if se.exit_info & EX_HIDDEN != 0 {
+            g.send_to_char(ch, "Alas, you cannot go that way...\r\n");
+        } else if let Some(kw) = &se.keyword {
+            let msg = format!("The {} seems to be closed.\r\n", fname(kw));
+            g.send_to_char(ch, &msg);
+        } else {
+            g.send_to_char(ch, "It seems to be closed.\r\n");
+        }
+        return false;
+    }
+
+    let followers = g.get_char(ch).map(|c| c.followers.clone()).unwrap_or_default();
+    if followers.is_empty() {
+        return do_special_move(g, ch);
+    }
+
+    let was_in = rnum;
+    if !do_special_move(g, ch) {
+        return false;
+    }
+    for k in followers {
+        let (krnum, kpos) = match g.get_char(k) {
+            Some(c) => (c.in_room, c.position),
+            None => continue,
+        };
+        if krnum == Some(was_in) && kpos >= Position::Standing {
+            act(g, "You follow $N.", false, k, None, ActArg::Char(ch), To::Char);
+            perform_special_move(g, k, true);
+        }
+    }
+    true
+}
+
+/// do_special_move (act.movement.c): the special-exit analogue of do_simple_move
+/// (charm/chained/boat/movement/godroom/tunnel gates), then relocate via the
+/// special exit and show the new room.
+fn do_special_move(g: &mut GameState, ch: CharId) -> bool {
+    let rnum = match g.get_char(ch).and_then(|c| c.in_room) {
+        Some(r) => r,
+        None => return false,
+    };
+    let se = match g.room(rnum).special_exit.clone() {
+        Some(se) => se,
+        None => return false,
+    };
+    let to_rnum = match g.real_room(se.to_room) {
+        Some(r) => r,
+        None => return false,
+    };
+
+    let (aff, master, is_npc, level, riding, ridden_by) = match g.get_char(ch) {
+        Some(c) => (c.affect_flags, c.master, c.is_npc, c.player.level, c.riding, c.ridden_by),
+        None => return false,
+    };
+
+    if aff & AFF_CHARM != 0 {
+        if let Some(m) = master {
+            if g.get_char(m).and_then(|c| c.in_room) == Some(rnum) {
+                g.send_to_char(ch, "The thought of leaving your master makes you weep.\r\n");
+                act(g, "$n bursts into tears.", false, ch, None, ActArg::None, To::Room);
+                return false;
+            }
+        }
+    }
+    if aff & AFF_CHAINED != 0 {
+        g.send_to_char(ch, "You try to move but find your feet are chained together!\r\n");
+        return false;
+    }
+
+    let from_sect = g.room(rnum).sector_type;
+    let to_sect = g.room(to_rnum).sector_type;
+    if (from_sect == SectorType::WaterNoSwim || to_sect == SectorType::WaterNoSwim) && !has_boat(g, ch) {
+        g.send_to_char(ch, "You need a boat to go there.\r\n");
+        return false;
+    }
+
+    let loss = |s: SectorType| constants::MOVEMENT_LOSS.get(s as usize).copied().unwrap_or(1);
+    let need_movement = (loss(from_sect) + loss(to_sect)) / 2;
+
+    let is_imm = !is_npc && (level as u8) >= LVL_IMMORT;
+    if let Some(mount) = riding {
+        if g.get_char(mount).map(|c| c.points.move_points).unwrap_or(0) < need_movement {
+            g.send_to_char(ch, "Your mount is too exhausted.\r\n");
+            return false;
+        }
+    } else if g.get_char(ch).map(|c| c.points.move_points).unwrap_or(0) < need_movement && !is_npc {
+        g.send_to_char(ch, "You are too exhausted.\r\n");
+        return false;
+    }
+
+    // NOTE: ROOM_WALL / ROOM_IMPROOM (C bits 18 / 16) gates are omitted to match
+    // do_simple_move — the Rust RoomFlags bitfield does not model those bits
+    // (see this module's header). Atrium/House gating is likewise not modelled.
+    if (riding.is_some() || ridden_by.is_some()) && g.room(to_rnum).room_flags.contains(RoomFlags::TUNNEL) {
+        g.send_to_char(ch, "There isn't enough room there, while mounted.\r\n");
+        return false;
+    }
+    if g.room(to_rnum).room_flags.contains(RoomFlags::TUNNEL) && num_pc_in_room(g, to_rnum) > 1 {
+        g.send_to_char(ch, "There isn't enough room there for more than one person!\r\n");
+        return false;
+    }
+    if (level as u8) < LVL_GRGOD && g.room(to_rnum).room_flags.contains(RoomFlags::GODROOM) {
+        g.send_to_char(ch, "You aren't godly enough to use that room!\r\n");
+        return false;
+    }
+
+    let intangible = g.get_char(ch).map(|c| c.prf2_flags & PRF2_INTANGIBLE != 0).unwrap_or(false);
+    if !is_imm && !intangible && !is_npc {
+        if let Some(c) = g.get_char_mut(ch) {
+            c.points.move_points -= need_movement;
+        }
+    } else if let Some(mount) = riding {
+        if let Some(c) = g.get_char_mut(mount) {
+            c.points.move_points -= need_movement;
+        }
+    } else if let Some(rider) = ridden_by {
+        if let Some(c) = g.get_char_mut(rider) {
+            c.points.move_points -= need_movement;
+        }
+    }
+
+    if aff & AFF_SNEAK == 0 {
+        match &se.leave_msg {
+            Some(m) if !m.is_empty() => act(g, m, true, ch, None, ActArg::None, To::Room),
+            _ => act(g, "$n leaves.", true, ch, None, ActArg::None, To::Room),
+        }
+    }
+
+    g.char_from_room(ch);
+    g.char_to_room(ch, to_rnum);
+
+    if aff & AFF_SNEAK == 0 {
+        act(g, "$n has arrived.", true, ch, None, ActArg::None, To::Room);
+    }
+    if g.get_char(ch).and_then(|c| c.desc).is_some() {
+        crate::commands::look_at_room(g, ch, false);
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -1085,10 +1412,41 @@ fn stop_follower(g: &mut GameState, ch: CharId) {
 // Mounts (mount / dismount / buck / tame)
 // ---------------------------------------------------------------------------
 //
-// The Rust Character has no RIDING/RIDDEN_BY mount pointers yet, so the mount
-// state machine cannot be wired. These reproduce the user-facing gates that do
-// not depend on mount state and otherwise report "not mounted" the way C does
-// once the mount fields are absent (RIDING(ch) == NULL).
+// RIDING/RIDDEN_BY are modelled as Option<CharId> pointers on Character. These
+// helpers and commands port handler.c mount_char/dismount_char and
+// act.movement.c do_mount/do_dismount/do_buck/do_tame 1:1.
+
+/// mount_char (handler.c): wire ch -> mount; no checks, no messages.
+pub fn mount_char(g: &mut GameState, ch: CharId, mount: CharId) {
+    if let Some(c) = g.get_char_mut(ch) {
+        c.riding = Some(mount);
+    }
+    if let Some(m) = g.get_char_mut(mount) {
+        m.ridden_by = Some(ch);
+    }
+}
+
+/// dismount_char (handler.c): break the link from whichever end ch holds.
+pub fn dismount_char(g: &mut GameState, ch: CharId) {
+    let riding = g.get_char(ch).and_then(|c| c.riding);
+    if let Some(mount) = riding {
+        if let Some(m) = g.get_char_mut(mount) {
+            m.ridden_by = None;
+        }
+        if let Some(c) = g.get_char_mut(ch) {
+            c.riding = None;
+        }
+    }
+    let ridden_by = g.get_char(ch).and_then(|c| c.ridden_by);
+    if let Some(rider) = ridden_by {
+        if let Some(r) = g.get_char_mut(rider) {
+            r.riding = None;
+        }
+        if let Some(c) = g.get_char_mut(ch) {
+            c.ridden_by = None;
+        }
+    }
+}
 
 pub fn do_mount(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let (word, _) = one_argument(arg);
@@ -1103,37 +1461,113 @@ pub fn do_mount(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             return;
         }
     };
-    let (v_is_npc, v_mountable) = match g.get_char(vict) {
-        Some(c) => (c.is_npc, c.act_flags & MOB_MOUNTABLE != 0),
+    let (v_is_npc, v_mountable, v_mounted) = match g.get_char(vict) {
+        Some(c) => (c.is_npc, c.act_flags & MOB_MOUNTABLE != 0, c.riding.is_some() || c.ridden_by.is_some()),
         None => return,
     };
     if !v_is_npc {
         g.send_to_char(ch, "Ehh... no.\r\n");
         return;
     }
+    let ch_mounted = g
+        .get_char(ch)
+        .map(|c| c.riding.is_some() || c.ridden_by.is_some())
+        .unwrap_or(false);
+    if ch_mounted {
+        g.send_to_char(ch, "You are already mounted.\r\n");
+        return;
+    }
+    if v_mounted {
+        g.send_to_char(ch, "It is already mounted.\r\n");
+        return;
+    }
     if v_is_npc && !v_mountable {
         g.send_to_char(ch, "You can't mount that!\r\n");
         return;
     }
-    if g.get_char(ch).map(|c| c.skill(SKILL_MOUNT)).unwrap_or(0) == 0 {
+    let skill = g.get_char(ch).map(|c| c.skill(SKILL_MOUNT)).unwrap_or(0);
+    if skill == 0 {
         g.send_to_char(ch, "First you need to learn *how* to mount.\r\n");
         return;
     }
-    // Mount pointers are not modelled; announce the success messages (the
-    // mount-char relocation lands with the mount batch).
+    if (skill as i32) <= g.rng.number(1, 101) {
+        act(g, "You try to mount $N, but slip and fall off.", false, ch, None, ActArg::Char(vict), To::Char);
+        act(g, "$n tries to mount you, but slips and falls off.", false, ch, None, ActArg::Char(vict), To::Vict);
+        act(g, "$n tries to mount $N, but slips and falls off.", true, ch, None, ActArg::Char(vict), To::NotVict);
+        let d = g.rng.dice(1, 2);
+        crate::combat::damage(g, ch, ch, d);
+        return;
+    }
+
     act(g, "You mount $N.", false, ch, None, ActArg::Char(vict), To::Char);
     act(g, "$n mounts you.", false, ch, None, ActArg::Char(vict), To::Vict);
     act(g, "$n mounts $N.", true, ch, None, ActArg::Char(vict), To::NotVict);
+    mount_char(g, ch, vict);
+
+    // An untamed mob may buck a fresh rider (second skill roll).
+    let v_tamed = g.get_char(vict).map(|c| c.affect_flags & AFF_TAMED != 0).unwrap_or(false);
+    let skill2 = g.get_char(ch).map(|c| c.skill(SKILL_MOUNT)).unwrap_or(0);
+    if v_is_npc && !v_tamed && (skill2 as i32) <= g.rng.number(1, 101) {
+        act(g, "$N suddenly bucks upwards, throwing you violently to the ground!", false, ch, None, ActArg::Char(vict), To::Char);
+        act(g, "$n is thrown to the ground as $N violently bucks!", true, ch, None, ActArg::Char(vict), To::NotVict);
+        act(g, "You buck violently and throw $n to the ground.", false, ch, None, ActArg::Char(vict), To::Vict);
+        dismount_char(g, ch);
+        let d = g.rng.dice(1, 3);
+        crate::combat::damage(g, vict, ch, d);
+    }
 }
 
 pub fn do_dismount(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    // No RIDING(ch) field yet -> always "not riding".
-    g.send_to_char(ch, "You aren't even riding anything.\r\n");
+    let riding = g.get_char(ch).and_then(|c| c.riding);
+    let riding = match riding {
+        Some(r) => r,
+        None => {
+            g.send_to_char(ch, "You aren't even riding anything.\r\n");
+            return;
+        }
+    };
+    let in_water = g
+        .get_char(ch)
+        .and_then(|c| c.in_room)
+        .map(|r| g.room(r).sector_type == SectorType::WaterNoSwim)
+        .unwrap_or(false);
+    if in_water && !has_boat(g, ch) {
+        g.send_to_char(ch, "Yah, right, and then drown...\r\n");
+        return;
+    }
+
+    act(g, "You dismount $N.", false, ch, None, ActArg::Char(riding), To::Char);
+    act(g, "$n dismounts from you.", false, ch, None, ActArg::Char(riding), To::Vict);
+    act(g, "$n dismounts $N.", true, ch, None, ActArg::Char(riding), To::NotVict);
+    dismount_char(g, ch);
 }
 
 pub fn do_buck(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    // No RIDDEN_BY(ch) field yet -> always "not being ridden".
-    g.send_to_char(ch, "You're not even being ridden!\r\n");
+    let ridden_by = g.get_char(ch).and_then(|c| c.ridden_by);
+    let rider = match ridden_by {
+        Some(r) => r,
+        None => {
+            g.send_to_char(ch, "You're not even being ridden!\r\n");
+            return;
+        }
+    };
+    if g.get_char(ch).map(|c| c.affect_flags & AFF_TAMED != 0).unwrap_or(false) {
+        g.send_to_char(ch, "But you're tamed!\r\n");
+        return;
+    }
+
+    act(g, "You quickly buck, throwing $N to the ground.", false, ch, None, ActArg::Char(rider), To::Char);
+    act(g, "$n quickly bucks, throwing you to the ground.", false, ch, None, ActArg::Char(rider), To::Vict);
+    act(g, "$n quickly bucks, throwing $N to the ground.", false, ch, None, ActArg::Char(rider), To::NotVict);
+    if let Some(r) = g.get_char_mut(rider) {
+        r.position = Position::Sitting;
+    }
+    if g.rng.number(0, 4) != 0 {
+        g.send_to_char(rider, "You hit the ground hard!\r\n");
+        let d = g.rng.dice(2, 4);
+        crate::combat::damage(g, rider, rider, d);
+    }
+    dismount_char(g, ch);
 }
 
 pub fn do_tame(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
@@ -1169,12 +1603,27 @@ pub fn do_tame(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "It is already tamed.\r\n");
         return;
     }
-
-    // Apply the AFF_TAMED bit (the affect-join with duration lands with the
-    // affects batch; the bit is what gates do_simple_move's tamed-mob check).
-    if let Some(c) = g.get_char_mut(vict) {
-        c.affect_flags |= AFF_TAMED;
+    // Tamer skill roll (act.movement.c: GET_SKILL(ch,SKILL_TAME) <= number(1,101)).
+    if g.get_char(ch).map(|c| c.skill(SKILL_TAME)).unwrap_or(0) as i32 <= g.rng.number(1, 101) {
+        g.send_to_char(ch, "You fail to tame it.\r\n");
+        return;
     }
+
+    // affect_join(vict, AFF_TAMED, dur 24): add a timed affect carrying the
+    // tamed bit and recompute totals so AFF_TAMED lands on affect_flags.
+    if let Some(c) = g.get_char_mut(vict) {
+        // Replace any existing tame affect (same spell + APPLY_NONE).
+        c.affected.retain(|a| !(a.spell_type == SKILL_TAME as i32 && a.location == 0));
+        c.affected.push(crate::character::Affect {
+            spell_type: SKILL_TAME as i32,
+            duration: 24,
+            modifier: 0,
+            location: 0, // APPLY_NONE
+            bitvector: AFF_TAMED,
+            caster: Some(ch),
+        });
+    }
+    g.affect_total(vict);
     act(g, "You tame $N. It will last 24 hours.", false, ch, None, ActArg::Char(vict), To::Char);
     act(g, "$n tames you.", false, ch, None, ActArg::Char(vict), To::Vict);
     act(g, "$n tames $N.", false, ch, None, ActArg::Char(vict), To::NotVict);
@@ -1219,8 +1668,10 @@ fn cap_first(s: &mut String) {
 // Tier-0 contract yet; define the DeltaMUD spello/skill ids locally so the
 // gates compile and read the right skill slot.
 const SKILL_MEDITATE: u16 = 156;
-const SKILL_MOUNT: u16 = 154;
-const SKILL_TAME: u16 = 155;
+// DeltaMUD spells.h: SKILL_MOUNT 521, SKILL_RIDING 522, SKILL_TAME 523.
+const SKILL_MOUNT: u16 = 521;
+const SKILL_RIDING: u16 = 522;
+const SKILL_TAME: u16 = 523;
 
 // MOB_MOUNTABLE is bit 20 in DeltaMUD's action_bits (constants::ACTION_BITS
 // index 20). Not a named const in flags.rs.

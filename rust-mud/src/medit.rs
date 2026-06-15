@@ -896,6 +896,9 @@ fn save_internally(g: &mut GameState, conn: ConnId) {
         position: Position::from_u8(m.position.clamp(0, 9) as u8),
         default_pos: Position::from_u8(m.default_pos.clamp(0, 9) as u8),
         sex: Gender::from_u8(m.sex.clamp(0, 2) as u8),
+        alignment: m.alignment,
+        act_flags: m.mob_flags | MOB_ISNPC,
+        affect_flags: m.aff_flags,
         // Combat fields the proto keeps; armor not edited by medit (espec-only
         // in this DeltaMUD build), keep prior value if present.
         armor: g.mob_protos.get(&vnum).map(|p| p.armor).unwrap_or(0),
@@ -903,6 +906,21 @@ fn save_internally(g: &mut GameState, conn: ConnId) {
         damroll: g.mob_protos.get(&vnum).map(|p| p.damroll).unwrap_or(0),
         damnodice: m.num_dam_dice,
         damsizedice: m.size_dam_dice,
+        power: m.power.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        mpower: m.mpower.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        defense: m.defense.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        mdefense: m.mdefense.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        technique: m.technique.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        abilities: Some(crate::character::Abilities {
+            str: m.str_.clamp(0, 127) as i8,
+            str_add: m.str_add.clamp(0, 127) as i8,
+            intel: m.intel.clamp(0, 127) as i8,
+            wis: m.wis.clamp(0, 127) as i8,
+            dex: m.dex.clamp(0, 127) as i8,
+            con: m.con.clamp(0, 127) as i8,
+            cha: m.cha.clamp(0, 127) as i8,
+        }),
+        attack_type: m.attack_type,
     };
 
     g.mob_protos.insert(vnum, proto);

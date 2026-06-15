@@ -735,6 +735,7 @@ fn perform_drop_gold(g: &mut GameState, ch: CharId, amount: i32, mode: i32, rdr:
         g.send_to_char(ch, "You don't have that many coins!\r\n");
     } else {
         if mode != SCMD_JUNK {
+            g.set_wait_state(ch, PULSE_VIOLENCE as i32); // to prevent coin-bombing
             let obj = match create_money(g, amount) {
                 Some(o) => o,
                 None => return,

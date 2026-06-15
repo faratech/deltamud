@@ -11,11 +11,27 @@ pub struct Exit {
     pub to_room: RoomVnum, // destination vnum (resolved to rnum at lookup)
 }
 
+/// A room "special exit" (the `O` block — room_special_exit_data in
+/// structs.h). Unlike the 6 cardinal directions, a special exit is a named
+/// custom egress with its own leave message. Stored verbatim so a .wld file
+/// round-trips; the runtime traversal is wired up by movement code.
+#[derive(Debug, Clone)]
+pub struct SpecialExit {
+    pub general_description: Option<String>,
+    pub keyword: Option<String>,
+    pub ex_name: Option<String>,
+    pub leave_msg: Option<String>,
+    pub exit_info: i32,
+    pub key: ObjVnum,
+    pub to_room: RoomVnum,
+}
+
 // Exit door-state bits (structs.h EX_*).
 pub const EX_ISDOOR: i32 = 1 << 0;
 pub const EX_CLOSED: i32 = 1 << 1;
 pub const EX_LOCKED: i32 = 1 << 2;
 pub const EX_PICKPROOF: i32 = 1 << 3;
+pub const EX_HIDDEN: i32 = 1 << 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -81,6 +97,7 @@ pub struct Room {
     pub name: String,
     pub description: String,
     pub extra_descriptions: Vec<(String, String)>,
+    pub special_exit: Option<SpecialExit>,
     pub exits: [Option<Exit>; NUM_OF_DIRS],
     pub room_flags: RoomFlags,
     pub light: u8,
@@ -88,6 +105,18 @@ pub struct Room {
     pub snow: u8,
     pub map_x: Option<i32>,
     pub map_y: Option<i32>,
+
+    // City-interior links (Map mods - Storm; structs.h linkmapnum/linkrnum).
+    // linkrnum: real-room index of the city interior reached from a surface
+    // map cell (do_enter). linkmapnum: real-room index of the surface map cell
+    // reached from a city interior (do_leave). Both default to NOWHERE; C sets
+    // them in maputils.c when the surface-map block is spliced in. The Rust
+    // world loader does not splice the surface-map room block (see maputils.rs),
+    // so these stay None here and do_enter/do_leave fall through to "no
+    // visible entrance/exit", exactly as C does for an unlinked room (linkrnum<0
+    // / linkmapnum==-1).
+    pub linkrnum: Option<RoomRnum>,
+    pub linkmapnum: Option<RoomRnum>,
 
     // Occupants & ground items, by id. Order matters for parity with the
     // C linked lists; handler code controls insertion order explicitly.
@@ -104,6 +133,7 @@ impl Room {
             name,
             description,
             extra_descriptions: Vec::new(),
+            special_exit: None,
             exits: Default::default(),
             room_flags: RoomFlags::empty(),
             light: 0,
@@ -111,6 +141,8 @@ impl Room {
             snow: 0,
             map_x: None,
             map_y: None,
+            linkrnum: None,
+            linkmapnum: None,
             people: Vec::new(),
             contents: Vec::new(),
         }

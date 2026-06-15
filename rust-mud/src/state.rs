@@ -143,6 +143,17 @@ impl GameState {
         self.obj_list.retain(|&o| o != id);
     }
 
+    /// WAIT_STATE(ch, cycles) (utils.h): impose `cycles` pulses of command lag
+    /// on the character's descriptor. The heartbeat's input drain won't run the
+    /// next queued command until this counter decrements to <= 0.
+    pub fn set_wait_state(&mut self, id: CharId, cycles: i32) {
+        if let Some(conn) = self.chars.get(&id).and_then(|c| c.desc) {
+            if let Some(d) = self.descriptors.get_mut(&conn) {
+                d.wait = cycles;
+            }
+        }
+    }
+
     // ---- Output ---------------------------------------------------------
     /// Append raw text to a character's connection buffer (C send_to_char).
     pub fn send_to_char(&mut self, id: CharId, msg: &str) {
@@ -155,6 +166,17 @@ impl GameState {
         };
         if let Some(d) = self.descriptors.get_mut(&conn) {
             d.outbuf.push_str(msg);
+        }
+        // Snoop relay (comm.c process_output): if this character is being
+        // snooped, tee its output to the snooper, prefixed "% " / suffixed "%%".
+        if let Some(snooper) = self.chars.get(&id).and_then(|c| c.snoop_by) {
+            if let Some(sconn) = self.chars.get(&snooper).and_then(|c| c.desc) {
+                if let Some(sd) = self.descriptors.get_mut(&sconn) {
+                    sd.outbuf.push_str("% ");
+                    sd.outbuf.push_str(msg);
+                    sd.outbuf.push_str("%%");
+                }
+            }
         }
     }
 

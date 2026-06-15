@@ -116,6 +116,16 @@ pub struct Character {
     pub master: Option<CharId>,
     pub followers: Vec<CharId>,
 
+    // Mount system (CircleMUD/DeltaMUD RIDING/RIDDEN_BY pointers).
+    pub riding: Option<CharId>,    // the mount this char is riding
+    pub ridden_by: Option<CharId>, // the rider sitting on this char
+
+    // Snoop link (descriptor-level in C: ch->desc->snooping / ->snoop_by).
+    // Stored on the character so it survives the per-conn lookup; both ends
+    // point at the *character* on the other side of the link.
+    pub snooping: Option<CharId>, // the char whose output this char sees
+    pub snoop_by: Option<CharId>, // the char snooping this char's output
+
     // Flag bitvectors (DB long columns).
     pub act_flags: i64,    // ACT_* for NPCs / PLR_* for PCs
     pub affect_flags: i64, // AFF_*
@@ -124,6 +134,7 @@ pub struct Character {
 
     // player_special_data_saved
     pub skills: HashMap<u16, u8>, // spell/skill number -> proficiency
+    pub padding0: i32, // PADDING0 (was spells_to_learn); saved for C cross-compat
     pub talks: [bool; MAX_TONGUE],
     pub conditions: [i8; NUM_CONDITIONS],
     pub wimp_level: i32,
@@ -131,12 +142,29 @@ pub struct Character {
     pub invis_level: i32,
     pub load_room: RoomVnum,
     pub bad_pws: u8,
+    pub death_timer: u8,
+    pub citizen: u8,
+    pub training: u8,
+    pub newbie: u8,
+    pub arena: u8,
     pub spells_to_learn: i32,
     pub clan: i32,
     pub clan_rank: i32,
+    pub recall_level: i32,
+    pub retreat_level: i32,
     pub trust: i32,
+    pub bail_amt: i32,
     pub wins: u8,
     pub losses: u8,
+    pub godcmds1: i64,
+    pub godcmds2: i64,
+    pub godcmds3: i64,
+    pub godcmds4: i64,
+    pub mapx: i64,
+    pub mapy: i64,
+    pub buildmodezone: i64,
+    pub buildmoderoom: i64,
+    pub tloadroom: i64,
     // Quest scaffolding (DeltaMUD autoquest).
     pub quest_points: i32,
     pub next_quest: i32,
@@ -200,11 +228,16 @@ impl Character {
             idle_tics: 0,
             master: None,
             followers: Vec::new(),
+            riding: None,
+            ridden_by: None,
+            snooping: None,
+            snoop_by: None,
             act_flags: 0,
             affect_flags: 0,
             prf_flags: 0,
             prf2_flags: 0,
             skills: HashMap::new(),
+            padding0: 0,
             talks: [false; MAX_TONGUE],
             conditions: [-1; NUM_CONDITIONS],
             wimp_level: 0,
@@ -212,12 +245,29 @@ impl Character {
             invis_level: 0,
             load_room: NOWHERE,
             bad_pws: 0,
+            death_timer: 0,
+            citizen: 0,
+            training: 0,
+            newbie: 0,
+            arena: 0,
             spells_to_learn: 0,
             clan: 0,
             clan_rank: 0,
+            recall_level: 0,
+            retreat_level: 0,
             trust: 0,
+            bail_amt: 0,
             wins: 0,
             losses: 0,
+            godcmds1: 0,
+            godcmds2: 0,
+            godcmds3: 0,
+            godcmds4: 0,
+            mapx: 0,
+            mapy: 0,
+            buildmodezone: 0,
+            buildmoderoom: 0,
+            tloadroom: 0,
             quest_points: 0,
             next_quest: 0,
             quest_countdown: 0,
@@ -254,6 +304,8 @@ impl Character {
         };
         // New PCs start hungry/thirsty clocks at 24 (CircleMUD do_start).
         ch.conditions = [0, 24, 24];
+        // New characters are flagged newbie (DeltaMUD do_start / newbie zone).
+        ch.newbie = 1;
         ch
     }
 
@@ -275,6 +327,28 @@ impl Character {
 
     pub fn is_immortal(&self) -> bool {
         !self.is_npc && self.player.level >= LVL_IMMORT
+    }
+
+    /// READ_CITIZEN (utils.h): the gendered citizen-title prefix (e.g. "Knight ")
+    /// for this character's citizen rank. Bounds-guarded against an out-of-range
+    /// rank. Returns "" if the rank is 0 (no title), matching the caller gate
+    /// `GET_CITIZEN(ch) > 0`.
+    pub fn read_citizen(&self) -> &'static str {
+        let idx = self.citizen as usize;
+        let row = match crate::constants::CITIZEN_TITLES.get(idx) {
+            Some(r) => r,
+            None => return "",
+        };
+        match self.player.sex {
+            crate::types::Gender::Male => row[0],
+            crate::types::Gender::Female => row[1],
+            _ => row[2],
+        }
+    }
+
+    /// citizen_colors[rank] (constants.c), bounds-guarded.
+    pub fn citizen_color(&self) -> &'static str {
+        crate::constants::CITIZEN_COLORS.get(self.citizen as usize).copied().unwrap_or("&n")
     }
 
     pub fn skill(&self, num: u16) -> u8 {

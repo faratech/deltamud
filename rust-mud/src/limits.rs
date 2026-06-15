@@ -35,7 +35,6 @@ use crate::types::*;
 // config.c globals.
 const MAX_EXP_GAIN: i64 = 1_000_000_000;
 const MAX_EXP_LOSS: i64 = 15_000_000;
-const ARENA_FLEE_TIMEOUT: i32 = 3;
 
 // structs.h level constants.
 const LVL_HERO: Level = 100;
@@ -397,22 +396,26 @@ pub fn exp_to_level(arg: i32) -> i64 {
 
 /// advance_level (class.c): apply one level's HMV / practice gains and the
 /// immortal-promotion side effects, then print the gain summary. The
-/// con_app/wis_app/training_pts tables are not ported yet, so the constitution
-/// hit bonus and training/practice award degrade to 0 exactly as they would
-/// against empty tables (see manifest gaps). The randomized per-class HMV rolls
-/// are faithful, using g.rng where C uses number().
+/// constitution hit bonus (con_app), practice award (wis_app), and per-level
+/// training sessions (training_pts) all come from the ported constant tables.
+/// The randomized per-class HMV rolls are faithful, using g.rng where C uses
+/// number().
 pub fn advance_level(g: &mut GameState, ch: CharId) {
-    let (class, level, is_immort_now) = match g.get_char(ch) {
+    let (class, level, is_immort_now, con, wis) = match g.get_char(ch) {
         Some(c) => (
             c.player.class,
             c.player.level as i32,
             c.player.level >= LVL_IMMORT,
+            c.aff_abils.con as i32,
+            c.aff_abils.wis as i32,
         ),
         None => return,
     };
 
-    // con_app[GET_CON].hitp — table not ported; degrades to 0.
-    let mut add_hp = 0i32;
+    // add_hp = con_app[GET_CON].hitp.
+    let mut add_hp = crate::constants::CON_APP
+        [crate::constants::app_index(con, crate::constants::CON_APP.len())]
+        .hitp;
     let add_mana;
     let add_move;
 
@@ -450,15 +453,18 @@ pub fn advance_level(g: &mut GameState, ch: CharId) {
     let hp_applied = add_hp.max(1);
     let move_applied = add_move.max(1);
 
-    // wis_app[GET_WIS].bonus — table not ported; degrades to 0, so:
-    //   casters: MAX(2, 0) = 2 ; non-casters: MIN(2, MAX(1, 0)) = 1.
+    // add_practices: casters MAX(2, wis_app.bonus); others MIN(2, MAX(1, bonus)).
+    let wis_bonus = crate::constants::WIS_APP
+        [crate::constants::app_index(wis, crate::constants::WIS_APP.len())]
+        .bonus;
     let add_practices = if class == CLASS_MAGIC_USER || class == CLASS_CLERIC {
-        2.max(0)
+        2.max(wis_bonus)
     } else {
-        2.min(1.max(0))
+        2.min(1.max(wis_bonus))
     };
-    // training_pts[level] — table not ported; degrades to 0.
-    let training = 0i32;
+    // training_pts[GET_LEVEL]: bonus training sessions for this level.
+    let training = crate::constants::TRAINING_PTS
+        [crate::constants::app_index(level, crate::constants::TRAINING_PTS.len())];
 
     if let Some(c) = g.get_char_mut(ch) {
         c.points.max_hit += hp_applied;
@@ -502,8 +508,11 @@ pub fn gain_exp(g: &mut GameState, ch: CharId, gain: i64) {
     if level < 1 || level >= LVL_HERO || c.prf2_flags & PRF2_INTANGIBLE != 0 {
         return;
     }
-    // IS_ARENACOMBATANT — arena status table not ported; never an arena
-    // combatant, so this guard degrades to a no-op (see manifest gaps).
+    // IS_ARENACOMBATANT(ch): arena combatants neither gain nor lose XP (their
+    // wins/losses are tracked instead). arena.rs owns the status side table.
+    if crate::arena::is_arena_combatant(ch) {
+        return;
+    }
 
     if gain > 0 {
         let gain = gain.min(MAX_EXP_GAIN); // cap per kill
@@ -916,12 +925,18 @@ fn env_damage(g: &mut GameState, ch: CharId, dmg: i32) {
 }
 
 /// die(ch, NULL) — handle a character's death with no killer (fight.c die +
-/// raw_kill). Applies the XP-loss penalty, clears killer/thief flags and resets
-/// the food/drink clocks for PCs, screams (death_cry), drops a corpse holding
-/// the victim's inventory/equipment, and extracts the body (NPC) / respawns the
-/// PC. increase_blood (room blood tracking) and the DG death_mtrigger degrade
-/// to no-ops (see manifest gaps).
+/// raw_kill). Bloods the room (increase_blood), applies the XP-loss penalty,
+/// clears killer/thief flags and resets the food/drink clocks for PCs, screams
+/// (death_cry), drops a corpse holding the victim's inventory/equipment, and
+/// extracts the body (NPC) / ghosts the high-level PC (or respawns a low-level
+/// PC). The DG death_mtrigger is wired by the caller (fight path).
 fn env_die(g: &mut GameState, ch: CharId) {
+    // increase_blood(ch->in_room): bloodstain the room the death happens in
+    // (fight.c die() does this first, before the XP penalty).
+    if let Some(rnum) = g.get_char(ch).and_then(|c| c.in_room) {
+        crate::maputils::increase_blood(g, rnum);
+    }
+
     // gain_exp(ch, -(GET_EXP - exp_to_level(level-1))/4): lose a quarter of the
     // progress into the current level.
     let (exp, level, is_npc) = match g.get_char(ch) {
@@ -981,20 +996,37 @@ fn env_die(g: &mut GameState, ch: CharId) {
         g.obj_to_room(corpse, rnum);
     }
 
-    // raw_kill: GET_LEVEL < 30 || IS_NPC -> extract_char; else do_extract_char
-    // (keep the descriptor for ghost respawn). The ghost/respawn entry path is
-    // not ported, so high-level PCs respawn at hometown like Tier-0 combat
-    // deaths instead of becoming intangible (see manifest gaps).
+    // raw_kill: GET_LEVEL < 30 || IS_NPC -> extract_char; else do_extract_char(,1)
+    // which ghosts the high-level PC. Low-level PCs respawn immediately at
+    // hometown (the observable result of CON_MENU re-entry in this port).
     let level = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
-    if is_npc || level < 30 {
-        if is_npc {
-            g.extract_char(ch);
-        } else {
-            respawn_pc(g, ch);
-        }
-    } else {
+    if is_npc {
+        g.extract_char(ch);
+    } else if level < 30 {
         respawn_pc(g, ch);
+    } else {
+        ghost_pc(g, ch);
     }
+}
+
+/// do_extract_char(ch, 1) ghost path (handler.c): a high-level PC death turns
+/// the PC intangible in the death room (vnum 99), at 1 HP/mana/move, with a
+/// two-mud-hour respawn timer (death_timer=96). point_update counts the timer
+/// down and respawns them when it expires.
+fn ghost_pc(g: &mut GameState, ch: CharId) {
+    g.char_from_room(ch);
+    let rnum = g.real_room(99).unwrap_or(0);
+    if let Some(c) = g.get_char_mut(ch) {
+        c.prf2_flags |= PRF2_INTANGIBLE;
+        c.position = Position::Standing;
+        c.points.hit = 1;
+        c.points.mana = 1;
+        c.points.move_points = 1;
+        c.death_timer = 96; // two mud-hours (96 half-minute tics)
+    }
+    g.char_to_room(ch, rnum);
+    g.send_to_char(ch, "You suddenly find yourself floating in space... you feel nothing.\r\n");
+    act(g, "$n slowly materializes before you...\r\n", false, ch, None, ActArg::None, To::Room);
 }
 
 /// Make a player/NPC corpse container (matches combat.rs make_corpse so corpses
@@ -1048,15 +1080,37 @@ pub fn point_update(g: &mut GameState) {
             None => continue,
         };
 
-        // Intangible (ghost) mortals: only idle or count down the death timer.
+        // Intangible (ghost) mortals: builders just idle; the dead count down
+        // their death_timer and respawn when it reaches zero (limits.c).
         if !is_npc && intangible && level < LVL_IMMORT {
             if mbuilding {
                 check_idling(g, ch);
+            } else {
+                let dt = g.get_char(ch).map(|c| c.death_timer).unwrap_or(0);
+                if dt > 0 {
+                    let ndt = dt - 1;
+                    if let Some(c) = g.get_char_mut(ch) {
+                        c.death_timer = ndt;
+                    }
+                    if ndt == 0 {
+                        // Death releases the ghost back into the living world.
+                        g.send_to_char(
+                            ch,
+                            "Death makes a cryptic gesture and you find yourself englufed in light!\r\n",
+                        );
+                        act(g, "Death makes a cryptic gesture and $n dissapears in a bright light!\r\n", false, ch, None, ActArg::None, To::Room);
+                        if let Some(c) = g.get_char_mut(ch) {
+                            c.prf2_flags &= !PRF2_INTANGIBLE;
+                        }
+                        // do_extract_char(i, 2) + enter_player_game(d): the PC
+                        // re-enters the game alive at hometown.
+                        respawn_pc(g, ch);
+                        if g.char_exists(ch) {
+                            act(g, "A white mist appears and $n steps out.\r\n", false, ch, None, ActArg::None, To::Room);
+                        }
+                    }
+                }
             }
-            // death_timer / do_extract_char / enter_player_game (the ghost
-            // respawn cycle) depend on the player-game entry path not ported
-            // here; the timer field is not modeled in the contract, so this
-            // branch degrades to leaving the ghost as-is (see manifest gaps).
             continue;
         }
 
@@ -1081,12 +1135,12 @@ pub fn point_update(g: &mut GameState) {
                 c.points.move_points = (c.points.move_points + vg).min(c.points.max_move);
             }
 
-            // Arena flee-recall timer. The arena status / flee_timer fields are
-            // not modeled in the contract; IS_ARENACOMBATANT is therefore always
-            // false here, so this whole block degrades to a no-op exactly like a
-            // MUD with no arena combatants (see manifest gaps). The faithful
-            // logic is preserved for when the arena table lands:
-            let _ = ARENA_FLEE_TIMEOUT;
+            // Arena flee-recall timer: advance the flee-recall countdown for any
+            // arena combatant (arena.rs owns the per-char timer side table).
+            crate::arena::arena_flee_pulse(g, ch);
+            if !g.char_exists(ch) {
+                continue;
+            }
 
             // Poison damage.
             let poisoned = g.get_char(ch).map(|c| c.affect_flags & AFF_POISON != 0).unwrap_or(false);
@@ -1133,9 +1187,7 @@ pub fn point_update(g: &mut GameState) {
             }
 
             // Drowning in unswimmable water without a boat. has_boat() inspects
-            // the player's inventory for an ITEM_BOAT; the ObjectType enum can't
-            // represent ITEM_BOAT yet, so has_boat degrades to false (player
-            // always "drowns" in NOSWIM water). See manifest gaps.
+            // the player's inventory/equipment for an ITEM_BOAT.
             let level = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
             if level < LVL_IMMORT {
                 let in_noswim = g
@@ -1307,9 +1359,8 @@ pub fn point_update(g: &mut GameState) {
                 g.extract_obj(oid);
             }
         } else {
-            // Generic timed object: count down and fire timer_otrigger at 0. DG
-            // scripts are not ported, so the trigger degrades to a no-op (and
-            // the object simply expires its timer, matching a no-trigger world).
+            // Generic timed object: count down and fire timer_otrigger at 0
+            // (limits.c: `if (!GET_OBJ_TIMER(j)) timer_otrigger(j)` — no extract).
             let fires = g
                 .get_obj(oid)
                 .map(|o| o.timer > 0)
@@ -1321,7 +1372,7 @@ pub fn point_update(g: &mut GameState) {
                     o.timer
                 };
                 if t == 0 {
-                    // timer_otrigger(j): no DG-script engine yet — no-op.
+                    crate::dg_triggers::timer_otrigger(g, oid);
                 }
             }
         }
@@ -1379,9 +1430,7 @@ fn corpse_spill_dest(g: &GameState, oid: ObjId) -> SpillDest {
     }
 }
 
-/// has_boat(ch): true if the character carries (or wears) an ITEM_BOAT. The
-/// ObjectType enum can't represent ITEM_BOAT yet, so this degrades to false —
-/// the same as a player with no boat (see manifest gaps).
+/// has_boat(ch): true if the character carries (or wears) an ITEM_BOAT.
 fn has_boat(g: &GameState, ch: CharId) -> bool {
     if let Some(c) = g.get_char(ch) {
         for &oid in &c.carrying {

@@ -830,3 +830,317 @@ pub static CITIZEN_COLORS: &[&str] = &[
     "&c", // KBCYN
     "&g", // KBGRN
 ];
+
+// ---------------------------------------------------------------------------
+// Ability-score "app" bonus tables (constants.c).
+//
+// These mirror the CircleMUD/DeltaMUD `*_app[]` arrays 1:1 in C field order.
+// Index convention: every table except `STR_APP` is indexed directly by the
+// 0..=25 ability score (`GET_DEX`/`GET_CON`/`GET_INT`/`GET_WIS`). `STR_APP`
+// is indexed by [`strength_apply_index`] which folds the percentile
+// `str_add` (18/01..18/100) into entries 26..=30 — see the helper below.
+//
+// NOTE on DeltaMUD divergence: combat to-hit/damage do NOT consume these
+// tables here. DeltaMUD's `chance()`/`dam_multi()` (utils.c) use the raw
+// ability scores and the technique/power combat ratings directly, so the
+// stock CircleMUD `str_app.tohit/.todam` columns and the `dex_app.defensive`
+// AC adjustment simply do not exist / are never indexed in this codebase.
+// `DEX_APP` is provided for fidelity but, like the C `dex_app[]`, has no live
+// consumer (declared `extern` in fight.c, never indexed anywhere).
+// ---------------------------------------------------------------------------
+
+/// `struct str_app_type` (structs.h). DeltaMUD's str_app only carries the
+/// carry/wield weight columns (no tohit/todam columns).
+pub struct StrAppType {
+    /// Maximum weight that can be carried.
+    pub carry_w: i32,
+    /// Maximum weight that can be wielded.
+    pub wield_w: i32,
+}
+
+/// `str_app[]` (constants.c). Indexed by [`strength_apply_index`], NOT by the
+/// raw strength score: entries 0..=25 are STR 0..25; entries 26..=30 encode
+/// 18/01-50, 18/51-75, 18/76-90, 18/91-99, 18/100.
+pub static STR_APP: &[StrAppType] = &[
+    StrAppType { carry_w: 0, wield_w: 0 },        // str = 0
+    StrAppType { carry_w: 3, wield_w: 1 },        // str = 1
+    StrAppType { carry_w: 3, wield_w: 2 },
+    StrAppType { carry_w: 10, wield_w: 3 },
+    StrAppType { carry_w: 25, wield_w: 4 },
+    StrAppType { carry_w: 55, wield_w: 5 },       // str = 5
+    StrAppType { carry_w: 80, wield_w: 6 },
+    StrAppType { carry_w: 90, wield_w: 7 },
+    StrAppType { carry_w: 100, wield_w: 8 },
+    StrAppType { carry_w: 100, wield_w: 9 },
+    StrAppType { carry_w: 115, wield_w: 10 },     // str = 10
+    StrAppType { carry_w: 115, wield_w: 11 },
+    StrAppType { carry_w: 140, wield_w: 12 },
+    StrAppType { carry_w: 140, wield_w: 13 },
+    StrAppType { carry_w: 170, wield_w: 14 },
+    StrAppType { carry_w: 170, wield_w: 15 },     // str = 15
+    StrAppType { carry_w: 195, wield_w: 16 },
+    StrAppType { carry_w: 220, wield_w: 18 },
+    StrAppType { carry_w: 255, wield_w: 20 },     // str = 18
+    StrAppType { carry_w: 640, wield_w: 40 },
+    StrAppType { carry_w: 700, wield_w: 40 },     // str = 20
+    StrAppType { carry_w: 810, wield_w: 40 },
+    StrAppType { carry_w: 970, wield_w: 40 },
+    StrAppType { carry_w: 1130, wield_w: 40 },
+    StrAppType { carry_w: 1440, wield_w: 40 },
+    StrAppType { carry_w: 1750, wield_w: 40 },    // str = 25
+    StrAppType { carry_w: 280, wield_w: 22 },     // str = 18/0  - 18/50
+    StrAppType { carry_w: 305, wield_w: 24 },     // str = 18/51 - 18/75
+    StrAppType { carry_w: 330, wield_w: 26 },     // str = 18/76 - 18/90
+    StrAppType { carry_w: 380, wield_w: 28 },     // str = 18/91 - 18/99
+    StrAppType { carry_w: 480, wield_w: 30 },     // str = 18/100
+];
+
+/// `STRENGTH_APPLY_INDEX(ch)` (utils.h). Folds `str_add` (18/01..18/100) into
+/// the percentile entries 26..=30 of [`STR_APP`]; otherwise the raw strength.
+/// Pass `str_` and `str_add` from `aff_abils`.
+#[inline]
+pub fn strength_apply_index(str_: i32, str_add: i32) -> usize {
+    if str_add == 0 || str_ != 18 {
+        str_.clamp(0, (STR_APP.len() - 1) as i32) as usize
+    } else if str_add <= 50 {
+        26
+    } else if str_add <= 75 {
+        27
+    } else if str_add <= 90 {
+        28
+    } else if str_add <= 99 {
+        29
+    } else {
+        30
+    }
+}
+
+/// `struct dex_skill_type` (structs.h) — thief-skill bonuses by dexterity.
+pub struct DexSkillType {
+    pub p_pocket: i32,
+    pub p_locks: i32,
+    pub traps: i32,
+    pub sneak: i32,
+    pub hide: i32,
+}
+
+/// `dex_app_skill[]` (constants.c). Indexed directly by dexterity 0..=25.
+pub static DEX_APP_SKILL: &[DexSkillType] = &[
+    DexSkillType { p_pocket: -99, p_locks: -99, traps: -90, sneak: -99, hide: -60 }, // dex = 0
+    DexSkillType { p_pocket: -90, p_locks: -90, traps: -60, sneak: -90, hide: -50 }, // dex = 1
+    DexSkillType { p_pocket: -80, p_locks: -80, traps: -40, sneak: -80, hide: -45 },
+    DexSkillType { p_pocket: -70, p_locks: -70, traps: -30, sneak: -70, hide: -40 },
+    DexSkillType { p_pocket: -60, p_locks: -60, traps: -30, sneak: -60, hide: -35 },
+    DexSkillType { p_pocket: -50, p_locks: -50, traps: -20, sneak: -50, hide: -30 }, // dex = 5
+    DexSkillType { p_pocket: -40, p_locks: -40, traps: -20, sneak: -40, hide: -25 },
+    DexSkillType { p_pocket: -30, p_locks: -30, traps: -15, sneak: -30, hide: -20 },
+    DexSkillType { p_pocket: -20, p_locks: -20, traps: -15, sneak: -20, hide: -15 },
+    DexSkillType { p_pocket: -15, p_locks: -10, traps: -10, sneak: -20, hide: -10 },
+    DexSkillType { p_pocket: -10, p_locks: -5, traps: -10, sneak: -15, hide: -5 },   // dex = 10
+    DexSkillType { p_pocket: -5, p_locks: 0, traps: -5, sneak: -10, hide: 0 },
+    DexSkillType { p_pocket: 0, p_locks: 0, traps: 0, sneak: -5, hide: 0 },
+    DexSkillType { p_pocket: 0, p_locks: 0, traps: 0, sneak: 0, hide: 0 },
+    DexSkillType { p_pocket: 0, p_locks: 0, traps: 0, sneak: 0, hide: 0 },
+    DexSkillType { p_pocket: 0, p_locks: 0, traps: 0, sneak: 0, hide: 0 },           // dex = 15
+    DexSkillType { p_pocket: 0, p_locks: 5, traps: 0, sneak: 0, hide: 0 },
+    DexSkillType { p_pocket: 5, p_locks: 10, traps: 0, sneak: 5, hide: 5 },
+    DexSkillType { p_pocket: 10, p_locks: 15, traps: 5, sneak: 10, hide: 10 },       // dex = 18
+    DexSkillType { p_pocket: 15, p_locks: 20, traps: 10, sneak: 15, hide: 15 },
+    DexSkillType { p_pocket: 15, p_locks: 20, traps: 10, sneak: 15, hide: 15 },      // dex = 20
+    DexSkillType { p_pocket: 20, p_locks: 25, traps: 10, sneak: 15, hide: 20 },
+    DexSkillType { p_pocket: 20, p_locks: 25, traps: 15, sneak: 20, hide: 20 },
+    DexSkillType { p_pocket: 25, p_locks: 25, traps: 15, sneak: 20, hide: 20 },
+    DexSkillType { p_pocket: 25, p_locks: 30, traps: 15, sneak: 25, hide: 25 },
+    DexSkillType { p_pocket: 25, p_locks: 30, traps: 15, sneak: 25, hide: 25 },      // dex = 25
+];
+
+/// `struct dex_app_type` (structs.h). Provided for fidelity; DeltaMUD never
+/// indexes `dex_app[]` (no live consumer).
+pub struct DexAppType {
+    pub reaction: i32,
+    pub miss_att: i32,
+    pub defensive: i32,
+}
+
+/// `dex_app[]` (constants.c). Indexed directly by dexterity 0..=25.
+pub static DEX_APP: &[DexAppType] = &[
+    DexAppType { reaction: -7, miss_att: -7, defensive: 6 }, // dex = 0
+    DexAppType { reaction: -6, miss_att: -6, defensive: 5 }, // dex = 1
+    DexAppType { reaction: -4, miss_att: -4, defensive: 5 },
+    DexAppType { reaction: -3, miss_att: -3, defensive: 4 },
+    DexAppType { reaction: -2, miss_att: -2, defensive: 3 },
+    DexAppType { reaction: -1, miss_att: -1, defensive: 2 }, // dex = 5
+    DexAppType { reaction: 0, miss_att: 0, defensive: 1 },
+    DexAppType { reaction: 0, miss_att: 0, defensive: 0 },
+    DexAppType { reaction: 0, miss_att: 0, defensive: 0 },
+    DexAppType { reaction: 0, miss_att: 0, defensive: 0 },
+    DexAppType { reaction: 0, miss_att: 0, defensive: 0 },   // dex = 10
+    DexAppType { reaction: 0, miss_att: 0, defensive: 0 },
+    DexAppType { reaction: 0, miss_att: 0, defensive: 0 },
+    DexAppType { reaction: 0, miss_att: 0, defensive: 0 },
+    DexAppType { reaction: 0, miss_att: 0, defensive: 0 },
+    DexAppType { reaction: 0, miss_att: 0, defensive: -1 },  // dex = 15
+    DexAppType { reaction: 1, miss_att: 1, defensive: -2 },
+    DexAppType { reaction: 2, miss_att: 2, defensive: -3 },
+    DexAppType { reaction: 2, miss_att: 2, defensive: -4 },  // dex = 18
+    DexAppType { reaction: 3, miss_att: 3, defensive: -4 },
+    DexAppType { reaction: 3, miss_att: 3, defensive: -4 },  // dex = 20
+    DexAppType { reaction: 4, miss_att: 4, defensive: -5 },
+    DexAppType { reaction: 4, miss_att: 4, defensive: -5 },
+    DexAppType { reaction: 4, miss_att: 4, defensive: -5 },
+    DexAppType { reaction: 5, miss_att: 5, defensive: -6 },
+    DexAppType { reaction: 5, miss_att: 5, defensive: -6 },  // dex = 25
+];
+
+/// `struct con_app_type` (structs.h).
+pub struct ConAppType {
+    /// Bonus hitpoints per level (used in `advance_level`).
+    pub hitp: i32,
+    /// Survival % when raising from death (shock).
+    pub shock: i32,
+}
+
+/// `con_app[]` (constants.c). Indexed directly by constitution 0..=25.
+pub static CON_APP: &[ConAppType] = &[
+    ConAppType { hitp: -4, shock: 20 }, // con = 0
+    ConAppType { hitp: -3, shock: 25 }, // con = 1
+    ConAppType { hitp: -2, shock: 30 },
+    ConAppType { hitp: -2, shock: 35 },
+    ConAppType { hitp: -1, shock: 40 },
+    ConAppType { hitp: -1, shock: 45 }, // con = 5
+    ConAppType { hitp: -1, shock: 50 },
+    ConAppType { hitp: 0, shock: 55 },
+    ConAppType { hitp: 0, shock: 60 },
+    ConAppType { hitp: 0, shock: 65 },
+    ConAppType { hitp: 0, shock: 70 },  // con = 10
+    ConAppType { hitp: 0, shock: 75 },
+    ConAppType { hitp: 0, shock: 80 },
+    ConAppType { hitp: 0, shock: 85 },
+    ConAppType { hitp: 0, shock: 88 },
+    ConAppType { hitp: 1, shock: 90 },  // con = 15
+    ConAppType { hitp: 2, shock: 95 },
+    ConAppType { hitp: 2, shock: 97 },
+    ConAppType { hitp: 3, shock: 99 },  // con = 18
+    ConAppType { hitp: 3, shock: 99 },
+    ConAppType { hitp: 4, shock: 99 },  // con = 20
+    ConAppType { hitp: 5, shock: 99 },
+    ConAppType { hitp: 5, shock: 99 },
+    ConAppType { hitp: 5, shock: 99 },
+    ConAppType { hitp: 6, shock: 99 },
+    ConAppType { hitp: 6, shock: 99 },  // con = 25
+];
+
+/// `struct int_app_type` (structs.h).
+pub struct IntAppType {
+    /// % a player learns a spell/skill per practice.
+    pub learn: i32,
+}
+
+/// `int_app[]` (constants.c). Indexed directly by intelligence 0..=25.
+pub static INT_APP: &[IntAppType] = &[
+    IntAppType { learn: 3 },  // int = 0
+    IntAppType { learn: 5 },  // int = 1
+    IntAppType { learn: 7 },
+    IntAppType { learn: 8 },
+    IntAppType { learn: 9 },
+    IntAppType { learn: 10 }, // int = 5
+    IntAppType { learn: 11 },
+    IntAppType { learn: 12 },
+    IntAppType { learn: 13 },
+    IntAppType { learn: 15 },
+    IntAppType { learn: 17 }, // int = 10
+    IntAppType { learn: 19 },
+    IntAppType { learn: 22 },
+    IntAppType { learn: 25 },
+    IntAppType { learn: 30 },
+    IntAppType { learn: 35 }, // int = 15
+    IntAppType { learn: 40 },
+    IntAppType { learn: 45 },
+    IntAppType { learn: 50 }, // int = 18
+    IntAppType { learn: 53 },
+    IntAppType { learn: 55 }, // int = 20
+    IntAppType { learn: 56 },
+    IntAppType { learn: 57 },
+    IntAppType { learn: 58 },
+    IntAppType { learn: 59 },
+    IntAppType { learn: 60 }, // int = 25
+];
+
+/// `struct wis_app_type` (structs.h).
+pub struct WisAppType {
+    /// Practices gained per level (used in `advance_level`).
+    pub bonus: i32,
+}
+
+/// `wis_app[]` (constants.c). Indexed directly by wisdom 0..=25.
+pub static WIS_APP: &[WisAppType] = &[
+    WisAppType { bonus: 0 }, // wis = 0
+    WisAppType { bonus: 0 }, // wis = 1
+    WisAppType { bonus: 0 },
+    WisAppType { bonus: 0 },
+    WisAppType { bonus: 0 },
+    WisAppType { bonus: 0 }, // wis = 5
+    WisAppType { bonus: 0 },
+    WisAppType { bonus: 0 },
+    WisAppType { bonus: 0 },
+    WisAppType { bonus: 0 },
+    WisAppType { bonus: 0 }, // wis = 10
+    WisAppType { bonus: 0 },
+    WisAppType { bonus: 2 },
+    WisAppType { bonus: 2 },
+    WisAppType { bonus: 3 },
+    WisAppType { bonus: 3 }, // wis = 15
+    WisAppType { bonus: 3 },
+    WisAppType { bonus: 4 },
+    WisAppType { bonus: 5 }, // wis = 18
+    WisAppType { bonus: 6 },
+    WisAppType { bonus: 6 }, // wis = 20
+    WisAppType { bonus: 6 },
+    WisAppType { bonus: 6 },
+    WisAppType { bonus: 7 },
+    WisAppType { bonus: 7 },
+    WisAppType { bonus: 7 }, // wis = 25
+];
+
+/// `training_pts[LVL_IMMORT]` (config.c) — bonus training sessions awarded at
+/// each level on `advance_level`. Indexed directly by level 0..=99.
+pub static TRAINING_PTS: &[i32] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 0 - 9
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 10 - 19
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 20 - 29
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 30 - 39
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 40 - 49
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 50 - 59
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 60 - 69
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 70 - 79
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 80 - 89
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 90 - 99
+];
+
+/// Clamp an ability score to a valid index into the 0..=25 `*_app` tables.
+#[inline]
+pub fn app_index(score: i32, len: usize) -> usize {
+    score.clamp(0, (len - 1) as i32) as usize
+}
+
+/// `attack_hit_text[]` (fight.c) — weapon-attack verbs `(singular, plural)`
+/// indexed by `attacktype - TYPE_HIT`. The index order is the contract: it
+/// matches the `TYPE_HIT..TYPE_STAB` (#defines 1100..1114) sequence so the
+/// weapon's `value[3]` (and a mob's BareHandAttack) selects the right verb.
+pub static ATTACK_HIT_TEXT: &[(&str, &str)] = &[
+    ("hit", "hits"),           // 0  TYPE_HIT
+    ("sting", "stings"),       // 1  TYPE_STING
+    ("whip", "whips"),         // 2  TYPE_WHIP
+    ("slash", "slashes"),      // 3  TYPE_SLASH
+    ("bite", "bites"),         // 4  TYPE_BITE
+    ("bludgeon", "bludgeons"), // 5  TYPE_BLUDGEON
+    ("crush", "crushes"),      // 6  TYPE_CRUSH
+    ("pound", "pounds"),       // 7  TYPE_POUND
+    ("claw", "claws"),         // 8  TYPE_CLAW
+    ("maul", "mauls"),         // 9  TYPE_MAUL
+    ("thrash", "thrashes"),    // 10 TYPE_THRASH
+    ("pierce", "pierces"),     // 11 TYPE_PIERCE
+    ("blast", "blasts"),       // 12 TYPE_BLAST
+    ("punch", "punches"),      // 13 TYPE_PUNCH
+    ("stab", "stabs"),         // 14 TYPE_STAB
+];

@@ -9,6 +9,9 @@ use std::path::Path;
 use anyhow::Result;
 use log::{info, warn};
 
+/// structs.h MAX_OBJ_AFFECT — number of stat-apply slots an object carries.
+const MAX_OBJ_AFFECT: usize = 6;
+
 pub struct FileLoader;
 
 impl FileLoader {
@@ -75,40 +78,34 @@ impl FileLoader {
             };
             i += 1;
 
-            // Zone name (may span single line, ~-terminated)
-            let name = lines.get(i).map(|s| s.trim_end_matches('~').trim().to_string())
+            // Zone name (single line, ~-terminated). Mirrors load_zones in db.c.
+            let name = lines.get(i)
+                .map(|s| s.split('~').next().unwrap_or("").trim().to_string())
                 .unwrap_or_default();
             i += 1;
 
-            // Optional "builders" line — tilde-terminated in most formats but
-            // some DeltaMUD zones skip it. Peek: if the next line looks
-            // numeric (header of 3 numbers), treat it as the data line.
-            let maybe_builders = lines.get(i).map(|s| s.trim());
-            let builders_is_data = maybe_builders
-                .map(|s| s.split_whitespace().all(|t| t.parse::<i32>().is_ok()) && s.split_whitespace().count() >= 3)
-                .unwrap_or(false);
-            if !builders_is_data {
-                i += 1;
-            }
+            // Builders line (single line, ~-terminated) — always present in the
+            // DeltaMUD format (Z.builders = str_dup(buf)).
+            let builders = lines.get(i)
+                .map(|s| s.split('~').next().unwrap_or("").trim().to_string())
+                .unwrap_or_default();
+            i += 1;
 
-            // Zone header: top lifespan reset_mode [optional levels/status]
+            // Zone header: top lifespan reset_mode
             let parts: Vec<&str> = lines.get(i).map(|s| s.split_whitespace().collect())
                 .unwrap_or_default();
-            let top: i32 = parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let top: i32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
             let lifespan: i32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(30);
             let reset_mode: i32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(2);
             i += 1;
 
-            // Optional level-range line (not always present). Skip if it
-            // looks like numbers without a trailing reset command.
-            if let Some(next) = lines.get(i) {
-                let first = next.trim().chars().next();
-                let is_reset = matches!(first, Some(c) if "MOGEPRD*".contains(c));
-                if !is_reset && !next.trim().is_empty() && !next.trim().starts_with('S') && !next.trim().starts_with('$') {
-                    // Probably the level/status line — skip.
-                    i += 1;
-                }
-            }
+            // Level/status line: lvl1 lvl2 status_mode (required in DeltaMUD).
+            let lvl_parts: Vec<&str> = lines.get(i).map(|s| s.split_whitespace().collect())
+                .unwrap_or_default();
+            let lvl1: i32 = lvl_parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let lvl2: i32 = lvl_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(50);
+            let status_mode: i32 = lvl_parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            i += 1;
 
             // Reset commands until 'S' or '$'.
             let mut reset_commands = Vec::new();
@@ -132,12 +129,14 @@ impl FileLoader {
             world.zones.push(Zone {
                 number: zone_num,
                 name,
+                builders,
                 lifespan,
                 age: 0,
                 top,
                 reset_mode,
-                min_level: 0,
-                max_level: 50,
+                min_level: lvl1.clamp(0, 255) as Level,
+                max_level: lvl2.clamp(0, 255) as Level,
+                status_mode,
                 map_x: None,
                 map_y: None,
                 reset_commands,
@@ -156,34 +155,41 @@ impl FileLoader {
         let i32_at = |idx: usize| parts.get(idx).and_then(|s| s.parse::<i32>().ok());
         let if_flag = i32_at(1).unwrap_or(0) != 0;
         match cmd {
+            // arg4 (split index 5) is the load-chance for M/O/E/P; for G it's
+            // arg3 (index 4). Absent => 0 (always loads), matching legacy zones.
             'M' => Some(ResetCmd::LoadMob {
                 if_flag,
                 mob_vnum: i32_at(2)?,
                 max_count: i32_at(3)?,
                 room_vnum: i32_at(4)?,
+                load_chance: i32_at(5).unwrap_or(0),
             }),
             'O' => Some(ResetCmd::LoadObjInRoom {
                 if_flag,
                 obj_vnum: i32_at(2)?,
                 max_count: i32_at(3)?,
                 room_vnum: i32_at(4)?,
+                load_chance: i32_at(5).unwrap_or(0),
             }),
             'G' => Some(ResetCmd::GiveObjToMob {
                 if_flag,
                 obj_vnum: i32_at(2)?,
                 max_count: i32_at(3)?,
+                load_chance: i32_at(4).unwrap_or(0),
             }),
             'E' => Some(ResetCmd::EquipMob {
                 if_flag,
                 obj_vnum: i32_at(2)?,
                 max_count: i32_at(3)?,
                 wear_pos: i32_at(4)? as usize,
+                load_chance: i32_at(5).unwrap_or(0),
             }),
             'P' => Some(ResetCmd::PutObjInObj {
                 if_flag,
                 obj_vnum: i32_at(2)?,
                 max_count: i32_at(3)?,
                 container_vnum: i32_at(4)?,
+                load_chance: i32_at(5).unwrap_or(0),
             }),
             'R' => Some(ResetCmd::RemoveObj {
                 if_flag,
@@ -224,97 +230,141 @@ impl FileLoader {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
         let mut line = String::new();
-        
-        while reader.read_line(&mut line)? > 0 {
+        // Carries a record header ('#...' / '$') consumed while scanning the
+        // previous room's trailing trigger lines, so it isn't lost.
+        let mut pending: Option<String> = None;
+
+        loop {
+            if pending.is_none() {
+                line.clear();
+                if reader.read_line(&mut line)? == 0 {
+                    break;
+                }
+            } else {
+                line = pending.take().unwrap();
+            }
+
+            if line.starts_with('$') {
+                break;
+            }
             if line.starts_with('#') {
-                let vnum: RoomVnum = line[1..].trim().parse()?;
-                
+                let vnum: RoomVnum = match line[1..].trim().parse() {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
                 // Read room name (tilde-terminated; strip trailing newline first)
                 line.clear();
                 reader.read_line(&mut line)?;
                 let name = line.trim_end().trim_end_matches('~').to_string();
 
                 // Read room description
-                let mut description = String::new();
-                loop {
-                    line.clear();
-                    reader.read_line(&mut line)?;
-                    if let Some(p) = line.find('~') {
-                        description.push_str(&line[..p]);
-                        break;
-                    }
-                    description.push_str(&line);
-                }
-                
+                let description = Self::read_tilde_buf(&mut reader)?;
+
                 // Read zone, flags, sector
                 line.clear();
                 reader.read_line(&mut line)?;
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                
-                let zone = parts.get(0).unwrap_or(&"0").parse()?;
-                let flags = parts.get(1).unwrap_or(&"0").parse::<u32>()?;
-                let sector = parts.get(2).unwrap_or(&"0").parse::<u8>()?;
-                
+
+                let zone = parts.first().unwrap_or(&"0").parse()?;
+                let flags = parts.get(1).map(|s| Self::asciiflag_conv(s) as u32).unwrap_or(0);
+                let sector = parts.get(2).unwrap_or(&"0").parse::<i32>()?;
+
                 let mut room = Room::new(vnum, zone, name, description);
                 room.room_flags = RoomFlags::from_bits_truncate(flags);
-                room.sector_type = SectorType::from_i32(sector as i32);
-                
-                // Read exits
+                room.sector_type = SectorType::from_i32(sector);
+
+                // Read room sub-blocks until the 'S' terminator. Mirrors C
+                // parse_room: 'D'<n> exits, 'O' special exit, 'E' extra descrs.
                 loop {
                     line.clear();
-                    reader.read_line(&mut line)?;
-                    
-                    if line.trim() == "S" {
+                    if reader.read_line(&mut line)? == 0 {
                         break;
                     }
 
-                    // Room DG trigger: exactly 'T <number>' (WLD_TRIGGER=2);
-                    // avoids matching description lines like "The...".
-                    let lt = line.trim();
-                    if lt.starts_with("T ") && lt[2..].trim().parse::<i32>().is_ok() {
-                        crate::dg_db_scripts::parse_trigger_line(2, vnum, lt);
-                        continue;
-                    }
-
-                    if line.starts_with('D') {
-                        let dir = line[1..].trim().parse::<usize>()?;
-                        if dir < NUM_OF_DIRS {
-                            // Read exit description
-                            let mut exit_desc = String::new();
+                    let first = line.trim_start().chars().next().unwrap_or(' ');
+                    match first {
+                        'S' => {
+                            // 'T' DG triggers follow the 'S' terminator in C.
                             loop {
                                 line.clear();
-                                reader.read_line(&mut line)?;
-                                if let Some(p) = line.find('~') {
-                                    exit_desc.push_str(&line[..p]);
+                                if reader.read_line(&mut line)? == 0 {
                                     break;
                                 }
-                                exit_desc.push_str(&line);
+                                let lt = line.trim();
+                                if lt.starts_with('T')
+                                    && lt[1..].trim().parse::<i32>().is_ok()
+                                {
+                                    crate::dg_db_scripts::parse_trigger_line(2, vnum, lt);
+                                } else {
+                                    // Not a trigger — hand this header to the
+                                    // outer loop so it isn't dropped.
+                                    pending = Some(std::mem::take(&mut line));
+                                    break;
+                                }
                             }
-
+                            break;
+                        }
+                        'D' => {
+                            let dir = line[1..].trim().parse::<usize>().unwrap_or(NUM_OF_DIRS);
+                            // Read exit description
+                            let exit_desc = Self::read_tilde_buf(&mut reader)?;
                             // Read keywords
-                            line.clear();
-                            reader.read_line(&mut line)?;
-                            let keywords = line.trim_end().trim_end_matches('~').to_string();
-                            
-                            // Read door info
+                            let keywords = Self::read_tilde_buf(&mut reader)?;
+                            // Read door info: exit_info key to_room
                             line.clear();
                             reader.read_line(&mut line)?;
                             let parts: Vec<&str> = line.split_whitespace().collect();
-                            let exit_info = parts.get(0).unwrap_or(&"0").parse()?;
-                            let key = parts.get(1).unwrap_or(&"-1").parse()?;
-                            let to_room = parts.get(2).unwrap_or(&"0").parse()?;
-                            
-                            room.exits[dir] = Some(Exit {
-                                description: if exit_desc.is_empty() { None } else { Some(exit_desc) },
-                                keyword: if keywords.is_empty() { None } else { Some(keywords) },
-                                exit_info,
+                            let raw_flag: i32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+                            let key = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(-1);
+                            let to_room = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                            let exit_info = Self::door_flag(raw_flag);
+                            if dir < NUM_OF_DIRS {
+                                room.exits[dir] = Some(Exit {
+                                    description: if exit_desc.is_empty() { None } else { Some(exit_desc) },
+                                    keyword: if keywords.is_empty() { None } else { Some(keywords) },
+                                    exit_info,
+                                    key,
+                                    to_room,
+                                });
+                            }
+                        }
+                        'O' => {
+                            // setup_special_dir: 4 tilde-strings then a
+                            // exit_info/key/to_room line.
+                            let general_description = Self::read_tilde_buf(&mut reader)?;
+                            let keyword = Self::read_tilde_buf(&mut reader)?;
+                            let ex_name = Self::read_tilde_buf(&mut reader)?;
+                            let leave_msg = Self::read_tilde_buf(&mut reader)?;
+                            line.clear();
+                            reader.read_line(&mut line)?;
+                            let parts: Vec<&str> = line.split_whitespace().collect();
+                            let raw_flag: i32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+                            let key = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(-1);
+                            let to_room = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                            room.special_exit = Some(crate::room::SpecialExit {
+                                general_description: if general_description.is_empty() { None } else { Some(general_description) },
+                                keyword: if keyword.is_empty() { None } else { Some(keyword) },
+                                ex_name: if ex_name.is_empty() { None } else { Some(ex_name) },
+                                leave_msg: if leave_msg.is_empty() { None } else { Some(leave_msg) },
+                                exit_info: Self::door_flag(raw_flag),
                                 key,
                                 to_room,
                             });
                         }
+                        'E' => {
+                            // Extra description: keyword~ desc~
+                            let keyword = Self::read_tilde_buf(&mut reader)?;
+                            let descr = Self::read_tilde_buf(&mut reader)?;
+                            room.extra_descriptions.push((keyword, descr));
+                        }
+                        _ => {
+                            // Unknown line (blank / stray). Skip, matching the
+                            // robust-loader behaviour of not aborting the file.
+                        }
                     }
                 }
-                
+
                 world.add_room(room);
             }
             line.clear();
@@ -420,22 +470,28 @@ impl FileLoader {
         let description = Self::read_tilde_string(lines, i)?;
 
         // Flag line: ACTION_FLAGS AFF_FLAGS ALIGNMENT LETTER
-        // We don't need flags for Tier-0; we just need the type letter to
-        // know whether an espec block follows.
+        // (asciiflag_conv f1) (asciiflag_conv f2) (alignment) ({S|E})
         let flag_line = Self::next_content_line(lines, i)
             .ok_or_else(|| anyhow::anyhow!("missing flag line"))?;
         let flag_parts: Vec<&str> = flag_line.split_whitespace().collect();
         if flag_parts.len() < 4 {
             return Err(anyhow::anyhow!("flag line has {} fields, need 4", flag_parts.len()));
         }
+        // Action flags (f1) and affect flags (f2): asciiflag_conv, exactly as
+        // db.c parse_mobile (MOB_FLAGS = asciiflag_conv(f1); SET MOB_ISNPC;
+        // AFF_FLAGS = asciiflag_conv(f2)). Without this every mob had act_flags=0,
+        // so MOB_SPEC/SENTINEL/SCAVENGER/AGGRESSIVE/HELPER were all inert.
+        let act_flags = Self::asciiflag_conv(flag_parts[0]) as i64 | crate::flags::MOB_ISNPC;
+        let affect_flags = Self::asciiflag_conv(flag_parts[1]) as i64;
+        let alignment: i32 = flag_parts[2].parse().unwrap_or(0);
         let letter = flag_parts[3].chars().next().unwrap_or('S').to_ascii_uppercase();
 
         // Stats line: either classic (9 numbers with dice) or X-prefixed
-        // (11 numbers, DeltaMUD extended). The only field we currently
-        // persist is level.
+        // (DeltaMUD extended power/mpower/defense/mdefense/technique).
         let stats_line = Self::next_content_line(lines, i)
             .ok_or_else(|| anyhow::anyhow!("missing stats line"))?;
         let level = Self::extract_level(stats_line)?;
+        let xstats = Self::parse_combat_stats(stats_line);
 
         // Gold + experience line.
         let ge_line = Self::next_content_line(lines, i)
@@ -456,13 +512,18 @@ impl FileLoader {
         let default_pos = (*pos_parts.get(1).unwrap_or(&8)).clamp(0, 9) as u8;
         let sex = (*pos_parts.get(2).unwrap_or(&0)).clamp(0, 2) as u8;
 
-        // Hitpoints: when the stats line has Hd+H notation, C stores the
-        // base of that dice roll in points.hit. Extract approximately.
-        let hitpoints = Self::extract_hitpoints(stats_line).unwrap_or(10);
+        // Hitpoints + damage dice from the stats line, format-aware.
+        let (hitpoints, damnodice, damsizedice) = Self::parse_mob_dice(stats_line);
 
-        // Enhanced: skip until a lone 'E' line (end of espec section).
-        // We don't persist espec values for Tier-0; that's a later polish.
+        // Enhanced ('E'): parse espec ability lines until a lone 'E'.
+        // Mirrors parse_enhanced_mob / interpret_espec in db.c.
+        let mut abilities: Option<crate::character::Abilities> = None;
+        let mut attack_type: i32 = 0;
         if letter == 'E' {
+            // Start from the C default ability set (11/13) and overlay especs.
+            let mut ab = crate::character::Abilities {
+                str: 13, str_add: 0, intel: 13, wis: 13, dex: 13, con: 13, cha: 13,
+            };
             while *i < lines.len() {
                 let t = lines[*i].trim();
                 *i += 1;
@@ -472,7 +533,10 @@ impl FileLoader {
                     *i -= 1;
                     break;
                 }
+                if t.is_empty() { continue; }
+                Self::interpret_espec(t, &mut ab, &mut attack_type);
             }
+            abilities = Some(ab);
         }
 
         // Attach DG triggers declared by trailing 'T <vnum>' lines (MOB_TRIGGER=0).
@@ -499,13 +563,105 @@ impl FileLoader {
             position: Position::from_u8(position),
             default_pos: Position::from_u8(default_pos),
             sex: Gender::from_u8(sex),
+            alignment,
+            act_flags,
+            affect_flags,
             // Combat fields default for Tier-0; refined in Batch 5 (fight.c).
             armor: 0,
             hitroll: 0,
             damroll: 0,
-            damnodice: 1,
-            damsizedice: 6,
+            damnodice,
+            damsizedice,
+            power: xstats.0,
+            mpower: xstats.1,
+            defense: xstats.2,
+            mdefense: xstats.3,
+            technique: xstats.4,
+            abilities,
+            attack_type,
         })
+    }
+
+    /// Parse one espec keyword line ("Str: 18", "BareHandAttack: 4", ...) and
+    /// apply it. Matches db.c interpret_espec/parse_espec: keyword:value split,
+    /// case-sensitive keyword names, RANGE-clamped values.
+    fn interpret_espec(
+        line: &str,
+        ab: &mut crate::character::Abilities,
+        attack_type: &mut i32,
+    ) {
+        let (key, val) = match line.split_once(':') {
+            Some((k, v)) => (k.trim(), v.trim()),
+            None => (line.trim(), ""),
+        };
+        let num: i32 = val.parse().unwrap_or(0);
+        let clamp = |n: i32, lo: i32, hi: i32| n.max(lo).min(hi);
+        match key {
+            "BareHandAttack" => *attack_type = clamp(num, 0, 99),
+            "Str" => ab.str = clamp(num, 3, 25) as i8,
+            "StrAdd" => ab.str_add = clamp(num, 0, 100) as i8,
+            "Int" => ab.intel = clamp(num, 3, 25) as i8,
+            "Wis" => ab.wis = clamp(num, 3, 25) as i8,
+            "Dex" => ab.dex = clamp(num, 3, 25) as i8,
+            "Con" => ab.con = clamp(num, 3, 25) as i8,
+            "Cha" => ab.cha = clamp(num, 3, 25) as i8,
+            _ => {
+                warn!("unrecognized espec keyword {:?}", key);
+            }
+        }
+    }
+
+    /// Parse the DeltaMUD `X`-format combat stats from a stats line. Returns
+    /// (power, mpower, defense, mdefense, technique); all zero for the classic
+    /// (non-X) format. Mirrors parse_simple_mob's X branch in db.c.
+    fn parse_combat_stats(stats_line: &str) -> (i16, i16, i16, i16, i16) {
+        let trimmed = stats_line.trim();
+        if !trimmed.starts_with('X') && !trimmed.starts_with('x') {
+            return (0, 0, 0, 0, 0);
+        }
+        // X<level> power mpower defense mdefense technique ...
+        let nums = Self::stat_numbers(trimmed);
+        // nums[0] is level; combat stats follow.
+        let g = |idx: usize| -> i16 {
+            nums.get(idx).copied().unwrap_or(0).clamp(i16::MIN as i32, i16::MAX as i32) as i16
+        };
+        (g(1), g(2), g(3), g(4), g(5))
+    }
+
+    /// Extract HP base + damage dice from a stats line for both formats.
+    /// Classic ` lvl thac0 ac Hd+H Dd+D` -> hit=t3, damnodice=t6, damsizedice=t7.
+    /// X `Xlvl pw mpw def mdef tech Hd+H Dd` -> hit=t6, damnodice=t9, damsizedice=t10.
+    fn parse_mob_dice(stats_line: &str) -> (i32, i32, i32) {
+        let nums = Self::stat_numbers(stats_line);
+        let trimmed = stats_line.trim();
+        let g = |idx: usize| -> i32 { nums.get(idx).copied().unwrap_or(0) };
+        if trimmed.starts_with('X') || trimmed.starts_with('x') {
+            // t0=lvl t1..t5=combat t6=hit t7=mana t8=move t9=damnodice t10=damsizedice
+            (g(6).max(1), g(9).max(1), g(10).max(1))
+        } else {
+            // t0=lvl t1=thac0 t2=ac t3=hit t4=mana t5=move t6=damnodice t7=damsizedice t8=damroll
+            (g(3).max(1), g(6).max(1), g(7).max(1))
+        }
+    }
+
+    /// Flatten a stats line into a list of integers, splitting dice tokens on
+    /// 'd'/'+' and dropping a leading 'X'/'x' marker. So `X5 1 2 3d4+5` yields
+    /// [5,1,2,3,4,5].
+    fn stat_numbers(stats_line: &str) -> Vec<i32> {
+        let mut out = Vec::new();
+        for (idx, tok) in stats_line.trim().split_whitespace().enumerate() {
+            let tok = if idx == 0 {
+                tok.trim_start_matches(['X', 'x'])
+            } else {
+                tok
+            };
+            for piece in tok.split(['d', '+']) {
+                if let Ok(n) = piece.parse::<i32>() {
+                    out.push(n);
+                }
+            }
+        }
+        out
     }
 
     /// Read a tilde-terminated string block. Accepts either inline `~`
@@ -550,27 +706,6 @@ impl FileLoader {
         Ok(level.clamp(0, 200) as u8)
     }
 
-    /// Pull the hit-point base out of a stats line's Hd+H dice field.
-    /// Both classic and X formats end with `... Hd+H ...`; we try the
-    /// first dice-notation token and read the `+N` or `Nd` value.
-    fn extract_hitpoints(stats_line: &str) -> Option<i32> {
-        for tok in stats_line.split_whitespace() {
-            if let Some(_d_pos) = tok.find('d') {
-                // Parse NdM+K — use K as HP base if present, else NxM as rough.
-                let (n_part, rest) = tok.split_once('d')?;
-                let (m_part, plus_part) = match rest.split_once('+') {
-                    Some((m, p)) => (m, Some(p)),
-                    None => (rest, None),
-                };
-                let n: i32 = n_part.parse().ok()?;
-                let m: i32 = m_part.parse().ok()?;
-                let k: i32 = plus_part.and_then(|p| p.parse().ok()).unwrap_or(0);
-                return Some(k + n * (m.max(1) + 1) / 2);
-            }
-        }
-        None
-    }
-    
     fn load_objects(world: &mut GameState, path: &Path) -> Result<()> {
         let index_path = path.join("index");
         let file = File::open(&index_path)?;
@@ -615,6 +750,24 @@ impl FileLoader {
         Ok(out)
     }
 
+    /// Decode the door-state code from a .wld exit/special-exit line exactly
+    /// as C setup_dir/setup_special_dir do: values >2 set EX_HIDDEN and drop
+    /// by 3; 1 => ISDOOR, 2 => ISDOOR|PICKPROOF, else nothing.
+    fn door_flag(mut t0: i32) -> i32 {
+        use crate::room::{EX_HIDDEN, EX_ISDOOR, EX_PICKPROOF};
+        let mut info = 0;
+        if t0 > 2 {
+            info = EX_HIDDEN;
+            t0 -= 3;
+        }
+        if t0 == 1 {
+            info |= EX_ISDOOR;
+        } else if t0 == 2 {
+            info |= EX_ISDOOR | EX_PICKPROOF;
+        }
+        info
+    }
+
     /// CircleMUD asciiflag_conv: a flag field is either a plain integer or a
     /// string of letters (a-z = bits 0-25, A-Z = bits 26-51).
     fn asciiflag_conv(flag: &str) -> u64 {
@@ -637,67 +790,157 @@ impl FileLoader {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
         let mut line = String::new();
+        // When parse_object consumes the next record's '#' header (C returns
+        // that line), we stash it here so the outer loop reuses it instead of
+        // reading a fresh line.
+        let mut pending: Option<String> = None;
 
-        while reader.read_line(&mut line)? > 0 {
-            if line.starts_with('#') {
-                let vnum: ObjVnum = match line[1..].trim().parse() {
-                    Ok(v) => v,
-                    Err(_) => {
-                        line.clear();
-                        continue;
-                    }
+        loop {
+            // Acquire the current header line.
+            if pending.is_none() {
+                line.clear();
+                if reader.read_line(&mut line)? == 0 {
+                    break;
+                }
+            } else {
+                line = pending.take().unwrap();
+            }
+
+            if line.starts_with('$') {
+                break;
+            }
+            if !line.starts_with('#') {
+                continue;
+            }
+            let vnum: ObjVnum = match line[1..].trim().parse() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            // Four tilde-terminated strings (each may span lines).
+            let keywords = Self::read_tilde_buf(&mut reader)?;
+            let short_desc = Self::read_tilde_buf(&mut reader)?;
+            let long_desc = Self::read_tilde_buf(&mut reader)?;
+            let _action_desc = Self::read_tilde_buf(&mut reader)?;
+
+            // type, extra flags, wear flags (flags may be ascii letters).
+            line.clear();
+            reader.read_line(&mut line)?;
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            let obj_type = parts.first().and_then(|s| s.parse::<i32>().ok()).unwrap_or(12);
+            let extra_flags = parts.get(1).map(|s| Self::asciiflag_conv(s)).unwrap_or(0);
+            let wear_flags = parts.get(2).map(|s| Self::asciiflag_conv(s) as u32).unwrap_or(1);
+
+            // values line: up to 6 numbers. value[0..4] are obj values;
+            // value[4]/value[5] become curr_slots/total_slots when in 0..=100.
+            line.clear();
+            reader.read_line(&mut line)?;
+            let vparts: Vec<&str> = line.split_whitespace().collect();
+            let mut values = [0i32; 4];
+            for (i, v) in values.iter_mut().enumerate() {
+                *v = vparts.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
+            }
+            let v4: i32 = vparts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let v5: i32 = vparts.get(5).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let (curr_slots, total_slots) =
+                if (0..=100).contains(&v4) && (0..=100).contains(&v5) {
+                    (v4, v5)
+                } else {
+                    (0, 0)
                 };
 
-                // Four tilde-terminated strings (each may span lines).
-                let keywords = Self::read_tilde_buf(&mut reader)?;
-                let short_desc = Self::read_tilde_buf(&mut reader)?;
-                let long_desc = Self::read_tilde_buf(&mut reader)?;
-                let action_desc = Self::read_tilde_buf(&mut reader)?;
-                let _ = action_desc;
-
-                // type, extra flags, wear flags (flags may be ascii letters).
-                line.clear();
-                reader.read_line(&mut line)?;
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                let obj_type = parts.first().and_then(|s| s.parse::<i32>().ok()).unwrap_or(9);
-                let extra_flags = parts.get(1).map(|s| Self::asciiflag_conv(s)).unwrap_or(0);
-                let wear_flags = parts.get(2).map(|s| Self::asciiflag_conv(s) as u32).unwrap_or(1);
-
-                // values (DeltaMUD writes up to 6; Object keeps the first 4).
-                line.clear();
-                reader.read_line(&mut line)?;
-                let vparts: Vec<&str> = line.split_whitespace().collect();
-                let mut values = [0i32; 4];
-                for (i, v) in values.iter_mut().enumerate() {
-                    *v = vparts.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
-                }
-
-                // weight, cost, rent.
-                line.clear();
-                reader.read_line(&mut line)?;
-                let wparts: Vec<&str> = line.split_whitespace().collect();
-                let weight = wparts.first().and_then(|s| s.parse().ok()).unwrap_or(1);
-                let cost = wparts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-                let rent = wparts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-
-                world.obj_protos.insert(
-                    vnum,
-                    ObjectProto {
-                        vnum,
-                        name: keywords,
-                        short_desc,
-                        description: long_desc,
-                        obj_type: ObjectType::from_i32(obj_type),
-                        wear_flags: WearFlags::from_bits_truncate(wear_flags),
-                        extra_flags: ExtraFlags::from_bits_truncate(extra_flags),
-                        weight,
-                        cost,
-                        rent,
-                        values,
-                    },
-                );
-            }
+            // weight, cost, rent.
             line.clear();
+            reader.read_line(&mut line)?;
+            let wparts: Vec<&str> = line.split_whitespace().collect();
+            let weight = wparts.first().and_then(|s| s.parse().ok()).unwrap_or(1);
+            let cost = wparts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let rent = wparts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+            // Optional E / A / c / L / BV / T blocks until '$' or next '#'.
+            let mut ex_descriptions: Vec<(String, String)> = Vec::new();
+            let mut affects: Vec<crate::object::ObjectAffect> = Vec::new();
+            let mut obj_class: i32 = -1;
+            let mut min_level: i32 = 0;
+            let mut bitvector: i64 = 0;
+            loop {
+                line.clear();
+                if reader.read_line(&mut line)? == 0 {
+                    break;
+                }
+                let first = line.trim_start().chars().next().unwrap_or(' ');
+                match first {
+                    'E' => {
+                        let keyword = Self::read_tilde_buf(&mut reader)?;
+                        let descr = Self::read_tilde_buf(&mut reader)?;
+                        ex_descriptions.push((keyword, descr));
+                    }
+                    'A' => {
+                        // The 'A' marker line is followed by 'location modifier'.
+                        if affects.len() < MAX_OBJ_AFFECT {
+                            line.clear();
+                            reader.read_line(&mut line)?;
+                            let ap: Vec<&str> = line.split_whitespace().collect();
+                            let location = ap.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+                            let modifier = ap.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                            affects.push(crate::object::ObjectAffect { location, modifier });
+                        }
+                    }
+                    'c' => {
+                        // c <class>  -> obj_class = class - 1 (C: atoi(line+2)-1)
+                        obj_class = line.trim_start()[1..].trim().parse::<i32>().unwrap_or(0) - 1;
+                    }
+                    'L' => {
+                        min_level = line.trim_start()[1..].trim().parse().unwrap_or(0);
+                    }
+                    'B' => {
+                        // Only 'BV' is meaningful (affect bitvector).
+                        let body = line.trim_start();
+                        if body.as_bytes().get(1) == Some(&b'V') {
+                            bitvector = body[2..].trim().parse().unwrap_or(0);
+                        }
+                    }
+                    'T' => {
+                        // Object DG trigger (kind = OBJ_TRIGGER = 1).
+                        let lt = line.trim();
+                        if lt[1..].trim().parse::<i32>().is_ok() {
+                            crate::dg_db_scripts::parse_trigger_line(1, vnum, lt);
+                        }
+                    }
+                    '$' | '#' => {
+                        // Hand this header to the outer loop.
+                        pending = Some(std::mem::take(&mut line));
+                        break;
+                    }
+                    _ => {
+                        // Stray/blank line — skip without aborting.
+                    }
+                }
+            }
+
+            world.obj_protos.insert(
+                vnum,
+                ObjectProto {
+                    vnum,
+                    name: keywords,
+                    short_desc,
+                    description: long_desc,
+                    obj_type: ObjectType::from_i32(obj_type),
+                    wear_flags: WearFlags::from_bits_truncate(wear_flags),
+                    extra_flags: ExtraFlags::from_bits_truncate(extra_flags),
+                    weight,
+                    cost,
+                    rent,
+                    values,
+                    curr_slots,
+                    total_slots,
+                    obj_class,
+                    min_level,
+                    bitvector,
+                    affects,
+                    ex_descriptions,
+                },
+            );
         }
 
         Ok(())

@@ -115,6 +115,14 @@ fn run_command(g: &mut GameState, ch: CharId, input: &str) {
         return;
     }
 
+    // Room special-exit interception (interpreter.c:799): a standing player who
+    // types the room special exit's ex_name moves through it, pre-empting normal
+    // dispatch (and the "Huh?!?" fallthrough). C passes the whole input line;
+    // ex_name is prefix-matched.
+    if pos == Position::Standing && crate::cmd_movement::special_exit_command(g, ch, input) {
+        return;
+    }
+
     // Abbreviation match: first table entry whose name is prefixed by `arg`
     // and whose min_level the actor meets. Table order is load-bearing.
     let mut found = None;

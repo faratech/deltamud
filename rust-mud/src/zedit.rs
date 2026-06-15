@@ -1207,17 +1207,14 @@ fn save_internally(g: &mut GameState, conn: ConnId) {
     };
 
     // Full on-disk command list (all rooms), minus this room's old commands,
-    // plus the edited ones spliced in at the right place.
+    // plus the edited ones spliced back in at the front.
     let path = zon_file_path(g, st.zone_number);
-    let mut all = read_disk_cmds(&path).unwrap_or_else(|| cmds_from_memory(g, st.zone_index));
-    all.retain(|c| cmd_room(c) != Some(st.room_vnum));
-    // Append this room's edited commands (CircleMUD appends them after the
-    // surviving commands; the file order is otherwise preserved).
-    for c in &st.cmds {
-        if c.command != 'N' {
-            all.push(*c);
-        }
-    }
+    let survivors = {
+        let mut all = read_disk_cmds(&path).unwrap_or_else(|| cmds_from_memory(g, st.zone_index));
+        all.retain(|c| cmd_room(c) != Some(st.room_vnum));
+        all
+    };
+    let all = splice_room_cmds(&st.cmds, survivors);
 
     // Update the live Zone header + simplified reset list.
     if let Some(z) = g.zones.get_mut(st.zone_index) {
@@ -1245,13 +1242,12 @@ fn save_to_disk(g: &mut GameState, conn: ConnId) {
 
     // Reconstruct the full command list the same way save_internally did, so
     // the file matches memory.
-    let mut all = read_disk_cmds(&path).unwrap_or_else(|| cmds_from_memory(g, st.zone_index));
-    all.retain(|c| cmd_room(c) != Some(st.room_vnum));
-    for c in &st.cmds {
-        if c.command != 'N' {
-            all.push(*c);
-        }
-    }
+    let survivors = {
+        let mut all = read_disk_cmds(&path).unwrap_or_else(|| cmds_from_memory(g, st.zone_index));
+        all.retain(|c| cmd_room(c) != Some(st.room_vnum));
+        all
+    };
+    let all = splice_room_cmds(&st.cmds, survivors);
 
     let name = if st.hdr.name.is_empty() { "undefined" } else { &st.hdr.name };
     let builders = if st.hdr.builders.is_empty() { "<NONE!>" } else { &st.hdr.builders };
@@ -1285,25 +1281,41 @@ fn save_to_disk(g: &mut GameState, conn: ConnId) {
     }
 }
 
+/// Splice the edited room's reset commands back into the surviving (other-room)
+/// command list, byte-faithfully matching CircleMUD `zedit_save_internally`.
+///
+/// C removes every command relating to the edited room from the live list, then
+/// re-inserts the player's scratch commands with `add_cmd_to_list(list, MYCMD[i],
+/// i)` for i = 0,1,2,... Each insertion places the command at absolute index `i`,
+/// so the edited room's commands always end up at the FRONT of the list in their
+/// scratch order, ahead of every surviving command. (Appending them at the end
+/// instead reorders the file and breaks the load->save round-trip.) 'N' is the
+/// freshly-created-blank sentinel and is never written.
+fn splice_room_cmds(edited: &[RawCmd], survivors: Vec<RawCmd>) -> Vec<RawCmd> {
+    let mut all: Vec<RawCmd> = edited.iter().filter(|c| c.command != 'N').copied().collect();
+    all.extend(survivors);
+    all
+}
+
 /// Convert a RawCmd (vnum-based) into the simplified in-memory ResetCmd. Returns
 /// None for command letters the Rust ResetCmd does not model.
 fn raw_to_reset(c: &RawCmd) -> Option<ResetCmd> {
     let if_flag = c.if_flag != 0;
     match c.command {
-        'M' => Some(ResetCmd::LoadMob { if_flag, mob_vnum: c.arg1, max_count: c.arg2, room_vnum: c.arg3 }),
-        'O' => Some(ResetCmd::LoadObjInRoom { if_flag, obj_vnum: c.arg1, max_count: c.arg2, room_vnum: c.arg3 }),
-        'G' => Some(ResetCmd::GiveObjToMob { if_flag, obj_vnum: c.arg1, max_count: c.arg2 }),
-        'E' => Some(ResetCmd::EquipMob { if_flag, obj_vnum: c.arg1, max_count: c.arg2, wear_pos: c.arg3.max(0) as usize }),
-        'P' => Some(ResetCmd::PutObjInObj { if_flag, obj_vnum: c.arg1, max_count: c.arg2, container_vnum: c.arg3 }),
+        'M' => Some(ResetCmd::LoadMob { if_flag, mob_vnum: c.arg1, max_count: c.arg2, room_vnum: c.arg3, load_chance: c.arg4 }),
+        'O' => Some(ResetCmd::LoadObjInRoom { if_flag, obj_vnum: c.arg1, max_count: c.arg2, room_vnum: c.arg3, load_chance: c.arg4 }),
+        'G' => Some(ResetCmd::GiveObjToMob { if_flag, obj_vnum: c.arg1, max_count: c.arg2, load_chance: c.arg3 }),
+        'E' => Some(ResetCmd::EquipMob { if_flag, obj_vnum: c.arg1, max_count: c.arg2, wear_pos: c.arg3.max(0) as usize, load_chance: c.arg4 }),
+        'P' => Some(ResetCmd::PutObjInObj { if_flag, obj_vnum: c.arg1, max_count: c.arg2, container_vnum: c.arg3, load_chance: c.arg4 }),
         'R' => Some(ResetCmd::RemoveObj { if_flag, room_vnum: c.arg1, obj_vnum: c.arg2 }),
         'D' => Some(ResetCmd::Door { if_flag, room_vnum: c.arg1, direction: c.arg2.max(0) as usize, state: c.arg3 }),
         _ => None,
     }
 }
 
-/// Reconstruct RawCmds (vnum-based) from the in-memory simplified ResetCmd list
-/// (used as a fallback when the on-disk file is unreadable). arg4 (load chance)
-/// is unrecoverable from the simplified form and defaults to 0 (= 100%).
+/// Reconstruct RawCmds (vnum-based) from the in-memory ResetCmd list (used as a
+/// fallback when the on-disk file is unreadable). The load-chance (arg4, or arg3
+/// for G) now round-trips through the in-memory model.
 fn cmds_from_memory(g: &GameState, zone_index: usize) -> Vec<RawCmd> {
     let z = match g.zones.get(zone_index) {
         Some(z) => z,
@@ -1312,20 +1324,20 @@ fn cmds_from_memory(g: &GameState, zone_index: usize) -> Vec<RawCmd> {
     z.reset_commands
         .iter()
         .map(|rc| match rc {
-            ResetCmd::LoadMob { if_flag, mob_vnum, max_count, room_vnum } => RawCmd {
-                command: 'M', if_flag: *if_flag as i32, arg1: *mob_vnum, arg2: *max_count, arg3: *room_vnum, arg4: 0,
+            ResetCmd::LoadMob { if_flag, mob_vnum, max_count, room_vnum, load_chance } => RawCmd {
+                command: 'M', if_flag: *if_flag as i32, arg1: *mob_vnum, arg2: *max_count, arg3: *room_vnum, arg4: *load_chance,
             },
-            ResetCmd::LoadObjInRoom { if_flag, obj_vnum, max_count, room_vnum } => RawCmd {
-                command: 'O', if_flag: *if_flag as i32, arg1: *obj_vnum, arg2: *max_count, arg3: *room_vnum, arg4: 0,
+            ResetCmd::LoadObjInRoom { if_flag, obj_vnum, max_count, room_vnum, load_chance } => RawCmd {
+                command: 'O', if_flag: *if_flag as i32, arg1: *obj_vnum, arg2: *max_count, arg3: *room_vnum, arg4: *load_chance,
             },
-            ResetCmd::GiveObjToMob { if_flag, obj_vnum, max_count } => RawCmd {
-                command: 'G', if_flag: *if_flag as i32, arg1: *obj_vnum, arg2: *max_count, arg3: 0, arg4: 0,
+            ResetCmd::GiveObjToMob { if_flag, obj_vnum, max_count, load_chance } => RawCmd {
+                command: 'G', if_flag: *if_flag as i32, arg1: *obj_vnum, arg2: *max_count, arg3: *load_chance, arg4: 0,
             },
-            ResetCmd::EquipMob { if_flag, obj_vnum, max_count, wear_pos } => RawCmd {
-                command: 'E', if_flag: *if_flag as i32, arg1: *obj_vnum, arg2: *max_count, arg3: *wear_pos as i32, arg4: 0,
+            ResetCmd::EquipMob { if_flag, obj_vnum, max_count, wear_pos, load_chance } => RawCmd {
+                command: 'E', if_flag: *if_flag as i32, arg1: *obj_vnum, arg2: *max_count, arg3: *wear_pos as i32, arg4: *load_chance,
             },
-            ResetCmd::PutObjInObj { if_flag, obj_vnum, max_count, container_vnum } => RawCmd {
-                command: 'P', if_flag: *if_flag as i32, arg1: *obj_vnum, arg2: *max_count, arg3: *container_vnum, arg4: 0,
+            ResetCmd::PutObjInObj { if_flag, obj_vnum, max_count, container_vnum, load_chance } => RawCmd {
+                command: 'P', if_flag: *if_flag as i32, arg1: *obj_vnum, arg2: *max_count, arg3: *container_vnum, arg4: *load_chance,
             },
             ResetCmd::RemoveObj { if_flag, room_vnum, obj_vnum } => RawCmd {
                 command: 'R', if_flag: *if_flag as i32, arg1: *room_vnum, arg2: *obj_vnum, arg3: -1, arg4: 0,

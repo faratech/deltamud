@@ -140,6 +140,40 @@ impl GameState {
             }
         }
 
+        // Break any mount link (handler.c extract_char -> dismount_char).
+        let riding = self.chars.get(&cid).and_then(|c| c.riding);
+        if let Some(m) = riding {
+            if let Some(mc) = self.chars.get_mut(&m) {
+                mc.ridden_by = None;
+            }
+        }
+        let ridden_by = self.chars.get(&cid).and_then(|c| c.ridden_by);
+        if let Some(r) = ridden_by {
+            if let Some(rc) = self.chars.get_mut(&r) {
+                rc.riding = None;
+            }
+        }
+        if let Some(c) = self.chars.get_mut(&cid) {
+            c.riding = None;
+            c.ridden_by = None;
+        }
+
+        // Forget snooping (comm.c close_socket / handler.c extract_char). If we
+        // were snooping someone, clear their snoop_by; if someone was snooping
+        // us, clear their snooping (and they lose the live feed).
+        let snooping = self.chars.get(&cid).and_then(|c| c.snooping);
+        if let Some(v) = snooping {
+            if let Some(vc) = self.chars.get_mut(&v) {
+                vc.snoop_by = None;
+            }
+        }
+        let snoop_by = self.chars.get(&cid).and_then(|c| c.snoop_by);
+        if let Some(s) = snoop_by {
+            if let Some(sc) = self.chars.get_mut(&s) {
+                sc.snooping = None;
+            }
+        }
+
         self.char_from_room(cid);
 
         // Extract carried + worn objects.

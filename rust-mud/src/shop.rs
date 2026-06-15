@@ -627,28 +627,11 @@ fn mud_hour() -> i32 {
 }
 
 /// Translate the Rust ObjectType enum back to the raw structs.h ITEM_* integer
-/// the shop file (and CircleMUD GET_OBJ_TYPE) uses. The enum's discriminants do
-/// NOT match these, so an explicit map is required for correct trade matching.
+/// the shop file (and CircleMUD GET_OBJ_TYPE) uses. ObjectType discriminants now
+/// equal the C ITEM_* numbers, so the type cast IS the trade code.
 fn obj_type_int(g: &GameState, oid: ObjId) -> i32 {
-    use crate::object::ObjectType::*;
     match g.get_obj(oid).map(|o| o.obj_type) {
-        Some(Light) => ITEM_LIGHT,
-        Some(Scroll) => ITEM_SCROLL,
-        Some(Wand) => ITEM_WAND,
-        Some(Staff) => ITEM_STAFF,
-        Some(Weapon) => ITEM_WEAPON,
-        Some(Treasure) => ITEM_TREASURE,
-        Some(Armor) => ITEM_ARMOR,
-        Some(Potion) => ITEM_POTION,
-        Some(Other) => ITEM_OTHER,
-        Some(Trash) => ITEM_TRASH,
-        Some(Container) => ITEM_CONTAINER,
-        Some(Note) => ITEM_NOTE,
-        Some(LiqContainer) => ITEM_DRINKCON,
-        Some(Key) => ITEM_KEY,
-        Some(Food) => ITEM_FOOD,
-        Some(Money) => ITEM_MONEY,
-        Some(Fountain) => ITEM_FOUNTAIN,
+        Some(t) => t as i32,
         None => ITEM_OTHER,
     }
 }

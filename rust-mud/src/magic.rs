@@ -84,13 +84,12 @@ fn affected_by_spell(g: &GameState, ch: CharId, spell: i32) -> bool {
 }
 
 /// mag_savingthrow(ch, victim) (magic.c): does the victim avoid the spell?
-/// chance() (the DeltaMUD hit-chance helper) isn't ported; C uses
-/// number(0,100) > chance(ch,victim,1). With no chance() we model the classic
-/// CircleMUD coin-flip on magic resistance: a victim saves on a high roll.
-fn mag_savingthrow(g: &mut GameState, _ch: CharId, _victim: CharId) -> bool {
-    // chance(ch,victim,1) is unported; degrade to a 50/50 save like the
-    // baseline DikuMUD saving throw (number(0,100) vs a 50 threshold).
-    g.rng.number(0, 100) > 50
+/// DeltaMUD: `number(0,100) > chance(ch, victim, 1)` — a magical to-hit roll
+/// against the attacker's magical chance. The save succeeds (returns true)
+/// when the roll beats that chance, so a weak caster's spells get resisted
+/// more often. Uses the canonical combat::chance (no forked formula).
+fn mag_savingthrow(g: &mut GameState, ch: CharId, victim: CharId) -> bool {
+    g.rng.number(0, 100) > combat::chance(g, ch, victim, 1)
 }
 
 /// affect_join (handler.c): merge a new affect into the victim, with optional
@@ -278,10 +277,14 @@ pub fn mag_damage(g: &mut GameState, level: i32, ch: CharId, victim: Option<Char
     if is_affected(g, ch, AFF_CONVERGENCE) {
         dam <<= 1;
     }
-    // dam_multi(ch, victim, 1) is the DeltaMUD power/mpower scaling, not yet
-    // ported; the multiplier is 1 in the base data model (documented gap).
+    // DeltaMUD magical power scaling: dam *= dam_multi(ch, victim, 1). As in C
+    // this is applied here AND again inside do_actual_damage (combat::damage_type
+    // re-applies the type-1 multiplier for spellnums 1..=MAX_SPELLS).
+    dam = (dam as f32 * combat::dam_multi(g, ch, victim, 1)) as i32;
 
-    combat::damage(g, ch, victim, dam);
+    // Pass the spell number as the attack type so the damage path treats it as
+    // magical (type-1 multiplier) and routes the spell message correctly.
+    combat::damage_type(g, ch, victim, dam, spellnum);
 }
 
 // ===========================================================================

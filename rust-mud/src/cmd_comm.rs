@@ -188,13 +188,74 @@ fn connected_players(g: &GameState) -> Vec<CharId> {
 }
 
 // ---------------------------------------------------------------------------
-// makedrunk — slur the speech of a sufficiently-drunk speaker (utils.c). The
-// drunk system is not yet ported; with a non-positive DRUNK condition the C
-// makedrunk returns the string untouched, which is the common path, so we
-// preserve the argument verbatim here.
+// makedrunk — slur the speech of a sufficiently-drunk speaker (language.c).
+// Each letter A..Z has a minimum DRUNK level and a replacement table; once the
+// speaker's DRUNK condition exceeds a letter's threshold, that letter is
+// replaced by a random table entry (case-folded on the original). Digits are
+// randomised to 0..9. A non-positive DRUNK condition returns the string
+// untouched (the common path). Ported 1:1 from the C drunk[] table.
 // ---------------------------------------------------------------------------
-fn makedrunk(arg: &str, _g: &GameState, _ch: CharId) -> String {
-    arg.to_string()
+
+/// (min_drunk_level, replacements). number(0, number_of_rep) selects an index
+/// into `replacements`, so the slice length is number_of_rep + 1 (C indexes
+/// [0..=number_of_rep] inclusive).
+const DRUNK_TABLE: [(i32, &[&str]); 26] = [
+    (3, &["a", "a", "a", "A", "aa", "ah", "Ah", "ao", "aw", "oa", "ahhhh"]),
+    (8, &["b", "b", "b", "B", "B", "vb"]),
+    (3, &["c", "c", "C", "cj", "sj", "zj"]),
+    (5, &["d", "d", "D"]),
+    (3, &["e", "e", "eh", "E"]),
+    (4, &["f", "f", "ff", "fff", "fFf", "F"]),
+    (8, &["g", "g", "G"]),
+    (9, &["h", "h", "hh", "hhh", "Hhh", "HhH", "H"]),
+    (7, &["i", "i", "Iii", "ii", "iI", "Ii", "I"]),
+    (9, &["j", "j", "jj", "Jj", "jJ", "J"]),
+    (7, &["k", "k", "K"]),
+    (3, &["l", "l", "L"]),
+    (5, &["m", "m", "mm", "mmm", "mmmm", "mmmmm", "MmM", "mM", "M"]),
+    (6, &["n", "n", "nn", "Nn", "nnn", "nNn", "N"]),
+    (3, &["o", "o", "ooo", "ao", "aOoo", "Ooo", "ooOo"]),
+    (3, &["p", "p", "P"]),
+    (5, &["q", "q", "Q", "ku", "ququ", "kukeleku"]),
+    (4, &["r", "r", "R"]),
+    (2, &["s", "ss", "zzZzssZ", "ZSssS", "sSzzsss", "sSss"]),
+    (5, &["t", "t", "T"]),
+    (3, &["u", "u", "uh", "Uh", "Uhuhhuh", "uhU", "uhhu"]),
+    (4, &["v", "v", "V"]),
+    (4, &["w", "w", "W"]),
+    (5, &["x", "x", "X", "ks", "iks", "kz", "xz"]),
+    (3, &["y", "y", "Y"]),
+    (2, &["z", "z", "ZzzZz", "Zzz", "Zsszzsz", "szz", "sZZz", "ZSz", "zZ", "Z"]),
+];
+
+fn makedrunk(arg: &str, g: &mut GameState, ch: CharId) -> String {
+    let drunk = g.get_char(ch).map(|c| c.conditions[DRUNK] as i32).unwrap_or(0);
+    if drunk <= 0 {
+        return arg.to_string();
+    }
+    let mut out = String::with_capacity(arg.len() * 2);
+    // C iterates `do { ... } while (*string++)`, i.e. it processes the trailing
+    // NUL too, which appends nothing; iterating the bytes here is equivalent.
+    for &b in arg.as_bytes() {
+        let upper = (b as char).to_ascii_uppercase();
+        if upper.is_ascii_uppercase() {
+            let idx = (upper as u8 - b'A') as usize;
+            let (min_level, reps) = DRUNK_TABLE[idx];
+            if drunk > min_level {
+                // C: number(0, number_of_rep) where number_of_rep == reps.len()-1.
+                let r = g.rng.number(0, (reps.len() - 1) as i32) as usize;
+                out.push_str(reps[r]);
+            } else {
+                out.push(b as char);
+            }
+        } else if (b as char).is_ascii_digit() {
+            let d = (b'0' + g.rng.number(0, 9) as u8) as char;
+            out.push(d);
+        } else {
+            out.push(b as char);
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

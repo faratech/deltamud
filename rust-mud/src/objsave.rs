@@ -1210,8 +1210,31 @@ fn crash_offer_rent(g: &mut GameState, ch: CharId, recep: CharId, display: bool,
         let line = format!("$n tells you, 'Plus, my {} coin fee..'", MIN_RENT_COST * factor);
         act(g, &line, false, recep, None, ActArg::Char(ch), To::Vict);
 
-        // GET_CITIZEN(ch) >= 1 reduction: no citizen table in the contract yet,
-        // so GET_CITIZEN == 0 and this branch is skipped (documented gap).
+        // C objsave.c Crash_offer_rent: town-citizens (GET_CITIZEN >= 1) get a
+        // percentage rent reduction equal to their citizen rank. The displayed
+        // reduction is (rank * totalcost / 100) computed BEFORE the subtraction;
+        // the floor is MAX(1, ...). READ_CITIZEN selects the title by sex.
+        let citizen = g.get_char(ch).map(|c| c.citizen).unwrap_or(0) as i64;
+        if citizen >= 1 {
+            let sex = g.get_char(ch).map(|c| c.player.sex).unwrap_or(Gender::Neutral);
+            let title = {
+                let idx = match sex {
+                    Gender::Male => 0,
+                    Gender::Female => 1,
+                    Gender::Neutral => 2,
+                };
+                crate::constants::CITIZEN_TITLES[citizen as usize][idx]
+            };
+            let line = format!(
+                "$n tells you, 'Your fame has marked you as a {}, and I honor that with a {} coin reduction in your rent.'",
+                title,
+                (citizen * totalcost) / 100
+            );
+            act(g, &line, false, recep, None, ActArg::Char(ch), To::Vict);
+            totalcost -= (totalcost * citizen) / 100;
+            totalcost = totalcost.max(1);
+        }
+
         if totalcost < 0 {
             totalcost = 0;
         }

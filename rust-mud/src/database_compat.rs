@@ -1,571 +1,314 @@
-// Full database compatibility layer for original DeltaMUD schema
+// C-schema-compatible player persistence helpers.
+//
+// This module is the single source of truth for translating between the C
+// DeltaMUD `player_main` / `player_affects` / `player_skills` tables and the
+// Rust `Character`. The column set, order, and source fields mirror
+// dbinterface.c::init_querystring (83 columns) exactly so the on-disk format
+// is cross-compatible with the original C MUD. `database.rs` reuses these
+// helpers for its real MySQL path.
+//
+// Column->field mapping (see src/dbinterface.c init_querystring):
+//   idnum,name,description,title,sex,class,race,deity,level,hometown,birth,
+//   played,weight,height,pwd,last_logon,host,mana,max_mana,hit,max_hit,move,
+//   max_move,gold,bank_gold,exp,power,mpower,defense,mdefense,technique,str,
+//   str_add,intel,wis,dex,con,cha,PADDING0,talks1,talks2,talks3,wimp_level,
+//   freeze_level,invis_level,load_room,pref,bad_pws,cond1,cond2,cond3,
+//   death_timer,citizen,training,newbie,arena,spells_to_learn,questpoints,
+//   nextquest,countdown,questobj,questmob,recall_level,retreat_level,trust,
+//   bail_amt,wins,losses,pref2,godcmds1,godcmds2,godcmds3,godcmds4,clan,
+//   clan_rank,mapx,mapy,buildmodezone,buildmoderoom,tloadroom,alignment,act,
+//   affected_by  (= 83 columns)
+//
+// Note on `talks`: C reads talks[0], talks[2], talks[3]. The struct is
+// `bool talks[MAX_TONGUE]` with MAX_TONGUE==3, so talks[3] is a C out-of-bounds
+// read (a latent C bug that aliases wimp_level's low byte). We persist the real
+// tongue data — talks1<-talks[0], talks2<-talks[2] — and write talks3 as 0
+// rather than replicate the overread; loading ignores talks3.
 
-use mysql_async::{Pool, prelude::*, Row};
-use crate::character::{Character, Affect};
-use anyhow::{Result, anyhow};
-use sha2::{Sha256, Digest};
-use log::warn;
+use crate::character::{Affect, Character};
+use crate::types::*;
+use mysql_async::prelude::*;
+use mysql_async::{Row, Value};
 
-// Complete player_main schema matching C version
-#[derive(Debug)]
-pub struct PlayerMainRow {
-    // Core identity
-    pub idnum: i32,
-    pub name: String,
-    pub password: String,
-    pub pwd_new: i8,  // 0 = old crypt, 1 = SHA256
-    
-    // Basic info
-    pub title: Option<String>,
-    pub sex: i8,
-    pub class: i8,
-    pub race: i8,
-    pub level: i8,
-    pub admlevel: i8,
-    pub hometown: i32,
-    
-    // Time tracking
-    pub birth: i64,
-    pub played: i32,
-    pub last_logon: i64,
-    
-    // Physical
-    pub weight: i8,
-    pub height: i8,
-    
-    // Location
-    pub room_vnum: i32,
-    pub load_room: i32,
-    
-    // Stats
-    pub hit: i16,
-    pub max_hit: i16,
-    pub mana: i16,
-    pub max_mana: i16,
-    pub move_points: i16,
-    pub max_move: i16,
-    
-    // Abilities
-    pub str: i8,
-    pub str_add: i8,
-    pub intel: i8,
-    pub wis: i8,
-    pub dex: i8,
-    pub con: i8,
-    pub cha: i8,
-    
-    // Combat
-    pub armor: i16,
-    pub gold: i32,
-    pub bank_gold: i32,
-    pub bank_amethyst: i32,
-    pub bank_bronze: i32,
-    pub bank_silver: i32,
-    pub bank_copper: i32,
-    pub bank_steel: i32,
-    pub exp: i32,
-    pub hitroll: i8,
-    pub damroll: i8,
-    pub power: i16,
-    pub defense: i16,
-    pub technique: i16,
-    
-    // Points/Status
-    pub points: i16,
-    pub death_count: i32,
-    pub pk_deaths: i32,
-    pub mob_deaths: i32,
-    pub dt_deaths: i32,
-    pub login_count: i32,
-    pub align: i16,
-    pub position: i8,
-    pub drunkenness: i8,
-    pub hunger: i8,
-    pub thirst: i8,
-    
-    // Flags
-    pub act: i64,
-    pub plr: i64,
-    pub prf: i64,
-    pub aff: i64,
-    
-    // System
-    pub page_length: i8,
-    pub wimp_level: i8,
-    pub freeze_level: i8,
-    pub bad_pws: i8,
-    pub invis_level: i8,
-    pub host: String,
-    
-    // Clan
-    pub clan_id: i32,
-    pub clan_rank: i32,
-    
-    // Arena
-    pub arena_wins: i16,
-    pub arena_losses: i16,
-    
-    // Quest
-    pub quest_points: i32,
-    pub quest_current: i32,
-    pub quest_timer: i32,
-    
-    // Description
-    pub description: Option<String>,
-    
-    // Language
-    pub speaks: i32,
-    
-    // Deity
-    pub deity: i8,
-    
-    // Spare fields
-    pub spare0: i32,
-    pub spare1: i32,
-    pub spare2: i32,
-    pub spare3: i32,
-    pub spare4: i32,
-    pub spare5: i32,
+/// The ordered list of all 83 `player_main` columns (matches dbinterface.c).
+pub const PLAYER_MAIN_COLUMNS: &[&str] = &[
+    "idnum", "name", "description", "title", "sex", "class", "race", "deity",
+    "level", "hometown", "birth", "played", "weight", "height", "pwd",
+    "last_logon", "host", "mana", "max_mana", "hit", "max_hit", "move",
+    "max_move", "gold", "bank_gold", "exp", "power", "mpower", "defense",
+    "mdefense", "technique", "str", "str_add", "intel", "wis", "dex", "con",
+    "cha", "PADDING0", "talks1", "talks2", "talks3", "wimp_level",
+    "freeze_level", "invis_level", "load_room", "pref", "bad_pws", "cond1",
+    "cond2", "cond3", "death_timer", "citizen", "training", "newbie", "arena",
+    "spells_to_learn", "questpoints", "nextquest", "countdown", "questobj",
+    "questmob", "recall_level", "retreat_level", "trust", "bail_amt", "wins",
+    "losses", "pref2", "godcmds1", "godcmds2", "godcmds3", "godcmds4", "clan",
+    "clan_rank", "mapx", "mapy", "buildmodezone", "buildmoderoom", "tloadroom",
+    "alignment", "act", "affected_by",
+];
+
+/// Build the ordered Value list for an INSERT/UPDATE of `player_main`, in the
+/// same column order as `PLAYER_MAIN_COLUMNS`. `pwd_hash` is the already-hashed
+/// password (the C MUD stores the crypt/hash directly in `pwd`); `host` is the
+/// connecting host string ("" if unknown).
+pub fn player_main_values(ch: &Character, pwd_hash: &str, host: &str) -> Vec<Value> {
+    vec![
+        Value::from(ch.idnum),
+        Value::from(ch.player.name.clone()),
+        Value::from(ch.player.description.clone()),
+        // title: NULL when empty, matching C's NULL-on-empty-string behaviour.
+        match &ch.player.title {
+            Some(t) if !t.is_empty() => Value::from(t.clone()),
+            _ => Value::NULL,
+        },
+        Value::from(ch.player.sex as u8),
+        Value::from(ch.player.class as u8),
+        Value::from(ch.player.race as u8),
+        Value::from(ch.player.deity),
+        Value::from(ch.player.level),
+        Value::from(ch.player.hometown),
+        Value::from(ch.player.time_birth),
+        Value::from(ch.player.time_played),
+        Value::from(ch.player.weight),
+        Value::from(ch.player.height),
+        Value::from(pwd_hash),
+        Value::from(ch.last_logon.timestamp()),
+        Value::from(host),
+        Value::from(ch.points.mana),
+        Value::from(ch.points.max_mana),
+        Value::from(ch.points.hit),
+        Value::from(ch.points.max_hit),
+        Value::from(ch.points.move_points),
+        Value::from(ch.points.max_move),
+        Value::from(ch.points.gold),
+        Value::from(ch.points.bank_gold),
+        Value::from(ch.points.exp),
+        Value::from(ch.points.power),
+        Value::from(ch.points.mpower),
+        Value::from(ch.points.defense),
+        Value::from(ch.points.mdefense),
+        Value::from(ch.points.technique),
+        Value::from(ch.real_abils.str),
+        Value::from(ch.real_abils.str_add),
+        Value::from(ch.real_abils.intel),
+        Value::from(ch.real_abils.wis),
+        Value::from(ch.real_abils.dex),
+        Value::from(ch.real_abils.con),
+        Value::from(ch.real_abils.cha),
+        Value::from(ch.padding0),
+        Value::from(ch.talks[0] as i32),
+        Value::from(ch.talks[2] as i32),
+        Value::from(0_i32), // talks3 (C overread; see module note)
+        Value::from(ch.wimp_level),
+        Value::from(ch.freeze_level),
+        Value::from(ch.invis_level),
+        Value::from(ch.load_room),
+        Value::from(ch.prf_flags),
+        Value::from(ch.bad_pws),
+        Value::from(ch.conditions[0]),
+        Value::from(ch.conditions[1]),
+        Value::from(ch.conditions[2]),
+        Value::from(ch.death_timer),
+        Value::from(ch.citizen),
+        Value::from(ch.training),
+        Value::from(ch.newbie),
+        Value::from(ch.arena),
+        Value::from(ch.spells_to_learn),
+        Value::from(ch.quest_points),
+        Value::from(ch.next_quest),
+        Value::from(ch.quest_countdown),
+        Value::from(ch.quest_obj),
+        Value::from(ch.quest_mob),
+        Value::from(ch.recall_level),
+        Value::from(ch.retreat_level),
+        Value::from(ch.trust),
+        Value::from(ch.bail_amt),
+        Value::from(ch.wins),
+        Value::from(ch.losses),
+        Value::from(ch.prf2_flags),
+        Value::from(ch.godcmds1),
+        Value::from(ch.godcmds2),
+        Value::from(ch.godcmds3),
+        Value::from(ch.godcmds4),
+        Value::from(ch.clan),
+        Value::from(ch.clan_rank),
+        Value::from(ch.mapx),
+        Value::from(ch.mapy),
+        Value::from(ch.buildmodezone),
+        Value::from(ch.buildmoderoom),
+        Value::from(ch.tloadroom),
+        Value::from(ch.alignment),
+        Value::from(ch.act_flags),
+        Value::from(ch.affect_flags),
+    ]
 }
 
-impl PlayerMainRow {
-    // Convert from C database row to Rust Character
-    pub fn to_character(&self) -> Character {
-        let mut ch = Character::new_player(
-            self.name.clone(),
-            unsafe { std::mem::transmute(self.class) },
-            unsafe { std::mem::transmute(self.race) },
-        );
-        
-        ch.id = self.idnum as u64;
-        ch.player.title = self.title.clone();
-        ch.player.sex = unsafe { std::mem::transmute(self.sex) };
-        ch.player.level = self.level as u8;
-        ch.player.hometown = self.hometown;
-        ch.player.time_played = self.played as i64;
-        ch.player.weight = self.weight as u8;
-        ch.player.height = self.height as u8;
-        
-        // Stats
-        ch.points.hit = self.hit as i32;
-        ch.points.max_hit = self.max_hit as i32;
-        ch.points.mana = self.mana as i32;
-        ch.points.max_mana = self.max_mana as i32;
-        ch.points.move_points = self.move_points as i32;
-        ch.points.max_move = self.max_move as i32;
-        ch.points.armor = self.armor;
-        ch.points.gold = self.gold;
-        ch.points.exp = self.exp as i64;
-        ch.points.hitroll = self.hitroll as i16;
-        ch.points.damroll = self.damroll as i16;
-        
-        // Abilities
-        ch.real_abils.str = self.str;
-        ch.real_abils.int = self.intel;
-        ch.real_abils.wis = self.wis;
-        ch.real_abils.dex = self.dex;
-        ch.real_abils.con = self.con;
-        ch.real_abils.cha = self.cha;
-        ch.aff_abils = ch.real_abils.clone();
-        
-        // Position and flags
-        ch.position = unsafe { std::mem::transmute(self.position) };
-        ch.act_flags = self.act;
-        ch.affect_flags = self.aff;
-        
-        ch
-    }
-    
-    // Convert from Rust Character to database row
-    pub fn from_character(ch: &Character) -> Self {
-        PlayerMainRow {
-            idnum: ch.id as i32,
-            name: ch.player.name.clone(),
-            password: String::new(), // Don't update password on normal saves
-            pwd_new: 1,
-            
-            title: ch.player.title.clone(),
-            sex: ch.player.sex as i8,
-            class: ch.player.class as i8,
-            race: ch.player.race as i8,
-            level: ch.player.level as i8,
-            admlevel: if ch.is_immortal() { ch.player.level as i8 - 30 } else { 0 },
-            hometown: ch.player.hometown,
-            
-            birth: ch.created_at.timestamp(),
-            played: ch.player.time_played as i32,
-            last_logon: ch.last_logon.timestamp(),
-            
-            weight: ch.player.weight as i8,
-            height: ch.player.height as i8,
-            
-            room_vnum: ch.in_room.as_ref()
-                .and_then(|r| r.upgrade())
-                .map(|r| r.read().number)
-                .unwrap_or(ch.player.hometown),
-            load_room: ch.player.hometown,
-            
-            hit: ch.points.hit as i16,
-            max_hit: ch.points.max_hit as i16,
-            mana: ch.points.mana as i16,
-            max_mana: ch.points.max_mana as i16,
-            move_points: ch.points.move_points as i16,
-            max_move: ch.points.max_move as i16,
-            
-            str: ch.real_abils.str,
-            str_add: 0,
-            intel: ch.real_abils.int,
-            wis: ch.real_abils.wis,
-            dex: ch.real_abils.dex,
-            con: ch.real_abils.con,
-            cha: ch.real_abils.cha,
-            
-            armor: ch.points.armor,
-            gold: ch.points.gold,
-            bank_gold: 0,
-            bank_amethyst: 0,
-            bank_bronze: 0,
-            bank_silver: 0,
-            bank_copper: 0,
-            bank_steel: 0,
-            exp: ch.points.exp as i32,
-            hitroll: ch.points.hitroll as i8,
-            damroll: ch.points.damroll as i8,
-            power: 100,
-            defense: 100,
-            technique: 100,
-            
-            points: 0,
-            death_count: 0,
-            pk_deaths: 0,
-            mob_deaths: 0,
-            dt_deaths: 0,
-            login_count: 1,
-            align: 0,
-            position: ch.position as i8,
-            drunkenness: 0,
-            hunger: 24,
-            thirst: 24,
-            
-            act: ch.act_flags,
-            plr: 0,
-            prf: 0,
-            aff: ch.affect_flags,
-            
-            page_length: 24,
-            wimp_level: 0,
-            freeze_level: 0,
-            bad_pws: 0,
-            invis_level: 0,
-            host: String::new(),
-            
-            clan_id: 0,
-            clan_rank: 0,
-            
-            arena_wins: 0,
-            arena_losses: 0,
-            
-            quest_points: 0,
-            quest_current: 0,
-            quest_timer: 0,
-            
-            description: Some(ch.player.description.clone()),
-            speaks: 0,
-            deity: 0,
-            
-            spare0: 0,
-            spare1: 0,
-            spare2: 0,
-            spare3: 0,
-            spare4: 0,
-            spare5: 0,
-        }
+/// Small helper: pull a column, falling back to a default if NULL/missing/typed
+/// wrong, so a partially-populated row never panics.
+fn col<T: FromValue + Default>(row: &Row, name: &str) -> T {
+    match row.get_opt::<T, _>(name) {
+        Some(Ok(v)) => v,
+        _ => T::default(),
     }
 }
 
-// Full compatibility database interface
-pub struct CompatDatabase {
-    pub pool: Pool,
+fn col_opt_string(row: &Row, name: &str) -> Option<String> {
+    match row.get_opt::<Option<String>, _>(name) {
+        Some(Ok(v)) => v,
+        _ => None,
+    }
 }
 
-impl CompatDatabase {
-    pub fn new(database_url: &str) -> Result<Self> {
-        let pool = Pool::new(database_url);
-        Ok(CompatDatabase { pool })
+/// Convert a fully-selected `player_main` row into a `Character`, mirroring the
+/// C retrieve_player_entry field assignments. Skills and affects are loaded
+/// separately (see `load_skills` / `load_affects`).
+pub fn player_main_to_character(row: &Row) -> Character {
+    let mut ch = Character::new_player(
+        col::<String>(row, "name"),
+        Class::from_u8(col::<i32>(row, "class") as u8),
+        Race::from_u8(col::<i32>(row, "race") as u8),
+    );
+
+    ch.idnum = col::<i64>(row, "idnum");
+    ch.player.description = col::<String>(row, "description");
+    ch.player.title = col_opt_string(row, "title");
+    ch.player.sex = Gender::from_u8(col::<i32>(row, "sex") as u8);
+    ch.player.deity = col::<i32>(row, "deity") as u8;
+    ch.player.level = col::<i32>(row, "level") as u8;
+    ch.player.hometown = col::<i32>(row, "hometown");
+    ch.player.time_birth = col::<i64>(row, "birth");
+    ch.player.time_played = col::<i64>(row, "played");
+    ch.player.weight = col::<i32>(row, "weight") as u8;
+    ch.player.height = col::<i32>(row, "height") as u8;
+
+    // points
+    ch.points.mana = col::<i32>(row, "mana");
+    ch.points.max_mana = col::<i32>(row, "max_mana");
+    ch.points.hit = col::<i32>(row, "hit");
+    ch.points.max_hit = col::<i32>(row, "max_hit");
+    ch.points.move_points = col::<i32>(row, "move");
+    ch.points.max_move = col::<i32>(row, "max_move");
+    ch.points.gold = col::<i32>(row, "gold");
+    ch.points.bank_gold = col::<i32>(row, "bank_gold");
+    ch.points.exp = col::<i64>(row, "exp");
+    ch.points.power = col::<i32>(row, "power") as i16;
+    ch.points.mpower = col::<i32>(row, "mpower") as i16;
+    ch.points.defense = col::<i32>(row, "defense") as i16;
+    ch.points.mdefense = col::<i32>(row, "mdefense") as i16;
+    ch.points.technique = col::<i32>(row, "technique") as i16;
+
+    // abilities
+    ch.real_abils.str = col::<i32>(row, "str") as i8;
+    ch.real_abils.str_add = col::<i32>(row, "str_add") as i8;
+    ch.real_abils.intel = col::<i32>(row, "intel") as i8;
+    ch.real_abils.wis = col::<i32>(row, "wis") as i8;
+    ch.real_abils.dex = col::<i32>(row, "dex") as i8;
+    ch.real_abils.con = col::<i32>(row, "con") as i8;
+    ch.real_abils.cha = col::<i32>(row, "cha") as i8;
+    ch.aff_abils = ch.real_abils;
+
+    // player_special_data_saved
+    ch.padding0 = col::<i32>(row, "PADDING0");
+    ch.talks[0] = col::<i32>(row, "talks1") != 0;
+    ch.talks[2] = col::<i32>(row, "talks2") != 0;
+    // talks3 intentionally ignored (C overread; see module note).
+    ch.wimp_level = col::<i32>(row, "wimp_level");
+    ch.freeze_level = col::<i32>(row, "freeze_level") as u8;
+    ch.invis_level = col::<i32>(row, "invis_level");
+    ch.load_room = col::<i32>(row, "load_room");
+    ch.prf_flags = col::<i64>(row, "pref");
+    ch.bad_pws = col::<i32>(row, "bad_pws") as u8;
+    ch.conditions[0] = col::<i32>(row, "cond1") as i8;
+    ch.conditions[1] = col::<i32>(row, "cond2") as i8;
+    ch.conditions[2] = col::<i32>(row, "cond3") as i8;
+    ch.death_timer = col::<i32>(row, "death_timer") as u8;
+    ch.citizen = col::<i32>(row, "citizen") as u8;
+    ch.training = col::<i32>(row, "training") as u8;
+    ch.newbie = col::<i32>(row, "newbie") as u8;
+    ch.arena = col::<i32>(row, "arena") as u8;
+    ch.spells_to_learn = col::<i32>(row, "spells_to_learn");
+    ch.quest_points = col::<i32>(row, "questpoints");
+    ch.next_quest = col::<i32>(row, "nextquest");
+    ch.quest_countdown = col::<i32>(row, "countdown");
+    ch.quest_obj = col::<i32>(row, "questobj");
+    ch.quest_mob = col::<i32>(row, "questmob");
+    ch.recall_level = col::<i32>(row, "recall_level");
+    ch.retreat_level = col::<i32>(row, "retreat_level");
+    ch.trust = col::<i32>(row, "trust");
+    ch.bail_amt = col::<i32>(row, "bail_amt");
+    ch.wins = col::<i32>(row, "wins") as u8;
+    ch.losses = col::<i32>(row, "losses") as u8;
+    ch.prf2_flags = col::<i64>(row, "pref2");
+    ch.godcmds1 = col::<i64>(row, "godcmds1");
+    ch.godcmds2 = col::<i64>(row, "godcmds2");
+    ch.godcmds3 = col::<i64>(row, "godcmds3");
+    ch.godcmds4 = col::<i64>(row, "godcmds4");
+    ch.clan = col::<i32>(row, "clan");
+    ch.clan_rank = col::<i32>(row, "clan_rank");
+    ch.mapx = col::<i64>(row, "mapx");
+    ch.mapy = col::<i64>(row, "mapy");
+    ch.buildmodezone = col::<i64>(row, "buildmodezone");
+    ch.buildmoderoom = col::<i64>(row, "buildmoderoom");
+    ch.tloadroom = col::<i64>(row, "tloadroom");
+
+    // char_special_data_saved
+    ch.alignment = col::<i32>(row, "alignment");
+    ch.act_flags = col::<i64>(row, "act");
+    ch.affect_flags = col::<i64>(row, "affected_by");
+
+    if ch.points.max_mana < 100 {
+        ch.points.max_mana = 100;
     }
-    
-    // Load player with full schema compatibility
-    pub async fn load_player_compat(&self, name: &str) -> Result<Character> {
-        let mut conn = self.pool.get_conn().await?;
-        
-        let row = conn.exec_first(
-            "SELECT * FROM player_main WHERE name = ?",
-            (name,)
-        ).await?;
-        
-        if let Some(row) = row {
-            let data = self.parse_full_row(row)?;
-            let mut character = data.to_character();
-            
-            // Load affects
-            let affects: Vec<Row> = conn.exec(
-                "SELECT * FROM player_affects WHERE idnum = ?",
-                (data.idnum,)
-            ).await?;
-            
-            for affect_row in affects {
-                character.affected.push(Affect {
-                    spell_type: affect_row.get("type").unwrap(),
-                    duration: affect_row.get("duration").unwrap(),
-                    modifier: affect_row.get("modifier").unwrap(),
-                    location: affect_row.get("location").unwrap(),
-                    bitvector: affect_row.get("bitvector").unwrap_or(0),
-                });
-            }
-            
-            Ok(character)
-        } else {
-            Err(anyhow!("Player not found"))
+    ch
+}
+
+/// Build the `player_affects` rows for a character (mirrors
+/// dbmodify_player_affects MODE_STORE). Returns one (type,duration,modifier,
+/// location,bitvector) tuple per affect.
+pub fn affect_rows(ch: &Character) -> Vec<(i32, i32, i32, i32, i64)> {
+    ch.affected
+        .iter()
+        .map(|a| (a.spell_type, a.duration, a.modifier, a.location, a.bitvector))
+        .collect()
+}
+
+/// Merge a fetched `player_affects` row set into a character (mirrors
+/// dbmodify_player_affects MODE_RETRIEVE -> affect_to_char). Caller is
+/// responsible for affect_total() afterward if it wants modifiers applied.
+pub fn apply_affect_rows(ch: &mut Character, rows: &[Row]) {
+    for r in rows {
+        ch.affected.push(Affect {
+            spell_type: col::<i32>(r, "type"),
+            duration: col::<i32>(r, "duration"),
+            modifier: col::<i32>(r, "modifier"),
+            location: col::<i32>(r, "location"),
+            bitvector: col::<i64>(r, "bitvector"),
+            caster: None,
+        });
+    }
+}
+
+/// Build the `player_skills` rows for a character (mirrors
+/// dbmodify_player_skills MODE_STORE — only skills with learned>0 are saved).
+pub fn skill_rows(ch: &Character) -> Vec<(i32, i32)> {
+    let mut rows: Vec<(i32, i32)> = ch
+        .skills
+        .iter()
+        .filter(|(_, &v)| v > 0)
+        .map(|(&k, &v)| (k as i32, v as i32))
+        .collect();
+    rows.sort_by_key(|&(k, _)| k); // deterministic ordering
+    rows
+}
+
+/// Merge a fetched `player_skills` row set into a character (mirrors
+/// dbmodify_player_skills MODE_RETRIEVE).
+pub fn apply_skill_rows(ch: &mut Character, rows: &[Row]) {
+    for r in rows {
+        let skill = col::<i32>(r, "skill");
+        let learned = col::<i32>(r, "learned");
+        if (0..=MAX_SKILLS as i32).contains(&skill) {
+            ch.skills.insert(skill as u16, learned as u8);
         }
-    }
-    
-    // Save player with full schema compatibility
-    pub async fn save_player_compat(&self, ch: &Character) -> Result<()> {
-        let mut conn = self.pool.get_conn().await?;
-        let data = PlayerMainRow::from_character(ch);
-        
-        // Update in multiple smaller queries to avoid parameter limits
-        conn.exec_drop(
-            r"UPDATE player_main SET
-                title = ?, sex = ?, class = ?, race = ?, level = ?, admlevel = ?,
-                hometown = ?, played = ?, last_logon = FROM_UNIXTIME(?)
-            WHERE idnum = ?",
-            (
-                &data.title, data.sex, data.class, data.race, data.level, data.admlevel,
-                data.hometown, data.played, data.last_logon,
-                data.idnum
-            )
-        ).await?;
-        
-        conn.exec_drop(
-            r"UPDATE player_main SET
-                weight = ?, height = ?, room_vnum = ?, load_room = ?
-            WHERE idnum = ?",
-            (
-                data.weight, data.height, data.room_vnum, data.load_room,
-                data.idnum
-            )
-        ).await?;
-        
-        conn.exec_drop(
-            r"UPDATE player_main SET
-                hit = ?, max_hit = ?, mana = ?, max_mana = ?, move = ?, max_move = ?,
-                armor = ?, gold = ?, exp = ?, hitroll = ?, damroll = ?
-            WHERE idnum = ?",
-            (
-                data.hit, data.max_hit, data.mana, data.max_mana, data.move_points, data.max_move,
-                data.armor, data.gold, data.exp, data.hitroll, data.damroll,
-                data.idnum
-            )
-        ).await?;
-        
-        conn.exec_drop(
-            r"UPDATE player_main SET
-                str = ?, str_add = ?, intel = ?, wis = ?, dex = ?, con = ?, cha = ?,
-                bank_gold = ?
-            WHERE idnum = ?",
-            (
-                data.str, data.str_add, data.intel, data.wis, data.dex, data.con, data.cha,
-                data.bank_gold,
-                data.idnum
-            )
-        ).await?;
-        
-        conn.exec_drop(
-            r"UPDATE player_main SET
-                power = ?, defense = ?, technique = ?, points = ?, death_count = ?,
-                pk_deaths = ?, mob_deaths = ?, dt_deaths = ?, login_count = ?
-            WHERE idnum = ?",
-            (
-                data.power, data.defense, data.technique, data.points, data.death_count,
-                data.pk_deaths, data.mob_deaths, data.dt_deaths, data.login_count,
-                data.idnum
-            )
-        ).await?;
-        
-        conn.exec_drop(
-            r"UPDATE player_main SET
-                align = ?, position = ?, drunkenness = ?, hunger = ?, thirst = ?
-            WHERE idnum = ?",
-            (
-                data.align, data.position, data.drunkenness, data.hunger, data.thirst,
-                data.idnum
-            )
-        ).await?;
-        
-        conn.exec_drop(
-            r"UPDATE player_main SET
-                act = ?, plr = ?, prf = ?, aff = ?, page_length = ?, wimp_level = ?,
-                freeze_level = ?, invis_level = ?, clan_id = ?, clan_rank = ?
-            WHERE idnum = ?",
-            (
-                data.act, data.plr, data.prf, data.aff, data.page_length, data.wimp_level,
-                data.freeze_level, data.invis_level, data.clan_id, data.clan_rank,
-                data.idnum
-            )
-        ).await?;
-        
-        conn.exec_drop(
-            r"UPDATE player_main SET
-                arena_wins = ?, arena_losses = ?, quest_points = ?, quest_current = ?,
-                quest_timer = ?, description = ?, speaks = ?, deity = ?
-            WHERE idnum = ?",
-            (
-                data.arena_wins, data.arena_losses, data.quest_points, data.quest_current,
-                data.quest_timer, &data.description, data.speaks, data.deity,
-                data.idnum
-            )
-        ).await?;
-        
-        // Save affects (same as before)
-        conn.exec_drop(
-            "DELETE FROM player_affects WHERE idnum = ?",
-            (data.idnum,)
-        ).await?;
-        
-        for affect in &ch.affected {
-            conn.exec_drop(
-                r"INSERT INTO player_affects 
-                (idnum, type, duration, modifier, location, bitvector)
-                VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    data.idnum,
-                    affect.spell_type,
-                    affect.duration,
-                    affect.modifier,
-                    affect.location,
-                    affect.bitvector,
-                )
-            ).await?;
-        }
-        
-        Ok(())
-    }
-    
-    // Parse all 83 columns from database
-    fn parse_full_row(&self, row: Row) -> Result<PlayerMainRow> {
-        Ok(PlayerMainRow {
-            idnum: row.get("idnum").unwrap(),
-            name: row.get("name").unwrap(),
-            password: row.get("pwd").unwrap(),
-            pwd_new: row.get("pwd_new").unwrap_or(0),
-            title: row.get("title").unwrap(),
-            sex: row.get("sex").unwrap(),
-            class: row.get("class").unwrap(),
-            race: row.get("race").unwrap(),
-            level: row.get("level").unwrap(),
-            admlevel: row.get("admlevel").unwrap_or(0),
-            hometown: row.get("hometown").unwrap(),
-            birth: row.get("birth").unwrap(),
-            played: row.get("played").unwrap(),
-            last_logon: row.get("last_logon").unwrap(),
-            weight: row.get("weight").unwrap(),
-            height: row.get("height").unwrap(),
-            room_vnum: row.get("room_vnum").unwrap(),
-            load_room: row.get("load_room").unwrap(),
-            hit: row.get("hit").unwrap(),
-            max_hit: row.get("max_hit").unwrap(),
-            mana: row.get("mana").unwrap(),
-            max_mana: row.get("max_mana").unwrap(),
-            move_points: row.get("move").unwrap(),
-            max_move: row.get("max_move").unwrap(),
-            str: row.get("str").unwrap(),
-            str_add: row.get("str_add").unwrap(),
-            intel: row.get("intel").unwrap(),
-            wis: row.get("wis").unwrap(),
-            dex: row.get("dex").unwrap(),
-            con: row.get("con").unwrap(),
-            cha: row.get("cha").unwrap(),
-            armor: row.get("armor").unwrap(),
-            gold: row.get("gold").unwrap(),
-            bank_gold: row.get("bank_gold").unwrap(),
-            bank_amethyst: row.get("bank_amethyst").unwrap_or(0),
-            bank_bronze: row.get("bank_bronze").unwrap_or(0),
-            bank_silver: row.get("bank_silver").unwrap_or(0),
-            bank_copper: row.get("bank_copper").unwrap_or(0),
-            bank_steel: row.get("bank_steel").unwrap_or(0),
-            exp: row.get("exp").unwrap(),
-            hitroll: row.get("hitroll").unwrap(),
-            damroll: row.get("damroll").unwrap(),
-            power: row.get("power").unwrap_or(100),
-            defense: row.get("defense").unwrap_or(100),
-            technique: row.get("technique").unwrap_or(100),
-            points: row.get("points").unwrap(),
-            death_count: row.get("death_count").unwrap_or(0),
-            pk_deaths: row.get("pk_deaths").unwrap_or(0),
-            mob_deaths: row.get("mob_deaths").unwrap_or(0),
-            dt_deaths: row.get("dt_deaths").unwrap_or(0),
-            login_count: row.get("login_count").unwrap_or(1),
-            align: row.get("align").unwrap(),
-            position: row.get("position").unwrap(),
-            drunkenness: row.get("drunkenness").unwrap(),
-            hunger: row.get("hunger").unwrap(),
-            thirst: row.get("thirst").unwrap(),
-            act: row.get("act").unwrap(),
-            plr: row.get("plr").unwrap_or(0),
-            prf: row.get("prf").unwrap_or(0),
-            aff: row.get("aff").unwrap(),
-            page_length: row.get("page_length").unwrap(),
-            wimp_level: row.get("wimp_level").unwrap(),
-            freeze_level: row.get("freeze_level").unwrap(),
-            bad_pws: row.get("bad_pws").unwrap(),
-            invis_level: row.get("invis_level").unwrap(),
-            host: row.get("host").unwrap(),
-            clan_id: row.get("clan_id").unwrap_or(0),
-            clan_rank: row.get("clan_rank").unwrap_or(0),
-            arena_wins: row.get("arena_wins").unwrap_or(0),
-            arena_losses: row.get("arena_losses").unwrap_or(0),
-            quest_points: row.get("quest_points").unwrap_or(0),
-            quest_current: row.get("quest_current").unwrap_or(0),
-            quest_timer: row.get("quest_timer").unwrap_or(0),
-            description: row.get("description").unwrap(),
-            speaks: row.get("speaks").unwrap_or(0),
-            deity: row.get("deity").unwrap_or(0),
-            spare0: row.get("spare0").unwrap_or(0),
-            spare1: row.get("spare1").unwrap_or(0),
-            spare2: row.get("spare2").unwrap_or(0),
-            spare3: row.get("spare3").unwrap_or(0),
-            spare4: row.get("spare4").unwrap_or(0),
-            spare5: row.get("spare5").unwrap_or(0),
-        })
-    }
-    
-    // Handle old crypt() passwords
-    pub async fn verify_password_compat(&self, name: &str, password: &str) -> Result<bool> {
-        let mut conn = self.pool.get_conn().await?;
-        
-        let row: Option<Row> = conn.exec_first(
-            "SELECT pwd, pwd_new FROM player_main WHERE name = ?",
-            (name,)
-        ).await?;
-        
-        if let Some(row) = row {
-            let stored_pwd: String = row.get("pwd").unwrap();
-            let pwd_new: i8 = row.get("pwd_new").unwrap_or(0);
-            
-            if pwd_new == 0 {
-                // Old crypt() password - would need C interop or conversion
-                warn!("Player {} has old crypt() password, needs reset", name);
-                return Ok(false);
-            } else {
-                // SHA-256 password
-                let mut hasher = Sha256::new();
-                hasher.update(password.as_bytes());
-                let hash = format!("{:x}", hasher.finalize());
-                return Ok(hash == stored_pwd);
-            }
-        }
-        
-        Ok(false)
     }
 }

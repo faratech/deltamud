@@ -12,24 +12,33 @@
 // once at boot by `assign_specs()`. `special()` then performs the same five-
 // phase walk, looking each present entity's prototype vnum up in those tables.
 //
-// Only the procs that have been ported are wired:
-//   * postmaster   (mail::postmaster)          — mob vnums 199, 1201
-//   * gen_board    (boards::board)             — obj vnums 199/198/197 + god boards
-//   * shop_keeper  (shop::shop_keeper)         — every shop keeper mob; resolved
-//                  dynamically because shop_keeper() self-validates by vnum and
-//                  returns false for any mob that does not own a shop (mirroring
-//                  C's assign_the_shopkeepers() in shop.c, which is separate
-//                  from spec_assign.c's assign_mobiles()).
+// Wired procs:
+//   * postmaster          (mail::postmaster)        — mob vnums 199, 1201
+//   * receptionist        (objsave::receptionist)   — mob vnums 1200, 101
+//   * puff                (spec_procs::puff)         — mob vnum 1 (Limbo)
+//   * janitor             (spec_procs::janitor)      — mob vnum 1202
+//   * librarian           (spec_procs::librarian)    — mob vnum 102 (Itrius)
+//   * arenaentrancemaster (arena::arenaentrancemaster) — mob vnum 4800
+//   * temple_healer       (spec_procs::temple_healer) — mob vnum 4801
+//   * temple_mana_regenerator (spec_procs::…)        — mob vnum 4802
+//   * gen_board           (boards::board)           — obj vnums 199/198/197 + god boards
+//   * portal              (spec_procs::portal)       — obj vnum 20
+//   * tent                (spec_procs::tent)         — obj vnum 500
+//   * shop_keeper         (shop::shop_keeper)        — every shop keeper mob; resolved
+//                         dynamically because shop_keeper() self-validates by vnum and
+//                         returns false for any mob that does not own a shop (mirroring
+//                         C's assign_the_shopkeepers() in shop.c, which is separate
+//                         from spec_assign.c's assign_mobiles()).
+//   * dump / pet_shops    (spec_procs::…)            — registered via register_room_specs
+//   * king's-castle procs (castle::assign_kings_castle)
 //
-// The remaining spec_assign.c procs (puff, receptionist, cryogenicist, janitor,
-// librarian, mayor, snake, thief, magic_user, cityguard, guild, guild_guard,
-// temple_*, trainer, arenaentrancemaster, portal, tent, bank, dump, pet_shops,
-// pray_for_items, and the castle.c king's-castle procs) live in not-yet-ported
-// modules (spec_procs.rs / castle.rs). They are simply absent from the tables,
-// which is byte-for-byte equivalent to C leaving their `func` NULL: the spec
-// walk skips them and the command falls through to normal dispatch. As those
-// modules land their boot side adds entries here (or via this module's
-// register helpers); no spec walk logic needs to change.
+// The remaining spec_assign.c SPECIAL() declarations (cryogenicist, mayor, snake,
+// thief, magic_user, cityguard, guild, guild_guard, trainer, pray_for_items) are
+// either bound through OLC/medit data rather than a code ASSIGNMOB, or (bank,
+// pray_for_items) are declared-but-never-assigned no-ops in the C source itself.
+// They are absent from the static tables here, which is byte-for-byte equivalent
+// to C leaving the corresponding `func` NULL: the spec walk skips them and the
+// command falls through to normal dispatch.
 
 use crate::state::GameState;
 use crate::types::*;
@@ -119,16 +128,22 @@ fn assign_mobiles(mobs: &mut HashMap<MobVnum, SpecFn>) {
     // their vnums stay unassigned (== C leaving mob_index[].func NULL), so the
     // spec walk skips the mob and the command falls through to normal dispatch.
     //
-    // ASSIGNMOB(1,    puff);                 — spec_procs::puff   (not ported)
-    // ASSIGNMOB(1200, receptionist);         — objsave::receptionist (not ported)
+    // Limbo.
+    ASSIGNMOB(mobs, 1, crate::spec_procs::puff as SpecFn); // ASSIGNMOB(1, puff)
+    // Immortal Zone.
+    ASSIGNMOB(mobs, 1200, crate::objsave::receptionist as SpecFn); // ASSIGNMOB(1200, receptionist)
     ASSIGNMOB(mobs, 1201, crate::mail::postmaster as SpecFn);
     ASSIGNMOB(mobs, 1202, crate::spec_procs::janitor as SpecFn); // immortal-zone janitor
-    // ASSIGNMOB(4800, arenaentrancemaster);  — spec_procs::arenaentrancemaster (not ported)
-    // ASSIGNMOB(4801, temple_healer);        — spec_procs::temple_healer (not ported)
-    // ASSIGNMOB(4802, temple_mana_regenerator); — spec_procs (not ported)
+    // Battle Arena (Thargor 7/25-28/98). arenaentrancemaster lives in arena.rs
+    // (the full arena subsystem); temple_healer / temple_mana_regenerator in
+    // spec_procs.rs.
+    ASSIGNMOB(mobs, 4800, crate::arena::arenaentrancemaster as SpecFn);
+    ASSIGNMOB(mobs, 4801, crate::spec_procs::temple_healer as SpecFn);
+    ASSIGNMOB(mobs, 4802, crate::spec_procs::temple_mana_regenerator as SpecFn);
+    // Itrius.
     ASSIGNMOB(mobs, 199, crate::mail::postmaster as SpecFn);
-    // ASSIGNMOB(101,  receptionist);         — objsave::receptionist (not ported)
-    // ASSIGNMOB(102,  librarian);            — spec_procs::librarian (not ported)
+    ASSIGNMOB(mobs, 101, crate::objsave::receptionist as SpecFn); // ASSIGNMOB(101, receptionist)
+    ASSIGNMOB(mobs, 102, crate::spec_procs::librarian as SpecFn); // ASSIGNMOB(102, librarian)
 
     // spec_procs.rs (Batch 11+): guild / guild_guard / cityguard / mayor /
     // janitor / fido / thief + the generic combat specs. The module owns the
@@ -158,8 +173,8 @@ fn assign_mobiles(mobs: &mut HashMap<MobVnum, SpecFn>) {
 }
 
 fn assign_objects(objs: &mut HashMap<ObjVnum, ObjSpecFn>) {
-    // ASSIGNOBJ(20,  portal);  — spec_procs::portal (not ported)
-    // ASSIGNOBJ(500, tent);    — spec_procs::tent   (not ported)
+    ASSIGNOBJ(objs, 20, crate::spec_procs::portal as ObjSpecFn); // ASSIGNOBJ(20, portal) — generic portal
+    ASSIGNOBJ(objs, 500, crate::spec_procs::tent as ObjSpecFn); // ASSIGNOBJ(500, tent)
 
     // Mortal boards.
     ASSIGNOBJ(objs, 199, gen_board as ObjSpecFn); // general board
@@ -177,7 +192,11 @@ fn assign_objects(objs: &mut HashMap<ObjVnum, ObjSpecFn>) {
     ASSIGNOBJ(objs, 1207, gen_board as ObjSpecFn); // bugs board
     ASSIGNOBJ(objs, 1208, gen_board as ObjSpecFn); // reimbursement board
     ASSIGNOBJ(objs, 1209, gen_board as ObjSpecFn); // builders board
-    // bank (obj) — spec_procs::bank (not ported)
+    // SPECIAL(bank) is declared in DeltaMUD's spec_assign.c (a forward prototype
+    // so OLC can reference it) but it is never DEFINED in any .c file and never
+    // ASSIGNOBJ'd to a vnum — it is a dangling no-op in the C source. There is
+    // nothing to port and nothing to assign; banking is handled by the BANKER
+    // mob flag path (act.other.c), not an object spec. Left intentionally absent.
 }
 
 fn assign_rooms(rooms: &mut HashMap<RoomVnum, RoomSpecFn>) {

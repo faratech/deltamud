@@ -10,22 +10,21 @@
 //
 // Fidelity notes (systems not yet ported elsewhere — they degrade exactly as
 // C would with empty data, and are documented in the manifest):
-//   * WAIT_STATE: the Character has no `wait` field and the dispatcher does
-//     not consult one, so the lag-state calls are dropped (no-op), matching a
-//     build with WAIT_STATE compiled out. All other control flow is intact.
+//   * WAIT_STATE: wired — the offensive skills below call g.set_wait_state and
+//     the heartbeat drains queued player input through the descriptor wait gate.
 //   * Arena (IS_ARENACOMBATANT / GET_ARENAFLEETIMER / LASTFIGHTING / match_over
 //     / trans_to_preproom) and gain_exp are not ported: a live PC is never an
 //     arena combatant (the state defaults off), so flee always takes the
 //     non-arena branch; the exp-loss is computed and reported but gain_exp is
 //     applied directly to points.exp here.
-//   * check_killer / raw_kill / pk gating: pk_allowed is false (config), so
-//     PC-vs-PC requires murder, as in C; the killer/pkill bookkeeping that C
-//     does in check_killer is a no-op stub here.
+//   * pk gating: pk_allowed is false (config), so PC-vs-PC requires murder, as
+//     in C. check_killer (combat::check_killer) is wired at the murder sites and
+//     inside set_fighting/damage, flagging PLR_KILLER in jurisdicted areas.
 //   * command_interpreter is reused for `order` (charmed pets execute orders).
 
 use crate::act::{act, ActArg, To};
 use crate::character::Affect;
-use crate::combat::{damage, hit, set_fighting};
+use crate::combat::{chance, check_killer, damage, hit, set_fighting};
 use crate::flags::*;
 use crate::object::ObjectType;
 use crate::room::RoomFlags;
@@ -70,6 +69,8 @@ const CLASS_THIEF: Class = Class::Thief;
 
 // config.c — PvP gating.
 const PK_ALLOWED: bool = false;
+// config.c — pk_victim_min: a PC below this level can't be flagged/attacked.
+const PK_VICTIM_MIN: Level = 10;
 
 // Standard C messages (interpreter.c).
 const NOPERSON: &str = "No-one by that name here.\r\n";
@@ -158,27 +159,6 @@ fn numdisplay(val: i64) -> String {
     }
 }
 
-/// chance(ch, vict, type) (utils.c): percentage chance ch lands a hit on vict.
-/// type 0 = normal attack (the only one this file uses).
-fn chance(g: &GameState, ch: CharId, vict: CharId, ty: i32) -> i32 {
-    let (c_tech, c_dex, c_int) = match g.get_char(ch) {
-        Some(c) => (c.points.technique as i32, c.aff_abils.dex as i32, c.aff_abils.intel as i32),
-        None => return 0,
-    };
-    let (v_tech, v_dex, v_wis) = match g.get_char(vict) {
-        Some(c) => (c.points.technique as i32, c.aff_abils.dex as i32, c.aff_abils.wis as i32),
-        None => return 0,
-    };
-    let mut p: i32 = match ty {
-        0 => (c_tech - v_tech) + (c_dex - v_dex) * 10,
-        1 => (c_tech - v_tech) + (c_int - v_wis) * 10,
-        _ => return 0,
-    };
-    p /= 10;
-    p = (p + 100) / 2;
-    p.clamp(0, 100)
-}
-
 /// stop_fighting(ch) (fight.c): clear the fight target, drop out of POS_FIGHTING.
 /// (combat::stop_fighting is private; this matches its behaviour.)
 fn stop_fighting(g: &mut GameState, ch: CharId) {
@@ -194,9 +174,15 @@ fn stop_fighting(g: &mut GameState, ch: CharId) {
 /// death system at Tier-0 we route through combat by delivering lethal damage,
 /// which produces the corpse + extract/respawn exactly as a normal death does.
 fn raw_kill(g: &mut GameState, victim: CharId, killer: CharId) {
-    let overkill = get_hit(g, victim) + 100;
+    // C raw_kill() extracts the victim directly, bypassing the combat damage
+    // path (and therefore dam_multi). To stay faithful while reusing the
+    // corpse/respawn path, drain the victim to a guaranteed-lethal hp first so
+    // the death resolves even if dam_multi would scale a normal blow to zero.
+    if let Some(c) = g.get_char_mut(victim) {
+        c.points.hit = -100;
+    }
     set_fighting(g, killer, victim);
-    damage(g, killer, victim, overkill);
+    damage(g, killer, victim, 1);
 }
 
 /// deathblow(ch, victim, dam, attacktype) (fight.c): a guaranteed killing blow
@@ -312,7 +298,12 @@ pub fn do_hit(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
                 g.send_to_char(ch, "Use 'murder' to hit another player.\r\n");
                 return;
             }
-            // check_killer(ch, vict) — pkill bookkeeping (no-op stub).
+            // Flag the attacker as a PLAYER KILLER (unless either party is a
+            // newbie below pk_victim_min). Mirrors act.offensive.c do_hit.
+            let newbie = get_level(g, vict) < PK_VICTIM_MIN || get_level(g, ch) < PK_VICTIM_MIN;
+            if !newbie {
+                check_killer(g, ch, vict);
+            }
         }
         // You can't order a charmed pet to attack a player.
         if is_affected(g, ch, AFF_CHARM) {
@@ -332,7 +323,7 @@ pub fn do_hit(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
             }
         } else {
             hit(g, ch, vict);
-            // WAIT_STATE(ch, PULSE_VIOLENCE + 2) — see module gap note.
+            g.set_wait_state(ch, PULSE_VIOLENCE as i32 + 2);
         }
     } else {
         g.send_to_char(ch, "You do the best you can!\r\n");
@@ -423,14 +414,14 @@ pub fn do_target(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
     if percent > prob {
         act(g, "You try to switch target, but your current opponent keep you busy!", false, ch, None, ActArg::None, To::Char);
         act(g, "$n makes some desperate attempts to attack another opponent!", false, ch, None, ActArg::None, To::Room);
-        // WAIT_STATE(ch, PULSE_VIOLENCE * 2) — gap note.
+        g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 2);
         return;
     }
     act(g, "You start fighting $N!", false, ch, None, ActArg::Char(vict), To::Char);
     act(g, "$n starts fighting $N!", false, ch, None, ActArg::Char(vict), To::NotVict);
     act(g, "$n starts fighting you!", false, ch, None, ActArg::Char(vict), To::Vict);
     hit(g, ch, vict);
-    // WAIT_STATE(ch, PULSE_VIOLENCE * 2) — gap note.
+    g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 2);
 }
 
 // ===========================================================================
@@ -485,7 +476,7 @@ pub fn do_backstab(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) 
     } else {
         hit(g, ch, vict);
     }
-    // WAIT_STATE(ch, PULSE_VIOLENCE * 2) — gap note.
+    g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 2);
 }
 
 // ===========================================================================
@@ -728,7 +719,7 @@ pub fn do_chain_footing(g: &mut GameState, ch: CharId, argument: &str, _subcmd: 
     if fighting(g, ch).is_none() {
         set_fighting(g, ch, vict);
     }
-    // WAIT_STATE(ch, PULSE_VIOLENCE * 2) — gap note.
+    g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 2);
 }
 
 // ===========================================================================
@@ -783,9 +774,9 @@ pub fn do_bash(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         if let Some(c) = g.get_char_mut(vict) {
             c.position = Position::Sitting;
         }
-        // WAIT_STATE(vict, PULSE_VIOLENCE) — gap note.
+        g.set_wait_state(vict, PULSE_VIOLENCE as i32);
     }
-    // WAIT_STATE(ch, PULSE_VIOLENCE * 2) — gap note.
+    g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 2);
 }
 
 // ===========================================================================
@@ -854,7 +845,7 @@ pub fn do_rescue(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
     set_fighting(g, ch, tmp_ch);
     set_fighting(g, tmp_ch, ch);
-    // WAIT_STATE(vict, 2 * PULSE_VIOLENCE) — gap note.
+    g.set_wait_state(vict, 2 * PULSE_VIOLENCE as i32);
 }
 
 // ===========================================================================
@@ -892,7 +883,7 @@ pub fn do_kick(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         let dmg = (get_level(g, ch) as i32) >> 1;
         damage(g, ch, vict, dmg);
     }
-    // WAIT_STATE(ch, PULSE_VIOLENCE * 3) — gap note.
+    g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 3);
 }
 
 // ===========================================================================
@@ -963,10 +954,10 @@ pub fn do_berserk(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
     if percent > prob {
         damage(g, ch, vict, 0);
-        // WAIT_STATE(ch, PULSE_VIOLENCE * 4) — gap note.
+        g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 4);
     } else {
         damage(g, ch, vict, dmg);
-        // WAIT_STATE(ch, PULSE_VIOLENCE * 2) — gap note.
+        g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 2);
     }
 }
 
@@ -1046,7 +1037,7 @@ pub fn do_disarm(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
             hit(g, vict, ch);
         }
     }
-    // WAIT_STATE(ch, PULSE_VIOLENCE) — gap note.
+    g.set_wait_state(ch, PULSE_VIOLENCE as i32);
 }
 
 // ===========================================================================
@@ -1094,10 +1085,11 @@ pub fn do_trip(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         damage(g, ch, vict, 0);
     } else {
         damage(g, ch, vict, 2);
-        // WAIT_STATE(vict, PULSE_VIOLENCE * 2); WAIT_STATE(ch, PULSE_VIOLENCE) — gap note.
+        g.set_wait_state(vict, PULSE_VIOLENCE as i32 * 2);
+        g.set_wait_state(ch, PULSE_VIOLENCE as i32);
         return;
     }
-    // WAIT_STATE(ch, PULSE_VIOLENCE * 2) — gap note.
+    g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 2);
 }
 
 // ===========================================================================
@@ -1135,8 +1127,12 @@ pub fn do_camouflage(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i3
         }
     }
 
-    // prob = SKILL + dex_app_skill[DEX].hide (hide bonus table not ported -> 0).
-    let mut prob = get_skill(g, ch, SKILL_CAMOUFLAGE);
+    // prob = SKILL_CAMOUFLAGE + dex_app_skill[GET_DEX].hide.
+    let dex = g.get_char(ch).map(|c| c.aff_abils.dex as i32).unwrap_or(0);
+    let hide_bonus = crate::constants::DEX_APP_SKILL
+        [crate::constants::app_index(dex, crate::constants::DEX_APP_SKILL.len())]
+        .hide;
+    let mut prob = get_skill(g, ch, SKILL_CAMOUFLAGE) + hide_bonus;
     let r = g.rng.number(10, 15);
     let mut percent = g.rng.number((prob as f32 * 0.6) as i32, 101) - (get_level(g, ch) as i32 / r);
     if percent <= 0 {
@@ -1169,7 +1165,7 @@ pub fn do_camouflage(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i3
     if let Some(c) = g.get_char_mut(ch) {
         c.affect_flags |= AFF_HIDE;
     }
-    // WAIT_STATE(ch, PULSE_VIOLENCE * 2) — gap note.
+    g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 2);
 }
 
 // ===========================================================================
@@ -1226,8 +1222,12 @@ pub fn do_blanket(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) 
         }
     }
 
-    // prob = SKILL_CAMOUFLAGE + dex_app(hide=0) - grpsize.
-    let mut prob = get_skill(g, ch, SKILL_CAMOUFLAGE) - grpsize;
+    // prob = SKILL_CAMOUFLAGE + dex_app_skill[GET_DEX].hide - grpsize.
+    let dex = g.get_char(ch).map(|c| c.aff_abils.dex as i32).unwrap_or(0);
+    let hide_bonus = crate::constants::DEX_APP_SKILL
+        [crate::constants::app_index(dex, crate::constants::DEX_APP_SKILL.len())]
+        .hide;
+    let mut prob = get_skill(g, ch, SKILL_CAMOUFLAGE) + hide_bonus - grpsize;
     let r = g.rng.number(10, 15);
     let mut percent = g.rng.number((prob as f32 * 0.6) as i32, 101) - (get_level(g, ch) as i32 / r);
     if percent <= 0 {
@@ -1289,5 +1289,5 @@ pub fn do_blanket(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) 
             }
         }
     }
-    // WAIT_STATE(ch, PULSE_VIOLENCE * 2) — gap note.
+    g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 2);
 }

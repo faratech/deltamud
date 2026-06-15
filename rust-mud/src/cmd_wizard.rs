@@ -1120,6 +1120,7 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
     let klevel = kc.player.level;
     let exp = kc.points.exp;
     let align = kc.alignment;
+    let citizen = kc.citizen as i32; // GET_CITIZEN (Cstat is GET_CITIZEN+1).
     let abils = kc.aff_abils;
     let points = kc.points.clone();
     let position = kc.position as i32;
@@ -1208,12 +1209,12 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
     let lvl_line = if klevel < LVL_IMMORT {
         format!(
             "{}{}, Lev: [&y{:2}&n], XP: [&y{:7}&n], Align: [{:4}], MaxWeapon: [{}], Cstat: [{}]\r\n",
-            class_label, classstr, klevel, exp, align, 0, 1
+            class_label, classstr, klevel, exp, align, 0, citizen + 1
         )
     } else {
         format!(
             "{}{}, Lev: [&y{:2}&n], XP: [&y{:7}&n], Align: [{:4}], Cstat: [{}]\r\n",
-            class_label, classstr, klevel, exp, align, 1
+            class_label, classstr, klevel, exp, align, citizen + 1
         )
     };
     g.send_to_char(ch, &lvl_line);
@@ -1541,16 +1542,33 @@ fn log_line(g: &mut GameState, line: &str) {
 // ===========================================================================
 // do_snoop / do_switch / do_return
 // ===========================================================================
-// The descriptor snoop link (snoop_by / snooping) is not modelled in
-// Descriptor, so snoop can only report its guard messages and the stop path.
+// Snoop links live on Character (snooping / snoop_by). When the snooped char
+// receives output, state::send_to_char tees it to the snooper.
+
+/// stop_snooping (act.wizard.c): break ch's outgoing snoop link, if any.
+fn stop_snooping(g: &mut GameState, ch: CharId) {
+    let target = g.get_char(ch).and_then(|c| c.snooping);
+    match target {
+        None => g.send_to_char(ch, "You aren't snooping anyone.\r\n"),
+        Some(victim) => {
+            g.send_to_char(ch, "You stop snooping.\r\n");
+            if let Some(v) = g.get_char_mut(victim) {
+                v.snoop_by = None;
+            }
+            if let Some(c) = g.get_char_mut(ch) {
+                c.snooping = None;
+            }
+        }
+    }
+}
+
 pub fn do_snoop(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     if g.get_char(ch).and_then(|c| c.desc).is_none() {
         return;
     }
     let (name, _rest) = one_argument(arg);
     if name.is_empty() {
-        // stop_snooping: with no snoop link modelled, always "not snooping".
-        g.send_to_char(ch, "You aren't snooping anyone.\r\n");
+        stop_snooping(g, ch);
         return;
     }
     let victim = match get_char_vis(g, ch, &name) {
@@ -1565,16 +1583,39 @@ pub fn do_snoop(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
     if victim == ch {
-        g.send_to_char(ch, "You aren't snooping anyone.\r\n");
+        stop_snooping(g, ch);
         return;
     }
+    if g.get_char(victim).and_then(|c| c.snoop_by).is_some() {
+        g.send_to_char(ch, "Busy already. \r\n");
+        return;
+    }
+    // C: victim->desc->snooping == ch->desc — already snooping us back.
+    if g.get_char(victim).and_then(|c| c.snooping) == Some(ch) {
+        g.send_to_char(ch, "Don't be stupid.\r\n");
+        return;
+    }
+    // Level gate uses the original (switched) body's level; switched bodies are
+    // handled at the descriptor level in C. Here level_of(victim) suffices.
     if level_of(g, victim) >= level_of(g, ch) && name_of(g, ch) != "Mulder" {
         g.send_to_char(ch, "You can't.\r\n");
         return;
     }
-    // Snoop link establishment is a documented gap (no snoop_by field); confirm
-    // like C does on success.
     g.send_to_char(ch, OK);
+
+    // Drop any prior outgoing snoop, then wire ch -> victim.
+    let prior = g.get_char(ch).and_then(|c| c.snooping);
+    if let Some(p) = prior {
+        if let Some(pc) = g.get_char_mut(p) {
+            pc.snoop_by = None;
+        }
+    }
+    if let Some(c) = g.get_char_mut(ch) {
+        c.snooping = Some(victim);
+    }
+    if let Some(v) = g.get_char_mut(victim) {
+        v.snoop_by = Some(ch);
+    }
 }
 
 pub fn do_switch(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
@@ -3505,10 +3546,11 @@ fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize,
         119 => set_or_remove_act(g, PLR_MULTIOK),
         120 | 121 => {} // GCMD bits — no-op
         122 => {
+            // C: RANGE(1,7); citizen = value - 1 (stored 0..6).
             let nv = range_i32(1, 7, value);
-            // citizen rank stored as rank-1; no citizen field on Character —
-            // documented gap, no-op stored value.
-            let _ = nv;
+            if let Some(v) = g.get_char_mut(vict) {
+                v.citizen = (nv - 1) as u8;
+            }
         }
         123 => set_or_remove_act(g, PLR_MBUILDER),
         124 | 125 | 126 => {} // GCMD bits — no-op
@@ -4219,7 +4261,14 @@ pub fn do_citizen(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "Valid levels are 1..7!\r\n");
         return;
     }
-    // citizen rank stored as i-1; no citizen field on Character (documented gap).
+    // C: GET_CITIZEN(vict) = i-1 (stored 0..6). Persistence mirrors every other
+    // wizard mutation in this build: the in-memory field is written here, and
+    // the async disconnect/save loop (game.rs) snapshots the Character and calls
+    // db.save_player — which writes the citizen column (database_compat.rs) — so
+    // C's save_char(vict, NOWHERE) is honoured when the victim next saves/quits.
+    if let Some(v) = g.get_char_mut(vict) {
+        v.citizen = (i - 1) as u8;
+    }
     g.send_to_char(vict, "You feel different, something has changed.\r\n");
     g.send_to_char(ch, OK);
 }

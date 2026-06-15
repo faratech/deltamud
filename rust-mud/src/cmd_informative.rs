@@ -636,8 +636,10 @@ fn list_all_char(g: &GameState, i: CharId, ch: CharId) -> String {
     let mut buf;
     if c.is_npc {
         buf = cap(c.short_desc.as_deref().unwrap_or(&c.player.name));
+    } else if (c.player.level as u8) < LVL_IMMORT && c.citizen > 0 {
+        // Mortal town-citizen: prefix the gendered rank title (act.informative.c).
+        buf = format!("&Y{}{} {}&Y", c.read_citizen(), c.player.name, c.get_title());
     } else {
-        // Non-citizen branch (citizen table not in contract -> GET_CITIZEN==0).
         buf = format!("&Y{} {}&Y", c.player.name, c.get_title());
     }
 
@@ -993,11 +995,87 @@ fn look_at_target(g: &mut GameState, ch: CharId, arg: &str) {
         return;
     }
 
-    // Equipment extra descriptions.
-    // Per-object extra descriptions (equipment / inventory / room) are not on
-    // the Tier-0 Object model, so `found` stays false; fall back to the generic
-    // object (no-special) display exactly as the C does when no exdesc matched.
-    let found = false;
+    // Room special exit (the `O` block): looking by its ex_name shows the
+    // general description plus an open/closed door note (act.informative.c).
+    if let Some(se) = g.room(rnum).special_exit.clone() {
+        let matches = se.ex_name.as_deref().map(|n| isname(arg, n)).unwrap_or(false);
+        if matches {
+            match &se.general_description {
+                Some(d) if !d.is_empty() => {
+                    let s = d.clone();
+                    g.send_to_char(ch, &s);
+                }
+                _ => g.send_to_char(ch, "You see nothing special.\r\n"),
+            }
+            if se.exit_info & EX_CLOSED != 0 {
+                if let Some(kw) = &se.keyword {
+                    let msg = format!("The {} is closed.\r\n", kw);
+                    g.send_to_char(ch, &msg);
+                }
+            } else if se.exit_info & EX_ISDOOR != 0 {
+                if let Some(kw) = &se.keyword {
+                    let msg = format!("The {} is open.\r\n", kw);
+                    g.send_to_char(ch, &msg);
+                }
+            }
+            return;
+        }
+    }
+
+    // Does the argument match an extra desc in the char's equipment?
+    let mut found = false;
+    for pos in 0..NUM_WEARS {
+        if found {
+            break;
+        }
+        let oid = match g.get_char(ch).and_then(|c| c.equipment[pos]) {
+            Some(o) => o,
+            None => continue,
+        };
+        if !can_see_obj(g, ch, oid) {
+            continue;
+        }
+        let exdescs = g.get_obj(oid).map(|o| o.ex_descriptions.clone()).unwrap_or_default();
+        if let Some(desc) = find_exdesc(arg, &exdescs) {
+            let d = desc.to_string();
+            g.send_to_char(ch, &d);
+            found = true;
+        }
+    }
+
+    // Does the argument match an extra desc in the char's inventory?
+    if !found {
+        let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        for oid in inv {
+            if !can_see_obj(g, ch, oid) {
+                continue;
+            }
+            let exdescs = g.get_obj(oid).map(|o| o.ex_descriptions.clone()).unwrap_or_default();
+            if let Some(desc) = find_exdesc(arg, &exdescs) {
+                let d = desc.to_string();
+                g.send_to_char(ch, &d);
+                found = true;
+                break;
+            }
+        }
+    }
+
+    // Does the argument match an extra desc of an object in the room?
+    if !found {
+        let contents = g.room(rnum).contents.clone();
+        for oid in contents {
+            if !can_see_obj(g, ch, oid) {
+                continue;
+            }
+            let exdescs = g.get_obj(oid).map(|o| o.ex_descriptions.clone()).unwrap_or_default();
+            if let Some(desc) = find_exdesc(arg, &exdescs) {
+                let d = desc.to_string();
+                g.send_to_char(ch, &d);
+                found = true;
+                break;
+            }
+        }
+    }
 
     let (obj, bits) = generic_find_obj(g, ch, arg, true, true, false, true);
     if bits != 0 {
@@ -1825,12 +1903,36 @@ pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
         let ismortal = lvl < LVL_IMMORT;
         let mut line: String;
+        // Mortal town-citizens (citizen rank > 0) get a colored rank-title prefix
+        // between the bracket and the name (act.informative.c). CCNRM is "&n".
+        let is_citizen = lvl < LVL_IMMORT && c.citizen > 0;
         if lvl >= LVL_IMMORT {
             let widx = (lvl - LVL_IMMORT) as usize;
             let wname = WIZ_LEVELS.get(widx).copied().unwrap_or(WIZ_LEVELS[0]);
             line = format!("&Y[{}] {} {}&n", wname, c.player.name, c.get_title());
         } else if lvl == LVL_HERO {
-            line = format!("&B[&n100 &YHero &B]&n {} {}&n", c.player.name, c.get_title());
+            if is_citizen {
+                line = format!(
+                    "&B[&n100 &YHero &B]{} {}&n{} {}&n",
+                    c.citizen_color(),
+                    c.read_citizen(),
+                    c.player.name,
+                    c.get_title()
+                );
+            } else {
+                line = format!("&B[&n100 &YHero &B]&n {} {}&n", c.player.name, c.get_title());
+            }
+        } else if is_citizen {
+            line = format!(
+                "&B[&n{:2} {} {}&B]{} {}&n{} {}&n",
+                lvl,
+                race_abbr(c.player.race),
+                class_abbr(c.player.class),
+                c.citizen_color(),
+                c.read_citizen(),
+                c.player.name,
+                c.get_title()
+            );
         } else {
             line = format!(
                 "&B[&n{:2} {} {}&B]&n {} {}&n",
@@ -2602,6 +2704,7 @@ pub fn do_forage(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     act(g, "$n starts foraging the area for food.\r\n", false, ch, None, ActArg::None, To::Room);
 
     if g.rng.number(1, 101) > skill {
+        g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 2);
         if let Some(c) = g.get_char_mut(ch) {
             c.points.move_points -= 120 - level as i32;
         }
@@ -2618,6 +2721,7 @@ pub fn do_forage(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         6 => 2505,
         _ => 10015,
     };
+    g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 2); // Not really necessary
     if let Some(c) = g.get_char_mut(ch) {
         c.points.move_points -= 120 - level as i32;
     }

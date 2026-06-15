@@ -1069,6 +1069,16 @@ fn save_internally(g: &mut GameState, conn: ConnId) {
         cost: edit.cost,
         rent: edit.rent,
         values: edit.values,
+        curr_slots: edit.cslots,
+        total_slots: edit.tslots,
+        obj_class: edit.obj_class,
+        min_level: edit.level,
+        bitvector: edit.bitvector,
+        affects: edit.affects.iter()
+            .filter(|(loc, _)| *loc != crate::flags::APPLY_NONE)
+            .map(|&(location, modifier)| crate::object::ObjectAffect { location, modifier })
+            .collect(),
+        ex_descriptions: edit.extra_descriptions.clone(),
     };
     g.obj_protos.insert(edit.vnum, proto);
 

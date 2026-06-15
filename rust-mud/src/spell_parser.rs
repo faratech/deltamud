@@ -994,6 +994,7 @@ pub fn do_cast(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let skill = g.get_char(ch).map(|c| c.skill(spellnum as u16) as i32).unwrap_or(0);
     if g.rng.number(0, 101) > skill {
         // Lost concentration.
+        g.set_wait_state(ch, PULSE_VIOLENCE as i32);
         g.send_to_char(ch, "You lost your concentration!\r\n");
         if mana > 0 {
             if let Some(c) = g.get_char_mut(ch) {
@@ -1009,6 +1010,7 @@ pub fn do_cast(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             }
         }
     } else if cast_spell(g, ch, tch, tobj, spellnum) != 0 {
+        g.set_wait_state(ch, PULSE_VIOLENCE as i32);
         if mana > 0 {
             if let Some(c) = g.get_char_mut(ch) {
                 let max = c.points.max_mana;
