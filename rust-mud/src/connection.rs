@@ -1,19 +1,22 @@
-use tokio::net::TcpStream;
-use tokio::io::{AsyncWriteExt, BufReader, AsyncBufReadExt};
-use tokio::sync::mpsc;
-use std::sync::Arc;
-use parking_lot::RwLock;
-use crate::character::Character;
-use std::net::SocketAddr;
-use anyhow::Result;
+// Connection edge: async socket I/O over channels, plus the per-connection
+// Descriptor that lives inside GameState. Commands never touch sockets —
+// they append to Descriptor::outbuf, which the Game task flushes to the
+// writer task after each command/pulse (mirrors C process_input/process_output).
 
-// Connection states
+use crate::types::{CharId, ConnId};
+use anyhow::Result;
+use std::net::SocketAddr;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
+use tokio::sync::mpsc;
+
+/// Connection / login state machine. Editor/OLC states will extend this via
+/// the nested-input stack (Batch 1 Pillar D groundwork: `editor`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConnectionState {
+pub enum ConState {
     GetName,
     GetOldPassword,
-    GetNewName,
-    Confirm,
+    ConfirmName, // "Did I get that right (Y/N)?"
     GetNewPassword,
     ConfirmPassword,
     GetSex,
@@ -25,163 +28,126 @@ pub enum ConnectionState {
     Close,
 }
 
-// Color codes
-pub const COLOR_CODES: &[(&str, &str)] = &[
-    ("&n", "\x1b[0m"),     // Normal
-    ("&r", "\x1b[0;31m"),  // Red
-    ("&g", "\x1b[0;32m"),  // Green
-    ("&y", "\x1b[0;33m"),  // Yellow
-    ("&b", "\x1b[0;34m"),  // Blue
-    ("&m", "\x1b[0;35m"),  // Magenta
-    ("&c", "\x1b[0;36m"),  // Cyan
-    ("&w", "\x1b[0;37m"),  // White
-    ("&R", "\x1b[1;31m"),  // Bright Red
-    ("&G", "\x1b[1;32m"),  // Bright Green
-    ("&Y", "\x1b[1;33m"),  // Bright Yellow
-    ("&B", "\x1b[1;34m"),  // Bright Blue
-    ("&M", "\x1b[1;35m"),  // Bright Magenta
-    ("&C", "\x1b[1;36m"),  // Bright Cyan
-    ("&W", "\x1b[1;37m"),  // Bright White
-];
+/// A nested input context (string editor, OLC editor). Tier-0 stub; the
+/// stack lets a Playing descriptor push an editor without a giant enum.
+#[derive(Debug, Clone)]
+pub enum InputContext {
+    StringEdit { buffer: String, max_len: usize },
+}
 
-pub struct Connection {
-    pub id: u64,
-    pub addr: SocketAddr,
-    pub state: ConnectionState,
-    pub character: Option<Arc<RwLock<Character>>>,
-    pub original: Option<Arc<RwLock<Character>>>,  // For switch command
-    
-    // I/O channels
-    pub output_tx: mpsc::Sender<String>,
-    pub input_rx: Option<mpsc::Receiver<String>>,
-    
-    // Temporary data during character creation
+pub struct Descriptor {
+    pub id: ConnId,
+    pub host: String,
+    pub state: ConState,
+    /// Stack of nested input contexts; empty == normal command/menu input.
+    pub editors: Vec<InputContext>,
+    pub character: Option<CharId>,
+    pub original: Option<CharId>, // for `switch`
+    /// Output accumulated this pulse; flushed by the Game task.
+    pub outbuf: String,
+    /// True when a fresh prompt should be sent after flushing.
+    pub need_prompt: bool,
+    // Scratch during login / char creation.
     pub temp_name: Option<String>,
     pub temp_password: Option<String>,
 }
 
-impl Connection {
-    pub fn new(id: u64, addr: SocketAddr, output_tx: mpsc::Sender<String>) -> Self {
-        Connection {
+impl Descriptor {
+    pub fn new(id: ConnId, host: String) -> Self {
+        Descriptor {
             id,
-            addr,
-            state: ConnectionState::GetName,
+            host,
+            state: ConState::GetName,
+            editors: Vec::new(),
             character: None,
             original: None,
-            output_tx,
-            input_rx: None,
+            outbuf: String::new(),
+            need_prompt: true,
             temp_name: None,
             temp_password: None,
         }
     }
-    
-    pub async fn send(&self, message: &str) -> Result<()> {
-        let processed = self.process_color_codes(message);
-        self.output_tx.send(processed).await?;
-        Ok(())
-    }
-    
-    pub async fn send_line(&self, message: &str) -> Result<()> {
-        self.send(&format!("{}\r\n", message)).await
-    }
-    
-    pub async fn send_prompt(&self) -> Result<()> {
-        match self.state {
-            ConnectionState::Playing => {
-                if let Some(ch) = &self.character {
-                    let (hit, mana, mv) = {
-                        let ch = ch.read();
-                        (ch.points.hit, ch.points.mana, ch.points.move_points)
-                    };
-                    let prompt = format!("&g{}H &c{}M &y{}V&n> ", hit, mana, mv);
-                    self.send(&prompt).await?;
-                }
-            }
-            ConnectionState::GetName => {
-                self.send("By what name do you wish to be known? ").await?;
-            }
-            ConnectionState::GetOldPassword => {
-                self.send("Password: ").await?;
-            }
-            ConnectionState::GetNewPassword => {
-                self.send("Give me a password for your character: ").await?;
-            }
-            ConnectionState::ConfirmPassword => {
-                self.send("Please retype password: ").await?;
-            }
-            ConnectionState::GetSex => {
-                self.send("What is your sex (M/F)? ").await?;
-            }
-            ConnectionState::GetClass => {
-                self.send_line("\r\nSelect a class:").await?;
-                self.send_line("  &YW&n) &YW&narrior").await?;
-                self.send_line("  &YC&n) &YC&nleric").await?;
-                self.send_line("  &YT&n) &YT&nhief").await?;
-                self.send_line("  &YM&n) &YM&nagic User").await?;
-                self.send_line("  &YA&n) &YA&nrtisan").await?;
-                self.send("\r\nClass: ").await?;
-            }
-            ConnectionState::GetRace => {
-                self.send_line("\r\nSelect a race:").await?;
-                self.send_line("  &YH&n) &YH&numan").await?;
-                self.send_line("  &YE&n) &YE&nlf").await?;
-                self.send_line("  &YD&n) &YD&nwarf").await?;
-                self.send_line("  &YG&n) &YG&nnome").await?;
-                self.send("\r\nRace: ").await?;
-            }
-            ConnectionState::Menu => {
-                self.send_line("\r\n&YWelcome to DeltaMUD!&n").await?;
-                self.send_line("\r\n&g0&n) Exit from DeltaMUD.").await?;
-                self.send_line("&g1&n) Enter the game.").await?;
-                self.send_line("&g2&n) Enter description.").await?;
-                self.send_line("&g3&n) Read the background story.").await?;
-                self.send_line("&g4&n) Change password.").await?;
-                self.send_line("&g5&n) Delete this character.").await?;
-                self.send("\r\n   Make your choice: ").await?;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-    
-    fn process_color_codes(&self, text: &str) -> String {
-        let mut result = text.to_string();
-        for (code, ansi) in COLOR_CODES {
-            result = result.replace(code, ansi);
-        }
-        result
-    }
-    
-    pub fn close(&mut self) {
-        self.state = ConnectionState::Close;
+
+    pub fn write(&mut self, msg: &str) {
+        self.outbuf.push_str(msg);
     }
 }
 
-// Handles individual client connections
+// ANSI color: DeltaMUD `&x` codes. (Render path; the strip path for
+// color-off players is added with the act() engine.)
+pub const COLOR_CODES: &[(&str, &str)] = &[
+    ("&n", "\x1b[0m"),
+    ("&r", "\x1b[0;31m"),
+    ("&g", "\x1b[0;32m"),
+    ("&y", "\x1b[0;33m"),
+    ("&b", "\x1b[0;34m"),
+    ("&m", "\x1b[0;35m"),
+    ("&c", "\x1b[0;36m"),
+    ("&w", "\x1b[0;37m"),
+    ("&R", "\x1b[1;31m"),
+    ("&G", "\x1b[1;32m"),
+    ("&Y", "\x1b[1;33m"),
+    ("&B", "\x1b[1;34m"),
+    ("&M", "\x1b[1;35m"),
+    ("&C", "\x1b[1;36m"),
+    ("&W", "\x1b[1;37m"),
+];
+
+pub fn render_color(text: &str) -> String {
+    let mut result = text.to_string();
+    for (code, ansi) in COLOR_CODES {
+        result = result.replace(code, ansi);
+    }
+    result
+}
+
+/// Strip color codes (for players with color off / for logs).
+pub fn strip_color(text: &str) -> String {
+    let mut result = text.to_string();
+    for (code, _) in COLOR_CODES {
+        result = result.replace(code, "");
+    }
+    result
+}
+
+// Messages from connection tasks to the single Game task.
+#[derive(Debug)]
+pub enum GameMessage {
+    NewConnection {
+        id: ConnId,
+        host: String,
+        output_tx: mpsc::Sender<String>,
+    },
+    Input {
+        conn_id: ConnId,
+        input: String,
+    },
+    Disconnect {
+        conn_id: ConnId,
+    },
+}
+
+/// Per-connection task: split the stream, register with the Game, pump input
+/// lines into the game channel, and run a writer task draining output.
 pub async fn handle_client(
     stream: TcpStream,
     addr: SocketAddr,
-    conn_id: u64,
+    conn_id: ConnId,
     game_tx: mpsc::Sender<GameMessage>,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
-    
-    // Create output channel
-    let (output_tx, mut output_rx) = mpsc::channel(100);
-    
-    // Notify game of new connection
-    game_tx.send(GameMessage::NewConnection {
-        id: conn_id,
-        addr,
-        output_tx: output_tx.clone(),
-    }).await?;
-    
-    // Send welcome message
-    let welcome = "\r\n&YWelcome to DeltaMUD!&n\r\n\r\n";
-    output_tx.send(welcome.to_string()).await?;
-    
-    // Spawn task to handle output
+
+    let (output_tx, mut output_rx) = mpsc::channel::<String>(256);
+
+    game_tx
+        .send(GameMessage::NewConnection {
+            id: conn_id,
+            host: addr.ip().to_string(),
+            output_tx: output_tx.clone(),
+        })
+        .await?;
+
     let write_handle = tokio::spawn(async move {
         while let Some(msg) = output_rx.recv().await {
             if writer.write_all(msg.as_bytes()).await.is_err() {
@@ -192,47 +158,23 @@ pub async fn handle_client(
             }
         }
     });
-    
-    // Read input
+
     let mut line = String::new();
     loop {
         line.clear();
         match reader.read_line(&mut line).await {
             Ok(0) => break, // EOF
             Ok(_) => {
-                let input = line.trim().to_string();
-                // Pass empty lines through too — Enter on a prompt (MOTD, etc.)
-                // is meaningful. Command handlers guard against empty input.
-                game_tx.send(GameMessage::Input {
-                    conn_id,
-                    input,
-                }).await?;
+                let input = line.trim_end_matches(['\r', '\n']).to_string();
+                game_tx
+                    .send(GameMessage::Input { conn_id, input })
+                    .await?;
             }
             Err(_) => break,
         }
     }
-    
-    // Notify disconnection
-    game_tx.send(GameMessage::Disconnect { conn_id }).await?;
-    
-    // Cleanup
+
+    let _ = game_tx.send(GameMessage::Disconnect { conn_id }).await;
     write_handle.abort();
     Ok(())
-}
-
-// Messages sent to the main game loop
-#[derive(Debug)]
-pub enum GameMessage {
-    NewConnection {
-        id: u64,
-        addr: SocketAddr,
-        output_tx: mpsc::Sender<String>,
-    },
-    Input {
-        conn_id: u64,
-        input: String,
-    },
-    Disconnect {
-        conn_id: u64,
-    },
 }

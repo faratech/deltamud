@@ -1,10 +1,9 @@
-use crate::types::*;
-use crate::character::Character;
-use crate::room::Room;
-use std::sync::{Arc, Weak};
-use parking_lot::RwLock;
+// Object (item) entity — id-indexed. Location and containment are expressed
+// as ids into the GameState arenas rather than locked pointers.
 
-// Object types
+use crate::types::*;
+
+// Object types (structs.h ITEM_*).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ObjectType {
@@ -27,9 +26,32 @@ pub enum ObjectType {
     Fountain = 17,
 }
 
-// Object wear flags
+impl ObjectType {
+    pub fn from_i32(v: i32) -> ObjectType {
+        match v {
+            1 => ObjectType::Light,
+            2 => ObjectType::Scroll,
+            3 => ObjectType::Wand,
+            4 => ObjectType::Staff,
+            5 => ObjectType::Weapon,
+            6 => ObjectType::Treasure,
+            7 => ObjectType::Armor,
+            8 => ObjectType::Potion,
+            10 => ObjectType::Trash,
+            11 => ObjectType::Container,
+            12 => ObjectType::Note,
+            13 => ObjectType::LiqContainer,
+            14 => ObjectType::Key,
+            15 => ObjectType::Food,
+            16 => ObjectType::Money,
+            17 => ObjectType::Fountain,
+            _ => ObjectType::Other,
+        }
+    }
+}
+
 bitflags::bitflags! {
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct WearFlags: u32 {
         const TAKE = 1 << 0;
         const FINGER = 1 << 1;
@@ -46,14 +68,14 @@ bitflags::bitflags! {
         const WRIST = 1 << 12;
         const WIELD = 1 << 13;
         const HOLD = 1 << 14;
-        const FLOAT = 1 << 15;
-        const FACE = 1 << 16;
+        const SHOULDERS = 1 << 15;
+        const ANKLE = 1 << 16;
+        const FACE = 1 << 17;
     }
 }
 
-// Object extra flags
 bitflags::bitflags! {
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct ExtraFlags: u64 {
         const GLOW = 1 << 0;
         const HUM = 1 << 1;
@@ -75,38 +97,39 @@ bitflags::bitflags! {
     }
 }
 
-// Object affects
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct ObjectAffect {
     pub location: i32,
     pub modifier: i32,
 }
 
-// Object values (interpretation depends on object type)
-#[derive(Debug, Clone)]
-pub struct ObjectValues {
-    pub value: [i32; 4],
+/// Where an object currently lives. Exactly one of these holds at a time,
+/// mirroring CircleMUD's mutually-exclusive in_room/carried_by/worn_by/in_obj.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjLoc {
+    Nowhere,
+    Room(RoomRnum),
+    Carried(CharId),
+    Worn(CharId, usize),
+    Contained(ObjId),
 }
 
-// Main object structure
 #[derive(Debug)]
 pub struct Object {
-    pub id: u64,
-    pub item_number: ObjVnum,
-    
-    // Location
-    pub in_room: Option<Weak<RwLock<Room>>>,
-    pub carried_by: Option<Weak<RwLock<Character>>>,
-    pub worn_by: Option<Weak<RwLock<Character>>>,
-    pub worn_on: Option<usize>,
-    pub in_obj: Option<Weak<RwLock<Object>>>,
-    
+    pub id: ObjId,
+    pub item_number: ObjVnum, // prototype vnum, or NOTHING for synthetic
+
+    /// Current location (room / inventory / worn / inside container).
+    pub loc: ObjLoc,
+    /// Ids of objects this container holds (CircleMUD obj->contains list).
+    pub contains: Vec<ObjId>,
+
     // Descriptions
-    pub name: String,          // Keywords
-    pub description: String,   // Room description
-    pub short_description: String,  // Inventory description
-    pub action_description: Option<String>,  // Use message
-    
+    pub name: String,              // keyword list
+    pub description: String,       // shown on the ground
+    pub short_description: String, // inventory / action line
+    pub action_description: Option<String>,
+
     // Properties
     pub obj_type: ObjectType,
     pub wear_flags: WearFlags,
@@ -116,27 +139,17 @@ pub struct Object {
     pub rent: i32,
     pub level: Level,
     pub timer: i32,
-    
-    // Values (interpretation depends on type)
-    pub values: ObjectValues,
-    
-    // Affects
+    pub values: [i32; 4],
     pub affects: Vec<ObjectAffect>,
-    
-    // Container contents
-    pub contains: Vec<Arc<RwLock<Object>>>,
 }
 
 impl Object {
     pub fn new(vnum: ObjVnum, name: String, short_desc: String) -> Self {
         Object {
-            id: 0,
+            id: ObjId(0),
             item_number: vnum,
-            in_room: None,
-            carried_by: None,
-            worn_by: None,
-            worn_on: None,
-            in_obj: None,
+            loc: ObjLoc::Nowhere,
+            contains: Vec::new(),
             name,
             description: String::new(),
             short_description: short_desc,
@@ -149,55 +162,36 @@ impl Object {
             rent: 0,
             level: 0,
             timer: -1,
-            values: ObjectValues { value: [0; 4] },
+            values: [0; 4],
             affects: Vec::new(),
-            contains: Vec::new(),
         }
     }
-    
+
     pub fn is_container(&self) -> bool {
         self.obj_type == ObjectType::Container
     }
-    
-    pub fn can_wear(&self, position: WearFlags) -> bool {
-        self.wear_flags.contains(position)
-    }
-    
-    pub fn add_to_container(&mut self, obj: Arc<RwLock<Object>>) {
-        self.contains.push(obj);
-    }
-    
-    pub fn remove_from_container(&mut self, obj_id: u64) {
-        self.contains.retain(|obj| obj.read().id != obj_id);
-    }
-    
-    pub fn get_total_weight(&self) -> i32 {
-        let mut total = self.weight;
-        for obj in &self.contains {
-            total += obj.read().get_total_weight();
-        }
-        total
-    }
-    
     pub fn is_weapon(&self) -> bool {
         self.obj_type == ObjectType::Weapon
     }
-    
     pub fn is_armor(&self) -> bool {
         self.obj_type == ObjectType::Armor
     }
-    
-    pub fn get_damage_dice(&self) -> Option<(i32, i32)> {
+    pub fn can_wear(&self, position: WearFlags) -> bool {
+        self.wear_flags.contains(position)
+    }
+
+    /// Weapon damage dice (num, size) from values[1]/values[2].
+    pub fn damage_dice(&self) -> Option<(i32, i32)> {
         if self.is_weapon() {
-            Some((self.values.value[1], self.values.value[2]))
+            Some((self.values[1], self.values[2]))
         } else {
             None
         }
     }
-    
-    pub fn get_armor_class(&self) -> i32 {
+
+    pub fn armor_class(&self) -> i32 {
         if self.is_armor() {
-            self.values.value[0]
+            self.values[0]
         } else {
             0
         }

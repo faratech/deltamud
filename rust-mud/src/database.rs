@@ -1,411 +1,180 @@
-use mysql_async::{Pool, prelude::*, Row};
-use crate::character::{Character, Affect};
-use anyhow::{Result, anyhow};
-use sha2::{Sha256, Digest};
-use log::info;
+// Standard persistence (MySQL via mysql_async). Tier-0 round-trips the core
+// playable fields in an isolated `rust_player` table; Batch 2 reconciles this
+// to the full 83-column `player_main` schema for C-MUD cross-compat.
+
+use crate::character::Character;
+use crate::types::*;
+use anyhow::Result;
+use mysql_async::{params, prelude::*, Pool, Row};
+use sha2::{Digest, Sha256};
 
 pub struct Database {
     pool: Pool,
 }
 
+fn hash_password(pw: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(pw.as_bytes());
+    format!("{:x}", h.finalize())
+}
+
 impl Database {
     pub fn new(database_url: &str) -> Result<Self> {
-        let pool = Pool::new(database_url);
-        Ok(Database { pool })
+        Ok(Database { pool: Pool::new(database_url) })
     }
-    
+
     pub async fn init_tables(&self) -> Result<()> {
         let mut conn = self.pool.get_conn().await?;
-        
-        // Create player_main table
-        conn.exec_drop(r"
-            CREATE TABLE IF NOT EXISTS player_main (
-                idnum INT AUTO_INCREMENT PRIMARY KEY,
+        conn.query_drop(
+            r"CREATE TABLE IF NOT EXISTS rust_player (
+                idnum BIGINT AUTO_INCREMENT PRIMARY KEY,
                 name VARCHAR(20) UNIQUE NOT NULL,
                 password VARCHAR(64) NOT NULL,
-                title VARCHAR(80),
+                title VARCHAR(80) DEFAULT NULL,
                 description TEXT,
                 sex TINYINT DEFAULT 0,
                 class TINYINT DEFAULT 0,
                 race TINYINT DEFAULT 0,
                 level TINYINT DEFAULT 1,
                 hometown INT DEFAULT 3001,
-                birth TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                played INT DEFAULT 0,
-                weight TINYINT DEFAULT 150,
-                height TINYINT DEFAULT 170,
-                pwd_new TINYINT DEFAULT 0,
-                last_logon TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                host VARCHAR(100),
-                hit INT DEFAULT 20,
-                max_hit INT DEFAULT 20,
-                mana INT DEFAULT 100,
-                max_mana INT DEFAULT 100,
-                move_points INT DEFAULT 80,
-                max_move INT DEFAULT 80,
-                gold INT DEFAULT 0,
-                exp BIGINT DEFAULT 0,
-                armor INT DEFAULT 100,
-                hitroll SMALLINT DEFAULT 0,
-                damroll SMALLINT DEFAULT 0,
-                str_base TINYINT DEFAULT 10,
-                dex_base TINYINT DEFAULT 10,
-                int_base TINYINT DEFAULT 10,
-                wis_base TINYINT DEFAULT 10,
-                con_base TINYINT DEFAULT 10,
-                cha_base TINYINT DEFAULT 10,
-                str_add TINYINT DEFAULT 0,
-                room_vnum INT DEFAULT 3001,
-                position TINYINT DEFAULT 9,
-                act_flags BIGINT DEFAULT 0,
-                affect_flags BIGINT DEFAULT 0,
-                clan_id INT DEFAULT 0,
-                clan_rank TINYINT DEFAULT 0
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-        ", ()).await?;
-        
-        // Create player_affects table
-        conn.exec_drop(r"
-            CREATE TABLE IF NOT EXISTS player_affects (
-                idnum INT NOT NULL,
-                spell_type INT NOT NULL,
-                duration INT NOT NULL,
-                modifier INT NOT NULL,
-                location INT NOT NULL,
-                bitvector BIGINT DEFAULT 0,
-                KEY idnum_idx (idnum),
-                FOREIGN KEY (idnum) REFERENCES player_main(idnum) ON DELETE CASCADE
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-        ", ()).await?;
-        
-        // Create player_skills table
-        conn.exec_drop(r"
-            CREATE TABLE IF NOT EXISTS player_skills (
-                idnum INT NOT NULL,
-                skill_num INT NOT NULL,
-                skill_level TINYINT DEFAULT 0,
-                PRIMARY KEY (idnum, skill_num),
-                FOREIGN KEY (idnum) REFERENCES player_main(idnum) ON DELETE CASCADE
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-        ", ()).await?;
-        
-        // Create player_objects table (for saved equipment/inventory)
-        conn.exec_drop(r"
-            CREATE TABLE IF NOT EXISTS player_objects (
-                owner_id INT NOT NULL,
-                obj_vnum INT NOT NULL,
-                worn_on INT DEFAULT -1,
-                in_room INT DEFAULT -1,
-                values VARCHAR(255),
-                extra_flags BIGINT DEFAULT 0,
-                weight INT DEFAULT 1,
-                timer INT DEFAULT -1,
-                affects TEXT,
-                KEY owner_idx (owner_id),
-                FOREIGN KEY (owner_id) REFERENCES player_main(idnum) ON DELETE CASCADE
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-        ", ()).await?;
-        
-        info!("Database tables initialized");
+                weight SMALLINT DEFAULT 150,
+                height SMALLINT DEFAULT 170,
+                hit INT DEFAULT 20, max_hit INT DEFAULT 20,
+                mana INT DEFAULT 100, max_mana INT DEFAULT 100,
+                move_pts INT DEFAULT 80, max_move INT DEFAULT 80,
+                armor INT DEFAULT 100, gold INT DEFAULT 0, bank_gold INT DEFAULT 0,
+                exp BIGINT DEFAULT 0, alignment INT DEFAULT 0,
+                str_ TINYINT DEFAULT 13, intel TINYINT DEFAULT 13, wis TINYINT DEFAULT 13,
+                dex TINYINT DEFAULT 13, con TINYINT DEFAULT 13, cha TINYINT DEFAULT 13,
+                hometown_room INT DEFAULT 3001
+            )",
+        )
+        .await?;
         Ok(())
     }
-    
+
     pub async fn player_exists(&self, name: &str) -> Result<bool> {
         let mut conn = self.pool.get_conn().await?;
-        let result: Option<Row> = conn
-            .exec_first("SELECT idnum FROM player_main WHERE name = ?", (name,))
+        let row: Option<Row> = conn
+            .exec_first("SELECT idnum FROM rust_player WHERE name = ?", (name,))
             .await?;
-        Ok(result.is_some())
+        Ok(row.is_some())
     }
-    
-    pub async fn create_player(&self, character: &Character, password: &str) -> Result<u64> {
-        let mut conn = self.pool.get_conn().await?;
-        
-        // Hash password
-        let password_hash = self.hash_password(password);
-        
-        // Split into multiple smaller queries to avoid tuple size limits
-        conn.exec_drop(
-            r"INSERT INTO player_main 
-            (name, password, title, sex, class, race, level, hometown)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                &character.player.name,
-                &password_hash,
-                &character.player.title,
-                character.player.sex as u8,
-                character.player.class as u8,
-                character.player.race as u8,
-                character.player.level,
-                character.player.hometown,
-            )
-        ).await?;
-        
-        let id = conn.last_insert_id().unwrap();
-        
-        // Update with stats (max 12 params)
-        conn.exec_drop(
-            r"UPDATE player_main SET
-             hit = ?, max_hit = ?, mana = ?, max_mana = ?, move_points = ?, max_move = ?, 
-             gold = ?, exp = ?, armor = ?, hitroll = ?, damroll = ?
-             WHERE idnum = ?",
-            (
-                character.points.hit,
-                character.points.max_hit,
-                character.points.mana,
-                character.points.max_mana,
-                character.points.move_points,
-                character.points.max_move,
-                character.points.gold,
-                character.points.exp,
-                character.points.armor,
-                character.points.hitroll,
-                character.points.damroll,
-                id,
-            )
-        ).await?;
-        
-        // Update abilities and position
-        conn.exec_drop(
-            r"UPDATE player_main SET
-             str_base = ?, dex_base = ?, int_base = ?, wis_base = ?, con_base = ?, cha_base = ?,
-             room_vnum = ?, position = ?, act_flags = ?, affect_flags = ?
-             WHERE idnum = ?",
-            (
-                character.real_abils.str,
-                character.real_abils.dex,
-                character.real_abils.int,
-                character.real_abils.wis,
-                character.real_abils.con,
-                character.real_abils.cha,
-                character.player.hometown,
-                character.position as u8,
-                character.act_flags,
-                character.affect_flags,
-                id,
-            )
-        ).await?;
-        
-        Ok(id)
-    }
-    
-    pub async fn load_player(&self, name: &str) -> Result<Character> {
-        let mut conn = self.pool.get_conn().await?;
-        
-        let row: Row = conn
-            .exec_first(
-                "SELECT * FROM player_main WHERE name = ?",
-                (name,)
-            )
-            .await?
-            .ok_or_else(|| anyhow!("Player not found"))?;
-        
-        let mut character = self.row_to_character(row)?;
-        
-        // Load affects
-        let affects: Vec<Row> = conn
-            .exec(
-                "SELECT * FROM player_affects WHERE idnum = ?",
-                (character.id,)
-            )
-            .await?;
-        
-        for affect_row in affects {
-            character.affected.push(Affect {
-                spell_type: affect_row.get("spell_type").unwrap(),
-                duration: affect_row.get("duration").unwrap(),
-                modifier: affect_row.get("modifier").unwrap(),
-                location: affect_row.get("location").unwrap(),
-                bitvector: affect_row.get("bitvector").unwrap(),
-            });
-        }
-        
-        Ok(character)
-    }
-    
-    pub async fn save_player(&self, character: &Character) -> Result<()> {
-        let mut conn = self.pool.get_conn().await?;
-        
-        // Update main player data in smaller chunks
-        conn.exec_drop(
-            r"UPDATE player_main SET
-                title = ?, sex = ?, class = ?, race = ?, level = ?
-            WHERE idnum = ?",
-            (
-                &character.player.title,
-                character.player.sex as u8,
-                character.player.class as u8,
-                character.player.race as u8,
-                character.player.level,
-                character.id,
-            )
-        ).await?;
-        
-        conn.exec_drop(
-            r"UPDATE player_main SET
-                hit = ?, max_hit = ?, mana = ?, max_mana = ?,
-                move_points = ?, max_move = ?, gold = ?, exp = ?
-            WHERE idnum = ?",
-            (
-                character.points.hit,
-                character.points.max_hit,
-                character.points.mana,
-                character.points.max_mana,
-                character.points.move_points,
-                character.points.max_move,
-                character.points.gold,
-                character.points.exp,
-                character.id,
-            )
-        ).await?;
-        
-        conn.exec_drop(
-            r"UPDATE player_main SET
-                armor = ?, hitroll = ?, damroll = ?,
-                str_base = ?, dex_base = ?, int_base = ?, 
-                wis_base = ?, con_base = ?, cha_base = ?
-            WHERE idnum = ?",
-            (
-                character.points.armor,
-                character.points.hitroll,
-                character.points.damroll,
-                character.real_abils.str,
-                character.real_abils.dex,
-                character.real_abils.int,
-                character.real_abils.wis,
-                character.real_abils.con,
-                character.real_abils.cha,
-                character.id,
-            )
-        ).await?;
-        
-        conn.exec_drop(
-            r"UPDATE player_main SET
-                room_vnum = ?, position = ?, act_flags = ?, affect_flags = ?,
-                last_logon = NOW()
-            WHERE idnum = ?",
-            (
-                character.in_room.as_ref()
-                    .and_then(|r| r.upgrade())
-                    .map(|r| r.read().number)
-                    .unwrap_or(3001),
-                character.position as u8,
-                character.act_flags,
-                character.affect_flags,
-                character.id,
-            )
-        ).await?;
-        
-        // Save affects
-        conn.exec_drop(
-            "DELETE FROM player_affects WHERE idnum = ?",
-            (character.id,)
-        ).await?;
-        
-        for affect in &character.affected {
-            conn.exec_drop(
-                r"INSERT INTO player_affects 
-                (idnum, spell_type, duration, modifier, location, bitvector)
-                VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    character.id,
-                    affect.spell_type,
-                    affect.duration,
-                    affect.modifier,
-                    affect.location,
-                    affect.bitvector,
-                )
-            ).await?;
-        }
-        
-        Ok(())
-    }
-    
+
     pub async fn verify_password(&self, name: &str, password: &str) -> Result<bool> {
         let mut conn = self.pool.get_conn().await?;
-        
-        let row: Option<Row> = conn
-            .exec_first(
-                "SELECT password, pwd_new FROM player_main WHERE name = ?",
-                (name,)
-            )
+        let stored: Option<String> = conn
+            .exec_first("SELECT password FROM rust_player WHERE name = ?", (name,))
             .await?;
-        
-        if let Some(row) = row {
-            let stored_hash: String = row.get("password").unwrap();
-            let pwd_new: i8 = row.get("pwd_new").unwrap();
-            
-            if pwd_new == 0 {
-                // Old crypt() password, needs upgrade
-                // For now, just return false to force password reset
-                return Ok(false);
-            }
-            
-            let password_hash = self.hash_password(password);
-            Ok(password_hash == stored_hash)
-        } else {
-            Ok(false)
-        }
+        Ok(matches!(stored, Some(h) if h == hash_password(password)))
     }
-    
-    fn hash_password(&self, password: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(password.as_bytes());
-        format!("{:x}", hasher.finalize())
+
+    pub async fn create_player(&self, ch: &Character, password: &str) -> Result<i64> {
+        let mut conn = self.pool.get_conn().await?;
+        conn.exec_drop(
+            r"INSERT INTO rust_player
+                (name, password, sex, class, race, level, hometown, weight, height,
+                 hit, max_hit, mana, max_mana, move_pts, max_move, armor, gold, exp,
+                 str_, intel, wis, dex, con, cha)
+              VALUES (:name,:pw,:sex,:class,:race,:level,:hometown,:weight,:height,
+                 :hit,:max_hit,:mana,:max_mana,:move_pts,:max_move,:armor,:gold,:exp,
+                 :str,:intel,:wis,:dex,:con,:cha)",
+            params! {
+                "name" => ch.player.name.clone(),
+                "pw" => hash_password(password),
+                "sex" => ch.player.sex as u8,
+                "class" => ch.player.class as u8,
+                "race" => ch.player.race as u8,
+                "level" => ch.player.level,
+                "hometown" => ch.player.hometown,
+                "weight" => ch.player.weight,
+                "height" => ch.player.height,
+                "hit" => ch.points.hit,
+                "max_hit" => ch.points.max_hit,
+                "mana" => ch.points.mana,
+                "max_mana" => ch.points.max_mana,
+                "move_pts" => ch.points.move_points,
+                "max_move" => ch.points.max_move,
+                "armor" => ch.points.armor,
+                "gold" => ch.points.gold,
+                "exp" => ch.points.exp,
+                "str" => ch.real_abils.str,
+                "intel" => ch.real_abils.intel,
+                "wis" => ch.real_abils.wis,
+                "dex" => ch.real_abils.dex,
+                "con" => ch.real_abils.con,
+                "cha" => ch.real_abils.cha,
+            },
+        )
+        .await?;
+        Ok(conn.last_insert_id().unwrap_or(0) as i64)
     }
-    
-    fn row_to_character(&self, row: Row) -> Result<Character> {
-        let id: u64 = row.get("idnum").unwrap();
-        let name: String = row.get("name").unwrap();
-        let title: Option<String> = row.get("title").unwrap();
-        let sex: u8 = row.get("sex").unwrap();
-        let class: u8 = row.get("class").unwrap();
-        let race: u8 = row.get("race").unwrap();
-        let level: u8 = row.get("level").unwrap();
-        let hometown: i32 = row.get("hometown").unwrap();
-        
-        let mut character = Character::new_player(
-            name,
-            unsafe { std::mem::transmute(class) },
-            unsafe { std::mem::transmute(race) },
+
+    pub async fn load_player(&self, name: &str) -> Result<Character> {
+        let mut conn = self.pool.get_conn().await?;
+        let row: Option<Row> = conn
+            .exec_first("SELECT * FROM rust_player WHERE name = ?", (name,))
+            .await?;
+        let row = row.ok_or_else(|| anyhow::anyhow!("Player not found"))?;
+
+        let mut ch = Character::new_player(
+            row.get::<String, _>("name").unwrap_or_default(),
+            Class::from_u8(row.get::<i8, _>("class").unwrap_or(3) as u8),
+            Race::from_u8(row.get::<i8, _>("race").unwrap_or(0) as u8),
         );
-        
-        character.id = id;
-        character.player.title = title;
-        character.player.sex = unsafe { std::mem::transmute(sex) };
-        character.player.level = level;
-        character.player.hometown = hometown;
-        
-        // Load points
-        character.points.hit = row.get("hit").unwrap();
-        character.points.max_hit = row.get("max_hit").unwrap();
-        character.points.mana = row.get("mana").unwrap();
-        character.points.max_mana = row.get("max_mana").unwrap();
-        character.points.move_points = row.get("move_points").unwrap();
-        character.points.max_move = row.get("max_move").unwrap();
-        character.points.gold = row.get("gold").unwrap();
-        character.points.exp = row.get("exp").unwrap();
-        character.points.armor = row.get("armor").unwrap();
-        character.points.hitroll = row.get("hitroll").unwrap();
-        character.points.damroll = row.get("damroll").unwrap();
-        
-        // Load abilities
-        character.real_abils.str = row.get("str_base").unwrap();
-        character.real_abils.dex = row.get("dex_base").unwrap();
-        character.real_abils.int = row.get("int_base").unwrap();
-        character.real_abils.wis = row.get("wis_base").unwrap();
-        character.real_abils.con = row.get("con_base").unwrap();
-        character.real_abils.cha = row.get("cha_base").unwrap();
-        
-        // Copy to affected abilities (will be modified by affects)
-        character.aff_abils = character.real_abils.clone();
-        
-        // Load position and flags
-        let pos: u8 = row.get("position").unwrap();
-        character.position = unsafe { std::mem::transmute(pos) };
-        character.act_flags = row.get("act_flags").unwrap();
-        character.affect_flags = row.get("affect_flags").unwrap();
-        
-        Ok(character)
+        ch.idnum = row.get::<i64, _>("idnum").unwrap_or(-1);
+        ch.player.sex = Gender::from_u8(row.get::<i8, _>("sex").unwrap_or(0) as u8);
+        ch.player.level = row.get::<u8, _>("level").unwrap_or(1);
+        ch.player.hometown = row.get::<i32, _>("hometown").unwrap_or(3001);
+        ch.player.weight = row.get::<u16, _>("weight").unwrap_or(150) as u8;
+        ch.player.height = row.get::<u16, _>("height").unwrap_or(170) as u8;
+        ch.points.hit = row.get::<i32, _>("hit").unwrap_or(20);
+        ch.points.max_hit = row.get::<i32, _>("max_hit").unwrap_or(20);
+        ch.points.mana = row.get::<i32, _>("mana").unwrap_or(100);
+        ch.points.max_mana = row.get::<i32, _>("max_mana").unwrap_or(100);
+        ch.points.move_points = row.get::<i32, _>("move_pts").unwrap_or(80);
+        ch.points.max_move = row.get::<i32, _>("max_move").unwrap_or(80);
+        ch.points.armor = row.get::<i32, _>("armor").unwrap_or(100) as ArmorClass;
+        ch.points.gold = row.get::<i32, _>("gold").unwrap_or(0);
+        ch.points.bank_gold = row.get::<i32, _>("bank_gold").unwrap_or(0);
+        ch.points.exp = row.get::<i64, _>("exp").unwrap_or(0);
+        ch.alignment = row.get::<i32, _>("alignment").unwrap_or(0);
+        ch.real_abils.str = row.get::<i8, _>("str_").unwrap_or(13);
+        ch.real_abils.intel = row.get::<i8, _>("intel").unwrap_or(13);
+        ch.real_abils.wis = row.get::<i8, _>("wis").unwrap_or(13);
+        ch.real_abils.dex = row.get::<i8, _>("dex").unwrap_or(13);
+        ch.real_abils.con = row.get::<i8, _>("con").unwrap_or(13);
+        ch.real_abils.cha = row.get::<i8, _>("cha").unwrap_or(13);
+        ch.aff_abils = ch.real_abils;
+        Ok(ch)
+    }
+
+    pub async fn save_player(&self, ch: &Character) -> Result<()> {
+        let mut conn = self.pool.get_conn().await?;
+        conn.exec_drop(
+            r"UPDATE rust_player SET
+                level=:level, hit=:hit, max_hit=:max_hit, mana=:mana, max_mana=:max_mana,
+                move_pts=:move_pts, max_move=:max_move, armor=:armor, gold=:gold,
+                bank_gold=:bank_gold, exp=:exp, alignment=:alignment, hometown=:hometown
+              WHERE name=:name",
+            params! {
+                "level" => ch.player.level,
+                "hit" => ch.points.hit,
+                "max_hit" => ch.points.max_hit,
+                "mana" => ch.points.mana,
+                "max_mana" => ch.points.max_mana,
+                "move_pts" => ch.points.move_points,
+                "max_move" => ch.points.max_move,
+                "armor" => ch.points.armor,
+                "gold" => ch.points.gold,
+                "bank_gold" => ch.points.bank_gold,
+                "exp" => ch.points.exp,
+                "alignment" => ch.alignment,
+                "hometown" => ch.player.hometown,
+                "name" => ch.player.name.clone(),
+            },
+        )
+        .await?;
+        Ok(())
     }
 }

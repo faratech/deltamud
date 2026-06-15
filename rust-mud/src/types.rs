@@ -1,11 +1,25 @@
-// Core type definitions for DeltaMUD
+// Core type definitions for DeltaMUD (idiomatic Rust port).
+//
+// The port follows CircleMUD's actually-single-threaded heartbeat model:
+// a single `GameState` owns the world and every entity lives in an
+// id-indexed arena. Entities reference each other by small `Copy` ids
+// (`CharId`, `ObjId`, room real-numbers) instead of locked pointers, which
+// mirrors C's `char_data *` semantics with safe indices and lets the borrow
+// checker — not hand-managed lock ordering — enforce correctness.
 
+use std::fmt;
+
+// ---------------------------------------------------------------------------
+// Virtual-number aliases (vnums are the builder-facing numbers from the
+// world files; rnums are dense indices into the loaded arrays).
+// ---------------------------------------------------------------------------
 pub type RoomVnum = i32;
 pub type ObjVnum = i32;
 pub type MobVnum = i32;
+pub type ZoneVnum = i32;
+
+/// Real room number: a dense index into `GameState::rooms`.
 pub type RoomRnum = usize;
-pub type ObjRnum = usize;
-pub type MobRnum = usize;
 
 pub type Level = u8;
 pub type Hitroll = i16;
@@ -14,7 +28,34 @@ pub type ArmorClass = i16;
 pub type Gold = i32;
 pub type Experience = i64;
 
-// Direction constants
+// ---------------------------------------------------------------------------
+// Entity ids. Newtypes over u64 so they can never be confused with each
+// other or with raw counts. A lookup that misses (e.g. after the entity is
+// extracted) simply returns `None`, mirroring C's null-pointer checks.
+// ---------------------------------------------------------------------------
+macro_rules! id_newtype {
+    ($name:ident) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub struct $name(pub u64);
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+    };
+}
+id_newtype!(CharId);
+id_newtype!(ObjId);
+id_newtype!(ConnId);
+
+// Sentinel "nil" references, matching CircleMUD's structs.h.
+pub const NOWHERE: RoomVnum = -1;
+pub const NOTHING: ObjVnum = -1;
+pub const NOBODY: MobVnum = -1;
+
+// ---------------------------------------------------------------------------
+// Directions (structs.h: NUM_OF_DIRS = 6, order n/e/s/w/u/d).
+// ---------------------------------------------------------------------------
 pub const NORTH: usize = 0;
 pub const EAST: usize = 1;
 pub const SOUTH: usize = 2;
@@ -23,7 +64,9 @@ pub const UP: usize = 4;
 pub const DOWN: usize = 5;
 pub const NUM_OF_DIRS: usize = 6;
 
-// Class constants
+// ---------------------------------------------------------------------------
+// Classes (DeltaMUD: 5 player classes).
+// ---------------------------------------------------------------------------
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Class {
@@ -34,7 +77,18 @@ pub enum Class {
     Artisan = 4,
 }
 
-// Race constants
+impl Class {
+    pub fn from_u8(v: u8) -> Class {
+        match v {
+            0 => Class::MagicUser,
+            1 => Class::Cleric,
+            2 => Class::Thief,
+            3 => Class::Warrior,
+            _ => Class::Artisan,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Race {
@@ -52,23 +106,62 @@ pub enum Race {
     HalfOrc = 11,
 }
 
-// Position states
+impl Race {
+    pub fn from_u8(v: u8) -> Race {
+        match v {
+            0 => Race::Human,
+            1 => Race::Elf,
+            2 => Race::Gnome,
+            3 => Race::Dwarf,
+            4 => Race::Troll,
+            5 => Race::Orc,
+            6 => Race::HalfElf,
+            7 => Race::Kender,
+            8 => Race::Minotaur,
+            9 => Race::Vampire,
+            10 => Race::Ogre,
+            _ => Race::HalfOrc,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Position. Numeric values MUST match structs.h POS_* exactly — they are
+// stored in the player file / DB and used as min_position gates in the
+// command table. (The prior port had Resting/Meditating swapped.)
+// ---------------------------------------------------------------------------
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum Position {
     Dead = 0,
-    MortalllyWounded = 1,
+    MortallyWounded = 1,
     Incapacitated = 2,
     Stunned = 3,
     Sleeping = 4,
-    Meditating = 5,
-    Resting = 6,
+    Resting = 5,
+    Meditating = 6,
     Sitting = 7,
     Fighting = 8,
     Standing = 9,
 }
 
-// Gender
+impl Position {
+    pub fn from_u8(v: u8) -> Position {
+        match v {
+            0 => Position::Dead,
+            1 => Position::MortallyWounded,
+            2 => Position::Incapacitated,
+            3 => Position::Stunned,
+            4 => Position::Sleeping,
+            5 => Position::Resting,
+            6 => Position::Meditating,
+            7 => Position::Sitting,
+            8 => Position::Fighting,
+            _ => Position::Standing,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Gender {
@@ -77,7 +170,41 @@ pub enum Gender {
     Female = 2,
 }
 
-// Equipment positions
+impl Gender {
+    pub fn from_u8(v: u8) -> Gender {
+        match v {
+            1 => Gender::Male,
+            2 => Gender::Female,
+            _ => Gender::Neutral,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Immortal level thresholds (structs.h LVL_*).
+// ---------------------------------------------------------------------------
+pub const LVL_IMPL: Level = 105;
+pub const LVL_GRGOD: Level = 104;
+pub const LVL_GOD: Level = 103;
+pub const LVL_IMMORT: Level = 101;
+pub const LVL_FREEZE: Level = LVL_GRGOD;
+
+// ---------------------------------------------------------------------------
+// Condition indices (structs.h): char->player_specials->conditions[].
+// ---------------------------------------------------------------------------
+pub const DRUNK: usize = 0;
+pub const FULL: usize = 1;
+pub const THIRST: usize = 2;
+pub const NUM_CONDITIONS: usize = 3;
+
+// Player-data fixed limits (structs.h — *DO*NOT*CHANGE* for save-compat).
+pub const MAX_SKILLS: usize = 1000;
+pub const MAX_TONGUE: usize = 3;
+pub const MAX_AFFECT: usize = 32;
+
+// ---------------------------------------------------------------------------
+// Equipment wear positions (structs.h WEAR_*; NUM_WEARS = 20).
+// ---------------------------------------------------------------------------
 pub const WEAR_LIGHT: usize = 0;
 pub const WEAR_FINGER_R: usize = 1;
 pub const WEAR_FINGER_L: usize = 2;
@@ -96,10 +223,23 @@ pub const WEAR_WRIST_R: usize = 14;
 pub const WEAR_WRIST_L: usize = 15;
 pub const WEAR_WIELD: usize = 16;
 pub const WEAR_HOLD: usize = 17;
-pub const WEAR_FLOAT: usize = 18;
-pub const WEAR_FACE: usize = 19;
-pub const NUM_WEARS: usize = 20;
+pub const WEAR_SHOULDERS: usize = 18;
+pub const WEAR_ANKLE_R: usize = 19;
+pub const WEAR_ANKLE_L: usize = 20;
+pub const WEAR_FACE: usize = 21;
+pub const NUM_WEARS: usize = 22;
 
-// Sentinel vnum for dynamically created objects (corpses, money, etc.)
-// that have no prototype. Matches CircleMUD NOTHING convention.
-pub const NOTHING: i32 = -1;
+// ---------------------------------------------------------------------------
+// Heartbeat timing. CircleMUD: OPT_USEC=100000 => PASSES_PER_SEC=10, so one
+// pulse is 100ms. RL_SEC = *PASSES_PER_SEC. (comm.c game_loop.)
+// ---------------------------------------------------------------------------
+pub const PASSES_PER_SEC: u64 = 10;
+pub const PULSE_VIOLENCE: u64 = 2 * PASSES_PER_SEC; // every 2s
+pub const PULSE_MOBILE: u64 = 10 * PASSES_PER_SEC; // every 10s
+pub const PULSE_ZONE: u64 = 10 * PASSES_PER_SEC; // every 10s
+
+/// Direction names for output (CircleMUD `dirs[]`).
+pub const DIR_NAMES: [&str; NUM_OF_DIRS] = ["north", "east", "south", "west", "up", "down"];
+
+/// The direction you came *from* when arriving via `dir` (for arrival msgs).
+pub const REV_DIR: [usize; NUM_OF_DIRS] = [SOUTH, WEST, NORTH, EAST, DOWN, UP];

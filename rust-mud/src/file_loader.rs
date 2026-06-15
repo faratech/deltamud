@@ -1,6 +1,7 @@
-use crate::world::{World, Zone, MobileProto, ObjectProto, ResetCmd};
-use crate::room::{Room, Exit, RoomFlags};
-use crate::object::{WearFlags, ExtraFlags};
+use crate::world::{Zone, MobileProto, ObjectProto, ResetCmd};
+use crate::room::{Room, Exit, RoomFlags, SectorType};
+use crate::object::{WearFlags, ExtraFlags, ObjectType};
+use crate::state::GameState;
 use crate::types::*;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -11,7 +12,7 @@ use log::{info, warn};
 pub struct FileLoader;
 
 impl FileLoader {
-    pub async fn load_world(world: &mut World, base_path: &str) -> Result<()> {
+    pub async fn load_world(world: &mut GameState, base_path: &str) -> Result<()> {
         let world_path = Path::new(base_path).join("world");
         
         // Load zones
@@ -36,7 +37,7 @@ impl FileLoader {
         Ok(())
     }
     
-    fn load_zones(world: &mut World, path: &Path) -> Result<()> {
+    fn load_zones(world: &mut GameState, path: &Path) -> Result<()> {
         let index_path = path.join("index");
         let file = File::open(&index_path)?;
         let reader = BufReader::new(file);
@@ -56,7 +57,7 @@ impl FileLoader {
         Ok(())
     }
     
-    fn load_zone_file(world: &mut World, path: &Path) -> Result<()> {
+    fn load_zone_file(world: &mut GameState, path: &Path) -> Result<()> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
         let lines: Vec<String> = reader.lines().collect::<std::io::Result<_>>()?;
@@ -199,7 +200,7 @@ impl FileLoader {
         }
     }
     
-    fn load_rooms(world: &mut World, path: &Path) -> Result<()> {
+    fn load_rooms(world: &mut GameState, path: &Path) -> Result<()> {
         let index_path = path.join("index");
         let file = File::open(&index_path)?;
         let reader = BufReader::new(file);
@@ -219,7 +220,7 @@ impl FileLoader {
         Ok(())
     }
     
-    fn load_room_file(world: &mut World, path: &Path) -> Result<()> {
+    fn load_room_file(world: &mut GameState, path: &Path) -> Result<()> {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
         let mut line = String::new();
@@ -228,18 +229,18 @@ impl FileLoader {
             if line.starts_with('#') {
                 let vnum: RoomVnum = line[1..].trim().parse()?;
                 
-                // Read room name
+                // Read room name (tilde-terminated; strip trailing newline first)
                 line.clear();
                 reader.read_line(&mut line)?;
-                let name = line.trim_end_matches('~').to_string();
-                
+                let name = line.trim_end().trim_end_matches('~').to_string();
+
                 // Read room description
                 let mut description = String::new();
                 loop {
                     line.clear();
                     reader.read_line(&mut line)?;
-                    if line.contains('~') {
-                        description.push_str(line.trim_end_matches('~'));
+                    if let Some(p) = line.find('~') {
+                        description.push_str(&line[..p]);
                         break;
                     }
                     description.push_str(&line);
@@ -256,7 +257,7 @@ impl FileLoader {
                 
                 let mut room = Room::new(vnum, zone, name, description);
                 room.room_flags = RoomFlags::from_bits_truncate(flags);
-                room.sector_type = unsafe { std::mem::transmute(sector.min(10)) };
+                room.sector_type = SectorType::from_i32(sector as i32);
                 
                 // Read exits
                 loop {
@@ -266,7 +267,15 @@ impl FileLoader {
                     if line.trim() == "S" {
                         break;
                     }
-                    
+
+                    // Room DG trigger: exactly 'T <number>' (WLD_TRIGGER=2);
+                    // avoids matching description lines like "The...".
+                    let lt = line.trim();
+                    if lt.starts_with("T ") && lt[2..].trim().parse::<i32>().is_ok() {
+                        crate::dg_db_scripts::parse_trigger_line(2, vnum, lt);
+                        continue;
+                    }
+
                     if line.starts_with('D') {
                         let dir = line[1..].trim().parse::<usize>()?;
                         if dir < NUM_OF_DIRS {
@@ -275,17 +284,17 @@ impl FileLoader {
                             loop {
                                 line.clear();
                                 reader.read_line(&mut line)?;
-                                if line.contains('~') {
-                                    exit_desc.push_str(line.trim_end_matches('~'));
+                                if let Some(p) = line.find('~') {
+                                    exit_desc.push_str(&line[..p]);
                                     break;
                                 }
                                 exit_desc.push_str(&line);
                             }
-                            
+
                             // Read keywords
                             line.clear();
                             reader.read_line(&mut line)?;
-                            let keywords = line.trim_end_matches('~').to_string();
+                            let keywords = line.trim_end().trim_end_matches('~').to_string();
                             
                             // Read door info
                             line.clear();
@@ -314,7 +323,7 @@ impl FileLoader {
         Ok(())
     }
     
-    fn load_mobiles(world: &mut World, path: &Path) -> Result<()> {
+    fn load_mobiles(world: &mut GameState, path: &Path) -> Result<()> {
         let index_path = path.join("index");
         let file = File::open(&index_path)?;
         let reader = BufReader::new(file);
@@ -355,7 +364,7 @@ impl FileLoader {
     ///
     /// Per-mob errors log and skip instead of aborting the whole file,
     /// so one bad entry doesn't sink the zone.
-    fn load_mobile_file(world: &mut World, path: &Path) -> Result<()> {
+    fn load_mobile_file(world: &mut GameState, path: &Path) -> Result<()> {
         let contents = std::fs::read_to_string(path)?;
         let lines: Vec<&str> = contents.lines().collect();
         let mut i = 0;
@@ -466,13 +475,11 @@ impl FileLoader {
             }
         }
 
-        // Skip any trailing DG trigger lines ('T ...') until next '#' or EOF.
+        // Attach DG triggers declared by trailing 'T <vnum>' lines (MOB_TRIGGER=0).
         while *i < lines.len() {
             let t = lines[*i].trim();
-            if t.starts_with('T') && t.len() > 1 && !t.starts_with("This") {
-                // Consume trigger header line + its body until the next
-                // terminator. DG format: 'T <vnum>' then the body. For
-                // Tier-0 we just skip; DG parsing is a separate milestone.
+            if t.starts_with("T ") && t[2..].trim().parse::<i32>().is_ok() {
+                crate::dg_db_scripts::parse_trigger_line(0, vnum, t);
                 *i += 1;
             } else {
                 break;
@@ -489,9 +496,15 @@ impl FileLoader {
             hitpoints,
             experience,
             gold,
-            position: unsafe { std::mem::transmute::<u8, Position>(position) },
-            default_pos: unsafe { std::mem::transmute::<u8, Position>(default_pos) },
-            sex: unsafe { std::mem::transmute::<u8, Gender>(sex) },
+            position: Position::from_u8(position),
+            default_pos: Position::from_u8(default_pos),
+            sex: Gender::from_u8(sex),
+            // Combat fields default for Tier-0; refined in Batch 5 (fight.c).
+            armor: 0,
+            hitroll: 0,
+            damroll: 0,
+            damnodice: 1,
+            damsizedice: 6,
         })
     }
 
@@ -558,7 +571,7 @@ impl FileLoader {
         None
     }
     
-    fn load_objects(world: &mut World, path: &Path) -> Result<()> {
+    fn load_objects(world: &mut GameState, path: &Path) -> Result<()> {
         let index_path = path.join("index");
         let file = File::open(&index_path)?;
         let reader = BufReader::new(file);
@@ -578,81 +591,115 @@ impl FileLoader {
         Ok(())
     }
     
-    fn load_object_file(world: &mut World, path: &Path) -> Result<()> {
+    /// Read a tilde-terminated (possibly multi-line) string from a reader.
+    fn read_tilde_buf(reader: &mut BufReader<File>) -> Result<String> {
+        let mut out = String::new();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line)? == 0 {
+                break;
+            }
+            if let Some(p) = line.find('~') {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&line[..p]);
+                return Ok(out);
+            }
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(line.trim_end_matches(['\r', '\n']));
+        }
+        Ok(out)
+    }
+
+    /// CircleMUD asciiflag_conv: a flag field is either a plain integer or a
+    /// string of letters (a-z = bits 0-25, A-Z = bits 26-51).
+    fn asciiflag_conv(flag: &str) -> u64 {
+        let flag = flag.trim();
+        if let Ok(n) = flag.parse::<u64>() {
+            return n;
+        }
+        let mut bits = 0u64;
+        for c in flag.chars() {
+            if c.is_ascii_lowercase() {
+                bits |= 1 << (c as u64 - 'a' as u64);
+            } else if c.is_ascii_uppercase() {
+                bits |= 1 << (26 + c as u64 - 'A' as u64);
+            }
+        }
+        bits
+    }
+
+    fn load_object_file(world: &mut GameState, path: &Path) -> Result<()> {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
         let mut line = String::new();
-        
+
         while reader.read_line(&mut line)? > 0 {
             if line.starts_with('#') {
-                let vnum: ObjVnum = line[1..].trim().parse()?;
-                
-                // Read keywords
-                line.clear();
-                reader.read_line(&mut line)?;
-                let keywords = line.trim_end_matches('~').to_string();
-                
-                // Read short description
-                line.clear();
-                reader.read_line(&mut line)?;
-                let short_desc = line.trim_end_matches('~').to_string();
-                
-                // Read long description
-                line.clear();
-                reader.read_line(&mut line)?;
-                let long_desc = line.trim_end_matches('~').to_string();
-                
-                // Read action description
-                line.clear();
-                reader.read_line(&mut line)?;
-                let _action_desc = line.trim_end_matches('~').to_string();
-                
-                // Read type, extra flags, wear flags
-                line.clear();
-                reader.read_line(&mut line)?;
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                
-                let obj_type = parts.get(0).unwrap_or(&"9").parse::<u8>()?;
-                let extra_flags = parts.get(1).unwrap_or(&"0").parse::<u64>()?;
-                let wear_flags = parts.get(2).unwrap_or(&"1").parse::<u32>()?;
-                
-                // Read values
-                line.clear();
-                reader.read_line(&mut line)?;
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                let mut values = [0; 4];
-                for i in 0..4 {
-                    values[i] = parts.get(i).unwrap_or(&"0").parse()?;
-                }
-                
-                // Read weight, cost, rent
-                line.clear();
-                reader.read_line(&mut line)?;
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                
-                let weight = parts.get(0).unwrap_or(&"1").parse()?;
-                let cost = parts.get(1).unwrap_or(&"0").parse()?;
-                let rent = parts.get(2).unwrap_or(&"0").parse()?;
-                
-                let obj = ObjectProto {
-                    vnum,
-                    name: keywords,
-                    short_desc,
-                    description: long_desc,
-                    obj_type: unsafe { std::mem::transmute(obj_type.min(17)) },
-                    wear_flags: WearFlags::from_bits_truncate(wear_flags),
-                    extra_flags: ExtraFlags::from_bits_truncate(extra_flags),
-                    weight,
-                    cost,
-                    rent,
-                    values,
+                let vnum: ObjVnum = match line[1..].trim().parse() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        line.clear();
+                        continue;
+                    }
                 };
-                
-                world.obj_protos.insert(vnum, obj);
+
+                // Four tilde-terminated strings (each may span lines).
+                let keywords = Self::read_tilde_buf(&mut reader)?;
+                let short_desc = Self::read_tilde_buf(&mut reader)?;
+                let long_desc = Self::read_tilde_buf(&mut reader)?;
+                let action_desc = Self::read_tilde_buf(&mut reader)?;
+                let _ = action_desc;
+
+                // type, extra flags, wear flags (flags may be ascii letters).
+                line.clear();
+                reader.read_line(&mut line)?;
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                let obj_type = parts.first().and_then(|s| s.parse::<i32>().ok()).unwrap_or(9);
+                let extra_flags = parts.get(1).map(|s| Self::asciiflag_conv(s)).unwrap_or(0);
+                let wear_flags = parts.get(2).map(|s| Self::asciiflag_conv(s) as u32).unwrap_or(1);
+
+                // values (DeltaMUD writes up to 6; Object keeps the first 4).
+                line.clear();
+                reader.read_line(&mut line)?;
+                let vparts: Vec<&str> = line.split_whitespace().collect();
+                let mut values = [0i32; 4];
+                for (i, v) in values.iter_mut().enumerate() {
+                    *v = vparts.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
+                }
+
+                // weight, cost, rent.
+                line.clear();
+                reader.read_line(&mut line)?;
+                let wparts: Vec<&str> = line.split_whitespace().collect();
+                let weight = wparts.first().and_then(|s| s.parse().ok()).unwrap_or(1);
+                let cost = wparts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                let rent = wparts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+                world.obj_protos.insert(
+                    vnum,
+                    ObjectProto {
+                        vnum,
+                        name: keywords,
+                        short_desc,
+                        description: long_desc,
+                        obj_type: ObjectType::from_i32(obj_type),
+                        wear_flags: WearFlags::from_bits_truncate(wear_flags),
+                        extra_flags: ExtraFlags::from_bits_truncate(extra_flags),
+                        weight,
+                        cost,
+                        rent,
+                        values,
+                    },
+                );
             }
             line.clear();
         }
-        
+
         Ok(())
     }
 }

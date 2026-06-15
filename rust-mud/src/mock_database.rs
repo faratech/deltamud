@@ -1,61 +1,79 @@
-// Mock database for testing without MySQL
+// In-memory database for tests / golden harness (no MySQL needed).
 use crate::character::Character;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+struct Stored {
+    character: Character,
+    password: String,
+}
+
 pub struct MockDatabase {
-    players: Mutex<HashMap<String, Character>>,
+    players: Mutex<HashMap<String, Stored>>,
+    next_idnum: Mutex<i64>,
 }
 
 impl MockDatabase {
     pub fn new() -> Self {
         MockDatabase {
             players: Mutex::new(HashMap::new()),
+            next_idnum: Mutex::new(1),
         }
+    }
+}
+
+impl Default for MockDatabase {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[async_trait::async_trait]
 impl crate::DatabaseInterface for MockDatabase {
     async fn init_tables(&self) -> Result<()> {
-        // Mock implementation - always succeeds
         Ok(())
     }
-    
+
     async fn player_exists(&self, name: &str) -> Result<bool> {
-        let players = self.players.lock().unwrap();
-        Ok(players.contains_key(name))
+        Ok(self.players.lock().unwrap().contains_key(&name.to_lowercase()))
     }
-    
-    async fn create_player(&self, character: &Character, _password: &str) -> Result<u64> {
+
+    async fn create_player(&self, character: &Character, password: &str) -> Result<i64> {
         let mut players = self.players.lock().unwrap();
-        let id = (players.len() + 1) as u64;
-        let mut ch = character.clone_for_save();
-        ch.id = id;
-        players.insert(character.get_name().to_string(), ch);
+        let mut idnum = self.next_idnum.lock().unwrap();
+        let id = *idnum;
+        *idnum += 1;
+        let mut ch = character.clone();
+        ch.idnum = id;
+        players.insert(
+            character.get_name().to_lowercase(),
+            Stored { character: ch, password: password.to_string() },
+        );
         Ok(id)
     }
-    
+
     async fn load_player(&self, name: &str) -> Result<Character> {
         let players = self.players.lock().unwrap();
-        if let Some(character) = players.get(name) {
-            Ok(character.clone_for_save())
-        } else {
-            Err(anyhow::anyhow!("Player not found"))
-        }
+        players
+            .get(&name.to_lowercase())
+            .map(|s| s.character.clone())
+            .ok_or_else(|| anyhow::anyhow!("Player not found"))
     }
-    
+
     async fn save_player(&self, character: &Character) -> Result<()> {
         let mut players = self.players.lock().unwrap();
-        players.insert(character.get_name().to_string(), character.clone_for_save());
+        if let Some(s) = players.get_mut(&character.get_name().to_lowercase()) {
+            s.character = character.clone();
+        }
         Ok(())
     }
-    
+
     async fn verify_password(&self, name: &str, password: &str) -> Result<bool> {
-        // For testing, accept any password for existing players
-        // or password "test" for new players
         let players = self.players.lock().unwrap();
-        Ok(players.contains_key(name) || password == "test")
+        match players.get(&name.to_lowercase()) {
+            Some(s) => Ok(s.password == password),
+            None => Ok(false),
+        }
     }
 }
