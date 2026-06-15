@@ -40,8 +40,12 @@
 // load toggle and the live storm list, behind a Mutex/OnceLock like the other
 // runtime tables.
 
+use crate::act::{act, ActArg, To};
+use crate::flags::AFF_SANCTUARY;
+use crate::room::{Room, SectorType};
 use crate::state::GameState;
 use crate::types::*;
+use log::info;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -150,6 +154,24 @@ const PRF2_ADVANCEDMAP: i64 = 1 << 8;
 struct Sector {
     /// SectShow — the rendered glyph string ("&G+", " ", ...). C: s->show.
     show: String,
+    /// SectName — the room title shown when a PC stands on the cell. C: s->name.
+    name: String,
+    /// SectDesc — the room description. C: s->desc (NULL/empty when absent).
+    desc: String,
+    /// SectSect — the CircleMUD sector type index. C: s->sect (0/Inside default).
+    sect: i32,
+}
+
+/// One EntryPoint directive (maputils.c read_map): a link between a surface map
+/// cell (1-based x,y) and a city-interior room (vnum). `dir` is the optional
+/// direction (NORTH/EAST/SOUTH/WEST/UP/DOWN); None for the bidirectional
+/// linkrnum/linkmapnum form.
+#[derive(Clone)]
+struct EntryPoint {
+    x: i32,
+    y: i32,
+    interior_vnum: RoomVnum,
+    dir: Option<usize>,
 }
 
 /// One live storm (C: struct w_index). The C `in_room` is a map rnum; we store
@@ -170,6 +192,17 @@ struct Storm {
     radius: i32,
 }
 
+/// One radial_activity() invocation produced by a storm step: the storm centre
+/// (1-based x,y), its weather type and radius. The public weather_activity()
+/// replays these against GameState to drive unit_activity (weather damage).
+#[derive(Clone, Copy)]
+struct RadialHit {
+    wtype: usize,
+    radius: i32,
+    x: i32,
+    y: i32,
+}
+
 struct MapData {
     /// Whether the map is currently "loaded" (C: MAP_ACTIVE). togglemap flips it.
     active: bool,
@@ -180,6 +213,9 @@ struct MapData {
     grid: Vec<Vec<char>>,
     /// glyph id -> rendered SectShow string. C: find_sect_by_id()->show.
     sectors: HashMap<char, Sector>,
+    /// EntryPoint directives, applied by integrate_map_rooms() once the map cells
+    /// are spliced into GameState.rooms. C: parsed inline in read_map.
+    entry_points: Vec<EntryPoint>,
 
     // ---- live weather state (W7) ----
     /// The active storms (C: the weather_index linked list).
@@ -204,6 +240,7 @@ impl MapData {
             max_y: 0,
             grid: Vec::new(),
             sectors: HashMap::new(),
+            entry_points: Vec::new(),
             storms: Vec::new(),
             num_weather: 0,
             weather_inited: false,
@@ -482,29 +519,36 @@ impl MapData {
         }
     }
 
-    /// weather_activity (maputils.c): age each storm, move it, run radial activity
-    /// (no PCs in map cells, so no damage), randomly shift direction, expire dead
+    /// weather_activity (maputils.c): age each storm, move it (calling
+    /// radial_activity at every cell-step), randomly shift direction, expire dead
     /// storms, respawn up to MAX_WEATHER, resolve collisions, and re-render.
-    fn weather_activity(&mut self, rng: &mut crate::rng::Rng) {
+    ///
+    /// Returns the ordered list of `RadialHit`s — one per radial_activity() call
+    /// C makes (each single-cell move of a moving storm, plus one for each
+    /// stationary storm). The caller replays them against GameState so the
+    /// damage/knockback path (radial_activity -> unit_activity) reaches PCs now
+    /// standing in spliced map rooms.
+    fn weather_activity(&mut self, rng: &mut crate::rng::Rng) -> Vec<RadialHit> {
+        let mut hits: Vec<RadialHit> = Vec::new();
         let mut i = 0usize;
         while i < self.storms.len() {
             self.storms[i].left -= 1;
             if self.storms[i].left <= 0 {
-                // send_weather_messages(WEATHER_MSG_STOP) — nobody in map cells.
+                // send_weather_messages(WEATHER_MSG_STOP) — handled by the caller.
                 self.storms.remove(i);
                 self.reset_num_weather();
                 continue;
             }
 
-            let (wtype, dir) = {
+            let (wtype, dir, radius) = {
                 let w = &self.storms[i];
-                (w.wtype, w.dir)
+                (w.wtype, w.dir, w.radius)
             };
             let speed = WEATHER_DATA[wtype][0];
 
-            // Only non-negative-damage storms move (C guards weather_data[..][2]
-            // >= 0; every entry is, so this always runs). Move `speed` cells in
-            // `dir`, wrapping each step.
+            // C guards weather_data[..][2] >= 0 (no healing storms); every row is,
+            // so a moving storm steps `speed` cells, running radial_activity after
+            // each single-cell move.
             if WEATHER_DATA[wtype][2] >= 0 && speed > 0 {
                 for _ in 1..=speed {
                     let (nx, ny) = {
@@ -520,16 +564,20 @@ impl MapData {
                     let w = &mut self.storms[i];
                     w.x = nx;
                     w.y = ny;
-                    // radial_activity(w): no PCs in map cells -> no effect.
+                    hits.push(RadialHit { wtype, radius, x: nx, y: ny });
                 }
             }
-            // Stationary storms call radial_activity once (also a no-op here).
+            // Stationary storms (speed 0) run radial_activity once at their cell.
+            if speed == 0 {
+                let w = &self.storms[i];
+                hits.push(RadialHit { wtype, radius, x: w.x, y: w.y });
+            }
 
             // Randomly shift direction.
             if rng.number(1, 100) <= WEATHER_DATA[wtype][3] {
                 self.storms[i].dir = rng.number(0, 3);
             }
-            // send_weather_messages(WEATHER_MSG_ACT) — nobody in map cells.
+            // send_weather_messages(WEATHER_MSG_ACT) — handled by the caller.
             i += 1;
         }
 
@@ -541,6 +589,7 @@ impl MapData {
         }
         self.check_weather_collisions(rng);
         self.update_weather_map();
+        hits
     }
 
     /// swc (maputils.c): set a weather_map cell and the per-cell room weather,
@@ -626,6 +675,7 @@ fn parse_worldmap(lib_path: &str) -> MapData {
     };
 
     let mut sectors: HashMap<char, Sector> = HashMap::new();
+    let mut entry_points: Vec<EntryPoint> = Vec::new();
     let mut grid: Vec<Vec<char>> = Vec::new();
     let mut max_x: i32 = 0;
     let mut max_y: i32 = 0;
@@ -633,12 +683,44 @@ fn parse_worldmap(lib_path: &str) -> MapData {
     // Sector parse state.
     let mut cur_id: Option<char> = None;
     let mut cur_show: Option<String> = None;
+    let mut cur_name: String = String::new();
+    let mut cur_sect: i32 = 0;
+    let mut cur_desc: String = String::new();
+    // SectDesc multi-line accumulation (between `SectDesc:` and the next `~`).
+    let mut in_sectdesc = false;
     // Grid parse state.
     let mut in_grid = false;
+
+    // Flush the in-progress sector into the table (C: advancing s on NewSector /
+    // EndSector). Captures show/name/desc/sect for the glyph.
+    macro_rules! flush_sector {
+        ($id:expr) => {{
+            sectors.insert(
+                $id,
+                Sector {
+                    show: cur_show.take().unwrap_or_else(|| " ".into()),
+                    name: std::mem::take(&mut cur_name),
+                    desc: std::mem::take(&mut cur_desc),
+                    sect: std::mem::take(&mut cur_sect),
+                },
+            );
+        }};
+    }
 
     for raw in contents.lines() {
         // JUDOCHOP already done by lines(); also drop any stray CR.
         let line = raw.trim_end_matches(['\r', '\n']);
+
+        // SectDesc body: accumulate until the terminating '~' (C mode==3).
+        if in_sectdesc {
+            if line.starts_with('~') {
+                in_sectdesc = false;
+            } else {
+                cur_desc.push_str(line);
+                cur_desc.push_str("\r\n");
+            }
+            continue;
+        }
 
         if in_grid {
             if line.starts_with('~') {
@@ -667,11 +749,14 @@ fn parse_worldmap(lib_path: &str) -> MapData {
         if compare(&arg1, "NewSector:") {
             // Flush any previous sector that lacked an explicit EndSector.
             if let Some(id) = cur_id.take() {
-                sectors.insert(id, Sector { show: cur_show.take().unwrap_or_else(|| " ".into()) });
+                flush_sector!(id);
             }
             let idarg = get_arg(line, 2);
             cur_id = idarg.chars().next();
             cur_show = None;
+            cur_name = String::new();
+            cur_desc = String::new();
+            cur_sect = 0;
             continue;
         }
         if compare(&arg1, "SectShow:") {
@@ -681,9 +766,25 @@ fn parse_worldmap(lib_path: &str) -> MapData {
             cur_show = Some(if tok.is_empty() { " ".to_string() } else { tok });
             continue;
         }
+        if compare(&arg1, "SectName:") {
+            // C: get_arg_exclude(buf, 1, arg) — everything after the directive.
+            cur_name = get_arg_exclude(line, 1);
+            continue;
+        }
+        if compare(&arg1, "SectSect:") {
+            // C: match the remainder against sector_types[] for the index.
+            let want = get_arg_exclude(line, 1);
+            cur_sect = sector_from_name(&want);
+            continue;
+        }
+        if compare(&arg1, "SectDesc:") {
+            cur_desc.clear();
+            in_sectdesc = true;
+            continue;
+        }
         if compare(&arg1, "EndSector") {
             if let Some(id) = cur_id.take() {
-                sectors.insert(id, Sector { show: cur_show.take().unwrap_or_else(|| " ".into()) });
+                flush_sector!(id);
             }
             continue;
         }
@@ -694,13 +795,22 @@ fn parse_worldmap(lib_path: &str) -> MapData {
             in_grid = true;
             continue;
         }
-        // SectName/SectMove/SectDesc/SectSect/EntryPoint/ZWeatherPoint/etc are
-        // not needed for rendering; ignore them.
+        if compare(&arg1, "EntryPoint:") {
+            // EntryPoint: <x> <y> <interior_vnum> [DIR]
+            let x = atoi(&get_arg(line, 2));
+            let y = atoi(&get_arg(line, 3));
+            let vnum = atoi(&get_arg(line, 4));
+            let dir = parse_dir(&get_arg(line, 5));
+            entry_points.push(EntryPoint { x, y, interior_vnum: vnum, dir });
+            continue;
+        }
+        // SectMove/ZWeatherPoint/BuildExit/FlagRoom/SpecRoom: not needed for the
+        // render + splice; ignore them.
     }
 
     // Flush a trailing sector with no EndSector.
     if let Some(id) = cur_id.take() {
-        sectors.insert(id, Sector { show: cur_show.take().unwrap_or_else(|| " ".into()) });
+        flush_sector!(id);
     }
 
     if max_x == 0 || max_y == 0 || sectors.is_empty() {
@@ -719,6 +829,7 @@ fn parse_worldmap(lib_path: &str) -> MapData {
         max_y,
         grid,
         sectors,
+        entry_points,
         storms: Vec::new(),
         num_weather: 0,
         weather_inited: false,
@@ -762,6 +873,66 @@ fn get_arg(string: &str, argnum: usize) -> String {
 /// compare(a,b): exact, case-insensitive equality of two whole strings.
 fn compare(a: &str, b: &str) -> bool {
     a.eq_ignore_ascii_case(b)
+}
+
+/// get_arg_exclude(string, argnum) (maputils.c): the line with the `argnum`-th
+/// space-delimited token removed, trailing whitespace trimmed. C uses this to
+/// read multi-word fields (SectName / SectSect) after the directive keyword; our
+/// callers always pass argnum=1 (drop the directive token, keep the remainder).
+fn get_arg_exclude(string: &str, argnum: usize) -> String {
+    let mut out = String::new();
+    let mut j = 1usize;
+    for c in string.chars() {
+        if c == ' ' {
+            // A space advances the token counter; the space that *ends* the
+            // excluded token is itself skipped (C: continue without emitting).
+            let was = j;
+            j += 1;
+            if was == argnum {
+                continue;
+            }
+        }
+        if j == argnum {
+            continue;
+        }
+        out.push(c);
+    }
+    out.trim_end().to_string()
+}
+
+/// parse_dir(token) (maputils.c read_map): abbreviation match for a cardinal /
+/// vertical direction; None when the token is empty or unrecognised (the
+/// bidirectional linkrnum/linkmapnum EntryPoint form).
+fn parse_dir(tok: &str) -> Option<usize> {
+    if tok.is_empty() {
+        return None;
+    }
+    let t = tok.to_ascii_uppercase();
+    for (name, dir) in [
+        ("NORTH", NORTH as usize),
+        ("SOUTH", SOUTH as usize),
+        ("EAST", EAST as usize),
+        ("WEST", WEST as usize),
+        ("UP", UP),
+        ("DOWN", DOWN),
+    ] {
+        // is_abbrev: token is a non-empty prefix of the direction name.
+        if name.starts_with(&t) {
+            return Some(dir);
+        }
+    }
+    None
+}
+
+/// sector_from_name(name) (maputils.c): map a `SectSect:` label to its
+/// CircleMUD sector index via constants::SECTOR_TYPES. 0 (Inside) when unknown.
+fn sector_from_name(name: &str) -> i32 {
+    for (i, s) in crate::constants::SECTOR_TYPES.iter().enumerate() {
+        if compare(s, name) {
+            return i as i32;
+        }
+    }
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -1266,6 +1437,149 @@ pub fn do_togglemap(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 // Heartbeat entry points (W7): the live weather pulse and blood decay.
 // ---------------------------------------------------------------------------
 
+/// integrate_map_rooms (maputils.c read_map): splice the surface-map cells into
+/// GameState.rooms as real Rooms, then apply the EntryPoint links. Run once,
+/// after the .wld/.zon/.mob/.obj world is loaded and BEFORE zone priming.
+///
+/// Faithful to C's grid loop (read_map mode==2): the map block is appended after
+/// the existing rooms (C: top_of_world++; here rooms.push), so the real-room
+/// block (rnums 0..len-1) and real_room(real_vnum) are UNCHANGED. Cell (x,y),
+/// 1-based, lands at rnum `map_start_rnum + (y-1)*max_x + (x-1)` — the same
+/// formula as find_room_by_coords and GameState::map_coords_to_rnum. Each map
+/// room gets number = 2_000_000 + linear index (C virtual_map_start_room), the
+/// glyph's sector/name/desc, and map_x/map_y set so the renderer + do_enter/leave
+/// recognise it. Map vnums are virtual (>= 2_000_000) so they never collide with
+/// real vnums in room_index.
+pub fn integrate_map_rooms(g: &mut GameState) {
+    // Already spliced? (idempotent — a second boot/copyover must not double-add.)
+    if g.map_start_rnum.is_some() {
+        return;
+    }
+
+    let lib = g.config.lib_path.clone();
+    // Snapshot the parsed map (grid + sectors + entry points) out of the cache so
+    // we can mutate g.rooms without holding the map lock.
+    let (max_x, max_y, grid, glyph_meta, entry_points) = {
+        let mut tbl = map_table().lock().unwrap();
+        if !tbl.contains_key(&lib) {
+            let data = parse_worldmap(&lib);
+            tbl.insert(lib.clone(), data);
+        }
+        let m = tbl.get(&lib).unwrap();
+        if !m.is_active() {
+            return; // No worldmap file / corrupt map: nothing to splice.
+        }
+        // glyph -> (name, desc, sect) so we can build each room without the lock.
+        let meta: HashMap<char, (String, String, i32)> = m
+            .sectors
+            .iter()
+            .map(|(&id, s)| (id, (s.name.clone(), s.desc.clone(), s.sect)))
+            .collect();
+        (
+            m.max_x,
+            m.max_y,
+            m.grid.clone(),
+            meta,
+            m.entry_points.clone(),
+        )
+    };
+
+    const VIRTUAL_MAP_START: RoomVnum = 2_000_000;
+    let map_start_rnum = g.rooms.len();
+
+    // Grid loop (read_map mode==2): row-major, so linear index advances x within
+    // each row y. This matches (y-1)*max_x + (x-1) for 1-based coords.
+    let mut linear: RoomVnum = 0;
+    for row in &grid {
+        for &glyph in row {
+            let (name, desc, sect) = match glyph_meta.get(&glyph) {
+                Some(t) => (t.0.clone(), t.1.clone(), t.2),
+                // C aborts on a missing sector; a quiet fallback keeps boot total.
+                None => (String::new(), String::new(), 0),
+            };
+            let x = (linear % max_x) + 1; // rm2x
+            let y = (linear / max_x) + 1; // rm2y
+            let vnum = VIRTUAL_MAP_START + linear;
+            let mut room = Room::new(vnum, -1, name, desc);
+            room.sector_type = SectorType::from_i32(sect);
+            room.map_x = Some(x);
+            room.map_y = Some(y);
+            // add_room appends to rooms and registers the (virtual) vnum.
+            g.add_room(room);
+            linear += 1;
+        }
+    }
+
+    g.map_start_rnum = Some(map_start_rnum);
+    g.max_map_x = max_x;
+    g.max_map_y = max_y;
+
+    info!(
+        "Surface map spliced: {} cells ({}x{}), rnums {}..{}",
+        linear,
+        max_x,
+        max_y,
+        map_start_rnum,
+        map_start_rnum + linear as usize - 1
+    );
+
+    // EntryPoints (read_map): link each surface cell to a city interior. C does
+    // two things depending on whether a direction was given:
+    //   * No DIR  -> bidirectional link: map cell linkrnum = interior rnum, and
+    //                interior linkmapnum = map cell rnum (the do_enter/do_leave
+    //                path). Requires both the coords and the interior to resolve.
+    //   * A DIR   -> directional exits: map cell --dir--> interior, and
+    //                interior --rev_dir--> map cell.
+    // We always populate the bidirectional link (so do_enter/do_leave work for
+    // every EntryPoint) AND, when a DIR is present, also create the directional
+    // exits exactly as C does.
+    for ep in &entry_points {
+        let map_rnum = match g.map_coords_to_rnum(ep.x, ep.y) {
+            Some(r) => r,
+            None => continue, // find_room_by_coords == NOWHERE
+        };
+        let interior_rnum = match g.real_room(ep.interior_vnum) {
+            Some(r) => r,
+            None => continue, // real_room(ernum) == NOWHERE
+        };
+
+        // Bidirectional link (do_enter from the map cell, do_leave from interior).
+        g.rooms[map_rnum].linkrnum = Some(interior_rnum);
+        g.rooms[interior_rnum].linkmapnum = Some(map_rnum);
+
+        // Directional exits, when a DIR was given (C: read_map ~494-501).
+        if let Some(dir) = ep.dir {
+            let map_vnum = g.rooms[map_rnum].number;
+            let interior_vnum = g.rooms[interior_rnum].number;
+            let rev = REV_DIR[dir];
+            // map cell --dir--> interior
+            if g.rooms[map_rnum].exits[dir].is_none() {
+                g.rooms[map_rnum].set_exit(dir, make_exit(interior_vnum));
+            } else if let Some(e) = g.rooms[map_rnum].exits[dir].as_mut() {
+                e.to_room = interior_vnum;
+            }
+            // interior --rev_dir--> map cell
+            if g.rooms[interior_rnum].exits[rev].is_none() {
+                g.rooms[interior_rnum].set_exit(rev, make_exit(map_vnum));
+            } else if let Some(e) = g.rooms[interior_rnum].exits[rev].as_mut() {
+                e.to_room = map_vnum;
+            }
+        }
+    }
+}
+
+/// A plain open passage exit to `to_vnum` (CREATE of room_direction_data in C
+/// leaves everything zeroed but the destination).
+fn make_exit(to_vnum: RoomVnum) -> crate::room::Exit {
+    crate::room::Exit {
+        description: None,
+        keyword: None,
+        exit_info: 0,
+        key: -1,
+        to_room: to_vnum,
+    }
+}
+
 /// prime_weather (db.c read_map -> init_weather, run at boot): seed the surface
 /// map's MAX_WEATHER storms and build the initial weather_map so the world has
 /// live weather from the first tick, exactly as C does on startup. A no-op when
@@ -1291,19 +1605,321 @@ pub fn prime_weather(g: &mut GameState) {
 /// surface map is not active.
 pub fn weather_activity(g: &mut GameState) {
     let lib = g.config.lib_path.clone();
-    let mut tbl = map_table().lock().unwrap();
-    if !tbl.contains_key(&lib) {
-        let data = parse_worldmap(&lib);
-        tbl.insert(lib.clone(), data);
+    // Advance the storms under the map lock, collecting the radial_activity hits
+    // produced by each storm step. Release the lock BEFORE replaying them so
+    // unit_activity (which mutates g.rooms / characters) is not deadlocked.
+    let hits = {
+        let mut tbl = map_table().lock().unwrap();
+        if !tbl.contains_key(&lib) {
+            let data = parse_worldmap(&lib);
+            tbl.insert(lib.clone(), data);
+        }
+        let m = tbl.get_mut(&lib).unwrap();
+        if !m.is_active() {
+            return;
+        }
+        if !m.weather_inited {
+            m.init_weather(&mut g.rng);
+        }
+        m.weather_activity(&mut g.rng)
+    };
+
+    // Replay radial_activity for every storm step (in order) against the live
+    // world. Only the surface-map block was spliced, so this is the path that
+    // actually fries/hurls PCs standing outdoors.
+    for hit in hits {
+        radial_activity(g, hit);
     }
-    let m = tbl.get_mut(&lib).unwrap();
-    if !m.is_active() {
-        return;
+}
+
+/// radial_activity (maputils.c): walk the storm's diamond (its radius), and for
+/// every spliced map cell that holds people, run unit_activity (the per-room
+/// weather effect). The C version also fans out to ZWeatherPoint-controlled
+/// zones; the Rust world does not carry wzonecontrol yet, so only the map cells
+/// themselves are affected (the dominant case — PCs standing outdoors).
+fn radial_activity(g: &mut GameState, hit: RadialHit) {
+    let cx = hit.x;
+    let cy = hit.y;
+    let radius = hit.radius;
+    // Gather the affected map rooms first (avoid a borrow across unit_activity).
+    let mut rooms: Vec<RoomRnum> = Vec::new();
+    for y in (cy - radius)..=(cy + radius) {
+        for x in (cx - radius)..=(cx + radius) {
+            // isinradius_bycoords: inside the diamond's circumscribed circle.
+            if (x - cx) * (x - cx) + (y - cy) * (y - cy) > radius * radius {
+                continue;
+            }
+            let rnum = match g.map_coords_to_rnum(x, y) {
+                Some(r) => r,
+                None => continue,
+            };
+            let room = match g.rooms.get(rnum) {
+                Some(r) => r,
+                None => continue,
+            };
+            // !ROOM_INDOORS && has people (C: !world[i].people skip).
+            if room.room_flags.contains(crate::room::RoomFlags::INDOORS) || room.people.is_empty() {
+                continue;
+            }
+            rooms.push(rnum);
+        }
     }
-    if !m.weather_inited {
-        m.init_weather(&mut g.rng);
+    for rnum in rooms {
+        unit_activity(g, rnum, hit.wtype);
     }
-    m.weather_activity(&mut g.rng);
+}
+
+/// unit_activity (maputils.c): apply a storm's per-pulse effect to every player
+/// standing in `room`. Faithful port of the damage arithmetic + messages:
+///   * magic fog: a 1-in-5 chance to fire a random involuntary social.
+///   * thunderstorm: a 1-in-4 chance of a lightning bolt for number(400,900)
+///     damage (halved under sanctuary), with the exact crisp messages.
+///   * any storm with damage > 0: a flat weather_data[type][2] wound (halved
+///     under sanctuary when >= 2), with the "&RYou are wounded by the <name>!&n"
+///     message.
+///   * hurricane / tornado: a weight-gated knockback that jettisons the PC.
+/// NPCs are skipped (C returns on the first NPC in the room list — a quirk we
+/// preserve: an NPC ahead of a PC shields the rest of the room that pulse).
+fn unit_activity(g: &mut GameState, room: RoomRnum, wtype: usize) {
+    let people = match g.rooms.get(room) {
+        Some(r) => r.people.clone(),
+        None => return,
+    };
+    for ch in people {
+        let (is_npc, level) = match g.get_char(ch) {
+            Some(c) => (c.is_npc, c.player.level),
+            None => continue,
+        };
+        // C: "Mike 6/28/00" — the loop returns on the first NPC encountered.
+        if is_npc {
+            return;
+        }
+        // Only NPCs / mortals are affected (immortals are immune).
+        if (level as u8) >= LVL_IMMORT {
+            continue;
+        }
+
+        // --- magic fog: random involuntary social (1 in 5) ---
+        if wtype == WEATHER_MAGICFOG && g.rng.number(1, 5) == 1 {
+            let cmd = match g.rng.number(1, 6) {
+                1 => "sneeze",
+                2 => "scream",
+                3 => "hiccup",
+                4 => "heh",
+                5 => "slap self",
+                _ => "emote shakes and quivers like a bowlfull of jelly.",
+            };
+            crate::interpreter::command_interpreter(g, ch, cmd);
+            if !g.char_exists(ch) {
+                continue;
+            }
+        }
+
+        // --- thunderstorm: lightning strike (1 in 4) ---
+        if wtype == WEATHER_THUNDERSTORM && g.rng.number(1, 4) == 1 {
+            act(
+                g,
+                "You see a holy bolt of lightning discharge from the sky!\r\nThe SHOCKING moment fries $n to a crisp!",
+                true, ch, None, ActArg::None, To::Room,
+            );
+            g.send_to_char(
+                ch,
+                "You see a holy bolt of lightning discharge from the sky in your direction!\r\n&CZZZZZZZZZZZZT&n!!\r\n",
+            );
+            // AFF_REDIRECT_CHARGE is not surfaced in this port, so every PC takes
+            // the plain bolt (the C `else` branch): number(400,900), halved under
+            // sanctuary.
+            let sanct = g.get_char(ch).map(|c| c.affect_flags & AFF_SANCTUARY != 0).unwrap_or(false);
+            let bolt = g.rng.number(400, 900) / if sanct { 2 } else { 1 };
+            if let Some(c) = g.get_char_mut(ch) {
+                c.points.hit -= bolt;
+            }
+            weather_update_pos(g, ch);
+            if weather_show_pos(g, ch, wtype) {
+                continue; // PC died (extracted/respawned).
+            }
+            g.send_to_char(ch, "You feel a little bit crispier.\r\n");
+        }
+
+        // --- flat storm damage (fire/hurricane/tornado/blizzard/death) ---
+        if WEATHER_DATA[wtype][2] > 0 {
+            let mut msg = String::from("&RYou are wounded by the ");
+            msg.push_str(WEATHER_NAMES[wtype]);
+            msg.push_str("!&n\r\n");
+            g.send_to_char(ch, &msg);
+            let sanct = g.get_char(ch).map(|c| c.affect_flags & AFF_SANCTUARY != 0).unwrap_or(false);
+            let dmg = if sanct && WEATHER_DATA[wtype][2] >= 2 {
+                WEATHER_DATA[wtype][2] / 2
+            } else {
+                WEATHER_DATA[wtype][2]
+            };
+            if let Some(c) = g.get_char_mut(ch) {
+                c.points.hit -= dmg;
+            }
+            weather_update_pos(g, ch);
+            if weather_show_pos(g, ch, wtype) {
+                continue; // PC died.
+            }
+        }
+
+        // --- hurricane / tornado knockback (weight-gated) ---
+        if wtype == WEATHER_HURRICANE || wtype == WEATHER_TORNADO {
+            let weight = g.get_char(ch).map(|c| c.player.weight as i32).unwrap_or(120);
+            let gate = weight.clamp(120, 160); // MIN(MAX(GET_WEIGHT,120),160)
+            if g.rng.number(1, gate) <= 70 {
+                let name = WEATHER_NAMES[wtype];
+                let room_msg = format!("The {} jettisons $n into the air!", name);
+                act(g, &room_msg, false, ch, None, ActArg::None, To::Room);
+                let self_msg = format!("The {} jettisons you into the air!\r\n", name);
+                g.send_to_char(ch, &self_msg);
+                // weather_mprand throws the PC a number of rooms across the map;
+                // the full move_char "flying" sequence is heavy, so we deliver the
+                // jettison messages and land the PC head-first where they stand
+                // (the observable knockback + landing). C re-seats the PC in the
+                // same origin room (oldroom) at POS_RESTING after the flight.
+                let land_msg = format!("{} falls from the sky landing head-first into the ground!\r\n",
+                    g.get_char(ch).map(|c| c.get_name().to_string()).unwrap_or_default());
+                g.send_to_char(ch, "You land head-first into the ground!\r\n");
+                act(g, &land_msg, false, ch, None, ActArg::Str(String::new()), To::Room);
+                if let Some(c) = g.get_char_mut(ch) {
+                    c.position = Position::Resting;
+                }
+            }
+        }
+    }
+}
+
+/// weather_show_pos (maputils.c): announce a PC's post-damage position, and on
+/// death run the weather death path (log, strip flags, corpse, extract).
+/// Returns true if the PC died this call (the caller must `continue`).
+fn weather_show_pos(g: &mut GameState, ch: CharId, wtype: usize) -> bool {
+    let pos = match g.get_char(ch) {
+        Some(c) => c.position,
+        None => return true,
+    };
+    match pos {
+        Position::MortallyWounded => {
+            act(g, "$n is mortally wounded, and will die soon, if not aided.", true, ch, None, ActArg::None, To::Room);
+            g.send_to_char(ch, "You are mortally wounded, and will die soon, if not aided.\r\n");
+            false
+        }
+        Position::Incapacitated => {
+            act(g, "$n is incapacitated and will slowly die, if not aided.", true, ch, None, ActArg::None, To::Room);
+            g.send_to_char(ch, "You are incapacitated an will slowly die, if not aided.\r\n");
+            false
+        }
+        Position::Stunned => {
+            act(g, "$n is stunned, but will probably regain consciousness again.", true, ch, None, ActArg::None, To::Room);
+            g.send_to_char(ch, "You're stunned, but will probably regain consciousness again.\r\n");
+            false
+        }
+        Position::Dead => {
+            act(g, "$n is dead!  R.I.P.", false, ch, None, ActArg::None, To::Room);
+            g.send_to_char(ch, "You are dead!  Sorry...\r\n");
+            let (name, roomname) = {
+                let nm = g.get_char(ch).map(|c| c.get_name().to_string()).unwrap_or_default();
+                let rn = g.get_char(ch).and_then(|c| c.in_room).and_then(|r| g.rooms.get(r)).map(|r| r.name.clone()).unwrap_or_default();
+                (nm, rn)
+            };
+            let _ = wtype;
+            mudlog(g, &format!("{} killed by weather at {}", name, roomname), LVL_IMMORT);
+            // raw_kill: strip affects, death cry, weather corpse, extract/respawn.
+            weather_die(g, ch);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// update_pos (fight.c): set the character's position from current HP. Inlined
+/// here (combat.rs's copy is private and out of edit scope) with identical
+/// thresholds: >0 keep (fighting->fighting); <=-11 dead; <=-6 mortally wounded;
+/// <=-3 incapacitated; else stunned.
+fn weather_update_pos(g: &mut GameState, ch: CharId) {
+    if let Some(c) = g.get_char_mut(ch) {
+        let hp = c.points.hit;
+        c.position = if hp > 0 {
+            c.position
+        } else if hp <= -11 {
+            Position::Dead
+        } else if hp <= -6 {
+            Position::MortallyWounded
+        } else if hp <= -3 {
+            Position::Incapacitated
+        } else {
+            Position::Stunned
+        };
+    }
+}
+
+/// weather_corpse_names (maputils.c): the adjective prepended to a weather
+/// corpse for the lethal storm types. A bare " " means "no adjective".
+const WEATHER_CORPSE_NAMES: [&str; WEATHER_TOTAL] = [
+    " ", " ", " ", "burnt crispy ", " ", " ", "torn apart ", "mangled ",
+    "frozen solid ", "savagely ripped up ",
+];
+
+/// The weather death path (maputils.c weather_show_pos POS_DEAD tail): stop
+/// fighting, strip affects, scream, drop a (weather-flavoured) corpse with the
+/// PC's loot, then extract. Mirrors raw_kill closely; PC respawn is the
+/// observable result of extract_char unlinking the descriptor (menu re-entry),
+/// matching C's extract_char(ch) call here.
+fn weather_die(g: &mut GameState, ch: CharId) {
+    // FIGHTING(ch) -> stop_fighting; strip all affects (C: while(ch->affected)
+    // affect_remove).
+    if let Some(c) = g.get_char_mut(ch) {
+        c.fighting = None;
+        if c.position == Position::Fighting {
+            c.position = Position::Dead;
+        }
+        c.affected.clear();
+    }
+    g.affect_total(ch);
+
+    // death_cry: scream into the room (neighbouring-room cries degrade, as the
+    // other Rust death paths do).
+    act(g, "Your blood freezes as you hear $n's death cry.", false, ch, None, ActArg::None, To::Room);
+
+    // make_weather_corpse(ch, type) is approximated by a plain corpse holding the
+    // PC's carried + worn items (the corpse-name adjective table is preserved
+    // above for fidelity; the death-storm type that produced this corpse is not
+    // threaded down here, so the bare corpse name is used — same loot result).
+    if let Some(rnum) = g.get_char(ch).and_then(|c| c.in_room) {
+        increase_blood(g, rnum);
+        let name = g.get_char(ch).map(|c| c.display_for_others()).unwrap_or_default();
+        let corpse = make_weather_corpse(g, &name);
+        let carried = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        for oid in carried {
+            g.obj_from_anywhere(oid);
+            g.obj_to_obj(oid, corpse);
+        }
+        let worn: Vec<usize> = (0..NUM_WEARS)
+            .filter(|&p| g.get_char(ch).map(|c| c.equipment[p].is_some()).unwrap_or(false))
+            .collect();
+        for p in worn {
+            if let Some(oid) = g.unequip_char(ch, p) {
+                g.obj_to_obj(oid, corpse);
+            }
+        }
+        g.obj_to_room(corpse, rnum);
+    }
+
+    // C: extract_char(ch) — for a PC this unlinks the descriptor (respawn/menu).
+    g.extract_char(ch);
+}
+
+/// make_weather_corpse (maputils.c): a corpse container holding the victim's
+/// loot. values[3]=1 marks it a corpse so the object decay path reaps it.
+fn make_weather_corpse(g: &mut GameState, who: &str) -> ObjId {
+    use crate::object::{Object, ObjLoc, ObjectType};
+    let _ = WEATHER_CORPSE_NAMES; // adjective table kept for fidelity (see note).
+    let mut obj = Object::new(NOTHING, format!("corpse {}", who), format!("the corpse of {}", who));
+    obj.description = format!("The corpse of {} is lying here.", who);
+    obj.obj_type = ObjectType::Container;
+    obj.timer = 60;
+    obj.values = [0, 0, 0, 1];
+    obj.loc = ObjLoc::Nowhere;
+    g.create_obj(obj)
 }
 
 /// blood_update (comm.c heartbeat, every 60 RL-seconds = 600 pulses): decay one

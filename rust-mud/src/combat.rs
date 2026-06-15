@@ -27,6 +27,14 @@ const SKILL_BACKSTAB: u16 = 501;
 const PLR_KILLER: i64 = 1 << 0;
 const PLR_THIEF: i64 = 1 << 1;
 
+// Victim defensive skills (spells.h) and their shared difficulty scalar.
+// fight.c rolls (number(1,100) * AVOID_FACTOR) <= GET_SKILL(victim, X).
+const SKILL_DODGE: u16 = 532;
+const SKILL_PARRY: u16 = 533;
+const SKILL_AVOID: u16 = 534;
+const SKILL_RIPOSTE: u16 = 535;
+const AVOID_FACTOR: i32 = 20; // spells.h
+
 // config.c — PvP gating (pk_allowed is false on this MUD).
 const PK_ALLOWED: bool = false;
 // Position multiplier hack (fight.c) keys off POS_FIGHTING's ordinal (8).
@@ -256,7 +264,111 @@ pub fn hit(g: &mut GameState, ch: CharId, victim: CharId) {
     // At least 1 hp damage per hit.
     dam = dam.max(1);
 
+    // Victim defensive skills (fight.c do_actual_damage, before HP is deducted):
+    // riposte / avoid / parry / dodge. A successful defense consumes the swing.
+    if try_defensive_skills(g, ch, victim, attacktype) {
+        return;
+    }
+
     damage_type(g, ch, victim, dam, attacktype);
+}
+
+/// Victim defensive-skill checks (fight.c do_actual_damage, ~lines 903-979),
+/// run after a melee hit has landed but before any HP is deducted. Returns
+/// `true` if the swing was consumed (the caller must not apply its damage):
+///   * RIPOSTE — victim strikes `ch` back (weapon dice or 2 bare-hand).
+///   * AVOID   — victim trips `ch` to POS_SITTING + a violence wait-state.
+///   * PARRY   — full block, no damage, no position change.
+///   * DODGE   — full evade, no damage.
+/// Only fires for true weapon attacks (TYPE_HIT..=TYPE_STAB) when the attacker
+/// is standing (`GET_POS(ch) > POS_STANDING-1`). Each roll is
+/// `number(1,100) * AVOID_FACTOR <= GET_SKILL(victim, X)`, tried in C's order.
+fn try_defensive_skills(g: &mut GameState, ch: CharId, victim: CharId, attacktype: i32) -> bool {
+    // Guard: only real weapon attacks, and only while the attacker stands.
+    if !(TYPE_HIT..=TYPE_STAB).contains(&attacktype) {
+        return false;
+    }
+    let ch_standing = g
+        .get_char(ch)
+        .map(|c| (c.position as i32) > (Position::Standing as i32) - 1)
+        .unwrap_or(false);
+    if !ch_standing {
+        return false;
+    }
+
+    let skill = |g: &GameState, num: u16| -> i32 {
+        g.get_char(victim).map(|c| c.skill(num) as i32).unwrap_or(0)
+    };
+
+    // --- Riposte: counter-attack ----------------------------------------
+    if g.rng.number(1, 100) * AVOID_FACTOR <= skill(g, SKILL_RIPOSTE) {
+        act(g, "You anticipate $N's attack, avoiding it, and striking back!",
+            true, victim, None, ActArg::Char(ch), To::Char);
+        act(g, "$n anticipates your attack, and strikes back at you!",
+            false, victim, None, ActArg::Char(ch), To::Vict);
+        act(g, "$n anticipates $N's ameteur attack, and strikes back expertly.",
+            false, victim, None, ActArg::Char(ch), To::NotVict);
+
+        // Weapon dice (val1, val2) with the attacker's position multiplier,
+        // else minimal bare-hand damage. damage_dice() yields Some only for a
+        // wielded ITEM_WEAPON, exactly matching C's `tobj` / GET_OBJ_TYPE guard.
+        let rip_dam = match g
+            .get_char(victim)
+            .and_then(|c| c.equipment[WEAR_WIELD])
+            .and_then(|w| g.get_obj(w))
+            .and_then(|o| o.damage_dice())
+        {
+            Some((n, s)) => {
+                let mut d = g.rng.dice(n, s);
+                let ch_pos = g.get_char(ch).map(|c| c.position as i32).unwrap_or(POS_FIGHTING_ORD);
+                d *= 1 + (POS_FIGHTING_ORD - ch_pos) / 3;
+                d
+            }
+            None => 2,
+        };
+        damage_type(g, victim, ch, rip_dam, SKILL_RIPOSTE as i32);
+        return true;
+    }
+
+    // --- Avoid: trip the attacker ---------------------------------------
+    if g.rng.number(1, 100) * AVOID_FACTOR <= skill(g, SKILL_AVOID) {
+        act(g, "You avoid $N's attack, tossing $M to the ground.",
+            true, victim, None, ActArg::Char(ch), To::Char);
+        act(g, "$n avoids your attack, trips you, sending you to the ground.",
+            false, victim, None, ActArg::Char(ch), To::Vict);
+        act(g, "$n avoids $N's pathetic attack and sends $M sprawling.",
+            false, victim, None, ActArg::Char(ch), To::NotVict);
+
+        if let Some(c) = g.get_char_mut(ch) {
+            c.position = Position::Sitting;
+        }
+        g.set_wait_state(ch, PULSE_VIOLENCE as i32);
+        return true;
+    }
+
+    // --- Parry: full block ----------------------------------------------
+    if g.rng.number(1, 100) * AVOID_FACTOR <= skill(g, SKILL_PARRY) {
+        act(g, "You parry $N's viscious attack upon your person.",
+            true, victim, None, ActArg::Char(ch), To::Char);
+        act(g, "$n spoils your attack with a deft parrying move.",
+            false, victim, None, ActArg::Char(ch), To::Vict);
+        act(g, "$n parries $N's attack with a series of skillful maneuvers.",
+            false, victim, None, ActArg::Char(ch), To::NotVict);
+        return true;
+    }
+
+    // --- Dodge: full evade ----------------------------------------------
+    if g.rng.number(1, 100) * AVOID_FACTOR <= skill(g, SKILL_DODGE) {
+        act(g, "You narrowly dodge $N's masterful attack.",
+            true, victim, None, ActArg::Char(ch), To::Char);
+        act(g, "$n narrowly dodges your skillful attack, just avoiding your intended blow.",
+            false, victim, None, ActArg::Char(ch), To::Vict);
+        act(g, "$n narrowly dodges $N's strike.",
+            false, victim, None, ActArg::Char(ch), To::NotVict);
+        return true;
+    }
+
+    false
 }
 
 /// damage(ch, victim, dam) — back-compat entry for callers that don't carry an

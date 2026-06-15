@@ -312,8 +312,11 @@ pub fn do_action_named(g: &mut GameState, ch: CharId, command: &str, argument: &
     }
 
     // --- Victim found and is someone else. ---------------------------------
-    // (C consults isignoresend(IGNORE_EMOTE) here; the ignore system is not
-    // yet ported — when it lands, gate the emit below on it.)
+    // C: isignoresend(vict, ch, IGNORE_EMOTE) — if the victim ignores ch's
+    // emotes, notify ch and abort the social entirely.
+    if crate::cmd_comm::isignoresend(g, vict, ch, crate::cmd_comm::IGNORE_EMOTE) {
+        return;
+    }
 
     let vict_pos = g.get_char(vict).map(|c| c.position).unwrap_or(Position::Standing);
     if (vict_pos as i32) < action.min_victim_position {
@@ -596,7 +599,11 @@ pub fn do_gmote_named(g: &mut GameState, ch: CharId, command: &str, argument: &s
             }
             Some(v) => {
                 vict = Some(v);
-                // (C consults isignoresend(IGNORE_EMOTE); not yet ported.)
+                // C: isignoresend(vict, ch, IGNORE_EMOTE) — abort if the victim
+                // ignores ch's emotes (notifying ch).
+                if crate::cmd_comm::isignoresend(g, v, ch, crate::cmd_comm::IGNORE_EMOTE) {
+                    return;
+                }
                 let vpos = g.get_char(v).map(|c| c.position).unwrap_or(Position::Standing);
                 if (vpos as i32) < action.min_victim_position {
                     act_sleep(

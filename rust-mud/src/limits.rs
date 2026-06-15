@@ -62,9 +62,8 @@ const PLR_WRITING: i64 = 1 << 4;
 const AFF_POISON: i64 = 1 << 11;
 const AFF_PLAGUED: i64 = 1 << 23;
 
-// structs.h ITEM_* object types not representable by the `ObjectType` enum yet
-// (the enum maps these vnums to ObjectType::Other). Kept here so the regen /
-// portal / boat logic reads against the C numbers; see the manifest gap notes.
+// structs.h ITEM_* object type numbers. The `ObjectType` enum's discriminants
+// now equal these C numbers, so `obj_type as i32 == ITEM_X` is the real test.
 const ITEM_BOAT: i32 = 22;
 const ITEM_PORTAL: i32 = 24;
 const ITEM_HP_REGEN: i32 = 25;
@@ -143,10 +142,8 @@ fn graf(age: i64, p0: i32, p1: i32, p2: i32, p3: i32, p4: i32, p5: i32, p6: i32)
 // HMV gain per game hour (limits.c mana_gain / hit_gain / move_gain).
 // ---------------------------------------------------------------------------
 
-/// Count equipment slots holding an item of the given (raw) ITEM_* type. The
-/// `ObjectType` enum currently maps the regen item vnums to Other, so this
-/// will return 0 for them until the enum carries those variants — degrading
-/// exactly like a world with no regen items (see manifest gaps).
+/// Count equipment slots holding an item of the given (raw) ITEM_* type
+/// (ObjectType discriminants == C ITEM_* numbers, so HP/MP/MV-regen items count).
 fn count_eq_of_type(g: &GameState, ch: CharId, item_type: i32) -> i32 {
     let mut n = 0;
     if let Some(c) = g.get_char(ch) {
@@ -542,7 +539,10 @@ pub fn gain_exp(g: &mut GameState, ch: CharId, gain: i64) {
             } else {
                 g.send_to_char(ch, &format!("You rise {} levels!\r\n", num_levels));
             }
-            // check_autowiz: autowiz is a CIRCLE_UNIX system() call; not ported.
+            // check_autowiz(ch): C regenerates the wiz/imm lists here. The native
+            // autowiz (autowiz.rs) replaces the C system() call; its internal level
+            // gate means real work only happens the moment the player reaches HERO.
+            crate::autowiz::check_autowiz(g, ch);
             let name = g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default();
             let new_level = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
             g.send_to_all_players(&format!(
@@ -623,6 +623,9 @@ pub fn gain_exp_regardless(g: &mut GameState, ch: CharId, gain: i64) {
         } else {
             g.send_to_char(ch, &format!("You rise {} levels!\r\n", num_levels));
         }
+        // check_autowiz(ch): C calls it here too (limits.c gain_exp_regardless);
+        // the immortal-leveling path can cross LVL_HERO/IMMORT, so regenerate.
+        crate::autowiz::check_autowiz(g, ch);
         let name = g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default();
         let new_level = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
         g.send_to_all_players(&format!(
@@ -752,7 +755,9 @@ pub fn check_idling(g: &mut GameState, ch: CharId) {
             }
             act(g, "$n disappears into the void.", true, ch, None, ActArg::None, To::Room);
             g.send_to_char(ch, "You have been idle, and are pulled into a void.\r\n");
-            // save_char / Crash_crashsave handled by the save layer.
+            // save_char(ch, NOWHERE); Crash_crashsave(ch) (limits.c) — protect the
+            // idle player's objects before they sit in the void.
+            crate::objsave::crash_crashsave(g, ch);
             g.char_from_room(ch);
             if let Some(void) = g.real_room(1) {
                 g.char_to_room(ch, void);
@@ -774,7 +779,14 @@ pub fn check_idling(g: &mut GameState, ch: CharId) {
             if let Some(c) = g.get_char_mut(ch) {
                 c.desc = None;
             }
-            // Crash_rentsave / Crash_idlesave handled by the save layer.
+            // free_rent || LVL_IMMORT -> rentsave, else idlesave (limits.c). This
+            // MUST run before extract_char or the idle player loses all objects.
+            let level = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
+            if level >= LVL_IMMORT {
+                crate::objsave::crash_rentsave(g, ch, 0);
+            } else {
+                crate::objsave::crash_idlesave(g, ch);
+            }
             g.extract_char(ch);
         }
     }

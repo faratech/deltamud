@@ -308,6 +308,22 @@ impl GameState {
     }
 }
 
+/// check_perm_duration (handler.c): true if `ch` carries a permanent affect
+/// matching `bitvector`. C condition:
+///   IS_SET(af->bitvector, bitvector) && af->duration == -1 && af->type == -1
+/// Such affects (e.g. eq-granted flags reaffected via reaffect_obj_char) must
+/// not be stripped by the cure/remove spells. `type == -1` maps to the Rust
+/// `spell_type` field.
+pub fn check_perm_duration(g: &GameState, ch: CharId, bitvector: i64) -> bool {
+    g.get_char(ch)
+        .map(|c| {
+            c.affected
+                .iter()
+                .any(|af| (af.bitvector & bitvector) != 0 && af.duration == -1 && af.spell_type == -1)
+        })
+        .unwrap_or(false)
+}
+
 /// Apply one affect modifier to a character's affected fields (Tier-0:
 /// abilities; the DeltaMUD combat mods are recomputed in Batch 5).
 pub fn apply_location(ch: &mut Character, location: i32, modifier: i32) {

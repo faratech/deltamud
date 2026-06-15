@@ -3,10 +3,10 @@
 // routine signature `fn(&mut GameState, level, ch, victim, obj)` and is invoked
 // from magic::call_magic's MAG_MANUAL switch.
 //
-// Arena, house-ownership and the multi-startroom table are not yet ported, so
-// the location-changing spells (recall/home/retreat/summon/portal) degrade to
-// the player's hometown / same-room semantics exactly where the C code's arena
-// and house branches no-op. Documented in the gaps manifest.
+// Arena and house-ownership are not yet ported, so the location-changing spells
+// (recall/home/retreat/summon/portal) degrade to the player's hometown /
+// same-room semantics exactly where the C code's arena and house branches no-op.
+// Documented in the gaps manifest.
 
 use crate::act::{act, ActArg, To};
 use crate::character::Affect;
@@ -20,6 +20,7 @@ use crate::state::GameState;
 use crate::types::*;
 
 use crate::cmd_informative::look_at_room;
+use crate::config::{MORTAL_START_ROOM, NUM_STARTROOMS};
 use crate::constants::DRINKS;
 use crate::spell_parser::*;
 
@@ -130,12 +131,21 @@ fn mag_savingthrow(g: &mut GameState, ch: CharId, victim: CharId) -> bool {
     roll > crate::combat::chance(g, ch, victim, 1)
 }
 
-/// The player's recall destination room rnum (mortal_start_room[GET_HOME]).
-/// The multi-startroom table is unported; the hometown vnum is the faithful
-/// stand-in, falling back to 3001 (Temple of Midgaard) like C's start room 1.
+/// Resolve a player's home town index to a `MORTAL_START_ROOM[]` table slot,
+/// applying C's clamping (spell_recall, spells.c): a `GET_HOME(ch)` outside
+/// `1..=NUM_STARTROOMS` is treated as 0, which then loads start town 1.
+fn mortal_start_index(home: i32) -> usize {
+    let home = if home >= 1 && home <= NUM_STARTROOMS as i32 { home } else { 0 };
+    // home == 0 falls back to table slot 1 (start town 1), matching C.
+    if home == 0 { 1 } else { home as usize }
+}
+
+/// The player's recall destination room rnum
+/// (`real_room(mortal_start_room[GET_HOME(ch)])`, spells.c).
 fn recall_room(g: &GameState, ch: CharId) -> Option<RoomRnum> {
     let home = g.get_char(ch).map(|c| c.player.hometown).unwrap_or(NOWHERE);
-    g.real_room(home).or_else(|| g.real_room(3001))
+    let vnum = MORTAL_START_ROOM[mortal_start_index(home)];
+    g.real_room(vnum)
 }
 
 // ===========================================================================
@@ -832,7 +842,10 @@ pub fn spell_portal(g: &mut GameState, level: i32, ch: CharId, victim: Option<Ch
 // ===========================================================================
 pub fn spell_home(g: &mut GameState, _level: i32, ch: CharId, _victim: Option<CharId>, _obj: Option<ObjId>) {
     // House-ownership table unported, so a player never owns a house; the C
-    // routine fails here for everyone without a house.
+    // routine fails here for everyone without a house — before it would teleport
+    // them to their owned house room (real_room(homenum)). Note C also computes
+    // mortal_start_room[GET_HOME(ch)] (the MORTAL_START_ROOM table, ported above)
+    // but never uses it for the destination, so nothing is lost by failing here.
     g.send_to_char(ch, "The spell fails because you don't own a house!\r\n");
 }
 

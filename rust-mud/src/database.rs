@@ -40,7 +40,7 @@ impl Database {
                 title VARCHAR(80),
                 sex TINYINT, class TINYINT, race TINYINT, deity TINYINT,
                 level TINYINT, hometown INT, birth BIGINT, played BIGINT,
-                weight INT, height INT, pwd VARCHAR(50),
+                weight INT, height INT, pwd VARCHAR(255),
                 last_logon BIGINT, host VARCHAR(80),
                 act BIGINT, str TINYINT, str_add TINYINT, intel TINYINT,
                 wis TINYINT, dex TINYINT, con TINYINT, cha TINYINT,
@@ -64,6 +64,12 @@ impl Database {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
         )
         .await?;
+        // A C-MUD-created player_main has pwd VARCHAR(50) (sized for crypt()),
+        // but the Rust stores a 64-char SHA-256 hex digest. Widen it idempotently
+        // so the modern hash fits (no-op if the column is already wide enough).
+        let _ = conn
+            .query_drop("ALTER TABLE player_main MODIFY COLUMN pwd VARCHAR(255)")
+            .await;
         conn.query_drop(
             r"CREATE TABLE IF NOT EXISTS player_affects (
                 idnum INT NOT NULL, type INT, duration INT, modifier INT,

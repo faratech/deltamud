@@ -594,16 +594,31 @@ pub fn mag_unaffects(g: &mut GameState, _level: i32, ch: CharId, victim: Option<
         None => return,
     };
 
+    // check_perm_duration (handler.c) gates removal: a permanent affect
+    // (duration == -1, type == -1, matching bitvector) cannot be cured/removed.
+    // C checks this on the caster `ch` (not the victim) — preserved here.
     let (spell, to_vict, to_room): (i32, Option<&str>, Option<&str>) = match spellnum {
         SPELL_CURE_BLIND | SPELL_HEAL => {
-            // check_perm_duration (permanent-affect guard) is not ported; the
-            // affect set here is never permanent, so the guard is a no-op.
+            if crate::handler::check_perm_duration(g, ch, AFF_BLIND) {
+                if spellnum != SPELL_HEAL {
+                    g.send_to_char(ch, NOEFFECT);
+                }
+                return;
+            }
             (SPELL_BLINDNESS, Some("Your vision returns!"), Some("There's a momentary gleam in $n's eyes."))
         }
         SPELL_REMOVE_POISON => {
+            if crate::handler::check_perm_duration(g, ch, AFF_POISON) {
+                g.send_to_char(ch, NOEFFECT);
+                return;
+            }
             (SPELL_POISON, Some("A warm feeling runs through your body!"), Some("$n looks better."))
         }
         SPELL_REMOVE_CURSE => {
+            if crate::handler::check_perm_duration(g, ch, AFF_CURSE) {
+                g.send_to_char(ch, NOEFFECT);
+                return;
+            }
             (SPELL_CURSE, Some("You don't feel so unlucky."), None)
         }
         _ => return,

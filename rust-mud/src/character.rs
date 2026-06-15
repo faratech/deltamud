@@ -73,6 +73,21 @@ pub struct Affect {
     pub caster: Option<CharId>,
 }
 
+/// One ignore-list entry — the Rust analogue of C
+/// `struct ignore_index_element` (act.comm.c / structs.h). `id` is the
+/// target's persistent player idnum (C `i->id`, set from get_id_by_name),
+/// `type` carries the IGNORE_* bitmask (pub/priv/emote), and `reason` is the
+/// free-text note shown back to an ignored sender. `name` mirrors the value C
+/// recovers on demand via get_name_by_id(i->id); we cache it so the ignore
+/// listing renders without an online reverse lookup.
+#[derive(Debug, Clone)]
+pub struct IgnoreEntry {
+    pub id: i64,
+    pub type_bits: i64,
+    pub name: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Character {
     pub id: CharId,    // runtime arena id (per session)
@@ -178,6 +193,14 @@ pub struct Character {
     pub email: Option<String>,
     pub last_tell: Option<CharId>,
 
+    // Ignore list (C `ch->ignore_list`, a linked list of
+    // `struct ignore_index_element`). Purely in-memory in the C MUD — it is
+    // never serialized to the player file or DB (referenced only in
+    // act.comm.c), so it is lost on logout/reboot. Each entry pairs the
+    // target's persistent player idnum with the IGNORE_* type bits and a
+    // free-text reason.
+    pub ignore_list: Vec<IgnoreEntry>,
+
     // Timestamps
     pub created_at: DateTime<Utc>,
     pub last_logon: DateTime<Utc>,
@@ -277,6 +300,7 @@ impl Character {
             poofout: None,
             email: None,
             last_tell: None,
+            ignore_list: Vec::new(),
             created_at: now,
             last_logon: now,
         }

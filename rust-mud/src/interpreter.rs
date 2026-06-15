@@ -89,8 +89,15 @@ fn dispatch_with_alias(g: &mut GameState, ch: CharId, input: &str, depth: u32) {
 /// The central dispatcher body (CircleMUD command_interpreter proper), run on
 /// input that has already passed alias expansion.
 fn run_command(g: &mut GameState, ch: CharId, input: &str) {
-    let (level, is_npc, pos) = match g.get_char(ch) {
-        Some(c) => (c.player.level, c.is_npc, c.position),
+    let (level, is_npc, pos, gcmds) = match g.get_char(ch) {
+        Some(c) => (
+            c.player.level,
+            c.is_npc,
+            c.position,
+            // The four god-command bitvectors (godcmds1..4), indexed by
+            // godcmd_set-1 in the gate below. NPCs have all-zero godcmds.
+            [c.godcmds1, c.godcmds2, c.godcmds3, c.godcmds4],
+        ),
         None => return,
     };
 
@@ -123,17 +130,35 @@ fn run_command(g: &mut GameState, ch: CharId, input: &str) {
         return;
     }
 
-    // Abbreviation match: first table entry whose name is prefixed by `arg`
-    // and whose min_level the actor meets. Table order is load-bearing.
+    // Abbreviation match: first table entry whose name is prefixed by `arg`,
+    // whose min_level the actor meets, AND (for god commands) whose required
+    // godcmd bit the actor holds in the matching godcmds bitvector. Table order
+    // is load-bearing.
+    //
+    // The godcmd gate mirrors interpreter.c:786-789: a god command is usable
+    // only if `(cmd.godcmd & GCMDn_FLAGS(ch))` is set in the godcmds<set>
+    // bitvector named by the command's GOD_CMD/2/3/4 marker. The C OR-clause at
+    // 790-791 also lets `GET_LEVEL(ch) >= LVL_IMPL` bypass the gate entirely
+    // (so e.g. `citizen`/`mobdie`/`slowns`, whose godcmd bit is 0 and thus can
+    // never match, remain reachable by the Implementor). A god command that
+    // fails the gate is SKIPPED — the loop walks on, exactly as in C, so the
+    // word falls through to a later match / "Huh?!?" rather than erroring.
     let mut found = None;
     for e in CMD_INFO {
         if e.name == "\n" {
             break;
         }
-        if e.name.starts_with(arg.as_str()) && level >= e.min_level {
-            found = Some(*e);
-            break;
+        if !(e.name.starts_with(arg.as_str()) && level >= e.min_level) {
+            continue;
         }
+        if e.godcmd_set != 0 && level < LVL_IMPL {
+            let bits = gcmds[(e.godcmd_set - 1) as usize];
+            if (e.godcmd & bits) == 0 {
+                continue; // lacks the required god-command bit; keep searching
+            }
+        }
+        found = Some(*e);
+        break;
     }
 
     let entry = match found {

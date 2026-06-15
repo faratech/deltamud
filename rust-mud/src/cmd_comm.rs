@@ -10,6 +10,7 @@
 // descriptor_list walk.
 
 use crate::act::{act, act_sleep, ActArg, To};
+use crate::character::IgnoreEntry;
 use crate::flags::*;
 use crate::interpreter::half_chop;
 use crate::room::RoomFlags;
@@ -259,42 +260,106 @@ fn makedrunk(arg: &str, g: &mut GameState, ch: CharId) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Ignore-list predicates. The per-player ignore list (ch->ignore_list) is not
-// yet a field on Character, so — exactly as for an empty ignore_list in C —
-// nobody is ignored: isignore()/isignoresend() are always false. do_ignore
-// below reproduces the user-facing flow against that empty list.
+// Ignore-list predicates. The per-player ignore list lives on Character as
+// `ignore_list: Vec<IgnoreEntry>` (the Rust analogue of C `ch->ignore_list`).
+// Each entry stores the target's persistent player idnum plus the IGNORE_*
+// type bits; the check matches ch2's idnum against the stored ids, mirroring
+// C's `i->id == get_id_by_name(GET_NAME(ch2)) && IS_SET(i->type, type)`.
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 const IGNORE_PUBLIC: i64 = 1 << 0;
-#[allow(dead_code)]
 const IGNORE_PRIVATE: i64 = 1 << 1;
-#[allow(dead_code)]
-const IGNORE_EMOTE: i64 = 1 << 2;
+/// IGNORE_EMOTE — gates directed socials/emotes (act.social.c). Exported so
+/// cmd_social.rs can reuse the shared predicate below.
+pub(crate) const IGNORE_EMOTE: i64 = 1 << 2;
+
+/// GET_IDNUM(ch): persistent player idnum (-1 for mobs / unknown).
+fn idnum(g: &GameState, id: CharId) -> i64 {
+    g.get_char(id).map(|c| c.idnum).unwrap_or(-1)
+}
+
+/// Does ignore entry `i` refer to the target with idnum `id` / name `name`?
+/// Used by do_ignore for dup-replacement and "off" removal. Matches on idnum
+/// when both are valid, else on case-insensitive name.
+fn entry_is(i: &IgnoreEntry, id: i64, name: &str) -> bool {
+    if id >= 0 && i.id >= 0 {
+        return i.id == id;
+    }
+    i.name.eq_ignore_ascii_case(name)
+}
+
+/// Does ignore entry `i` identify character `ch2`? C compares
+/// `i->id == get_id_by_name(GET_NAME(ch2))` — i.e. the *name* of ch2 mapped to
+/// an idnum. We compare on idnum when both sides carry a valid one, and fall
+/// back to the name (the identity get_id_by_name resolves from) so the match
+/// still holds where idnums are unavailable.
+fn ignore_matches(g: &GameState, i: &IgnoreEntry, ch2: CharId) -> bool {
+    let target = idnum(g, ch2);
+    if target >= 0 && i.id >= 0 {
+        return i.id == target;
+    }
+    let n2 = get_name(g, ch2);
+    !n2.is_empty() && i.name.eq_ignore_ascii_case(&n2)
+}
 
 /// isignore(ch1, ch2, type): is ch2 on ch1's ignore list for `type`?
-fn isignore(_g: &GameState, _ch1: CharId, _ch2: CharId, _ty: i64) -> bool {
-    false
+fn isignore(g: &GameState, ch1: CharId, ch2: CharId, ty: i64) -> bool {
+    let entries = match g.get_char(ch1) {
+        Some(c) => &c.ignore_list,
+        None => return false,
+    };
+    entries
+        .iter()
+        .any(|i| (i.type_bits & ty) != 0 && ignore_matches(g, i, ch2))
 }
-/// isignoresend(ch1, ch2, type): like isignore but also notifies ch2.
-fn isignoresend(_g: &mut GameState, _ch1: CharId, _ch2: CharId, _ty: i64) -> bool {
+
+/// isignoresend(ch1, ch2, type): like isignore, but also notifies ch2 that
+/// they are on ch1's ignore list (with the entry's reason), matching C.
+pub(crate) fn isignoresend(g: &mut GameState, ch1: CharId, ch2: CharId, ty: i64) -> bool {
+    let hit = g
+        .get_char(ch1)
+        .map(|c| c.ignore_list.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .find(|i| (i.type_bits & ty) != 0 && ignore_matches(g, i, ch2))
+        .map(|i| i.reason);
+    if let Some(reason) = hit {
+        let name = get_name(g, ch1);
+        let msg = format!("\r\nYou are on {}'s ignore list. ({})\r\n", name, reason);
+        g.send_to_char(ch2, &msg);
+        return true;
+    }
     false
 }
 
 // ---------------------------------------------------------------------------
-// do_ignore — list / add / remove ignore entries. With no persistent
-// ignore_list storage the list is always empty; the parse + reply structure
-// is reproduced faithfully (immortals can't be ignored, type syntax errors,
-// "off" / "isn't on your ignore list", etc.).
+// do_ignore — list / add / remove ignore entries (act.comm.c). Entries are
+// stored on the target character's `ignore_list`; immortals can't be ignored,
+// types are given in 'pub priv emote all off' enclosed in single quotes, and a
+// trailing free-text reason is recorded. Mirrors C's parse + reply flow.
 // ---------------------------------------------------------------------------
 pub fn do_ignore(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let argument = arg.trim_start();
 
-    // No argument: print the (always-empty) ignore table.
+    // No argument: print the ignore table.
     if argument.is_empty() {
         g.send_to_char(ch, "\r\nName                 Type           Reason\r\n");
         g.send_to_char(ch, "-------------------- -------------- ------>\r\n");
-        g.send_to_char(ch, "None                 None           None\r\n");
+        let list = g.get_char(ch).map(|c| c.ignore_list.clone()).unwrap_or_default();
+        if list.is_empty() {
+            g.send_to_char(ch, "None                 None           None\r\n");
+            return;
+        }
+        for i in &list {
+            // C renders get_name_by_id(i->id); we use the cached name.
+            let mut line = format!("{:<20}", i.name);
+            line.push_str(if i.type_bits & IGNORE_PUBLIC != 0 { " pub" } else { "    " });
+            line.push_str(if i.type_bits & IGNORE_PRIVATE != 0 { " priv" } else { "     " });
+            line.push_str(if i.type_bits & IGNORE_EMOTE != 0 { " emote " } else { "       " });
+            line.push_str(&i.reason);
+            line.push_str("\r\n");
+            g.send_to_char(ch, &line);
+        }
         return;
     }
 
@@ -318,19 +383,23 @@ pub fn do_ignore(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         l += 1;
     }
 
-    // Player must exist.
+    // Player must exist (C: get_id_by_name(who) == -1). We resolve against
+    // online players, the only place a name->idnum mapping is available.
     let target = g.find_player_by_name(&who);
-    if target.is_none() {
-        g.send_to_char(ch, "\r\nNo player with that name exists.\r\n");
-        return;
-    }
-    // Cannot ignore immortals.
-    if let Some(t) = target {
-        if level(g, t) >= LVL_IMMORT as u8 {
-            g.send_to_char(ch, "\r\nYou cannot ignore immortals.\r\n");
+    let target = match target {
+        Some(t) => t,
+        None => {
+            g.send_to_char(ch, "\r\nNo player with that name exists.\r\n");
             return;
         }
+    };
+    // Cannot ignore immortals.
+    if level(g, target) >= LVL_IMMORT as u8 {
+        g.send_to_char(ch, "\r\nYou cannot ignore immortals.\r\n");
+        return;
     }
+    let target_id = idnum(g, target);
+    let target_name = get_name(g, target);
 
     // After the name we require the ignore type(s) enclosed in ' symbols.
     if l >= bytes.len() || bytes[l] != '\'' {
@@ -344,6 +413,7 @@ pub fn do_ignore(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
     // Collect the type tokens until the closing quote.
     let mut tokbuf = String::new();
+    let mut types: i64 = 0;
     let mut off_requested = false;
     let mut unknown: Option<String> = None;
     while l < bytes.len() {
@@ -351,7 +421,10 @@ pub fn do_ignore(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         if cprev == ' ' || cprev == '\'' {
             if !tokbuf.is_empty() {
                 match tokbuf.to_lowercase().as_str() {
-                    "pub" | "priv" | "emote" | "all" => {}
+                    "pub" => types |= IGNORE_PUBLIC,
+                    "priv" => types |= IGNORE_PRIVATE,
+                    "emote" => types |= IGNORE_EMOTE,
+                    "all" => types |= IGNORE_PUBLIC | IGNORE_PRIVATE | IGNORE_EMOTE,
                     "off" => off_requested = true,
                     other => {
                         unknown = Some(other.to_string());
@@ -377,11 +450,26 @@ pub fn do_ignore(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
 
-    // "off" removes the entry — but the list is always empty.
+    // "off" removes the entry for `who` from ch's ignore list (C: walk the list,
+    // compare get_name_by_id(i->id) with who, free and unlink the first match).
     if off_requested {
-        g.send_to_char(ch, "\r\n");
-        g.send_to_char(ch, &who);
-        g.send_to_char(ch, " isn't on your ignore list.\r\n");
+        let removed = if let Some(c) = g.get_char_mut(ch) {
+            let before = c.ignore_list.len();
+            c.ignore_list
+                .retain(|i| !entry_is(i, target_id, &target_name));
+            c.ignore_list.len() != before
+        } else {
+            false
+        };
+        if removed {
+            g.send_to_char(ch, "\r\nRemoved ");
+            g.send_to_char(ch, &who);
+            g.send_to_char(ch, " from your ignore list.\r\n");
+        } else {
+            g.send_to_char(ch, "\r\n");
+            g.send_to_char(ch, &who);
+            g.send_to_char(ch, " isn't on your ignore list.\r\n");
+        }
         return;
     }
 
@@ -405,9 +493,30 @@ pub fn do_ignore(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         bytes[l..].iter().collect()
     };
 
+    // Replace any existing entry for this target, then add the new one
+    // (C frees/unlinks duplicates before appending a fresh ignore_index_element).
+    if let Some(c) = g.get_char_mut(ch) {
+        c.ignore_list
+            .retain(|i| !entry_is(i, target_id, &target_name));
+        c.ignore_list.push(IgnoreEntry {
+            id: target_id,
+            type_bits: types,
+            name: target_name,
+            reason: reason.clone(),
+        });
+    }
+
     // Build the confirmation line exactly as C does.
     let mut out = format!("\r\nIgnored {} on", who);
-    // (No persisted types to reflect; C lists those that were set.)
+    if types & IGNORE_PUBLIC != 0 {
+        out.push_str(" pub");
+    }
+    if types & IGNORE_PRIVATE != 0 {
+        out.push_str(" priv");
+    }
+    if types & IGNORE_EMOTE != 0 {
+        out.push_str(" emote");
+    }
     out.push_str(&format!(" ({})\r\n", reason));
     g.send_to_char(ch, &out);
 }

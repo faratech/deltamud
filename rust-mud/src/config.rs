@@ -1,5 +1,31 @@
 use std::env;
 
+use crate::types::RoomVnum;
+
+// ===========================================================================
+// World room-number constants (config.c)
+// ===========================================================================
+
+/// Number of distinct hometowns / start towns (structs.h `NUM_STARTROOMS`).
+pub const NUM_STARTROOMS: usize = 3;
+
+/// Per-hometown mortal start rooms (config.c `mortal_start_room[NUM_STARTROOMS + 1]`).
+/// Index 0 is the newbie loadroom element; indices 1..=NUM_STARTROOMS are the
+/// start towns. In this world every entry resolves to vnum 100; the table
+/// structure is ported verbatim so per-town divergence stays faithful.
+pub const MORTAL_START_ROOM: [RoomVnum; NUM_STARTROOMS + 1] = [
+    100, // Newbie loadroom element
+    100, // Itrius
+    100, // Start Town 2
+    100, // Start Town 3
+];
+
+/// vnum of room that immortals enter at by default (config.c `immort_start_room`).
+pub const IMMORT_START_ROOM: RoomVnum = 1204;
+
+/// vnum of room that frozen players enter at (config.c `frozen_start_room`).
+pub const FROZEN_START_ROOM: RoomVnum = 1202;
+
 #[derive(Clone)]
 pub struct Config {
     pub database_url: String,

@@ -2175,8 +2175,25 @@ pub fn do_gen_ps(g: &mut GameState, ch: CharId, _arg: &str, subcmd: i32) {
             let motd = g.motd.clone();
             g.send_to_char(ch, &motd);
         }
+        4 => {
+            // SCMD_WIZLIST — C send_to_char(wizlist, ch). wizlist is the global
+            // loaded from lib/text/wizlist, which the native autowiz writes.
+            let lib_path = g.config.lib_path.clone();
+            match crate::autowiz::read_wizlist(&lib_path) {
+                Some(body) => g.send_to_char(ch, &body),
+                None => g.send_to_char(ch, "The wizlist is not available.\r\n"),
+            }
+        }
+        7 => {
+            // SCMD_IMMLIST — C send_to_char(immlist, ch); lib/text/immlist.
+            let lib_path = g.config.lib_path.clone();
+            match crate::autowiz::read_immlist(&lib_path) {
+                Some(body) => g.send_to_char(ch, &body),
+                None => g.send_to_char(ch, "The immlist is not available.\r\n"),
+            }
+        }
         // The remaining bodies (credits/news/info/imotd/handbook/policies/
-        // wizlist/immlist/circlemud) are not loaded in the contract.
+        // circlemud) are not loaded in the contract.
         _ => {}
     }
 }

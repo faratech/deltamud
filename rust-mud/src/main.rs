@@ -9,6 +9,7 @@ mod act;
 mod alias;
 mod arena;
 mod auction;
+mod autowiz;
 mod ban;
 mod boards;
 mod castle;
@@ -45,6 +46,7 @@ mod dg_wldcmd;
 mod file_loader;
 mod flags;
 mod game;
+mod gcmd;
 mod graph;
 mod house;
 mod handler;
@@ -164,6 +166,14 @@ async fn main() -> Result<()> {
     if let Err(e) = file_loader::FileLoader::load_world(&mut state, &config.lib_path).await {
         warn!("World load failed: {} (continuing with whatever loaded)", e);
     }
+
+    // Splice the surface ("outside") world-map cells into the room table as real
+    // rooms (maputils.c read_map). This MUST come straight after the real world
+    // is loaded and before any pass that wants every room (DG triggers, zone
+    // priming, weather) — it appends the map block AFTER the real rooms so real
+    // rnums are untouched, records GameState.map_start_rnum, and wires the city
+    // EntryPoint links so do_enter/do_leave and weather damage work.
+    maputils::integrate_map_rooms(&mut state);
 
     // Load socials (CircleMUD boot_social_messages); spliced into command
     // lookup as a fallback since they are not in the static command table.

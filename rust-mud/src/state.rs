@@ -40,6 +40,16 @@ pub struct GameState {
     pub motd: String,
     pub config: Config,
     pub pulse: u64,
+
+    // Surface ("outside") world-map splice (maputils.c read_map). The 99x99
+    // grid of map cells is appended to `rooms` *after* the real-room block, so
+    // real-room rnums (and real_room(vnum)) are untouched. `map_start_rnum` is
+    // the rnum of the first map cell (1-based grid (1,1)); cell (x,y) lives at
+    // `map_start_rnum + (y-1)*max_map_x + (x-1)` (C find_room_by_coords). None
+    // until integrate_map_rooms() runs (or the worldmap file is missing).
+    pub map_start_rnum: Option<RoomRnum>,
+    pub max_map_x: i32,
+    pub max_map_y: i32,
 }
 
 impl GameState {
@@ -62,7 +72,36 @@ impl GameState {
             motd: String::new(),
             config,
             pulse: 0,
+            map_start_rnum: None,
+            max_map_x: 0,
+            max_map_y: 0,
         }
+    }
+
+    /// find_room_by_coords (maputils.c): the rnum of the 1-based map cell (x,y),
+    /// with the world wrapping (it is "ROUND!"). None when the surface map has
+    /// not been spliced in (map_start_rnum is None / dimensions are 0).
+    pub fn map_coords_to_rnum(&self, x: i32, y: i32) -> Option<RoomRnum> {
+        let start = self.map_start_rnum?;
+        if self.max_map_x <= 0 || self.max_map_y <= 0 {
+            return None;
+        }
+        // WRAPX / WRAPY (maputils.c): fold the coordinate into 1..=max.
+        let mut nx = x;
+        let mut ny = y;
+        while nx > self.max_map_x {
+            nx -= self.max_map_x;
+        }
+        while nx < 1 {
+            nx += self.max_map_x;
+        }
+        while ny > self.max_map_y {
+            ny -= self.max_map_y;
+        }
+        while ny < 1 {
+            ny += self.max_map_y;
+        }
+        Some(start + ((ny - 1) * self.max_map_x + (nx - 1)) as usize)
     }
 
     // ---- Rooms ----------------------------------------------------------

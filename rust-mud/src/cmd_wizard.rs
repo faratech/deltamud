@@ -225,16 +225,11 @@ fn can_see_obj(g: &GameState, ch: CharId, oid: ObjId) -> bool {
     g.get_char(ch).map(|c| c.affect_flags & AFF_DETECT_INVIS != 0).unwrap_or(false)
 }
 
-/// skill_name(num): spell/skill name. The spells[] table isn't surfaced in the
-/// contract; render "UNDEFINED" for any number (the C table would otherwise
-/// index `spells[]`). Documented gap: spell-name table not yet ported.
-fn skill_name(num: i32) -> &'static str {
-    if num <= 0 {
-        "UNDEFINED"
-    } else {
-        "UNDEFINED"
-    }
-}
+/// skill_name(num): spell/skill name (spell_parser.c). Backed by the ported
+/// spells[] name table in spell_parser.rs, so object spell displays and affect
+/// readouts render real names ("armor", "fire breath", ...) rather than
+/// "UNDEFINED".
+use crate::spell_parser::skill_name;
 
 /// mudlog substitute — the C mudlog writes to the syslog and to immortals with
 /// the matching syslog level. We have no syslog file layer; reproduce the
@@ -2008,10 +2003,29 @@ pub fn do_advance(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     if let Some(v) = g.get_char_mut(victim) {
         v.player.level = newlevel as u8;
         v.points.exp = 0;
+        // Grant god-command bits on crossing IMMORT / IMPL, mirroring C
+        // do_advance (act.wizard.c:1738-1745): SET_BIT(godcmds1, GCMD_GEN) for
+        // any new immortal; full grant (all bitvectors) for a new Implementor.
+        // Without this, advancing a mortal to immortal would leave them unable
+        // to use even GCMD_GEN commands (goto, wiznet, ...).
+        crate::gcmd::grant_advance(
+            &mut v.godcmds1,
+            &mut v.godcmds2,
+            &mut v.godcmds3,
+            &mut v.godcmds4,
+            newlevel as u8,
+            LVL_IMMORT,
+            LVL_IMPL,
+        );
     }
-    // god-command bitvectors (GCMD_*) are set here in C when crossing IMMORT /
-    // IMPL — not modelled (no GCMD fields). save_char(NOWHERE): no player-file
-    // layer yet.
+    // check_autowiz: C reaches autowiz here via gain_exp_regardless()->check_autowiz(),
+    // which regenerates the wizlist/immlist when the (re-leveled) victim is now
+    // >= LVL_HERO. The level gate lives inside check_autowiz, matching C: advancing
+    // a player to immortal re-lists them; demoting below HERO leaves the stale entry
+    // until the next regeneration, exactly as C does.
+    crate::autowiz::check_autowiz(g, victim);
+    // C save_char(victim, NOWHERE) here persists the new level + godcmds; the
+    // Rust port saves on logout/copyover.
 }
 
 // ===========================================================================
@@ -2731,6 +2745,9 @@ pub fn do_wizutil(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
             act(g, "A sudden cold wind conjured from nowhere freezes $n!", false, vict, None, ActArg::None, To::Room);
             let m = logmin(g);
             mudlog(g, &format!("(GC) {} frozen by {}.", vname, cname), m);
+            // A frozen immortal is filtered out of the autowiz roster (PLR_FROZEN);
+            // regenerate so the list drops them. No-op for mortals (level gate).
+            crate::autowiz::check_autowiz(g, vict);
         }
         SCMD_THAW => {
             if !g.get_char(vict).map(|c| c.act_flags & PLR_FROZEN != 0).unwrap_or(false) {
@@ -2761,6 +2778,8 @@ pub fn do_wizutil(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
             g.send_to_char(vict, "A fireball suddenly explodes in front of you, melting the ice!\r\nYou feel thawed.\r\n");
             g.send_to_char(ch, "Thawed.\r\n");
             act(g, "A sudden fireball conjured from nowhere thaws $n!", false, vict, None, ActArg::None, To::Room);
+            // Thawing an immortal restores them to the autowiz roster; regenerate.
+            crate::autowiz::check_autowiz(g, vict);
         }
         SCMD_UNAFFECT => {
             let had = g.get_char(vict).map(|c| !c.affected.is_empty()).unwrap_or(false);
@@ -3682,9 +3701,14 @@ pub fn do_set(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 // do_rewiz
 // ===========================================================================
 pub fn do_rewiz(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    // use_autowiz global + check_autowiz() (writes the wizlist) — autowiz is not
-    // modelled; in this build it is treated as offline (the common case).
-    g.send_to_char(ch, "The autowiz system is not online at this time.\r\n");
+    // C do_rewiz: when use_autowiz (YES in config.c), regenerate the wiz/imm
+    // lists via check_autowiz(ch). The native autowiz is always available, so
+    // this build takes the online branch.
+    g.send_to_char(ch, "You have reloaded the autowiz system.\r\n");
+    let cname = name_of(g, ch);
+    let m = LVL_GOD.max(invis_lev(g, ch) as u8); // C MAX(LVL_GOD, GET_INVIS_LEV(ch))
+    mudlog(g, &format!("(GC) {} initiated reload of the autowiz system.", cname), m);
+    crate::autowiz::check_autowiz(g, ch);
 }
 
 // ===========================================================================
@@ -4506,6 +4530,10 @@ pub fn do_copyover(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     let cname = name_of(g, ch);
     send_to_all(g, &format!("\n\rThe server is being rebooted by {}. Please standby..\n\r", cname));
 
+    // Persist every playing player's objects first so the reboot loses nothing
+    // (C copyover Crash_crashsave's each character before execl()).
+    crate::objsave::crash_save_all(g);
+
     // Drop descriptors that are still logging on (C close_socket()s them).
     let conns: Vec<ConnId> = g.descriptors.keys().copied().collect();
     for conn in conns {
@@ -4520,5 +4548,11 @@ pub fn do_copyover(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
             }
         }
     }
-    // The actual execl()/seamless reattach is not modelled (documented gap).
+    // ARCHITECTURAL LIMITATION — the one feature that cannot be byte-1:1 with C:
+    // C's copyover execl()s the same process image and inherits the live socket
+    // fds, so playing connections survive a code reload seamlessly. The tokio
+    // runtime owns the listener + per-connection tasks and cannot hand raw fds
+    // across an exec, so a true seamless reattach is not possible here. Player
+    // state is fully saved above, so a normal restart loses no data — players
+    // simply reconnect.
 }

@@ -319,12 +319,31 @@ impl Game {
         ch.player.sex = choices.sex;
         match self.db.create_player(&ch, &pass).await {
             Ok(idnum) => {
+                // The in-memory char MUST take the assigned idnum, or the
+                // save_player below (which keys on idnum) writes idnum=0 with an
+                // empty pwd and REPLACE-clobbers the just-created row (name is
+                // UNIQUE), losing the password and orphaning skills/affects.
+                ch.idnum = idnum;
                 // CircleMUD convention: the first character created becomes the
                 // Implementor (nanny CON_QRACE).
                 if idnum == 1 {
-                    ch.idnum = 1;
+                    ch.player.level = LVL_IMPL;
                     ch.player.level = LVL_IMPL;
                     ch.player.title = Some("the Implementor".to_string());
+                    // Grant the Implementor every god-command bit (act.wizard.c
+                    // do_advance:1738-1745). Without this the new godcmd gate in
+                    // the interpreter would lock idnum 1 out of ALL god commands
+                    // and the game would be unadministrable. Persisted via the
+                    // save_player below and reloaded in enter_game.
+                    crate::gcmd::grant_advance(
+                        &mut ch.godcmds1,
+                        &mut ch.godcmds2,
+                        &mut ch.godcmds3,
+                        &mut ch.godcmds4,
+                        LVL_IMPL,
+                        crate::types::LVL_IMMORT,
+                        LVL_IMPL,
+                    );
                 }
                 if let Err(e) = self.db.save_player(&ch).await {
                     warn!("save new player {} failed: {}", name, e);
@@ -355,6 +374,13 @@ impl Game {
         };
         ch.desc = Some(conn_id);
         ch.aff_abils = ch.real_abils;
+        // The player file/DB carries no object references (C semantics): the real
+        // objects come entirely from the rent/crash file via crash_load below.
+        // The mock DB clones the whole Character, so its carrying/equipment hold
+        // stale ObjIds from the previous session — clear them or crash_load's
+        // auto_equip sees the slots "occupied" and dumps worn items to inventory.
+        ch.carrying.clear();
+        ch.equipment = [None; NUM_WEARS];
         let id = self.state.create_char(ch);
         self.state.affect_total(id);
         self.state.players_by_name.insert(name.to_lowercase(), id);

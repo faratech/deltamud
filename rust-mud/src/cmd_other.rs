@@ -785,10 +785,12 @@ pub fn do_practice(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) 
     }
 }
 
-/// list_skills (spell_parser.c). The full spell_info table + per-class min
-/// levels land in Batch 6; until then this prints the practice-sessions header
-/// and the player's known skill proficiencies, degrading exactly as C does when
-/// no spells are defined for the class (an empty list).
+/// list_skills (spec_procs.c). Prints the practice-sessions header and the
+/// player's known skills/spells by name. The full per-class min_level gating +
+/// alphabetical spell_sort_info[] ordering lands with the spell_info table;
+/// until then this lists the skills the player has actually learned (prof > 0),
+/// rendered by real name via the ported spells[] table (spell_parser::skill_name)
+/// with C's how_good() proficiency descriptor.
 fn list_skills(g: &mut GameState, ch: CharId) {
     let learn = g.get_char(ch).map(|c| c.spells_to_learn).unwrap_or(0);
     g.send_to_char(
@@ -796,9 +798,6 @@ fn list_skills(g: &mut GameState, ch: CharId) {
         &format!("You have {} practice session{} left.\r\n", learn, if learn == 1 { "" } else { "s" }),
     );
     g.send_to_char(ch, "You know of the following skills:\r\n");
-    // Known skills (proficiency > 0). The spell name table is not ported yet,
-    // so each known skill is reported by its number, matching C's behaviour of
-    // listing only skills the player has learned.
     let mut skills: Vec<(u16, u8)> = g
         .get_char(ch)
         .map(|c| c.skills.iter().filter(|(_, &v)| v > 0).map(|(&k, &v)| (k, v)).collect())
@@ -808,9 +807,35 @@ fn list_skills(g: &mut GameState, ch: CharId) {
         g.send_to_char(ch, " None.\r\n");
     } else {
         for (num, prof) in skills {
-            g.send_to_char(ch, &format!("skill #{:<4} ({}%)\r\n", num, prof));
+            let name = crate::spell_parser::skill_name(num as i32);
+            g.send_to_char(ch, &format!("{:<20}{}\r\n", name, how_good(prof as i32)));
         }
     }
+}
+
+/// how_good(percent) (spec_procs.c): proficiency descriptor + numeric percent,
+/// e.g. " (good) 75".
+fn how_good(percent: i32) -> String {
+    let label = if percent == 0 {
+        " (not learned)"
+    } else if percent <= 10 {
+        " (awful)"
+    } else if percent <= 20 {
+        " (bad)"
+    } else if percent <= 40 {
+        " (poor)"
+    } else if percent <= 55 {
+        " (average)"
+    } else if percent <= 70 {
+        " (fair)"
+    } else if percent <= 80 {
+        " (good)"
+    } else if percent <= 85 {
+        " (very good)"
+    } else {
+        " (superb)"
+    };
+    format!("{} {}", label, percent)
 }
 
 // ===========================================================================
