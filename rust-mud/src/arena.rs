@@ -203,6 +203,16 @@ pub fn arena_flee_timer(id: CharId) -> i32 {
     get_flee_timer(id)
 }
 
+/// OBSERVING(ch) — the combatant this observer is watching, if any.
+pub fn arena_observing(id: CharId) -> Option<CharId> {
+    observing_of(id)
+}
+
+/// LASTFIGHTING(ch) — the last opponent fought in the arena, if any.
+pub fn arena_last_fighting(id: CharId) -> Option<CharId> {
+    get_last_fighting(id)
+}
+
 // ---------------------------------------------------------------------------
 // Small helpers in the house style.
 // ---------------------------------------------------------------------------

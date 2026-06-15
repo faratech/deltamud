@@ -265,14 +265,8 @@ fn can_edit_zone(g: &GameState, ch: CharId, number: i32) -> bool {
 /// and each attached trigger (name/vnum/rnum, intended assignment, type bits,
 /// numeric arg, arglist, and — for a parked trigger — its current line and
 /// locals). Called by the do_sstat_* helpers. `key` selects the entity whose
-/// ScriptData (dg_handler) is walked.
-///
-/// One fidelity note: C also enumerates each `global_vars` entry under the
-/// "Global Variables:" header. dg_handler exposes get_global_var(key, name) but
-/// no whole-list accessor (a `pub fn global_vars(key) -> Vec<TrigVar>` would be
-/// the one-line addition there), so the per-var rows aren't listed; the header
-/// and "Global context" line are. Script globals are runtime-populated by the
-/// `global`/`remote` trigger commands, so a statted prototype shows none anyway.
+/// ScriptData (dg_handler) is walked. Each `global_vars` entry is enumerated
+/// under the "Global Variables:" header (name[:context] = value, UID-resolved).
 fn script_stat(g: &mut GameState, ch: CharId, key: ScriptKey) {
     // find_uid_name(uid): resolve a UID_CHAR-prefixed value to a char/obj name
     // (dg UID space: char UID = CharId.0, obj UID = ObjId.0).
@@ -294,8 +288,25 @@ fn script_stat(g: &mut GameState, ch: CharId, key: ScriptKey) {
     }
 
     let context = dg_handler::get_context(key);
-    g.send_to_char(ch, "Global Variables: \r\n");
+    let globals = dg_handler::global_vars(key);
+    g.send_to_char(
+        ch,
+        &format!("Global Variables: {}\r\n", if globals.is_empty() { "None" } else { "" }),
+    );
     g.send_to_char(ch, &format!("Global context: {}\r\n", context));
+    for (gname, gvalue, gctx) in &globals {
+        let label = if *gctx != 0 {
+            format!("{}:{}", gname, gctx)
+        } else {
+            gname.clone()
+        };
+        let shown = if gvalue.starts_with(crate::dg_scripts::UID_CHAR) {
+            find_uid_name(g, gvalue)
+        } else {
+            gvalue.clone()
+        };
+        g.send_to_char(ch, &format!("    {:>15}:  {}\r\n", label, shown));
+    }
 
     for tid in dg_handler::trigger_ids(key) {
         let t = match dg_handler::trig_clone(tid) {
@@ -1424,28 +1435,35 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
         buf.push_str(", Connected: Playing");
     }
     if !npc {
-        // Arena status block (GET_ARENASTAT). The status label + wins/losses +
-        // flee timer come from the public arena queries; the OBSERVING target
-        // name and the LASTFIGHTING name on the flee line need private arena
-        // getters (observing()/last_fighting()), so the [OBSERV]/flee labels show
-        // without those names.
+        // Arena status block (GET_ARENASTAT), matching act.wizard.c do_stat_character.
         let stat = crate::arena::arena_stat(k);
-        let label = match stat {
-            crate::arena::ARENA_NOT => "[NO]",
-            crate::arena::ARENA_COMBATANT1 => "[COMBAT1]",
-            crate::arena::ARENA_COMBATANT1W => "[COMBAT1W]",
-            crate::arena::ARENA_COMBATANT2 => "[COMBAT2]",
-            crate::arena::ARENA_COMBATANT3 => "[COMBAT3]",
-            crate::arena::ARENA_COMBATANTZ => "[COMBATZ]",
-            crate::arena::ARENA_OBSERVER => "[OBSERV]",
-            _ => "[UNKNOWN]",
-        };
-        buf.push_str(&format!("\r\nArena: {}", label));
-        buf.push_str(&format!(", Wins: [{}], Losses: [{}]", wins, losses));
+        buf.push_str("\r\nArena: ");
+        match stat {
+            crate::arena::ARENA_NOT => buf.push_str("[NO]"),
+            crate::arena::ARENA_COMBATANT1 => buf.push_str("[COMBAT1]"),
+            crate::arena::ARENA_COMBATANT1W => buf.push_str("[COMBAT1W]"),
+            crate::arena::ARENA_COMBATANT2 => buf.push_str("[COMBAT2]"),
+            crate::arena::ARENA_COMBATANT3 => buf.push_str("[COMBAT3]"),
+            crate::arena::ARENA_COMBATANTZ => buf.push_str("[COMBATZ]"),
+            crate::arena::ARENA_OBSERVER => {
+                buf.push_str("[OBSERV]");
+                match crate::arena::arena_observing(k) {
+                    Some(t) => buf.push_str(&format!(", Observing: [{}]", name_of(g, t))),
+                    None => buf.push_str(", Observing: [NOBODY]"),
+                }
+            }
+            _ => buf.push_str("[UNKNOWN]"),
+        }
+        buf.push_str(&format!(", Wins: [{}]", wins));
+        buf.push_str(&format!(", Losses: [{}]", losses));
         if connected {
             let ft = crate::arena::arena_flee_timer(k);
             if ft > 0 {
-                buf.push_str(&format!(", Fled-a-match [timer {}]", ft));
+                let lf = match crate::arena::arena_last_fighting(k) {
+                    Some(o) => name_of(g, o),
+                    None => String::new(),
+                };
+                buf.push_str(&format!(", Fled-a-match: {} [timer {}]", lf, ft));
             }
         }
     }
@@ -4555,29 +4573,42 @@ fn vwear_obj(g: &mut GameState, ch: CharId, item_type: ObjectType) {
 }
 
 pub fn do_tedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
-    // The text-editor (CON_TEXTED) state + the static text buffers (credits,
-    // news, motd, ...) are owned by the connection/editor layer, which is not
-    // ported. Reproduce the guards + the file-listing path.
-    if g.get_char(ch).and_then(|c| c.desc).is_none() {
-        g.send_to_char(ch, "Get outta here you linkdead head!\r\n");
-        return;
-    }
+    // act.wizard.c do_tedit: edit one of the static text files via the modify.c
+    // CON_TEXTED string editor (EditTarget::TextFile here). Each entry mirrors
+    // the C fields[] table: (command, level, relative path, buffer size).
+    let conn = match g.get_char(ch).and_then(|c| c.desc) {
+        Some(c) => c,
+        None => {
+            g.send_to_char(ch, "Get outta here you linkdead head!\r\n");
+            return;
+        }
+    };
     if level_of(g, ch) < LVL_GRGOD {
         g.send_to_char(ch, "You do not have text editor permissions.\r\n");
         return;
     }
     let (field, _rest) = half_chop(arg);
-    let files: [(&str, u8); 11] = [
-        ("credits", LVL_IMPL), ("news", LVL_GRGOD), ("motd", LVL_GRGOD), ("imotd", LVL_IMPL),
-        ("help", LVL_GRGOD), ("info", LVL_GRGOD), ("background", LVL_IMPL), ("handbook", LVL_IMPL),
-        ("policies", LVL_IMPL), ("circlemud", LVL_IMPL), ("startup", LVL_IMPL),
+    // (command, min level, relative path under lib, editor max size). Paths and
+    // sizes match db.h *_FILE constants / fields[].size in act.wizard.c.
+    let files: [(&str, u8, &str, usize); 11] = [
+        ("credits", LVL_IMPL, "text/credits", 2400),
+        ("news", LVL_GRGOD, "text/news", 8192),
+        ("motd", LVL_GRGOD, "text/motd", 2400),
+        ("imotd", LVL_IMPL, "text/imotd", 2400),
+        ("help", LVL_GRGOD, "text/help/screen", 2400),
+        ("info", LVL_GRGOD, "text/info", 8192),
+        ("background", LVL_IMPL, "text/background", 8192),
+        ("handbook", LVL_IMPL, "text/handbook", 8192),
+        ("policies", LVL_IMPL, "text/policies", 8192),
+        ("circlemud", LVL_IMPL, "text/circlemud", 2400),
+        ("startup", LVL_IMPL, "text/startup", 8192),
     ];
     let ch_level = level_of(g, ch);
     if field.is_empty() {
         let mut buf = String::from("Files available to be edited:\r\n");
         let mut i = 1;
         let mut any = false;
-        for (cmd, lvl) in &files {
+        for (cmd, lvl, _, _) in &files {
             if ch_level >= *lvl {
                 buf.push_str(&format!("{:<11.11}", cmd));
                 if i % 7 == 0 {
@@ -4596,18 +4627,21 @@ pub fn do_tedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, &buf);
         return;
     }
-    let l = files.iter().position(|(c, _)| c.starts_with(&field.to_lowercase()));
+    let l = files.iter().position(|(c, _, _, _)| c.starts_with(&field.to_lowercase()));
     match l {
         Some(i) if ch_level >= files[i].1 => {
-            // C sets up the modify.c string editor bound to the file's global
-            // buffer (ch->desc->str = &motd/&news/...) and writes it on /s. The
-            // editor entry + screen/announce are reproduced; persisting the saved
-            // body needs a modify.rs save target (an EditTarget::TextFile(path))
-            // plus the file buffers in GameState (only `motd` is held there) —
-            // both outside this module, so the on-disk write is the one note here.
+            let (_, _, rel, size) = files[i];
+            let path = std::path::Path::new(&g.config.lib_path).join(rel);
+            // C echoes the current file contents into the editor and seeds it as
+            // the abort-restore buffer (backstr); read what is on disk now.
+            let current = std::fs::read_to_string(&path).unwrap_or_default();
             g.send_to_char(ch, "\x1B[H\x1B[J");
             g.send_to_char(ch, "Edit file below: (/s saves /h for help)\r\n");
+            if !current.is_empty() {
+                g.send_to_char(ch, &current);
+            }
             act(g, "$n begins editing a scroll.", true, ch, None, ActArg::None, To::Room);
+            crate::modify::start_textfile_editing(g, conn, path, &current, size);
         }
         Some(_) => g.send_to_char(ch, "You are not godly enough for that!\r\n"),
         None => g.send_to_char(ch, "Invalid text editor option.\r\n"),

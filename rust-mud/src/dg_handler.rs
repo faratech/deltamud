@@ -254,6 +254,22 @@ pub fn get_global_var(key: ScriptKey, name: &str) -> Option<String> {
         .map(|v| v.value.clone())
 }
 
+/// Snapshot a script's global variable list as (name, value, context) tuples,
+/// in storage order (script_stat enumerates `sc->global_vars` in order).
+pub fn global_vars(key: ScriptKey) -> Vec<(String, String, i64)> {
+    scripts()
+        .lock()
+        .unwrap()
+        .get(&key)
+        .map(|sc| {
+            sc.global_vars
+                .iter()
+                .map(|v| (v.name.clone(), v.value.clone(), v.context))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// add_var into a script's global list (used by remote/global, and load).
 pub fn add_global_var(key: ScriptKey, name: &str, value: &str, context: i64) {
     let mut map = scripts().lock().unwrap();

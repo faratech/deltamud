@@ -80,6 +80,8 @@ enum EditTarget {
     CharField { cid: CharId, field: StrField },
     /// `string` immortal field edit on an object.
     ObjField { oid: ObjId, field: StrField },
+    /// `tedit` — CON_TEXTED: write the saved buffer to a text file (OLC_STORAGE).
+    TextFile(std::path::PathBuf),
 }
 
 struct EditState {
@@ -195,11 +197,34 @@ pub fn start_board_editing(g: &mut GameState, conn: ConnId, max_len: usize) {
     push_editor(g, conn, max_len, EditTarget::Board);
 }
 
+/// Open the CON_TEXTED text-file editor (do_tedit). The current file contents
+/// pre-fill the buffer (C echoes `fields[l].buffer` and seeds `backstr`); on
+/// save the buffer is written back to `path`.
+pub fn start_textfile_editing(
+    g: &mut GameState,
+    conn: ConnId,
+    path: std::path::PathBuf,
+    initial: &str,
+    max_len: usize,
+) {
+    push_editor_with(g, conn, max_len, EditTarget::TextFile(path), initial.to_string());
+}
+
 fn push_editor(g: &mut GameState, conn: ConnId, max_len: usize, target: EditTarget) {
+    push_editor_with(g, conn, max_len, target, String::new());
+}
+
+fn push_editor_with(
+    g: &mut GameState,
+    conn: ConnId,
+    max_len: usize,
+    target: EditTarget,
+    initial: String,
+) {
     set_edit(conn, target, max_len);
     if let Some(d) = g.descriptors.get_mut(&conn) {
         d.editors.push(InputContext::StringEdit {
-            buffer: String::new(),
+            buffer: initial,
             max_len,
         });
     }
@@ -400,6 +425,36 @@ fn finish_editor(g: &mut GameState, conn: ConnId, terminator: i32) {
                 send_to_q(g, conn, "Edit aborted.\r\n");
             } else {
                 send_to_q(g, conn, "Field updated.\r\n");
+            }
+        }
+        EditTarget::TextFile(path) => {
+            // CON_TEXTED save path (modify.c): fopen(OLC_STORAGE,"w") + fputs of
+            // stripcr(*d->str). Mirror the SYSERR/OLC mudlog lines and the
+            // "$n stops editing some scrolls." room act.
+            if saved {
+                let stripped: String = buffer.chars().filter(|&c| c != '\r').collect();
+                match std::fs::write(&path, stripped.as_bytes()) {
+                    Ok(_) => {
+                        let name = cid
+                            .and_then(|c| g.get_char(c))
+                            .map(|c| c.player.name.clone())
+                            .unwrap_or_default();
+                        mudlog(g, &format!("OLC: {} saves '{}'.", name, path.display()), LVL_GOD);
+                        send_to_q(g, conn, "Saved.\r\n");
+                    }
+                    Err(_) => {
+                        mudlog(
+                            g,
+                            &format!("SYSERR: Can't write file '{}'.", path.display()),
+                            LVL_IMPL,
+                        );
+                    }
+                }
+            } else {
+                send_to_q(g, conn, "Edit aborted.\r\n");
+            }
+            if let Some(cid) = cid {
+                act(g, "$n stops editing some scrolls.", true, cid, None, ActArg::None, To::Room);
             }
         }
         EditTarget::Plain => {
