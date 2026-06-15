@@ -76,4 +76,22 @@ impl crate::DatabaseInterface for MockDatabase {
             None => Ok(false),
         }
     }
+
+    async fn list_players(&self) -> Result<Vec<crate::state::PlayerIndex>> {
+        // Build index rows from the stored Character clones (the mock has no
+        // host column — host is connection-derived, "" here; the live
+        // descriptor's host is folded in later via update_player_index).
+        let players = self.players.lock().unwrap();
+        let out = players
+            .values()
+            .map(|s| crate::state::PlayerIndex {
+                idnum: s.character.idnum,
+                name: s.character.get_name().to_string(),
+                level: s.character.player.level,
+                last_logon: s.character.last_logon.timestamp(),
+                host: String::new(),
+            })
+            .collect();
+        Ok(out)
+    }
 }

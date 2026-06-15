@@ -223,6 +223,9 @@ pub trait DatabaseInterface: Send + Sync {
     async fn load_player(&self, name: &str) -> Result<character::Character>;
     async fn save_player(&self, character: &character::Character) -> Result<()>;
     async fn verify_password(&self, name: &str, password: &str) -> Result<bool>;
+    /// Every player's index row {idnum,name,level,last_logon,host} for the
+    /// boot-time player_table build (C build_player_index, db.c).
+    async fn list_players(&self) -> Result<Vec<crate::state::PlayerIndex>>;
 }
 
 #[async_trait::async_trait]
@@ -244,6 +247,9 @@ impl DatabaseInterface for database::Database {
     }
     async fn verify_password(&self, name: &str, p: &str) -> Result<bool> {
         self.verify_password(name, p).await
+    }
+    async fn list_players(&self) -> Result<Vec<crate::state::PlayerIndex>> {
+        self.list_players().await
     }
 }
 
@@ -350,6 +356,20 @@ async fn main() -> Result<()> {
     // pulse both find nothing to dispatch — exactly the C behaviour.
     if !config.no_specials {
         spec_assign::assign_specs();
+    }
+
+    // Build the in-memory player name<->idnum index (C build_player_index,
+    // called from boot_db after the world loads). Lets offline players resolve
+    // for `last`, ignore-by-name, mail, and name<->id lookups without an async
+    // DB hit. Empty on a brand-new DB; kept fresh by update_player_index as
+    // players are created / enter / save.
+    let pt = db.list_players().await.unwrap_or_default();
+    info!("Loaded {} player(s) into the name index.", pt.len());
+    state.player_table = pt;
+    // Mirror the index into the mail subsystem's private name<->id table so
+    // offline senders/recipients resolve there too (mail.rs keeps its own copy).
+    for p in &state.player_table {
+        mail::mail_register_player(p.idnum, &p.name);
     }
 
     let lib_path = config.lib_path.clone();

@@ -19,13 +19,15 @@
 // format for both files. See the `serialize_*` / `parse_*` helpers below for the
 // exact grammar. The control file additionally caches the owner/guest *names*
 // alongside their idnums so `hcontrol show`/`house` can render names for offline
-// players (C reaches into the in-memory player_table, which the Rust port does
-// not have yet; see gaps).
+// players. The Rust port now carries the in-memory player_table index (C
+// build_player_index) on GameState, so id<->name resolution works for offline
+// players too; the control-file name cache remains as a final fallback.
 //
 // GRACEFUL DEGRADATION (matches C where the dep is missing):
 //   * id<->name lookups (get_id_by_name / get_name_by_id) resolve against online
-//     players (players_by_name + idnum) and the on-disk name cache; an unknown
-//     id renders as "<UNDEF>" exactly like C's NAME() macro.
+//     players (players_by_name + idnum), then the boot-loaded GameState
+//     player_table index, then the on-disk name cache; an unknown id renders as
+//     "<UNDEF>" exactly like C's NAME() macro.
 //   * do_bed's write_aliases() (no alias system ported) is a no-op; the
 //     rent-save is performed by serializing carried/worn objects is NOT done
 //     here (do_bed is a quit path — the async loop owns player-file save exactly
@@ -134,12 +136,13 @@ fn house_filename(lib: &str, vnum: RoomVnum) -> Option<std::path::PathBuf> {
 
 // ---------------------------------------------------------------------------
 // id <-> name resolution (C: get_id_by_name / get_name_by_id, via player_table).
-// The Rust port has no in-memory player_table yet, so we resolve against online
-// players plus the name cache embedded in the control file.
+// We resolve against online players, then the boot-loaded GameState index
+// (C player_table, offline-capable), then the name cache embedded in the
+// control file.
 // ---------------------------------------------------------------------------
 
 /// get_id_by_name(): returns the persistent idnum for `name`, or -1 if unknown.
-/// Checks online players first, then the cached owner/guest names.
+/// Checks online players, the shared player_table index, then cached names.
 fn get_id_by_name(g: &GameState, name: &str) -> i64 {
     let lower = name.to_lowercase();
     if let Some(cid) = g.find_player_by_name(&lower) {
@@ -148,6 +151,10 @@ fn get_id_by_name(g: &GameState, name: &str) -> i64 {
                 return c.idnum;
             }
         }
+    }
+    // Shared GameState player_table index (resolves offline owners/guests).
+    if let Some(id) = g.get_id_by_name(&lower) {
+        return id;
     }
     // Fall back to the control-file name cache.
     let table = houses().lock().unwrap();
@@ -178,6 +185,10 @@ fn get_name_by_id(g: &GameState, id: i64) -> Option<String> {
                 return Some(c.player.name.clone());
             }
         }
+    }
+    // Shared GameState player_table index (offline-capable, canonical case).
+    if let Some(n) = g.get_name_by_id(id) {
+        return Some(n);
     }
     let table = houses().lock().unwrap();
     for h in table.iter() {

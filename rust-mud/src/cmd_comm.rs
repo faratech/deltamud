@@ -383,23 +383,37 @@ pub fn do_ignore(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         l += 1;
     }
 
-    // Player must exist (C: get_id_by_name(who) == -1). We resolve against
-    // online players, the only place a name->idnum mapping is available.
-    let target = g.find_player_by_name(&who);
-    let target = match target {
-        Some(t) => t,
-        None => {
-            g.send_to_char(ch, "\r\nNo player with that name exists.\r\n");
-            return;
-        }
+    // Player must exist (C: get_id_by_name(who) == -1). Resolve the real idnum
+    // from the player_table index so an OFFLINE player can be ignored too; fall
+    // back to the live char for level/name when they happen to be online.
+    let online = g.find_player_by_name(&who);
+    // Pull idnum/level/name from the index (offline-capable). The online char
+    // overrides name casing/level if present (it is authoritative for level).
+    let idx = g.player_index(&who).cloned();
+    let target_id = match online {
+        Some(t) => idnum(g, t),
+        None => match &idx {
+            Some(p) => p.idnum,
+            None => -1,
+        },
+    };
+    if target_id < 0 && online.is_none() {
+        g.send_to_char(ch, "\r\nNo player with that name exists.\r\n");
+        return;
+    }
+    let target_level = match online {
+        Some(t) => level(g, t),
+        None => idx.as_ref().map(|p| p.level).unwrap_or(0),
+    };
+    let target_name = match online {
+        Some(t) => get_name(g, t),
+        None => idx.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| who.clone()),
     };
     // Cannot ignore immortals.
-    if level(g, target) >= LVL_IMMORT as u8 {
+    if target_level >= LVL_IMMORT as u8 {
         g.send_to_char(ch, "\r\nYou cannot ignore immortals.\r\n");
         return;
     }
-    let target_id = idnum(g, target);
-    let target_name = get_name(g, target);
 
     // After the name we require the ignore type(s) enclosed in ' symbols.
     if l >= bytes.len() || bytes[l] != '\'' {

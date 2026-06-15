@@ -154,6 +154,28 @@ impl Database {
         Ok(ch)
     }
 
+    /// build_player_index() (db.c): read every player's index row. C selects
+    /// only idnum,name,level; we also pull last_logon,host so `do_last` can
+    /// render an offline player straight from the index. last_logon is a unix
+    /// BIGINT in player_main (see init_tables DDL), so it maps directly to the
+    /// PlayerIndex i64.
+    pub async fn list_players(&self) -> Result<Vec<crate::state::PlayerIndex>> {
+        let mut conn = self.pool.get_conn().await?;
+        let rows: Vec<Row> = conn
+            .exec("SELECT idnum,name,level,last_logon,host FROM player_main", ())
+            .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let idnum: i64 = row.get(0).unwrap_or(-1);
+            let name: String = row.get(1).unwrap_or_default();
+            let level: u8 = row.get(2).unwrap_or(1);
+            let last_logon: i64 = row.get(3).unwrap_or(0);
+            let host: String = row.get(4).unwrap_or_default();
+            out.push(crate::state::PlayerIndex { idnum, name, level, last_logon, host });
+        }
+        Ok(out)
+    }
+
     pub async fn save_player(&self, ch: &Character) -> Result<()> {
         // The password is never rewritten on a normal save; preserve the
         // stored hash (C re-supplies ch->player.passwd, which is unchanged).

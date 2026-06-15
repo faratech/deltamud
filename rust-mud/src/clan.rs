@@ -18,9 +18,14 @@
 //     pointer-width dependent); see `gaps`.
 //   * Operates on the live Character.clan / Character.clan_rank fields for the
 //     actor and any ONLINE victim — the analogue of C's `is_playing()` branch.
-//     The C `pe_printf`/`QUERY_DATABASE` offline-player branch has no
-//     synchronous equivalent here, so offline targets degrade to "no such
-//     player" exactly as C does when the name is absent from the live game.
+//     The boot-loaded GameState.player_table now resolves a player's NAME<->IDNUM
+//     and level OFFLINE (g.get_id_by_name / g.get_name_by_id), so member-name
+//     *display* (e.g. the roster's offline members) and existence checks no
+//     longer degrade to "no such player". What the index does NOT carry is a
+//     player's clan / clan_rank columns: those live only in player_main, so the
+//     clan-MEMBERSHIP *mutations* (enlist/expel/promote/demote of an offline
+//     player) still need an async on-demand player_main load, and keep the
+//     "no such player" degrade with a precise note at each such site.
 //
 // House style follows cmd_comm.rs / cmd_item.rs: copy needed values into
 // locals before mutating or broadcasting; re-look-up entities by id every
@@ -912,7 +917,8 @@ fn clan_enlist(g: &mut GameState, ch: CharId, arg: &str) {
     let victim = match is_playing(g, &arg1) {
         Some(v) => v,
         None => {
-            // C also checks the offline pfile here; unreachable synchronously.
+            // NOTE: enlisting an OFFLINE applicant mutates their player_main
+            // clan_rank (not in the index) — needs an async on-demand load.
             g.send_to_char(ch, "There is no such player.\r\n");
             return;
         }
@@ -968,6 +974,8 @@ fn clan_expel(g: &mut GameState, ch: CharId, arg: &str) {
     let victim = match is_playing(g, &arg1) {
         Some(v) => v,
         None => {
+            // NOTE: expelling an OFFLINE member mutates their player_main
+            // clan/clan_rank (not in the index) — needs an async on-demand load.
             g.send_to_char(ch, "There are no players by that name.\r\n");
             return;
         }
@@ -1044,6 +1052,8 @@ fn clan_promote(g: &mut GameState, ch: CharId, arg: &str) {
     let victim = match is_playing(g, &arg1) {
         Some(v) => v,
         None => {
+            // NOTE: promoting an OFFLINE member mutates their player_main
+            // clan_rank (not in the index) — needs an async on-demand load.
             g.send_to_char(ch, "There is no such player.\r\n");
             return;
         }
@@ -1103,6 +1113,8 @@ fn clan_demote(g: &mut GameState, ch: CharId, arg: &str) {
     let victim = match is_playing(g, &arg1) {
         Some(v) => v,
         None => {
+            // NOTE: demoting an OFFLINE member mutates their player_main
+            // clan_rank (not in the index) — needs an async on-demand load.
             g.send_to_char(ch, "There is no player by that name.\r\n");
             return;
         }
@@ -1303,9 +1315,15 @@ fn clan_who(g: &mut GameState, ch: CharId) {
 }
 
 // ---------------------------------------------------------------------------
-// clan roster — C reads the whole player_main table; we have no synchronous
-// roster of offline players, so we list the online membership (the same set
-// `clan who` shows, formatted as the roster) and the stored member count.
+// clan roster — C reads the whole player_main (`SELECT level,class,name,
+// clan_rank FROM player_main WHERE clan=N`) and lists every member, online or
+// not, with their class and clan_rank. The player_table index resolves a
+// member's NAME and level offline, but it does NOT carry the per-player
+// clan / clan_rank / class columns, so the *full* offline roster (rank label +
+// class for logged-off members) still needs an async player_main load (NOTE:
+// offline clan_rank/class roster requires the async DB layer). We therefore
+// list the online membership with full detail and append the clan owner from
+// the index if they are offline (so the roster always names the leader).
 // ---------------------------------------------------------------------------
 
 fn clan_roster(g: &mut GameState, ch: CharId) {
@@ -1318,7 +1336,13 @@ fn clan_roster(g: &mut GameState, ch: CharId) {
     g.send_to_char(ch, "Full Clan Roster:\r\n");
     g.send_to_char(ch, "------------------------------------\r\n");
 
+    // The clan owner's name (stored on the clan record). If they are not online
+    // we still want to list them: resolve their idnum from the index so the
+    // owner shows even when logged off (C's WHERE clan=N would include them).
+    let leader_name = with_clan(num, |c| c.leader.clone()).unwrap_or_default();
+
     let mut any = false;
+    let mut shown_leader = false;
     for d in connected_players(g) {
         if get_clan(g, d) == num && get_clan_rank(g, d) > 0 {
             any = true;
@@ -1326,9 +1350,25 @@ fn clan_roster(g: &mut GameState, ch: CharId) {
                 Some(c) => (c.player.level, c.class_abbrev().to_string(), c.player.name.clone()),
                 None => continue,
             };
+            if name.eq_ignore_ascii_case(&leader_name) {
+                shown_leader = true;
+            }
             let drank = get_clan_rank(g, d);
             let label = with_clan(num, |c| c.rank_label(drank).to_string()).unwrap_or_else(|| "N/A".to_string());
             g.send_to_char(ch, &format!("[ {} {} ] {} - {}\r\n", lvl, class_abbr, name, label));
+        }
+    }
+    // Owner offline: pull their canonical name + level from the index so the
+    // roster still names the leader (class/rank unavailable offline — see note).
+    if !leader_name.is_empty() && !shown_leader {
+        if let Some(id) = g.get_id_by_name(&leader_name) {
+            if let Some(p) = g.player_index(&leader_name) {
+                let (lvl, name) = (p.level, g.get_name_by_id(id).unwrap_or(leader_name.clone()));
+                let label = with_clan(num, |c| c.rank_label(c.ranks).to_string())
+                    .unwrap_or_else(|| "N/A".to_string());
+                any = true;
+                g.send_to_char(ch, &format!("[ {} {} ] {} - {} (offline)\r\n", lvl, "---", name, label));
+            }
         }
     }
     if !any {

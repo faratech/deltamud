@@ -31,6 +31,22 @@ pub fn listener_fd() -> std::os::unix::io::RawFd {
     LISTENER_FD.load(Ordering::SeqCst)
 }
 
+/// One row of the in-memory player index (C `struct player_index_element`,
+/// db.h). C carries only {name, id, level}; the Rust port additionally caches
+/// `last_logon` (unix seconds) and `host` so `do_last` can render an offline
+/// player's record from the index without an async DB load. `name` keeps the
+/// player's stored capitalisation (C lowercases its copy; get_name_by_id then
+/// returns the lowercased form — we keep the canonical name so callers that
+/// display it, e.g. the ignore listing, match the C `last`/listing output).
+#[derive(Debug, Clone)]
+pub struct PlayerIndex {
+    pub idnum: i64,
+    pub name: String,
+    pub level: u8,
+    pub last_logon: i64,
+    pub host: String,
+}
+
 pub struct GameState {
     // Static world (loaded at boot; mutated by resets / OLC).
     pub rooms: Vec<Room>,
@@ -50,6 +66,16 @@ pub struct GameState {
     // in the Game wrapper keyed by the same ConnId).
     pub descriptors: HashMap<ConnId, Descriptor>,
     pub players_by_name: HashMap<String, CharId>,
+
+    // In-memory player name<->idnum index (C `player_table`, built by
+    // build_player_index() at boot from a `SELECT idnum,name,level FROM
+    // player_main`). Lets name<->id lookups, `last`, and ignore resolve
+    // OFFLINE players without an async DB hit. We additionally cache
+    // last_logon + host so `do_last` can render an offline player's record
+    // straight from the index. Kept fresh by update_player_index() on
+    // create/enter/save (the C MUD rebuilds the whole table after a
+    // create_entry; we upsert the single row).
+    pub player_table: Vec<PlayerIndex>,
 
     next_char_id: u64,
     next_obj_id: u64,
@@ -84,6 +110,7 @@ impl GameState {
             obj_list: Vec::new(),
             descriptors: HashMap::new(),
             players_by_name: HashMap::new(),
+            player_table: Vec::new(),
             next_char_id: 1,
             next_obj_id: 1,
             rng: Rng::default(),
@@ -167,6 +194,77 @@ impl GameState {
 
     pub fn find_player_by_name(&self, name: &str) -> Option<CharId> {
         self.players_by_name.get(&name.to_lowercase()).copied()
+    }
+
+    // ---- Player index (C player_table / get_id_by_name / get_name_by_id) ----
+
+    /// get_id_by_name() (db.c): the persistent idnum for `name`, or None if no
+    /// player by that name exists. Case-insensitive (C lowercases both sides),
+    /// resolves OFFLINE players from the boot-loaded index. Like C, only the
+    /// first whitespace token of `name` is considered.
+    pub fn get_id_by_name(&self, name: &str) -> Option<i64> {
+        let arg = name.split_whitespace().next().unwrap_or("");
+        if arg.is_empty() {
+            return None;
+        }
+        self.player_table
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(arg))
+            .map(|p| p.idnum)
+    }
+
+    /// get_name_by_id() (db.c): the stored (canonical-cased) name for an idnum,
+    /// or None. Resolves offline players from the index.
+    pub fn get_name_by_id(&self, id: i64) -> Option<String> {
+        self.player_table
+            .iter()
+            .find(|p| p.idnum == id)
+            .map(|p| p.name.clone())
+    }
+
+    /// The full index row for `name` (level / last_logon / host), or None.
+    /// Case-insensitive; used by `do_last` to render an offline player.
+    pub fn player_index(&self, name: &str) -> Option<&PlayerIndex> {
+        let arg = name.split_whitespace().next().unwrap_or("");
+        if arg.is_empty() {
+            return None;
+        }
+        self.player_table.iter().find(|p| p.name.eq_ignore_ascii_case(arg))
+    }
+
+    /// UPSERT a player_table row (keyed on idnum), keeping the index fresh as
+    /// players are created/saved/enter. C rebuilds the whole table after a
+    /// create_entry(); we update the single row in place (or append it). A
+    /// negative idnum or empty name is ignored (mobs / not-yet-allocated).
+    pub fn update_player_index(
+        &mut self,
+        idnum: i64,
+        name: &str,
+        level: u8,
+        last_logon: i64,
+        host: &str,
+    ) {
+        if idnum < 0 || name.is_empty() {
+            return;
+        }
+        if let Some(p) = self.player_table.iter_mut().find(|p| p.idnum == idnum) {
+            p.name = name.to_string();
+            p.level = level;
+            p.last_logon = last_logon;
+            // Preserve a known host if the caller has none (a save with no live
+            // descriptor shouldn't blank the host the last login recorded).
+            if !host.is_empty() {
+                p.host = host.to_string();
+            }
+        } else {
+            self.player_table.push(PlayerIndex {
+                idnum,
+                name: name.to_string(),
+                level,
+                last_logon,
+                host: host.to_string(),
+            });
+        }
     }
 
     // ---- Objects --------------------------------------------------------

@@ -274,6 +274,11 @@ fn get_id_by_name(g: &GameState, name: &str) -> i64 {
             }
         }
     }
+    // The shared GameState player_table (C player_table) is the authoritative
+    // offline name<->id index; consult it before the mail-local mirror.
+    if let Some(id) = g.get_id_by_name(&lname) {
+        return id;
+    }
     let m = sys().lock().unwrap();
     *m.name_to_id.get(&lname).unwrap_or(&-1)
 }
@@ -287,6 +292,10 @@ fn get_name_by_id(g: &GameState, id: i64) -> String {
                 return c.player.name.clone();
             }
         }
+    }
+    // Shared GameState index (canonical-cased name) next.
+    if let Some(n) = g.get_name_by_id(id) {
+        return n;
     }
     let m = sys().lock().unwrap();
     m.id_to_name

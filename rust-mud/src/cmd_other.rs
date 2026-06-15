@@ -2802,6 +2802,16 @@ pub fn do_email(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         return;
     }
 
+    // Offline-but-existing player (C: get_id_by_name(farg) != -1 once the EDATA
+    // file is absent): their email isn't loaded, so report it unregistered
+    // rather than self-registering. The boot-loaded player_table index resolves
+    // the name offline. (Reading an offline player's stored EDATA email still
+    // needs the async extra-data file load — out of scope for the name index.)
+    if g.get_id_by_name(&farg).is_some() {
+        g.send_to_char(ch, "They have not registered an email address.\r\n");
+        return;
+    }
+
     // Unknown name: register the caller's own email to `argument` (C falls
     // through to the self-registration branch when the file is absent).
     if let Some(c) = g.get_char_mut(ch) {

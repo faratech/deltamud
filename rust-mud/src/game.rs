@@ -352,6 +352,24 @@ impl Game {
                 if let Err(e) = self.db.save_player(&ch).await {
                     warn!("save new player {} failed: {}", name, e);
                 }
+                // Register the new player in the in-memory index immediately (C
+                // create_entry appends to player_table) so name<->idnum lookups
+                // — ignore-by-name, mail, `last` — resolve them at once, before
+                // they ever log in elsewhere. enter_game refreshes last_logon.
+                let host = self
+                    .state
+                    .descriptors
+                    .get(&conn_id)
+                    .map(|d| d.host.clone())
+                    .unwrap_or_default();
+                self.state.update_player_index(
+                    ch.idnum,
+                    &name,
+                    ch.player.level,
+                    ch.last_logon.timestamp(),
+                    &host,
+                );
+                crate::mail::mail_register_player(ch.idnum, &name);
                 self.enter_game(conn_id, true).await;
             }
             Err(e) => {
@@ -392,6 +410,26 @@ impl Game {
             d.character = Some(id);
             d.state = ConState::Playing;
         }
+
+        // Refresh the index for this login: stamp last_logon to now and record
+        // the connecting host (C sets GET_LAST_LOGON/host at enter), so a later
+        // `last <name>` for this player shows their most recent session.
+        let host = self
+            .state
+            .descriptors
+            .get(&conn_id)
+            .map(|d| d.host.clone())
+            .unwrap_or_default();
+        let now = chrono::Utc::now().timestamp();
+        if let Some(c) = self.state.get_char_mut(id) {
+            c.last_logon = chrono::Utc::now();
+        }
+        let (pidnum, plevel) = self
+            .state
+            .get_char(id)
+            .map(|c| (c.idnum, c.player.level))
+            .unwrap_or((-1, 1));
+        self.state.update_player_index(pidnum, &name, plevel, now, &host);
 
         // Place in start room: CircleMUD mortal_start_room (Itrius vnum 100),
         // then the player's hometown, then any loaded room (config.c).
@@ -484,6 +522,16 @@ impl Game {
             if let Some(c) = self.state.get_char(cid) {
                 if !c.is_npc {
                     let snapshot = c.clone();
+                    // Keep the index current with the saved record (level can
+                    // have changed this session); host carries over the last
+                    // login's host (update_player_index ignores an empty host).
+                    let (idnum, pname, plevel, llogon) = (
+                        snapshot.idnum,
+                        snapshot.get_name().to_string(),
+                        snapshot.player.level,
+                        snapshot.last_logon.timestamp(),
+                    );
+                    self.state.update_player_index(idnum, &pname, plevel, llogon, "");
                     let db = self.db.clone();
                     tokio::spawn(async move {
                         let _ = db.save_player(&snapshot).await;

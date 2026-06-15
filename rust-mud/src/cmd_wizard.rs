@@ -2575,10 +2575,14 @@ pub fn do_last(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "For whom do you wish to search?\r\n");
         return;
     }
-    // C reads the player_main row from MySQL for an offline target. That query
-    // is async (database::load_player) and this sync command path holds no DB
-    // handle, so the online target is printed fully and an offline name mirrors
-    // the not-found path (one note: offline 'last' needs the async DB layer).
+    // C reads the player_main row from MySQL (pe_printf for idnum/level/class/
+    // name/host/last_logon). The full row — notably `class` and the formatted
+    // last_logon time — is only available synchronously for an ONLINE target;
+    // for an OFFLINE target we render from the boot-loaded player_table index
+    // (idnum/level/name/last_logon/host). Class is absent from the index (it is
+    // not one of the index columns), so the offline line shows "---" for the
+    // class abbreviation. (A full offline class/host-of-record render would
+    // need an async player_main load — out of scope for the name<->id index.)
     let target = g.find_player_by_name(&name);
     match target {
         Some(p) => {
@@ -2605,8 +2609,40 @@ pub fn do_last(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 ),
             );
         }
-        None => g.send_to_char(ch, "There is no such player.\r\n"),
+        None => {
+            // Offline: pull the index row (idnum/level/name/last_logon/host).
+            let row = g.player_index(&name).cloned();
+            match row {
+                Some(p) => {
+                    if p.level > level_of(g, ch) && level_of(g, ch) < LVL_IMPL {
+                        g.send_to_char(ch, "You are not sufficiently godly for that!\r\n");
+                        return;
+                    }
+                    let when = ctime(p.last_logon);
+                    g.send_to_char(
+                        ch,
+                        &format!(
+                            "[{:5}] [{:2} {}] {:<12} : {:<18} : {:<20}\r\n",
+                            p.idnum, p.level, "---", p.name, p.host, when
+                        ),
+                    );
+                }
+                None => g.send_to_char(ch, "There is no such player.\r\n"),
+            }
+        }
     }
+}
+
+/// ctime()-style rendering of a unix timestamp for the `last` line (C uses the
+/// libc ctime(&last_logon), e.g. "Mon Jun 15 13:04:22 2026"). chrono's
+/// "%a %b %e %T %Y" matches that fixed-width format.
+fn ctime(unix: i64) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_opt(unix, 0)
+        .single()
+        .map(|t| t.format("%a %b %e %T %Y").to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// class_abbrevs[] (class.c) — 3-letter PC class codes.
