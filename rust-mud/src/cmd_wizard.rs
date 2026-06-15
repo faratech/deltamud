@@ -10,10 +10,23 @@
 // Contract-gap policy (documented in the manifest, never stubbed): a few
 // global side-effects in the C source touch systems reachable only outside this
 // sync command path — chiefly the async player DB (database.rs) used by the
-// OFFLINE variants of `stat file` / `set file` / `show player` / `last`, and the
-// on-disk player-file password buffer. For those the command *logic* and every
-// output string is reproduced 1:1, the ONLINE target is handled in full, and the
-// offline branch mirrors C's not-found path with a one-line note at the site.
+// OFFLINE variants of `set` / `set file` / `stat player` / `stat file` /
+// `show player`, and the on-disk player-file password buffer.
+//
+// OFFLINE immortal commands (set / stat / show on a logged-off player's full
+// record) are handled by the ASYNC BRIDGE: C loads the record synchronously
+// (retrieve_player_entry), edits, and saves; the Rust DB is async, so when the
+// target is offline-but-indexed we don't degrade to "no such player". Instead
+// try_defer_offline() emits "[ Loading <name> from the player file... ]" and
+// queues the verbatim immortal command via GameState::queue_offline_op. The
+// async Game loop (game.rs::drain_offline_ops) then loads the player into the
+// world, REPLAYS the command through command_interpreter (so this exact handler
+// logic re-runs against the now-in-world char and the immortal sees the normal
+// output / change), persists the edited record, and extracts it — matching C's
+// load-edit-save. `set file` / `stat file` replay as the `player` form so the
+// replayed pass takes the online lookup branch instead of re-deferring. `last`
+// already renders an offline player straight from the boot-loaded player_table
+// index, so it stays synchronous (no deferral needed).
 
 use crate::act::{act, ActArg, To};
 use crate::connection::ConState;
@@ -430,6 +443,37 @@ fn get_char_vis(g: &GameState, ch: CharId, arg: &str) -> Option<CharId> {
         }
     }
     None
+}
+
+/// Async-bridge gate (the offline branch of do_set / do_stat-file / show
+/// player). C's retrieve_player_entry loads the logged-off player's full record
+/// synchronously; the Rust DB is async, so when the named target is OFFLINE but
+/// present in the player_table we defer the whole immortal command instead of
+/// degrading to "no such player". game.rs drains the queue next heartbeat: it
+/// loads the player into the world, REPLAYS `command` verbatim (so the existing
+/// online do_set/do_stat logic applies to the now-in-world char), then persists
+/// + extracts. Returns true (and emits the "[ Loading … ]" line + queues) when
+/// the op was deferred; false when `name` isn't an offline-indexed player (the
+/// caller then sends its normal not-found line). Never fires for a name that is
+/// already online (find_player_by_name resolves it) — including the requester —
+/// so the online path is untouched and the bridge can't double-load.
+fn try_defer_offline(g: &mut GameState, ch: CharId, name: &str, command: &str) -> bool {
+    let first = name.split_whitespace().next().unwrap_or("");
+    if first.is_empty() {
+        return false;
+    }
+    // Already in the world (online, or already loaded by a prior op) -> the
+    // normal online path handles it; do not defer.
+    if g.find_player_by_name(first).is_some() {
+        return false;
+    }
+    // Offline but in the persistent index -> bridge it.
+    if g.get_id_by_name(first).is_some() {
+        g.send_to_char(ch, &format!("[ Loading {} from the player file... ]\r\n", first));
+        g.queue_offline_op(ch, first, command);
+        return true;
+    }
+    false
 }
 
 /// get_player_vis(ch, name): a visible PC (in room first, then world).
@@ -1622,16 +1666,24 @@ pub fn do_stat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             g.send_to_char(ch, "Stats on which player?\r\n");
         } else if let Some(v) = get_player_vis(g, ch, &rest) {
             do_stat_character(g, ch, v);
+        } else if try_defer_offline(g, ch, &rest, &format!("stat player {}", rest)) {
+            // Offline: the async bridge loads the player, replays `stat player
+            // <name>` (now resolving online), prints the full record, extracts.
         } else {
             g.send_to_char(ch, "No such player around.\r\n");
         }
     } else if is_abbrev(&kind, "file") {
-        // retrieve_player_entry() loads an OFFLINE player. The real read is an
-        // async DB query (database::load_player) and GameState carries no DB
-        // handle on this sync path, so only the online `stat player` branch is
-        // reachable; mirror C's not-found path for an offline name (one note).
+        // stat file <name>: retrieve_player_entry() loads an OFFLINE player's
+        // full record. The real read is an async DB query (database::load_player)
+        // unreachable from this sync path, so when the named player exists in the
+        // index we defer through the async bridge (game.rs loads + replays +
+        // extracts). We replay as `stat player <name>` so the replayed pass takes
+        // the online get_player_vis branch (the char is now in the world) instead
+        // of re-entering this `file` branch and deferring forever.
         if rest.is_empty() {
             g.send_to_char(ch, "Stats on which player?\r\n");
+        } else if try_defer_offline(g, ch, &rest, &format!("stat player {}", rest)) {
+            // deferred to the async bridge
         } else {
             g.send_to_char(ch, "There is no such player.\r\n");
         }
@@ -3195,11 +3247,19 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
         2 => {
             // show player: C retrieve_player_entry loads the offline row. The
-            // online character is printed in full; the offline read is the async
-            // DB query (database::load_player), unreachable from this sync path,
-            // so an offline name mirrors C's not-found path (one note).
+            // online character is printed in full; for an OFFLINE name the read
+            // is the async DB query (database::load_player), unreachable from
+            // this sync path, so we defer through the async bridge — game.rs
+            // loads the player into the world, replays `show player <name>`
+            // (now resolving via find_player_by_name below), prints the record,
+            // then extracts.
             if value.is_empty() {
                 g.send_to_char(ch, "A name would help.\r\n");
+                return;
+            }
+            if g.find_player_by_name(&value).is_none()
+                && try_defer_offline(g, ch, &value, &format!("show player {}", value))
+            {
                 return;
             }
             match g.find_player_by_name(&value) {
@@ -4018,12 +4078,24 @@ pub fn do_set(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
 
     if name == "file" {
-        // set file: load-edit-save an OFFLINE player (retrieve_player_entry +
-        // save_char). Both the load and the write-back are async DB ops
-        // (database::load_player / save_player) and this sync path holds no DB
-        // handle, so only the online `set player` path runs; mirror C's
-        // not-found for an offline name (one note: needs the async DB layer).
-        let (_n, _r) = half_chop(&rest);
+        // set file <name> <field> <value>: load-edit-save an OFFLINE player
+        // (retrieve_player_entry + save_char). The load + write-back are async
+        // DB ops (database::load_player / save_player), unreachable from this
+        // sync path — so when the named player exists in the index, defer the
+        // command through the async bridge (game.rs loads the player into the
+        // world, replays it, saves + extracts). We replay as `set player <…>`
+        // rather than `set file <…>` so the replayed pass takes the online
+        // get_player_vis path (the char is now present) instead of re-entering
+        // this `file` branch and deferring forever.
+        let (fname, frest) = half_chop(&rest);
+        if !fname.is_empty()
+            && g.find_player_by_name(&fname).is_none()
+            && g.get_id_by_name(&fname).is_some()
+        {
+            g.send_to_char(ch, &format!("[ Loading {} from the player file... ]\r\n", fname));
+            g.queue_offline_op(ch, &fname, &format!("set player {} {}", fname, frest));
+            return;
+        }
         g.send_to_char(ch, "There is no such player.\r\n");
         return;
     } else if name.eq_ignore_ascii_case("player") {
@@ -4070,11 +4142,17 @@ pub fn do_set(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
 
-    // Find target.
+    // Find target. An offline player is resolved through the async bridge: if
+    // the name isn't in the world but IS in the player_table, defer the WHOLE
+    // command (game.rs loads the player, replays this verbatim so the online
+    // path below runs against the now-in-world char, then saves + extracts).
     let vict = if is_player {
         match get_player_vis(g, ch, &name) {
             Some(v) => v,
             None => {
+                if try_defer_offline(g, ch, &name, &format!("set {}", arg)) {
+                    return;
+                }
                 g.send_to_char(ch, "There is no such player.\r\n");
                 return;
             }
@@ -4083,6 +4161,9 @@ pub fn do_set(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         match get_char_vis(g, ch, &name) {
             Some(v) => v,
             None => {
+                if try_defer_offline(g, ch, &name, &format!("set {}", arg)) {
+                    return;
+                }
                 g.send_to_char(ch, "There is no such creature.\r\n");
                 return;
             }

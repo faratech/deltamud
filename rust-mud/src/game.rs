@@ -69,6 +69,11 @@ impl Game {
                 Some(msg) = game_rx.recv() => self.handle_message(msg).await,
                 _ = tick.tick() => self.heartbeat(),
             }
+            // Async bridge for OFFLINE immortal commands (set/stat/show on a
+            // logged-off player): cmd_wizard queues an OfflineOp; here — between
+            // awaits, where &mut self.state is free for the sync replay — we load
+            // the player, replay the command, save, and extract.
+            self.drain_offline_ops().await;
             self.flush_all().await;
         }
     }
@@ -544,6 +549,86 @@ impl Game {
         self.state.descriptors.remove(&conn_id);
         self.outputs.remove(&conn_id);
         info!("Connection {} closed", conn_id);
+    }
+
+    /// Async bridge for OFFLINE immortal commands (set/stat/show on a logged-off
+    /// player's full record). cmd_wizard's offline branch queues an OfflineOp
+    /// (GameState::queue_offline_op) instead of degrading to "no such player";
+    /// this drains the queue. For each op we mirror C's retrieve_player_entry +
+    /// edit + save_char: load the player from the DB, splice it into the world
+    /// (like enter_game, minus the descriptor / start-room / look), REPLAY the
+    /// immortal's verbatim command through command_interpreter — so the normal
+    /// ONLINE do_set/do_stat/do_show logic applies and the immortal sees the
+    /// usual output — then persist the (possibly edited) record and extract the
+    /// char so it doesn't linger in the world. Runs between awaits in the run
+    /// loop, so &mut self.state is free for the sync command_interpreter call.
+    async fn drain_offline_ops(&mut self) {
+        // Take the queue so a replayed command that itself queued (it won't,
+        // since the target is now present) wouldn't be processed re-entrantly.
+        let ops = std::mem::take(&mut self.state.offline_ops);
+        for op in ops {
+            // The requester must still be online to receive the output.
+            if !self.state.char_exists(op.requester) {
+                continue;
+            }
+            // If the target raced back online (logged in between queue + drain),
+            // just replay against the live char — no load/extract needed.
+            let key = op.target.to_lowercase();
+            if self.state.players_by_name.contains_key(&key) {
+                command_interpreter(&mut self.state, op.requester, &op.command);
+                continue;
+            }
+
+            let mut chr = match self.db.load_player(&op.target).await {
+                Ok(c) => c,
+                Err(_) => {
+                    self.state.send_to_char(op.requester, "There is no such player.\r\n");
+                    continue;
+                }
+            };
+            // No live connection; clear stale object refs (the DB clone carries
+            // last session's ObjIds — same hygiene as enter_game) so nothing in
+            // the world dangles when we extract.
+            chr.desc = None;
+            chr.carrying.clear();
+            chr.equipment = [None; NUM_WEARS];
+
+            // Splice into the world and register the name so the replayed
+            // command's online lookup (get_player_vis / find_player_by_name)
+            // resolves it.
+            let id = self.state.create_char(chr);
+            self.state.affect_total(id);
+            self.state.players_by_name.insert(key.clone(), id);
+            // Place in a holding room (void vnum 3, else room 0) for in_room
+            // safety; immortals target world-wide so the room is immaterial.
+            if let Some(r) = self.state.real_room(3).or_else(|| self.state.real_room(0)) {
+                self.state.char_to_room(id, r);
+            }
+
+            // Replay the immortal's verbatim command. Because the target is now
+            // present, the handler's normal online branch applies the change (and
+            // the immortal sees the standard output); the offline branch can't
+            // re-trigger (the name resolves), so there's no re-deferral.
+            command_interpreter(&mut self.state, op.requester, &op.command);
+
+            // Snapshot the (possibly edited) record, drop it from the world, and
+            // persist — mirroring C's save_char(ch, NOWHERE) after the edit.
+            let snap = self.state.get_char(id).cloned();
+            self.state.players_by_name.remove(&key);
+            if let Some(ref s) = snap {
+                self.state.update_player_index(
+                    s.idnum,
+                    s.get_name(),
+                    s.player.level,
+                    s.last_logon.timestamp(),
+                    "",
+                );
+            }
+            self.state.extract_char(id);
+            if let Some(s) = snap {
+                let _ = self.db.save_player(&s).await;
+            }
+        }
     }
 
     // ---- Heartbeat ------------------------------------------------------

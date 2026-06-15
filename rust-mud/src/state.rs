@@ -47,6 +47,24 @@ pub struct PlayerIndex {
     pub host: String,
 }
 
+/// A deferred immortal command against an OFFLINE player (the async bridge for
+/// C's do_set/do_stat/do_show, which load a logged-off player's full record via
+/// retrieve_player_entry, edit it, and save). The synchronous command handler
+/// can't await the async DB, so when it finds the target offline-but-indexed it
+/// queues one of these instead of degrading to "no such player". The async Game
+/// loop drains the queue (game.rs), loads the player into the world, REPLAYS
+/// `command` through command_interpreter so the existing online handler logic
+/// applies, then persists + extracts. `requester` is the immortal who typed it;
+/// `target` is the offline player's name; `command` is the immortal's ORIGINAL
+/// command verbatim (e.g. "set Mortvictim gold 5000") so the replay re-parses
+/// the identical field/value.
+#[derive(Debug, Clone)]
+pub struct OfflineOp {
+    pub requester: CharId,
+    pub target: String,
+    pub command: String,
+}
+
 pub struct GameState {
     // Static world (loaded at boot; mutated by resets / OLC).
     pub rooms: Vec<Room>,
@@ -76,6 +94,13 @@ pub struct GameState {
     // create/enter/save (the C MUD rebuilds the whole table after a
     // create_entry; we upsert the single row).
     pub player_table: Vec<PlayerIndex>,
+
+    // Deferred immortal commands against OFFLINE players (set/stat/show on a
+    // logged-off player's full record). The sync command path can't await the
+    // async DB, so it queues an OfflineOp here; the async Game loop (game.rs)
+    // drains this each heartbeat — loads the player into the world, replays the
+    // command, then saves + extracts. Empty in steady state.
+    pub offline_ops: Vec<OfflineOp>,
 
     next_char_id: u64,
     next_obj_id: u64,
@@ -111,6 +136,7 @@ impl GameState {
             descriptors: HashMap::new(),
             players_by_name: HashMap::new(),
             player_table: Vec::new(),
+            offline_ops: Vec::new(),
             next_char_id: 1,
             next_obj_id: 1,
             rng: Rng::default(),
@@ -265,6 +291,19 @@ impl GameState {
                 host: host.to_string(),
             });
         }
+    }
+
+    /// Queue a deferred immortal command against an OFFLINE player (the async
+    /// bridge for set/stat/show on a logged-off record). Called from cmd_wizard
+    /// when the target is offline-but-indexed; drained next heartbeat by game.rs.
+    /// `command` must be the immortal's ORIGINAL command verbatim so the replay
+    /// re-parses the identical field/value.
+    pub fn queue_offline_op(&mut self, requester: CharId, target: &str, command: &str) {
+        self.offline_ops.push(OfflineOp {
+            requester,
+            target: target.to_string(),
+            command: command.to_string(),
+        });
     }
 
     // ---- Objects --------------------------------------------------------
