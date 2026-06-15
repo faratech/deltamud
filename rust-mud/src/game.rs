@@ -12,6 +12,7 @@ use crate::DatabaseInterface;
 use anyhow::Result;
 use log::{info, warn};
 use std::collections::HashMap;
+use std::os::unix::io::RawFd;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
@@ -74,13 +75,16 @@ impl Game {
 
     async fn handle_message(&mut self, msg: GameMessage) {
         match msg {
-            GameMessage::NewConnection { id, host, output_tx } => {
+            GameMessage::NewConnection { id, host, raw_fd, output_tx } => {
                 info!("New connection from {}", host);
-                let mut d = Descriptor::new(id, host);
+                let mut d = Descriptor::with_fd(id, host, raw_fd);
                 d.write("\r\n&YWelcome to DeltaMUD!&n\r\n\r\n");
                 self.state.descriptors.insert(id, d);
                 self.outputs.insert(id, output_tx);
                 self.write_prompt(id);
+            }
+            GameMessage::Recover { id, host, raw_fd, name, output_tx } => {
+                self.recover_player(id, host, raw_fd, name, output_tx).await;
             }
             GameMessage::Input { conn_id, input } => {
                 self.handle_input(conn_id, input).await;
@@ -421,6 +425,56 @@ impl Game {
             );
             let _ = rnum;
         }
+    }
+
+    /// Copyover recovery (comm.c copyover_recover, per-player branch). The socket
+    /// fd was inherited across execv and `name` was playing before the reboot.
+    /// Register the descriptor (already wired to the live writer), load the player
+    /// straight into Playing state (no nanny), and send the C "reboot completed"
+    /// message. If the player file/DB load fails, send the C "lost in copyover"
+    /// line and close the socket.
+    async fn recover_player(
+        &mut self,
+        conn_id: ConnId,
+        host: String,
+        raw_fd: RawFd,
+        name: String,
+        output_tx: mpsc::Sender<String>,
+    ) {
+        info!("Copyover recovery: re-attaching {} (fd {})", name, raw_fd);
+        let mut d = Descriptor::with_fd(conn_id, host, raw_fd);
+        // The player was already greeted/logged-in pre-reboot; mark the name so
+        // descriptor_name() / enter_game pick the right pfile, and start in
+        // GetName so enter_game's state transition to Playing is well-defined.
+        d.temp_name = Some(name.clone());
+        d.state = ConState::GetName;
+        self.state.descriptors.insert(conn_id, d);
+        self.outputs.insert(conn_id, output_tx);
+
+        // "\n\rRestoring from copyover...\n\r" was already written to the fd by
+        // the OLD process right before exec (do_copyover); here we emit the C
+        // "reboot completed" confirmation, then enter the world.
+        let exists = self.db.player_exists(&name).await.unwrap_or(false);
+        if !exists {
+            // C: "\n\rSomehow, your character was lost in the copyover. Sorry.\n\r"
+            self.out(
+                conn_id,
+                "\n\rSomehow, your character was lost in the copyover. Sorry.\n\r",
+            );
+            if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                d.state = ConState::Close;
+            }
+            return;
+        }
+        self.out(
+            conn_id,
+            "\n\rThe reboot has been completed. You may continue playing.\n\r",
+        );
+        // enter_game loads the pfile by descriptor_name(), places the char, runs
+        // crash_load + look_at_room + "$n has entered the game." — exactly the
+        // tail of copyover_recover (enter_player_game + look_at_room).
+        self.enter_game(conn_id, false).await;
+        self.write_prompt(conn_id);
     }
 
     async fn disconnect(&mut self, conn_id: ConnId) {

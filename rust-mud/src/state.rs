@@ -12,6 +12,24 @@ use crate::room::Room;
 use crate::types::*;
 use crate::world::{MobileProto, ObjectProto, Zone};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI32, Ordering};
+
+/// Process-global copy of the listening socket fd (C `mother_desc`). main.rs
+/// publishes it here right after TcpListener::bind so do_copyover (running in
+/// the Game task, which never sees main's local listener) can clear FD_CLOEXEC
+/// on it and hand it to the re-exec'd binary. -1 until the listener is bound.
+static LISTENER_FD: AtomicI32 = AtomicI32::new(-1);
+
+/// Publish the bound listener fd (main.rs, at boot). Mirrors C setting
+/// `mother_desc` before init_game so copyover can inherit it.
+pub fn set_listener_fd(fd: std::os::unix::io::RawFd) {
+    LISTENER_FD.store(fd, Ordering::SeqCst);
+}
+
+/// Read the published listener fd (do_copyover). -1 if not yet bound.
+pub fn listener_fd() -> std::os::unix::io::RawFd {
+    LISTENER_FD.load(Ordering::SeqCst)
+}
 
 pub struct GameState {
     // Static world (loaded at boot; mutated by resets / OLC).

@@ -6,6 +6,7 @@
 use crate::types::{CharId, ConnId};
 use anyhow::Result;
 use std::net::SocketAddr;
+use std::os::unix::io::{AsRawFd, RawFd};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -38,6 +39,11 @@ pub enum InputContext {
 pub struct Descriptor {
     pub id: ConnId,
     pub host: String,
+    /// Raw OS file descriptor of the underlying TCP socket. Captured before the
+    /// stream is split (connection.rs handle_client) so do_copyover can write a
+    /// final flush, clear FD_CLOEXEC, and inherit the live socket across execv —
+    /// this is the linchpin of C's seamless copyover (act.wizard.c do_copyover).
+    pub raw_fd: RawFd,
     pub state: ConState,
     /// Stack of nested input contexts; empty == normal command/menu input.
     pub editors: Vec<InputContext>,
@@ -60,9 +66,14 @@ pub struct Descriptor {
 
 impl Descriptor {
     pub fn new(id: ConnId, host: String) -> Self {
+        Self::with_fd(id, host, -1)
+    }
+
+    pub fn with_fd(id: ConnId, host: String, raw_fd: RawFd) -> Self {
         Descriptor {
             id,
             host,
+            raw_fd,
             state: ConState::GetName,
             editors: Vec::new(),
             character: None,
@@ -124,6 +135,17 @@ pub enum GameMessage {
     NewConnection {
         id: ConnId,
         host: String,
+        raw_fd: RawFd,
+        output_tx: mpsc::Sender<String>,
+    },
+    /// Re-attach a player whose live socket was inherited across a copyover
+    /// execv (comm.c copyover_recover). The Game loads the named player straight
+    /// into Playing state, skipping the login nanny.
+    Recover {
+        id: ConnId,
+        host: String,
+        raw_fd: RawFd,
+        name: String,
         output_tx: mpsc::Sender<String>,
     },
     Input {
@@ -143,6 +165,11 @@ pub async fn handle_client(
     conn_id: ConnId,
     game_tx: mpsc::Sender<GameMessage>,
 ) -> Result<()> {
+    // Capture the raw fd BEFORE into_split() consumes the stream. do_copyover
+    // needs this to inherit the live socket across execv (FD_CLOEXEC dance).
+    let fd = stream.as_raw_fd();
+    let host = addr.ip().to_string();
+
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
@@ -151,7 +178,68 @@ pub async fn handle_client(
     game_tx
         .send(GameMessage::NewConnection {
             id: conn_id,
-            host: addr.ip().to_string(),
+            host,
+            raw_fd: fd,
+            output_tx: output_tx.clone(),
+        })
+        .await?;
+
+    let write_handle = tokio::spawn(async move {
+        while let Some(msg) = output_rx.recv().await {
+            if writer.write_all(msg.as_bytes()).await.is_err() {
+                break;
+            }
+            if writer.flush().await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                let input = line.trim_end_matches(['\r', '\n']).to_string();
+                game_tx
+                    .send(GameMessage::Input { conn_id, input })
+                    .await?;
+            }
+            Err(_) => break,
+        }
+    }
+
+    let _ = game_tx.send(GameMessage::Disconnect { conn_id }).await;
+    write_handle.abort();
+    Ok(())
+}
+
+/// Copyover recovery task (comm.c copyover_recover). The socket fd was inherited
+/// across execv and the player named `name` was playing before the reboot. We
+/// re-wrap the fd as a tokio TcpStream and drive the same writer/input loop as a
+/// fresh connection, but tell the Game to RECOVER (load the player straight into
+/// Playing, skip the nanny). `stream` was already rebuilt from the raw fd by the
+/// boot path (which set the std socket non-blocking before from_std).
+pub async fn handle_recovered(
+    stream: TcpStream,
+    conn_id: ConnId,
+    raw_fd: RawFd,
+    name: String,
+    host: String,
+    game_tx: mpsc::Sender<GameMessage>,
+) -> Result<()> {
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    let (output_tx, mut output_rx) = mpsc::channel::<String>(256);
+
+    game_tx
+        .send(GameMessage::Recover {
+            id: conn_id,
+            host,
+            raw_fd,
+            name,
             output_tx: output_tx.clone(),
         })
         .await?;

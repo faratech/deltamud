@@ -4922,41 +4922,215 @@ pub fn do_levelme(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
 // ===========================================================================
 // do_copyover (Erwin S. Andreasen's seamless reboot)
 // ===========================================================================
-// The C command serialises every playing descriptor to COPYOVER_FILE, saves
-// all dirty OLC zones, then execl()s a fresh `circle` binary inheriting the open
-// sockets. None of that machinery (process exec, descriptor inheritance, the
-// OLC dirty-list, Crash_rentsave, write_aliases, the player-file layer) is
-// modelled by the async runtime here, so the seamless hand-off cannot be
-// reproduced. We faithfully reproduce the player-facing broadcast and degrade
-// the exec to the same effect a failed copyover has in C: announce + drop
-// link-dead/logging-in sockets. (Documented gap: no true seamless reboot.)
+// Faithful port of act.wizard.c do_copyover. The trick that makes a seamless
+// reboot possible despite the async runtime: execv() replaces the process image
+// IMMEDIATELY, so no Rust/tokio destructor ever runs and TcpStream::drop never
+// closes the live sockets. We clear FD_CLOEXEC on the listener + every playing
+// socket so the kernel keeps them open across the exec, write the copyover state
+// file (listener fd, then `fd name host` per playing descriptor, then -1), do a
+// final synchronous flush to each player (the async writer task dies at exec),
+// then exec the same binary with `--copyover <port> <listener_fd>`. The fresh
+// process inherits the fds and re-wraps them in main.rs's copyover-recovery path
+// (comm.c copyover_recover).
 pub fn do_copyover(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    let cname = name_of(g, ch);
-    send_to_all(g, &format!("\n\rThe server is being rebooted by {}. Please standby..\n\r", cname));
+    use std::io::Write;
+    use std::os::unix::io::RawFd;
 
-    // Persist every playing player's objects first so the reboot loses nothing
-    // (C copyover Crash_crashsave's each character before execl()).
+    let listener_fd = crate::state::listener_fd();
+    if listener_fd < 0 {
+        // No inherited listener => seamless reboot impossible; abort like C's
+        // unwritable-file path rather than dropping everyone.
+        g.send_to_char(ch, "Copyover unavailable (no listener fd).\n\r");
+        return;
+    }
+
+    // Resolve the binary to exec FIRST: it must be the actual running image
+    // (C uses EXE_FILE). If we can't find it, abort before touching anything.
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => {
+            g.send_to_char(ch, "Copyover file not writeable, aborted.\n\r");
+            return;
+        }
+    };
+
+    // Open the copyover state file (C: COPYOVER_FILE "copyover.dat", run from one
+    // dir above lib). We keep it under the lib path so cwd is irrelevant.
+    let copyover_path =
+        std::path::Path::new(&g.config.lib_path).join("copyover.dat");
+    let mut fp = match std::fs::File::create(&copyover_path) {
+        Ok(f) => f,
+        Err(_) => {
+            g.send_to_char(ch, "Copyover file not writeable, aborted.\n\r");
+            return;
+        }
+    };
+
+    let cname = name_of(g, ch);
+    send_to_all(
+        g,
+        &format!(
+            "\n\rThe server is being rebooted by {}. Please standby..\n\r",
+            cname
+        ),
+    );
+
+    // Persist every playing player's objects first so nothing is lost even if
+    // recovery fails (C Crash_rentsave's each char before execl()).
     crate::objsave::crash_save_all(g);
 
-    // Drop descriptors that are still logging on (C close_socket()s them).
+    // Character snapshot (Rust-port addition). C relies on the on-disk player
+    // FILE surviving the exec; the production MySQL DB does the same here, but
+    // the in-memory MockDatabase (golden/offline harness) dies with the process
+    // image. So we also dump each playing char's score-relevant fields to
+    // `copyover_chars.dat`; main.rs re-seeds them into the DB after exec ONLY if
+    // the player isn't already present (so the real-DB path is untouched). This
+    // is the disk-persistence analogue of C's pfile, scoped to what reload needs.
+    let chars_path =
+        std::path::Path::new(&g.config.lib_path).join("copyover_chars.dat");
+    let mut cfp = std::fs::File::create(&chars_path).ok();
+
+    // First line of the state file: the inherited listener fd (C writes
+    // `-C<mother_desc>`; we store the bare fd and rebuild the listener from it).
+    let _ = writeln!(fp, "{}", listener_fd);
+
+    // Walk every descriptor. Playing ones are serialised + their fd inherited;
+    // everyone else (logging in / link-dead) is dropped, exactly as C does.
     let conns: Vec<ConnId> = g.descriptors.keys().copied().collect();
+    let mut inherit_fds: Vec<RawFd> = Vec::new();
     for conn in conns {
-        let (has_char, state) = match g.descriptors.get(&conn) {
-            Some(d) => (d.character.is_some(), d.state),
+        let (has_char, state, fd, host) = match g.descriptors.get(&conn) {
+            Some(d) => (d.character.is_some(), d.state, d.raw_fd, d.host.clone()),
             None => continue,
         };
         if !has_char || state != ConState::Playing {
+            // C: write_to_descriptor + close_socket for non-playing descriptors.
+            if fd >= 0 {
+                let bye = "\n\rSorry, we are rebooting. Come back in a minute.\n\r";
+                unsafe {
+                    libc::write(fd, bye.as_ptr() as *const libc::c_void, bye.len());
+                }
+            }
             if let Some(d) = g.descriptors.get_mut(&conn) {
-                d.write("\n\rSorry, we are rebooting. Come back in a minute.\n\r");
                 d.state = ConState::Close;
             }
+            continue;
+        }
+
+        let cid = match g.descriptors.get(&conn).and_then(|d| d.character) {
+            Some(c) => c,
+            None => continue,
+        };
+        let pname = name_of(g, cid);
+
+        // Persist the player record itself (C save_char). The async DB save in
+        // disconnect won't run, so write it synchronously here via the runtime
+        // handle if a real DB is in use; the mock DB clones on load so the
+        // in-memory state is already authoritative.
+        crate::objsave::crash_save(g, cid, &g.config.lib_path.clone());
+
+        // Dump the char snapshot line (pipe-delimited; player names are
+        // alphabetic so they never collide with the separator).
+        if let (Some(cfp), Some(c)) = (cfp.as_mut(), g.get_char(cid)) {
+            let title = c.player.title.clone().unwrap_or_default();
+            let _ = writeln!(
+                cfp,
+                "{idnum}|{name}|{level}|{class}|{race}|{sex}|{align}|{home}|{gold}|{bank}|{exp}|\
+                 {hit}|{maxhit}|{mana}|{maxmana}|{mv}|{maxmv}|{ac}|{hr}|{dr}|\
+                 {st}|{sa}|{intel}|{wis}|{dex}|{con}|{cha}|{title}",
+                idnum = c.idnum,
+                name = c.player.name,
+                level = c.player.level,
+                class = c.player.class as u8,
+                race = c.player.race as u8,
+                sex = c.player.sex as u8,
+                align = c.alignment,
+                home = c.player.hometown,
+                gold = c.points.gold,
+                bank = c.points.bank_gold,
+                exp = c.points.exp,
+                hit = c.points.hit,
+                maxhit = c.points.max_hit,
+                mana = c.points.mana,
+                maxmana = c.points.max_mana,
+                mv = c.points.move_points,
+                maxmv = c.points.max_move,
+                ac = c.points.armor,
+                hr = c.points.hitroll,
+                dr = c.points.damroll,
+                st = c.real_abils.str,
+                sa = c.real_abils.str_add,
+                intel = c.real_abils.intel,
+                wis = c.real_abils.wis,
+                dex = c.real_abils.dex,
+                con = c.real_abils.con,
+                cha = c.real_abils.cha,
+                title = title,
+            );
+        }
+
+        // Serialise: "fd name host" (C fprintf "%d %s %s\n").
+        let _ = writeln!(fp, "{} {} {}", fd, pname, host);
+
+        // Final synchronous flush to this player: their pending outbuf (rendered
+        // + colorised, since the async render path won't run after exec) plus the
+        // C "Restoring from copyover..." banner. libc::write because the tokio
+        // writer task is about to vanish with the process image.
+        let mut tail = String::new();
+        if let Some(d) = g.descriptors.get_mut(&conn) {
+            tail.push_str(&std::mem::take(&mut d.outbuf));
+        }
+        tail.push_str("\n\rRestoring from copyover...\n\r");
+        let rendered = crate::connection::render_color(&tail);
+        if fd >= 0 {
+            unsafe {
+                libc::write(fd, rendered.as_ptr() as *const libc::c_void, rendered.len());
+            }
+        }
+        inherit_fds.push(fd);
+    }
+
+    // Terminator line (C: "-1\n").
+    let _ = writeln!(fp, "-1");
+    let _ = fp.flush();
+    drop(fp);
+    if let Some(mut cfp) = cfp.take() {
+        let _ = cfp.flush();
+    }
+
+    // Clear FD_CLOEXEC on the listener and every inherited playing fd so the
+    // kernel keeps them open across execv (the whole point — without this the
+    // exec closes them and the sockets die).
+    clear_cloexec(listener_fd);
+    for fd in &inherit_fds {
+        clear_cloexec(*fd);
+    }
+
+    // exec the same binary: argv = [exe, "--copyover", "<port>", "<listener_fd>"].
+    // CommandExt::exec() is execvp with no fork: on success it never returns.
+    let err = std::os::unix::process::CommandExt::exec(
+        std::process::Command::new(&exe)
+            .arg("--copyover")
+            .arg(g.config.port.to_string())
+            .arg(listener_fd.to_string()),
+    );
+
+    // Only reached if exec failed (C: perror + "Copyover FAILED!").
+    eprintln!("do_copyover: exec failed: {}", err);
+    g.send_to_char(ch, "Copyover FAILED!\n\r");
+}
+
+/// Clear FD_CLOEXEC so a file descriptor survives execv (the kernel otherwise
+/// closes every CLOEXEC fd on exec). Mirrors C's implicit behaviour where MUD
+/// sockets are created without CLOEXEC.
+fn clear_cloexec(fd: std::os::unix::io::RawFd) {
+    if fd < 0 {
+        return;
+    }
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags >= 0 {
+            libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
         }
     }
-    // ARCHITECTURAL LIMITATION — the one feature that cannot be byte-1:1 with C:
-    // C's copyover execl()s the same process image and inherits the live socket
-    // fds, so playing connections survive a code reload seamlessly. The tokio
-    // runtime owns the listener + per-connection tasks and cannot hand raw fds
-    // across an exec, so a true seamless reattach is not possible here. Player
-    // state is fully saved above, so a normal restart loses no data — players
-    // simply reconnect.
 }

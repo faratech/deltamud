@@ -90,11 +90,128 @@ mod world;
 use anyhow::Result;
 use config::Config;
 use log::{info, warn};
+use std::os::unix::io::{FromRawFd, RawFd};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use types::ConnId;
+
+/// One recovered playing connection inherited across a copyover exec
+/// (comm.c copyover_recover, per-line `fd name host`).
+struct CopyoverEntry {
+    fd: RawFd,
+    name: String,
+    host: String,
+}
+
+/// Parse the `--copyover <port> <listener_fd>` argv tail produced by
+/// do_copyover. Returns the inherited listener fd when present.
+fn parse_copyover_args() -> Option<RawFd> {
+    let args: Vec<String> = std::env::args().collect();
+    let pos = args.iter().position(|a| a == "--copyover")?;
+    // args[pos+1] = port (already in Config via env/default), args[pos+2] = fd.
+    args.get(pos + 2).and_then(|s| s.parse::<RawFd>().ok())
+}
+
+/// Re-seed the player DB from the copyover char snapshot (cmd_wizard.rs writes
+/// `copyover_chars.dat`). Only needed when the DB does not itself persist across
+/// the exec (the in-memory MockDatabase): for each snapshot line we reconstruct
+/// the score-relevant Character and create it in the DB *iff* it isn't already
+/// there, so the real-MySQL path (player already persisted) is a no-op. Then the
+/// per-socket recovery's enter_game load_player succeeds. The file is consumed
+/// (deleted) here so it can't leak into a later boot.
+async fn reseed_copyover_chars(db: &Arc<dyn DatabaseInterface>, lib_path: &str) {
+    let path = std::path::Path::new(lib_path).join("copyover_chars.dat");
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let _ = std::fs::remove_file(&path);
+    for line in contents.lines() {
+        let f: Vec<&str> = line.split('|').collect();
+        if f.len() < 27 {
+            continue;
+        }
+        let name = f[1].to_string();
+        if name.is_empty() {
+            continue;
+        }
+        // Don't clobber a DB that already holds the player (real MySQL path).
+        if db.player_exists(&name).await.unwrap_or(false) {
+            continue;
+        }
+        let pi = |i: usize| f.get(i).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+        let class = types::Class::from_u8(pi(3) as u8);
+        let race = types::Race::from_u8(pi(4) as u8);
+        let mut ch = character::Character::new_player(name.clone(), class, race);
+        ch.idnum = pi(0);
+        ch.player.level = pi(2) as types::Level;
+        ch.player.sex = types::Gender::from_u8(pi(5) as u8);
+        ch.alignment = pi(6) as i32;
+        ch.player.hometown = pi(7) as types::RoomVnum;
+        ch.points.gold = pi(8) as types::Gold;
+        ch.points.bank_gold = pi(9) as types::Gold;
+        ch.points.exp = pi(10) as types::Experience;
+        ch.points.hit = pi(11) as i32;
+        ch.points.max_hit = pi(12) as i32;
+        ch.points.mana = pi(13) as i32;
+        ch.points.max_mana = pi(14) as i32;
+        ch.points.move_points = pi(15) as i32;
+        ch.points.max_move = pi(16) as i32;
+        ch.points.armor = pi(17) as types::ArmorClass;
+        ch.points.hitroll = pi(18) as types::Hitroll;
+        ch.points.damroll = pi(19) as types::Damroll;
+        ch.real_abils.str = pi(20) as i8;
+        ch.real_abils.str_add = pi(21) as i8;
+        ch.real_abils.intel = pi(22) as i8;
+        ch.real_abils.wis = pi(23) as i8;
+        ch.real_abils.dex = pi(24) as i8;
+        ch.real_abils.con = pi(25) as i8;
+        ch.real_abils.cha = pi(26) as i8;
+        let title = f.get(27).map(|s| s.to_string()).unwrap_or_default();
+        if !title.is_empty() {
+            ch.player.title = Some(title);
+        }
+        ch.aff_abils = ch.real_abils;
+        // create_player assigns a fresh idnum; immediately save_player to persist
+        // the reconstructed stats under that row so load_player returns them.
+        if db.create_player(&ch, "!copyover!").await.is_ok() {
+            let _ = db.save_player(&ch).await;
+        }
+    }
+}
+
+/// Read + unlink the copyover state file (comm.c copyover_recover: fopen, then
+/// unlink immediately so a crash can't loop on it). First line is the listener
+/// fd (already known from argv); subsequent lines are `fd name host`; a line of
+/// `-1` terminates.
+fn read_copyover_state(lib_path: &str) -> Vec<CopyoverEntry> {
+    let path = std::path::Path::new(lib_path).join("copyover.dat");
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let _ = std::fs::remove_file(&path); // C unlinks immediately.
+    let mut out = Vec::new();
+    for (i, line) in contents.lines().enumerate() {
+        if i == 0 {
+            continue; // listener fd line; handled from argv.
+        }
+        let line = line.trim();
+        if line == "-1" || line.is_empty() {
+            break;
+        }
+        let mut it = line.split_whitespace();
+        let fd = it.next().and_then(|s| s.parse::<RawFd>().ok());
+        let name = it.next().map(|s| s.to_string());
+        let host = it.next().map(|s| s.to_string()).unwrap_or_default();
+        if let (Some(fd), Some(name)) = (fd, name) {
+            out.push(CopyoverEntry { fd, name, host });
+        }
+    }
+    out
+}
 
 /// Database abstraction (CircleMUD dbinterface.c). Implemented by the
 /// MySQL-backed `Database` and the in-memory `MockDatabase`.
@@ -238,6 +355,10 @@ async fn main() -> Result<()> {
     let lib_path = config.lib_path.clone();
     let (game_tx, game_rx) = mpsc::channel(256);
 
+    // Keep a handle to the shared DB for copyover re-seeding (same Arc the game
+    // task uses, so re-seeds land in the live MockDatabase before recovery).
+    let db_for_recovery = db.clone();
+
     let _game = tokio::spawn(async move {
         let mut game = game::Game::new(state, db);
         game.load_text_files(&lib_path).await;
@@ -247,11 +368,67 @@ async fn main() -> Result<()> {
         }
     });
 
-    let addr = format!("0.0.0.0:{}", config.port);
-    let listener = TcpListener::bind(&addr).await?;
-    info!("Server listening on {}", addr);
+    // Copyover detection (comm.c init_game: `if (!fCopyOver) init_socket(port)`).
+    // When re-exec'd by do_copyover, the listener fd was inherited (FD_CLOEXEC
+    // cleared before exec); rebuild the tokio listener from it instead of bind().
+    let copyover_listener_fd = parse_copyover_args();
+    let listener = if let Some(lfd) = copyover_listener_fd {
+        info!("Copyover recovery: inheriting listener fd {}", lfd);
+        // SAFETY: lfd was a live listening socket in the previous image; execv
+        // kept it open (CLOEXEC cleared) and nothing else owns it now.
+        let std_listener = unsafe { std::net::TcpListener::from_raw_fd(lfd) };
+        std_listener.set_nonblocking(true)?;
+        TcpListener::from_std(std_listener)?
+    } else {
+        let addr = format!("0.0.0.0:{}", config.port);
+        let l = TcpListener::bind(&addr).await?;
+        info!("Server listening on {}", addr);
+        l
+    };
+
+    // Publish the (possibly inherited) listener fd so do_copyover can re-inherit
+    // it on the NEXT copyover. Mirrors C keeping `mother_desc` live.
+    {
+        use std::os::unix::io::AsRawFd;
+        state::set_listener_fd(listener.as_raw_fd());
+    }
 
     let mut next_conn: u64 = 1;
+
+    // If we came up via copyover, re-attach every previously-playing socket.
+    if copyover_listener_fd.is_some() {
+        // Re-seed the DB from the char snapshot first (no-op if the DB already
+        // persists the players, e.g. real MySQL), so enter_game can load them.
+        reseed_copyover_chars(&db_for_recovery, &config.lib_path).await;
+        let entries = read_copyover_state(&config.lib_path);
+        info!("Copyover recovery: {} player socket(s) to restore", entries.len());
+        for e in entries {
+            let id = ConnId(next_conn);
+            next_conn += 1;
+            // SAFETY: e.fd is a live connected socket inherited across exec.
+            let std_stream = unsafe { std::net::TcpStream::from_raw_fd(e.fd) };
+            if std_stream.set_nonblocking(true).is_err() {
+                warn!("copyover: fd {} for {} not usable, dropping", e.fd, e.name);
+                continue;
+            }
+            let stream = match tokio::net::TcpStream::from_std(std_stream) {
+                Ok(s) => s,
+                Err(err) => {
+                    warn!("copyover: from_std failed for {}: {}", e.name, err);
+                    continue;
+                }
+            };
+            let tx = game_tx.clone();
+            tokio::spawn(async move {
+                if let Err(err) =
+                    connection::handle_recovered(stream, id, e.fd, e.name.clone(), e.host, tx).await
+                {
+                    warn!("recovered client {} error: {}", e.name, err);
+                }
+            });
+        }
+    }
+
     loop {
         let (stream, peer) = listener.accept().await?;
         let id = ConnId(next_conn);
