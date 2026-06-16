@@ -5307,11 +5307,33 @@ pub fn do_isay(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 }
 
 pub fn do_mcasters(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    // mob_index[i].func == magic_user — the hard-assigned spec-proc table and
-    // the proto act flags (MOB_CASTER) aren't surfaced on MobileProto, so no
-    // prototype can be identified as a caster. C prints just the header in an
-    // empty world; we degrade identically (documented gap).
-    g.send_to_char(ch, "Spellcasting mobs:\r\n");
+    const MOB_CASTER: i64 = 1 << 21;
+
+    let magic_user = crate::spec_procs::magic_user as crate::spec_assign::SpecFn;
+    let mut casters: Vec<_> = g
+        .mob_protos
+        .values()
+        .filter(|proto| {
+            crate::spec_assign::get_mob_spec(proto.vnum)
+                .is_some_and(|func| std::ptr::fn_addr_eq(func, magic_user))
+        })
+        .collect();
+    casters.sort_by_key(|proto| proto.vnum);
+
+    let mut out = String::from("Spellcasting mobs:\r\n");
+    for proto in casters {
+        let caster_type = if proto.act_flags & MOB_CASTER != 0 {
+            "CASTER"
+        } else {
+            "ASSIGNED"
+        };
+        out.push_str(&format!(
+            "[{}] {} (Type: {})\r\n",
+            proto.vnum, proto.short_desc, caster_type
+        ));
+    }
+
+    g.send_to_char(ch, &out);
 }
 
 // ===========================================================================
@@ -6511,7 +6533,7 @@ mod tests {
     use crate::connection::Descriptor;
     use crate::object::{ExtraFlags, Object, WearFlags};
     use crate::room::Room;
-    use crate::world::ObjectProto;
+    use crate::world::{MobileProto, ObjectProto};
 
     fn connected_player(g: &mut GameState, conn: ConnId, name: &str, level: Level) -> CharId {
         g.descriptors
@@ -6568,6 +6590,38 @@ mod tests {
         }
     }
 
+    fn mobile_proto(vnum: MobVnum, short: &str, act_flags: i64) -> MobileProto {
+        MobileProto {
+            vnum,
+            name: short.to_string(),
+            short_desc: short.to_string(),
+            long_desc: format!("{} is here.\r\n", short),
+            description: String::new(),
+            level: 1,
+            hitpoints: 1,
+            experience: 0,
+            gold: 0,
+            position: Position::Standing,
+            default_pos: Position::Standing,
+            sex: Gender::Neutral,
+            alignment: 0,
+            act_flags,
+            affect_flags: 0,
+            armor: 0,
+            hitroll: 0,
+            damroll: 0,
+            damnodice: 1,
+            damsizedice: 1,
+            power: 0,
+            mpower: 0,
+            defense: 0,
+            mdefense: 0,
+            technique: 0,
+            abilities: None,
+            attack_type: 0,
+        }
+    }
+
     #[test]
     fn do_stat_object_reports_object_bitvector() {
         let mut g = GameState::new(Config::default());
@@ -6597,5 +6651,24 @@ mod tests {
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
         assert!(out.contains("[ 2222] a river boat"));
         assert!(!out.contains("[ 3333] a plain thing"));
+    }
+
+    #[test]
+    fn do_mcasters_lists_magic_user_specs_with_caster_flag_type() {
+        const MOB_CASTER: i64 = 1 << 21;
+
+        let mut g = GameState::new(Config::default());
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        g.mob_protos
+            .insert(3095, mobile_proto(3095, "a magic user", 0));
+        g.mob_protos
+            .insert(4000, mobile_proto(4000, "a flagged non-caster", MOB_CASTER));
+
+        do_mcasters(&mut g, imm, "", 0);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.starts_with("Spellcasting mobs:\r\n"));
+        assert!(out.contains("[3095] a magic user (Type: ASSIGNED)\r\n"));
+        assert!(!out.contains("a flagged non-caster"));
     }
 }
