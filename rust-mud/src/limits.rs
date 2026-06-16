@@ -717,10 +717,8 @@ pub fn gain_condition(g: &mut GameState, ch: CharId, condition: usize, value: i3
 // ---------------------------------------------------------------------------
 
 /// Increment a player's idle timer and act on the thresholds: build-mode kick
-/// at >5, void-pull at >8, force-rent+extract at >48. The build-off path and
-/// crash/rent persistence depend on systems not ported, so those side effects
-/// degrade to the player-visible actions (messages + room moves) while the
-/// rent/crash saves are handled by the save layer (see manifest gaps).
+/// at >5, void-pull at >8, force-rent+extract at >48. The rent/crash saves are
+/// handled by the save layer (see manifest gaps).
 pub fn check_idling(g: &mut GameState, ch: CharId) {
     let lockout = g
         .get_char(ch)
@@ -745,8 +743,7 @@ pub fn check_idling(g: &mut GameState, ch: CharId) {
             ch,
             "Build mode, my friend, was not made for you to idle in.\r\n",
         );
-        // command_interpreter(ch, "build off") — build OLC not ported; the
-        // build-off transition is left to the build subsystem.
+        crate::cmd_other::do_build(g, ch, "off", 0);
         return;
     }
 
@@ -1749,6 +1746,7 @@ mod tests {
     use crate::character::Character;
     use crate::config::Config;
     use crate::object::{ExtraFlags, ObjectType, WearFlags};
+    use crate::room::Room;
     use crate::world::ObjectProto;
 
     fn test_game() -> GameState {
@@ -1818,5 +1816,39 @@ mod tests {
             .get_obj(*oid)
             .map(|o| o.item_number == 3014)
             .unwrap_or(false)));
+    }
+
+    #[test]
+    fn check_idling_exits_build_mode_after_idle_warning() {
+        let mut g = test_game();
+        let home = g.add_room(Room::new(
+            100,
+            0,
+            "Home".to_string(),
+            "The original room.".to_string(),
+        ));
+        let build = g.add_room(Room::new(
+            101,
+            0,
+            "Build".to_string(),
+            "The build room.".to_string(),
+        ));
+        let ch = add_player(&mut g, "Builder", 1);
+        g.char_to_room(ch, build);
+        {
+            let c = g.get_char_mut(ch).unwrap();
+            c.timer = 5;
+            c.was_in_room = Some(home);
+            c.prf2_flags |= PRF2_MBUILDING | PRF2_INTANGIBLE;
+        }
+
+        check_idling(&mut g, ch);
+
+        let c = g.get_char(ch).unwrap();
+        assert_eq!(c.timer, 6);
+        assert_eq!(c.in_room, Some(home));
+        assert_eq!(c.was_in_room, Some(home));
+        assert_eq!(c.prf2_flags & PRF2_MBUILDING, 0);
+        assert_eq!(c.prf2_flags & PRF2_INTANGIBLE, 0);
     }
 }
