@@ -27,6 +27,7 @@ use crate::act::{act, ActArg, To};
 use crate::character::Affect;
 use crate::combat::{chance, check_killer, damage, damage_type, hit, hit_type, set_fighting};
 use crate::flags::*;
+use crate::handler::check_perm_duration;
 use crate::object::ObjectType;
 use crate::room::RoomFlags;
 use crate::state::GameState;
@@ -1094,6 +1095,14 @@ pub fn do_trip(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 2);
 }
 
+fn remove_temporary_hide(g: &mut GameState, ch: CharId) {
+    if is_affected(g, ch, AFF_HIDE) && !check_perm_duration(g, ch, AFF_HIDE) {
+        if let Some(c) = g.get_char_mut(ch) {
+            c.affect_flags &= !AFF_HIDE;
+        }
+    }
+}
+
 // ===========================================================================
 // CAMOUFLAGE
 // ===========================================================================
@@ -1121,13 +1130,7 @@ pub fn do_camouflage(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i3
         c.points.move_points -= 25;
     }
 
-    // check_perm_duration not ported: a runtime-applied hide is not permanent,
-    // so unconditionally clear AFF_HIDE here (matches the !permanent path).
-    if is_affected(g, ch, AFF_HIDE) {
-        if let Some(c) = g.get_char_mut(ch) {
-            c.affect_flags &= !AFF_HIDE;
-        }
-    }
+    remove_temporary_hide(g, ch);
 
     // prob = SKILL_CAMOUFLAGE + dex_app_skill[GET_DEX].hide.
     let dex = g.get_char(ch).map(|c| c.aff_abils.dex as i32).unwrap_or(0);
@@ -1204,11 +1207,7 @@ pub fn do_blanket(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) 
     // First un-hide the leader (if in this room) and grouped followers in-room.
     let k_in_room = g.get_char(k).and_then(|c| c.in_room) == ch_room;
     if k_in_room || k == ch {
-        if is_affected(g, k, AFF_HIDE) {
-            if let Some(c) = g.get_char_mut(k) {
-                c.affect_flags &= !AFF_HIDE;
-            }
-        }
+        remove_temporary_hide(g, k);
     }
 
     let followers = g.get_char(k).map(|c| c.followers.clone()).unwrap_or_default();
@@ -1216,11 +1215,7 @@ pub fn do_blanket(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) 
     for f in followers.iter().copied() {
         if is_affected(g, f, AFF_GROUP) && g.get_char(f).and_then(|c| c.in_room) == ch_room {
             grpsize += 1;
-            if is_affected(g, f, AFF_HIDE) {
-                if let Some(c) = g.get_char_mut(f) {
-                    c.affect_flags &= !AFF_HIDE;
-                }
-            }
+            remove_temporary_hide(g, f);
         }
     }
 
@@ -1292,4 +1287,50 @@ pub fn do_blanket(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) 
         }
     }
     g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 2);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    fn hidden_player_with_affect(duration: Option<i32>) -> (GameState, CharId) {
+        let mut g = GameState::new(Config::default());
+        let mut ch = crate::character::Character::new_player(
+            "Hidden".to_string(),
+            Class::Thief,
+            Race::Human,
+        );
+        ch.affect_flags |= AFF_HIDE;
+        if let Some(duration) = duration {
+            ch.affected.push(Affect {
+                spell_type: -1,
+                duration,
+                modifier: 0,
+                location: 0,
+                bitvector: AFF_HIDE,
+                caster: None,
+            });
+        }
+        let ch_id = g.create_char(ch);
+        (g, ch_id)
+    }
+
+    #[test]
+    fn remove_temporary_hide_preserves_permanent_hide() {
+        let (mut g, ch) = hidden_player_with_affect(Some(-1));
+
+        remove_temporary_hide(&mut g, ch);
+
+        assert!(is_affected(&g, ch, AFF_HIDE));
+    }
+
+    #[test]
+    fn remove_temporary_hide_clears_non_permanent_hide() {
+        let (mut g, ch) = hidden_player_with_affect(None);
+
+        remove_temporary_hide(&mut g, ch);
+
+        assert!(!is_affected(&g, ch, AFF_HIDE));
+    }
 }
