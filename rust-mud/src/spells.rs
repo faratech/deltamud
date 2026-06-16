@@ -68,13 +68,19 @@ fn get_level(g: &GameState, ch: CharId) -> i32 {
     g.get_char(ch).map(|c| c.player.level as i32).unwrap_or(1)
 }
 fn is_affected(g: &GameState, ch: CharId, bit: i64) -> bool {
-    g.get_char(ch).map(|c| c.affect_flags & bit != 0).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.affect_flags & bit != 0)
+        .unwrap_or(false)
 }
 fn mob_flagged(g: &GameState, ch: CharId, flag: i64) -> bool {
-    g.get_char(ch).map(|c| c.is_npc && c.act_flags & flag != 0).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.is_npc && c.act_flags & flag != 0)
+        .unwrap_or(false)
 }
 fn prf_flagged(g: &GameState, ch: CharId, flag: i64) -> bool {
-    g.get_char(ch).map(|c| c.prf_flags & flag != 0).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.prf_flags & flag != 0)
+        .unwrap_or(false)
 }
 fn is_good(g: &GameState, ch: CharId) -> bool {
     g.get_char(ch).map(|c| c.alignment >= 350).unwrap_or(false)
@@ -89,7 +95,9 @@ fn pers(g: &GameState, viewer: CharId, target: CharId) -> String {
     if g.can_see(viewer, target) {
         if let Some(c) = g.get_char(target) {
             return if c.is_npc {
-                c.short_desc.clone().unwrap_or_else(|| c.player.name.clone())
+                c.short_desc
+                    .clone()
+                    .unwrap_or_else(|| c.player.name.clone())
             } else {
                 c.player.name.clone()
             };
@@ -140,9 +148,17 @@ fn mag_savingthrow(g: &mut GameState, ch: CharId, victim: CharId) -> bool {
 /// applying C's clamping (spell_recall, spells.c): a `GET_HOME(ch)` outside
 /// `1..=NUM_STARTROOMS` is treated as 0, which then loads start town 1.
 fn mortal_start_index(home: i32) -> usize {
-    let home = if home >= 1 && home <= NUM_STARTROOMS as i32 { home } else { 0 };
+    let home = if home >= 1 && home <= NUM_STARTROOMS as i32 {
+        home
+    } else {
+        0
+    };
     // home == 0 falls back to table slot 1 (start town 1), matching C.
-    if home == 0 { 1 } else { home as usize }
+    if home == 0 {
+        1
+    } else {
+        home as usize
+    }
 }
 
 /// The player's recall destination room rnum
@@ -156,7 +172,13 @@ fn recall_room(g: &GameState, ch: CharId) -> Option<RoomRnum> {
 // ===========================================================================
 // spell_create_water (spells.c)
 // ===========================================================================
-pub fn spell_create_water(g: &mut GameState, level: i32, ch: CharId, _victim: Option<CharId>, obj: Option<ObjId>) {
+pub fn spell_create_water(
+    g: &mut GameState,
+    level: i32,
+    ch: CharId,
+    _victim: Option<CharId>,
+    obj: Option<ObjId>,
+) {
     let obj = match obj {
         Some(o) => o,
         None => return,
@@ -169,7 +191,10 @@ pub fn spell_create_water(g: &mut GameState, level: i32, ch: CharId, _victim: Op
     if g.get_obj(obj).map(|o| o.obj_type) != Some(ObjectType::LiqContainer) {
         return;
     }
-    let (cap, cur, liq) = g.get_obj(obj).map(|o| (o.values[0], o.values[1], o.values[2])).unwrap_or((0, 0, 0));
+    let (cap, cur, liq) = g
+        .get_obj(obj)
+        .map(|o| (o.values[0], o.values[1], o.values[2]))
+        .unwrap_or((0, 0, 0));
 
     if liq != LIQ_WATER && cur != 0 {
         // Contaminate to slime.
@@ -190,7 +215,15 @@ pub fn spell_create_water(g: &mut GameState, level: i32, ch: CharId, _victim: Op
             }
             name_to_drinkcon(g, obj, LIQ_WATER);
             weight_change_object(g, obj, water);
-            act(g, "$p is filled.", false, ch, Some(obj), ActArg::None, To::Char);
+            act(
+                g,
+                "$p is filled.",
+                false,
+                ch,
+                Some(obj),
+                ActArg::None,
+                To::Char,
+            );
         }
     }
     let _ = level;
@@ -223,7 +256,13 @@ fn weight_change_object(g: &mut GameState, obj: ObjId, weight: i32) {
 // ===========================================================================
 // spell_recall (spells.c) — word of recall
 // ===========================================================================
-pub fn spell_recall(g: &mut GameState, _level: i32, _ch: CharId, victim: Option<CharId>, _obj: Option<ObjId>) {
+pub fn spell_recall(
+    g: &mut GameState,
+    _level: i32,
+    _ch: CharId,
+    victim: Option<CharId>,
+    _obj: Option<ObjId>,
+) {
     let victim = match victim {
         Some(v) => v,
         None => return,
@@ -240,11 +279,27 @@ pub fn spell_recall(g: &mut GameState, _level: i32, _ch: CharId, victim: Option<
         return;
     }
 
-    act(g, "$n disappears.", true, victim, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n disappears.",
+        true,
+        victim,
+        None,
+        ActArg::None,
+        To::Room,
+    );
     g.char_from_room(victim);
     let dest = recall_room(g, victim).unwrap_or(0);
     g.char_to_room(victim, dest);
-    act(g, "$n appears in the middle of the room.", true, victim, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n appears in the middle of the room.",
+        true,
+        victim,
+        None,
+        ActArg::None,
+        To::Room,
+    );
     look_at_room(g, victim, false);
 }
 
@@ -252,7 +307,13 @@ pub fn spell_recall(g: &mut GameState, _level: i32, _ch: CharId, victim: Option<
 // spell_teleport (spells.c) — random destination (not in the MANUAL switch,
 // but kept for parity / object use).
 // ===========================================================================
-pub fn spell_teleport(g: &mut GameState, _level: i32, _ch: CharId, victim: Option<CharId>, _obj: Option<ObjId>) {
+pub fn spell_teleport(
+    g: &mut GameState,
+    _level: i32,
+    _ch: CharId,
+    victim: Option<CharId>,
+    _obj: Option<ObjId>,
+) {
     let victim = match victim {
         Some(v) => v,
         None => return,
@@ -269,17 +330,39 @@ pub fn spell_teleport(g: &mut GameState, _level: i32, _ch: CharId, victim: Optio
             break;
         }
     }
-    act(g, "$n slowly fades out of existence and is gone.", false, victim, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n slowly fades out of existence and is gone.",
+        false,
+        victim,
+        None,
+        ActArg::None,
+        To::Room,
+    );
     g.char_from_room(victim);
     g.char_to_room(victim, to_room);
-    act(g, "$n slowly fades into existence.", false, victim, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n slowly fades into existence.",
+        false,
+        victim,
+        None,
+        ActArg::None,
+        To::Room,
+    );
     look_at_room(g, victim, false);
 }
 
 // ===========================================================================
 // spell_summon (spells.c)
 // ===========================================================================
-pub fn spell_summon(g: &mut GameState, level: i32, ch: CharId, victim: Option<CharId>, _obj: Option<ObjId>) {
+pub fn spell_summon(
+    g: &mut GameState,
+    level: i32,
+    ch: CharId,
+    victim: Option<CharId>,
+    _obj: Option<ObjId>,
+) {
     let victim = match victim {
         Some(v) => v,
         None => return,
@@ -300,7 +383,10 @@ pub fn spell_summon(g: &mut GameState, level: i32, ch: CharId, victim: Option<Ch
     let v_in_arena = crate::arena::arena_stat(victim) != crate::arena::ARENA_NOT;
     let ch_in_arena = crate::arena::arena_stat(ch) != crate::arena::ARENA_NOT;
     if v_in_arena && !ch_in_arena {
-        g.send_to_char(ch, "Your target is in the arena right now.\r\nEldrich magic obstructs thee!\r\n");
+        g.send_to_char(
+            ch,
+            "Your target is in the arena right now.\r\nEldrich magic obstructs thee!\r\n",
+        );
         return;
     }
     if !v_in_arena && ch_in_arena {
@@ -313,35 +399,83 @@ pub fn spell_summon(g: &mut GameState, level: i32, ch: CharId, victim: Option<Ch
         return;
     }
     if !is_npc(g, victim) && !prf_flagged(g, victim, PRF_SUMMONABLE) {
-        let caster_name = g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default();
-        let room_name = g.get_char(ch).and_then(|c| c.in_room).map(|r| g.room(r).name.clone()).unwrap_or_default();
-        let pron = if g.get_char(ch).map(|c| c.player.sex) == Some(Gender::Male) { "He" } else { "She" };
-        let vname = g.get_char(victim).map(|c| c.player.name.clone()).unwrap_or_default();
+        let caster_name = g
+            .get_char(ch)
+            .map(|c| c.player.name.clone())
+            .unwrap_or_default();
+        let room_name = g
+            .get_char(ch)
+            .and_then(|c| c.in_room)
+            .map(|r| g.room(r).name.clone())
+            .unwrap_or_default();
+        let pron = if g.get_char(ch).map(|c| c.player.sex) == Some(Gender::Male) {
+            "He"
+        } else {
+            "She"
+        };
+        let vname = g
+            .get_char(victim)
+            .map(|c| c.player.name.clone())
+            .unwrap_or_default();
         g.send_to_char(victim, &format!(
             "{} just tried to summon you to: {}.\r\n{} failed because you have summon protection on.\r\nType NOSUMMON to allow other players to summon you.\r\n",
             caster_name, room_name, pron));
-        g.send_to_char(ch, &format!("You failed because {} has summon protection on.\r\n", vname));
+        g.send_to_char(
+            ch,
+            &format!("You failed because {} has summon protection on.\r\n", vname),
+        );
         return;
     }
 
-    if mob_flagged(g, victim, MOB_NOSUMMON) || (is_npc(g, victim) && mag_savingthrow(g, ch, victim)) {
+    if mob_flagged(g, victim, MOB_NOSUMMON) || (is_npc(g, victim) && mag_savingthrow(g, ch, victim))
+    {
         g.send_to_char(ch, "You failed.\r\n");
         return;
     }
 
-    act(g, "$n disappears suddenly.", true, victim, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n disappears suddenly.",
+        true,
+        victim,
+        None,
+        ActArg::None,
+        To::Room,
+    );
     let dest = g.get_char(ch).and_then(|c| c.in_room).unwrap_or(0);
     g.char_from_room(victim);
     g.char_to_room(victim, dest);
-    act(g, "$n arrives suddenly.", true, victim, None, ActArg::None, To::Room);
-    act(g, "$n has summoned you!", false, ch, None, ActArg::Char(victim), To::Vict);
+    act(
+        g,
+        "$n arrives suddenly.",
+        true,
+        victim,
+        None,
+        ActArg::None,
+        To::Room,
+    );
+    act(
+        g,
+        "$n has summoned you!",
+        false,
+        ch,
+        None,
+        ActArg::Char(victim),
+        To::Vict,
+    );
     look_at_room(g, victim, false);
 }
 
 // ===========================================================================
 // spell_locate_object (spells.c)
 // ===========================================================================
-pub fn spell_locate_object(g: &mut GameState, level: i32, ch: CharId, _victim: Option<CharId>, obj: Option<ObjId>) {
+pub fn spell_locate_object(
+    g: &mut GameState,
+    level: i32,
+    ch: CharId,
+    _victim: Option<CharId>,
+    obj: Option<ObjId>,
+) {
     let obj = match obj {
         Some(o) => o,
         None => return,
@@ -355,19 +489,32 @@ pub fn spell_locate_object(g: &mut GameState, level: i32, ch: CharId, _victim: O
         if j <= 0 {
             break;
         }
-        let matches = g.get_obj(oid).map(|o| crate::handler::isname(&name, &o.name)).unwrap_or(false);
+        let matches = g
+            .get_obj(oid)
+            .map(|o| crate::handler::isname(&name, &o.name))
+            .unwrap_or(false);
         if !matches {
             continue;
         }
-        let short = g.get_obj(oid).map(|o| o.short_description.clone()).unwrap_or_default();
+        let short = g
+            .get_obj(oid)
+            .map(|o| o.short_description.clone())
+            .unwrap_or_default();
         let line = match g.get_obj(oid).map(|o| o.loc) {
-            Some(ObjLoc::Carried(holder)) => format!("{} is being carried by {}.\n\r", short, pers(g, ch, holder)),
+            Some(ObjLoc::Carried(holder)) => {
+                format!("{} is being carried by {}.\n\r", short, pers(g, ch, holder))
+            }
             Some(ObjLoc::Room(r)) => format!("{} is in {}.\n\r", short, g.room(r).name.clone()),
             Some(ObjLoc::Contained(container)) => {
-                let cs = g.get_obj(container).map(|o| o.short_description.clone()).unwrap_or_default();
+                let cs = g
+                    .get_obj(container)
+                    .map(|o| o.short_description.clone())
+                    .unwrap_or_default();
                 format!("{} is in {}.\n\r", short, cs)
             }
-            Some(ObjLoc::Worn(wearer, _)) => format!("{} is being worn by {}.\n\r", short, pers(g, ch, wearer)),
+            Some(ObjLoc::Worn(wearer, _)) => {
+                format!("{} is being worn by {}.\n\r", short, pers(g, ch, wearer))
+            }
             _ => format!("{}'s location is uncertain.\n\r", short),
         };
         g.send_to_char(ch, &cap_first(&line));
@@ -382,12 +529,21 @@ pub fn spell_locate_object(g: &mut GameState, level: i32, ch: CharId, _victim: O
 // ===========================================================================
 // spell_locate_target (spells.c) — locate life
 // ===========================================================================
-pub fn spell_locate_target(g: &mut GameState, level: i32, ch: CharId, victim: Option<CharId>, _obj: Option<ObjId>) {
+pub fn spell_locate_target(
+    g: &mut GameState,
+    level: i32,
+    ch: CharId,
+    victim: Option<CharId>,
+    _obj: Option<ObjId>,
+) {
     let victim = match victim {
         Some(v) => v,
         None => return,
     };
-    let name = g.get_char(victim).map(|c| fname(&c.player.name)).unwrap_or_default();
+    let name = g
+        .get_char(victim)
+        .map(|c| fname(&c.player.name))
+        .unwrap_or_default();
     let mut j = level >> 1;
     let start_j = j;
 
@@ -396,17 +552,25 @@ pub fn spell_locate_target(g: &mut GameState, level: i32, ch: CharId, victim: Op
         if j <= 0 {
             break;
         }
-        let matches = g.get_char(cid).map(|c| crate::handler::isname(&name, &c.player.name)).unwrap_or(false);
+        let matches = g
+            .get_char(cid)
+            .map(|c| crate::handler::isname(&name, &c.player.name))
+            .unwrap_or(false);
         if !matches {
             continue;
         }
-        let disp = g.get_char(cid).map(|c| {
-            if c.is_npc {
-                c.short_desc.clone().unwrap_or_else(|| c.player.name.clone())
-            } else {
-                c.player.name.clone()
-            }
-        }).unwrap_or_default();
+        let disp = g
+            .get_char(cid)
+            .map(|c| {
+                if c.is_npc {
+                    c.short_desc
+                        .clone()
+                        .unwrap_or_else(|| c.player.name.clone())
+                } else {
+                    c.player.name.clone()
+                }
+            })
+            .unwrap_or_default();
         let line = match g.get_char(cid).and_then(|c| c.in_room) {
             Some(r) => format!("{} is in {}.\n\r", disp, g.room(r).name.clone()),
             None => format!("{}'s location is uncertain.\r\n", disp),
@@ -423,7 +587,13 @@ pub fn spell_locate_target(g: &mut GameState, level: i32, ch: CharId, victim: Op
 // ===========================================================================
 // spell_charm (spells.c)
 // ===========================================================================
-pub fn spell_charm(g: &mut GameState, level: i32, ch: CharId, victim: Option<CharId>, _obj: Option<ObjId>) {
+pub fn spell_charm(
+    g: &mut GameState,
+    level: i32,
+    ch: CharId,
+    victim: Option<CharId>,
+    _obj: Option<ObjId>,
+) {
     let victim = match victim {
         Some(v) => v,
         None => return,
@@ -456,7 +626,10 @@ pub fn spell_charm(g: &mut GameState, level: i32, ch: CharId, victim: Option<Cha
         }
         add_follower(g, victim, ch);
 
-        let int_score = g.get_char(victim).map(|c| c.aff_abils.intel as i32).unwrap_or(0);
+        let int_score = g
+            .get_char(victim)
+            .map(|c| c.aff_abils.intel as i32)
+            .unwrap_or(0);
         let duration = if int_score != 0 {
             24 * MAX_PLAYER_STAT / int_score
         } else {
@@ -475,7 +648,15 @@ pub fn spell_charm(g: &mut GameState, level: i32, ch: CharId, victim: Option<Cha
         }
         g.affect_total(victim);
 
-        act(g, "Isn't $n just such a nice fellow?", false, ch, None, ActArg::Char(victim), To::Vict);
+        act(
+            g,
+            "Isn't $n just such a nice fellow?",
+            false,
+            ch,
+            None,
+            ActArg::Char(victim),
+            To::Vict,
+        );
         if is_npc(g, victim) {
             if let Some(c) = g.get_char_mut(victim) {
                 c.act_flags &= !MOB_AGGRESSIVE;
@@ -488,18 +669,46 @@ pub fn spell_charm(g: &mut GameState, level: i32, ch: CharId, victim: Option<Cha
 // ===========================================================================
 // spell_identify (spells.c)
 // ===========================================================================
-pub fn spell_identify(g: &mut GameState, _level: i32, ch: CharId, victim: Option<CharId>, obj: Option<ObjId>) {
+pub fn spell_identify(
+    g: &mut GameState,
+    _level: i32,
+    ch: CharId,
+    victim: Option<CharId>,
+    obj: Option<ObjId>,
+) {
     if let Some(obj) = obj {
         g.send_to_char(ch, "You feel informed:\r\n");
-        let (short, otype, weight, cost, rent) = g.get_obj(obj).map(|o| {
-            (o.short_description.clone(), o.obj_type, o.weight, o.cost, o.rent)
-        }).unwrap_or((String::new(), ObjectType::Other, 0, 0, 0));
+        let (short, otype, weight, cost, rent) = g
+            .get_obj(obj)
+            .map(|o| {
+                (
+                    o.short_description.clone(),
+                    o.obj_type,
+                    o.weight,
+                    o.cost,
+                    o.rent,
+                )
+            })
+            .unwrap_or((String::new(), ObjectType::Other, 0, 0, 0));
 
-        g.send_to_char(ch, &format!("Object '{}', Item type: {}\r\n", short, item_type_name(otype)));
-        g.send_to_char(ch, &format!("Weight: {}, Value: {}, Rent: {}\r\n", weight, cost, rent));
+        g.send_to_char(
+            ch,
+            &format!(
+                "Object '{}', Item type: {}\r\n",
+                short,
+                item_type_name(otype)
+            ),
+        );
+        g.send_to_char(
+            ch,
+            &format!("Weight: {}, Value: {}, Rent: {}\r\n", weight, cost, rent),
+        );
 
         // Type-specific details.
-        let (v0, v1, v2, v3) = g.get_obj(obj).map(|o| (o.values[0], o.values[1], o.values[2], o.values[3])).unwrap_or((0, 0, 0, 0));
+        let (v0, v1, v2, v3) = g
+            .get_obj(obj)
+            .map(|o| (o.values[0], o.values[1], o.values[2], o.values[3]))
+            .unwrap_or((0, 0, 0, 0));
         match otype {
             ObjectType::Scroll | ObjectType::Potion => {
                 let mut line = format!("This {} casts: ", item_type_name(otype));
@@ -513,13 +722,27 @@ pub fn spell_identify(g: &mut GameState, _level: i32, ch: CharId, victim: Option
             }
             ObjectType::Wand | ObjectType::Staff => {
                 let plural = if v1 == 1 { "" } else { "s" };
-                g.send_to_char(ch, &format!(
-                    "This {} casts: {}\r\nIt has {} maximum charge{} and {} remaining.\r\n",
-                    item_type_name(otype), skill_name(v3), v1, plural, v2));
+                g.send_to_char(
+                    ch,
+                    &format!(
+                        "This {} casts: {}\r\nIt has {} maximum charge{} and {} remaining.\r\n",
+                        item_type_name(otype),
+                        skill_name(v3),
+                        v1,
+                        plural,
+                        v2
+                    ),
+                );
             }
             ObjectType::Weapon => {
                 let avg = ((v2 + 1) as f64 / 2.0) * v1 as f64;
-                g.send_to_char(ch, &format!("Damage Dice is '{}D{}' for an average per-round damage of {:.1}.\r\n", v1, v2, avg));
+                g.send_to_char(
+                    ch,
+                    &format!(
+                        "Damage Dice is '{}D{}' for an average per-round damage of {:.1}.\r\n",
+                        v1, v2, avg
+                    ),
+                );
             }
             ObjectType::Armor => {
                 g.send_to_char(ch, &format!("Defense apply is {}\r\n", v0));
@@ -528,7 +751,10 @@ pub fn spell_identify(g: &mut GameState, _level: i32, ch: CharId, victim: Option
         }
 
         // Affects.
-        let affects: Vec<(i32, i32)> = g.get_obj(obj).map(|o| o.affects.iter().map(|a| (a.location, a.modifier)).collect()).unwrap_or_default();
+        let affects: Vec<(i32, i32)> = g
+            .get_obj(obj)
+            .map(|o| o.affects.iter().map(|a| (a.location, a.modifier)).collect())
+            .unwrap_or_default();
         let mut found = false;
         for (loc, modi) in affects {
             if loc != APPLY_NONE && modi != 0 {
@@ -536,33 +762,71 @@ pub fn spell_identify(g: &mut GameState, _level: i32, ch: CharId, victim: Option
                     g.send_to_char(ch, "Can affect you as :\r\n");
                     found = true;
                 }
-                g.send_to_char(ch, &format!("   Affects: {} By {}\r\n", apply_type_name(loc), modi));
+                g.send_to_char(
+                    ch,
+                    &format!("   Affects: {} By {}\r\n", apply_type_name(loc), modi),
+                );
             }
         }
     } else if let Some(victim) = victim {
-        let (name, height, weight, level, hit, mana) = g.get_char(victim).map(|c| (
-            c.player.name.clone(), c.player.height as i32, c.player.weight as i32,
-            c.player.level as i32, c.points.hit, c.points.mana,
-        )).unwrap_or((String::new(), 0, 0, 1, 0, 0));
+        let (name, height, weight, level, hit, mana) = g
+            .get_char(victim)
+            .map(|c| {
+                (
+                    c.player.name.clone(),
+                    c.player.height as i32,
+                    c.player.weight as i32,
+                    c.player.level as i32,
+                    c.points.hit,
+                    c.points.mana,
+                )
+            })
+            .unwrap_or((String::new(), 0, 0, 1, 0, 0));
         g.send_to_char(ch, &format!("Name: {}\r\n", name));
-        g.send_to_char(ch, &format!("Height {} cm, Weight {} pounds\r\n", height, weight));
-        g.send_to_char(ch, &format!("Level: {}, Hits: {}, Mana: {}\r\n", level, hit, mana));
-        let (power, mpower, defense, mdefense, technique) = g.get_char(victim).map(|c| (
-            c.points.power, c.points.mpower, c.points.defense, c.points.mdefense, c.points.technique,
-        )).unwrap_or((0, 0, 0, 0, 0));
-        g.send_to_char(ch, &format!(
-            "Power: {}, Magic Power: {}, Defense: {}, Magic Defense: {}, Technique: {}\r\n",
-            power, mpower, defense, mdefense, technique));
+        g.send_to_char(
+            ch,
+            &format!("Height {} cm, Weight {} pounds\r\n", height, weight),
+        );
+        g.send_to_char(
+            ch,
+            &format!("Level: {}, Hits: {}, Mana: {}\r\n", level, hit, mana),
+        );
+        let (power, mpower, defense, mdefense, technique) = g
+            .get_char(victim)
+            .map(|c| {
+                (
+                    c.points.power,
+                    c.points.mpower,
+                    c.points.defense,
+                    c.points.mdefense,
+                    c.points.technique,
+                )
+            })
+            .unwrap_or((0, 0, 0, 0, 0));
+        g.send_to_char(
+            ch,
+            &format!(
+                "Power: {}, Magic Power: {}, Defense: {}, Magic Defense: {}, Technique: {}\r\n",
+                power, mpower, defense, mdefense, technique
+            ),
+        );
         let a = g.get_char(victim).map(|c| c.aff_abils).unwrap_or_default();
-        g.send_to_char(ch, &format!(
-            "Str: {}/{}, Int: {}, Wis: {}, Dex: {}, Con: {}, Cha: {}\r\n",
-            a.str, a.str_add, a.intel, a.wis, a.dex, a.con, a.cha));
+        g.send_to_char(
+            ch,
+            &format!(
+                "Str: {}/{}, Int: {}, Wis: {}, Dex: {}, Con: {}, Cha: {}\r\n",
+                a.str, a.str_add, a.intel, a.wis, a.dex, a.con, a.cha
+            ),
+        );
     }
 }
 
 fn item_type_name(t: ObjectType) -> &'static str {
     // ObjectType discriminant == C ITEM_* number == ITEM_TYPES index.
-    crate::constants::ITEM_TYPES.get(t as usize).copied().unwrap_or("UNDEFINED")
+    crate::constants::ITEM_TYPES
+        .get(t as usize)
+        .copied()
+        .unwrap_or("UNDEFINED")
 }
 
 fn apply_type_name(loc: i32) -> &'static str {
@@ -587,7 +851,13 @@ fn apply_type_name(loc: i32) -> &'static str {
 // ===========================================================================
 // spell_enchant_weapon (spells.c)
 // ===========================================================================
-pub fn spell_enchant_weapon(g: &mut GameState, level: i32, ch: CharId, _victim: Option<CharId>, obj: Option<ObjId>) {
+pub fn spell_enchant_weapon(
+    g: &mut GameState,
+    level: i32,
+    ch: CharId,
+    _victim: Option<CharId>,
+    obj: Option<ObjId>,
+) {
     let obj = match obj {
         Some(o) => o,
         None => return,
@@ -595,16 +865,29 @@ pub fn spell_enchant_weapon(g: &mut GameState, level: i32, ch: CharId, _victim: 
     if !g.char_exists(ch) {
         return;
     }
-    let (is_weapon, is_magic) = g.get_obj(obj).map(|o| (
-        o.obj_type == ObjectType::Weapon,
-        o.extra_flags.bits() & ITEM_MAGIC != 0,
-    )).unwrap_or((false, false));
+    let (is_weapon, is_magic) = g
+        .get_obj(obj)
+        .map(|o| {
+            (
+                o.obj_type == ObjectType::Weapon,
+                o.extra_flags.bits() & ITEM_MAGIC != 0,
+            )
+        })
+        .unwrap_or((false, false));
     if !is_weapon || is_magic {
         return;
     }
 
     // If any pre-existing apply, abort (C returns).
-    let has_apply = g.get_obj(obj).map(|o| o.affects.iter().take(MAX_OBJ_AFFECT).any(|a| a.location != APPLY_NONE)).unwrap_or(false);
+    let has_apply = g
+        .get_obj(obj)
+        .map(|o| {
+            o.affects
+                .iter()
+                .take(MAX_OBJ_AFFECT)
+                .any(|a| a.location != APPLY_NONE)
+        })
+        .unwrap_or(false);
     if has_apply {
         return;
     }
@@ -613,29 +896,65 @@ pub fn spell_enchant_weapon(g: &mut GameState, level: i32, ch: CharId, _victim: 
     if let Some(o) = g.get_obj_mut(obj) {
         o.extra_flags |= crate::object::ExtraFlags::from_bits_truncate(ITEM_MAGIC);
         o.affects.clear();
-        o.affects.push(crate::object::ObjectAffect { location: APPLY_POWER, modifier: bonus });
-        o.affects.push(crate::object::ObjectAffect { location: APPLY_TECHNIQUE, modifier: bonus });
+        o.affects.push(crate::object::ObjectAffect {
+            location: APPLY_POWER,
+            modifier: bonus,
+        });
+        o.affects.push(crate::object::ObjectAffect {
+            location: APPLY_TECHNIQUE,
+            modifier: bonus,
+        });
     }
 
     if is_good(g, ch) {
         if let Some(o) = g.get_obj_mut(obj) {
             o.extra_flags |= crate::object::ExtraFlags::from_bits_truncate(ITEM_ANTI_EVIL);
         }
-        act(g, "$p glows blue.", false, ch, Some(obj), ActArg::None, To::Char);
+        act(
+            g,
+            "$p glows blue.",
+            false,
+            ch,
+            Some(obj),
+            ActArg::None,
+            To::Char,
+        );
     } else if is_evil(g, ch) {
         if let Some(o) = g.get_obj_mut(obj) {
             o.extra_flags |= crate::object::ExtraFlags::from_bits_truncate(ITEM_ANTI_GOOD);
         }
-        act(g, "$p glows red.", false, ch, Some(obj), ActArg::None, To::Char);
+        act(
+            g,
+            "$p glows red.",
+            false,
+            ch,
+            Some(obj),
+            ActArg::None,
+            To::Char,
+        );
     } else {
-        act(g, "$p glows yellow.", false, ch, Some(obj), ActArg::None, To::Char);
+        act(
+            g,
+            "$p glows yellow.",
+            false,
+            ch,
+            Some(obj),
+            ActArg::None,
+            To::Char,
+        );
     }
 }
 
 // ===========================================================================
 // spell_detect_poison (spells.c)
 // ===========================================================================
-pub fn spell_detect_poison(g: &mut GameState, _level: i32, ch: CharId, victim: Option<CharId>, obj: Option<ObjId>) {
+pub fn spell_detect_poison(
+    g: &mut GameState,
+    _level: i32,
+    ch: CharId,
+    victim: Option<CharId>,
+    obj: Option<ObjId>,
+) {
     if let Some(victim) = victim {
         if victim == ch {
             if is_affected(g, victim, AFF_POISON) {
@@ -644,20 +963,55 @@ pub fn spell_detect_poison(g: &mut GameState, _level: i32, ch: CharId, victim: O
                 g.send_to_char(ch, "You feel healthy.\r\n");
             }
         } else if is_affected(g, victim, AFF_POISON) {
-            act(g, "You sense that $E is poisoned.", false, ch, None, ActArg::Char(victim), To::Char);
+            act(
+                g,
+                "You sense that $E is poisoned.",
+                false,
+                ch,
+                None,
+                ActArg::Char(victim),
+                To::Char,
+            );
         } else {
-            act(g, "You sense that $E is healthy.", false, ch, None, ActArg::Char(victim), To::Char);
+            act(
+                g,
+                "You sense that $E is healthy.",
+                false,
+                ch,
+                None,
+                ActArg::Char(victim),
+                To::Char,
+            );
         }
     }
 
     if let Some(obj) = obj {
-        let (otype, poisoned) = g.get_obj(obj).map(|o| (o.obj_type, o.values[3] != 0)).unwrap_or((ObjectType::Other, false));
+        let (otype, poisoned) = g
+            .get_obj(obj)
+            .map(|o| (o.obj_type, o.values[3] != 0))
+            .unwrap_or((ObjectType::Other, false));
         match otype {
             ObjectType::LiqContainer | ObjectType::Fountain | ObjectType::Food => {
                 if poisoned {
-                    act(g, "You sense that $p has been contaminated.", false, ch, Some(obj), ActArg::None, To::Char);
+                    act(
+                        g,
+                        "You sense that $p has been contaminated.",
+                        false,
+                        ch,
+                        Some(obj),
+                        ActArg::None,
+                        To::Char,
+                    );
                 } else {
-                    act(g, "You sense that $p is safe for consumption.", false, ch, Some(obj), ActArg::None, To::Char);
+                    act(
+                        g,
+                        "You sense that $p is safe for consumption.",
+                        false,
+                        ch,
+                        Some(obj),
+                        ActArg::None,
+                        To::Char,
+                    );
                 }
             }
             _ => g.send_to_char(ch, "You sense that it should not be consumed.\r\n"),
@@ -668,12 +1022,26 @@ pub fn spell_detect_poison(g: &mut GameState, _level: i32, ch: CharId, victim: O
 // ===========================================================================
 // spell_fear (spells.c)
 // ===========================================================================
-pub fn spell_fear(g: &mut GameState, level: i32, ch: CharId, _victim: Option<CharId>, _obj: Option<ObjId>) {
+pub fn spell_fear(
+    g: &mut GameState,
+    level: i32,
+    ch: CharId,
+    _victim: Option<CharId>,
+    _obj: Option<ObjId>,
+) {
     if !g.char_exists(ch) {
         return;
     }
     g.send_to_char(ch, "You radiate an aura of fear into the room!\r\n");
-    act(g, "$n is surrounded by an aura of fear!", true, ch, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n is surrounded by an aura of fear!",
+        true,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
 
     let rnum = match g.get_char(ch).and_then(|c| c.in_room) {
         Some(r) => r,
@@ -688,8 +1056,19 @@ pub fn spell_fear(g: &mut GameState, level: i32, ch: CharId, _victim: Option<Cha
             continue;
         }
         if mag_savingthrow(g, ch, target) {
-            let tname = g.get_char(target).map(|c| c.player.name.clone()).unwrap_or_default();
-            act(g, &format!("{} is unaffected by the fear!\r\n", tname), true, ch, None, ActArg::None, To::Room);
+            let tname = g
+                .get_char(target)
+                .map(|c| c.player.name.clone())
+                .unwrap_or_default();
+            act(
+                g,
+                &format!("{} is unaffected by the fear!\r\n", tname),
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             g.send_to_char(ch, "Your victim is not afraid of the likes of you!\r\n");
             if is_npc(g, target) {
                 crate::combat::hit(g, target, ch);
@@ -707,7 +1086,13 @@ pub fn spell_fear(g: &mut GameState, level: i32, ch: CharId, _victim: Option<Cha
 // ===========================================================================
 // spell_recharge (spells.c)
 // ===========================================================================
-pub fn spell_recharge(g: &mut GameState, _level: i32, ch: CharId, _victim: Option<CharId>, obj: Option<ObjId>) {
+pub fn spell_recharge(
+    g: &mut GameState,
+    _level: i32,
+    ch: CharId,
+    _victim: Option<CharId>,
+    obj: Option<ObjId>,
+) {
     let obj = match obj {
         Some(o) => o,
         None => return,
@@ -717,9 +1102,15 @@ pub fn spell_recharge(g: &mut GameState, _level: i32, ch: CharId, _victim: Optio
     }
 
     let otype = g.get_obj(obj).map(|o| o.obj_type);
-    let (max_ch, cur_ch) = g.get_obj(obj).map(|o| (o.values[1], o.values[2])).unwrap_or((0, 0));
+    let (max_ch, cur_ch) = g
+        .get_obj(obj)
+        .map(|o| (o.values[1], o.values[2]))
+        .unwrap_or((0, 0));
     let oname = g.get_obj(obj).map(|o| o.name.clone()).unwrap_or_default();
-    let chname = g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default();
+    let chname = g
+        .get_char(ch)
+        .map(|c| c.player.name.clone())
+        .unwrap_or_default();
 
     let (verb, restore_range, explode_dice): (&str, (i32, i32), i32) = match otype {
         Some(ObjectType::Wand) => ("wand", (1, 5), 2),
@@ -738,7 +1129,10 @@ pub fn spell_recharge(g: &mut GameState, _level: i32, ch: CharId, _victim: Optio
         o.values[2] = new_ch;
     }
     if new_ch > max_ch {
-        g.send_to_char(ch, &format!("The {} is overcharged and explodes!\r\n", verb));
+        g.send_to_char(
+            ch,
+            &format!("The {} is overcharged and explodes!\r\n", verb),
+        );
         let line = format!("{} overcharges {} and it explodes!\r\n", chname, oname);
         act(g, &line, true, ch, None, ActArg::None, To::NotVict);
         let explode = g.rng.dice(new_ch, explode_dice);
@@ -749,14 +1143,23 @@ pub fn spell_recharge(g: &mut GameState, _level: i32, ch: CharId, _victim: Optio
         g.obj_from_anywhere(obj);
         g.extract_obj(obj);
     } else {
-        g.send_to_char(ch, &format!("You restore {} charges to the {}.\r\n", restored, verb));
+        g.send_to_char(
+            ch,
+            &format!("You restore {} charges to the {}.\r\n", restored, verb),
+        );
     }
 }
 
 // ===========================================================================
 // spell_portal (spells.c)
 // ===========================================================================
-pub fn spell_portal(g: &mut GameState, level: i32, ch: CharId, victim: Option<CharId>, _obj: Option<ObjId>) {
+pub fn spell_portal(
+    g: &mut GameState,
+    level: i32,
+    ch: CharId,
+    victim: Option<CharId>,
+    _obj: Option<ObjId>,
+) {
     let victim = match victim {
         Some(v) => v,
         None => return,
@@ -806,7 +1209,10 @@ pub fn spell_portal(g: &mut GameState, level: i32, ch: CharId, victim: Option<Ch
     let v_in_arena = crate::arena::arena_stat(victim) != crate::arena::ARENA_NOT;
     let ch_in_arena = crate::arena::arena_stat(ch) != crate::arena::ARENA_NOT;
     if v_in_arena && !ch_in_arena {
-        g.send_to_char(ch, "Your target is in the arena right now.\r\nEldrich magic obstructs thee!\r\n");
+        g.send_to_char(
+            ch,
+            "Your target is in the arena right now.\r\nEldrich magic obstructs thee!\r\n",
+        );
         return;
     }
     if !v_in_arena && ch_in_arena {
@@ -846,11 +1252,30 @@ pub fn spell_portal(g: &mut GameState, level: i32, ch: CharId, victim: Option<Ch
             o.values[0] = 1;
             o.values[1] = v_room as i32; // value[1] = destination rnum
             o.timer = timer;
-            o.action_description = Some(format!("Through the mists of the portal, you can faintly see {}", v_room_name));
+            o.action_description = Some(format!(
+                "Through the mists of the portal, you can faintly see {}",
+                v_room_name
+            ));
         }
         g.obj_to_room(p1, ch_room);
-        act(g, "$p suddenly appears.", true, ch, Some(p1), ActArg::None, To::Room);
-        act(g, "$p suddenly appears.", true, ch, Some(p1), ActArg::None, To::Char);
+        act(
+            g,
+            "$p suddenly appears.",
+            true,
+            ch,
+            Some(p1),
+            ActArg::None,
+            To::Room,
+        );
+        act(
+            g,
+            "$p suddenly appears.",
+            true,
+            ch,
+            Some(p1),
+            ActArg::None,
+            To::Char,
+        );
     } else {
         g.send_to_char(ch, "The magic fails.\n\r");
         return;
@@ -863,11 +1288,30 @@ pub fn spell_portal(g: &mut GameState, level: i32, ch: CharId, victim: Option<Ch
             o.values[0] = 1;
             o.values[1] = ch_room as i32;
             o.timer = timer;
-            o.action_description = Some(format!("Through the mists of the portal, you can faintly see {}", ch_room_name));
+            o.action_description = Some(format!(
+                "Through the mists of the portal, you can faintly see {}",
+                ch_room_name
+            ));
         }
         g.obj_to_room(p2, v_room);
-        act(g, "$p suddenly appears.", true, victim, Some(p2), ActArg::None, To::Room);
-        act(g, "$p suddenly appears.", true, victim, Some(p2), ActArg::None, To::Char);
+        act(
+            g,
+            "$p suddenly appears.",
+            true,
+            victim,
+            Some(p2),
+            ActArg::None,
+            To::Room,
+        );
+        act(
+            g,
+            "$p suddenly appears.",
+            true,
+            victim,
+            Some(p2),
+            ActArg::None,
+            To::Char,
+        );
     }
     let _ = level;
 }
@@ -875,7 +1319,13 @@ pub fn spell_portal(g: &mut GameState, level: i32, ch: CharId, victim: Option<Ch
 // ===========================================================================
 // spell_home (spells.c)
 // ===========================================================================
-pub fn spell_home(g: &mut GameState, _level: i32, ch: CharId, victim: Option<CharId>, _obj: Option<ObjId>) {
+pub fn spell_home(
+    g: &mut GameState,
+    _level: i32,
+    ch: CharId,
+    victim: Option<CharId>,
+    _obj: Option<ObjId>,
+) {
     // SPELL_HOME is TAR_CHAR_ROOM | TAR_SELF_ONLY, so victim == ch; fall back to
     // ch if the dispatcher passes None.
     let victim = victim.unwrap_or(ch);
@@ -897,7 +1347,10 @@ pub fn spell_home(g: &mut GameState, _level: i32, ch: CharId, victim: Option<Cha
         .map(|c| c.riding.is_some() || c.ridden_by.is_some())
         .unwrap_or(false);
     if on_mount {
-        g.send_to_char(ch, "The spell fails because your victim is atop a mount.\r\n");
+        g.send_to_char(
+            ch,
+            "The spell fails because your victim is atop a mount.\r\n",
+        );
         return;
     }
 
@@ -928,10 +1381,26 @@ pub fn spell_home(g: &mut GameState, _level: i32, ch: CharId, victim: Option<Cha
         return;
     }
 
-    act(g, "$n magically teleports out.", false, ch, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n magically teleports out.",
+        false,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
     g.char_from_room(ch);
     g.char_to_room(ch, dest);
-    act(g, "$n suddenly appears in the room.", false, ch, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n suddenly appears in the room.",
+        false,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
     look_at_room(g, ch, false);
     g.send_to_char(ch, "\r\nAhhhh... Home Sweet Home!\r\n");
 }
@@ -939,7 +1408,13 @@ pub fn spell_home(g: &mut GameState, _level: i32, ch: CharId, victim: Option<Cha
 // ===========================================================================
 // spell_retreat (spells.c)
 // ===========================================================================
-pub fn spell_retreat(g: &mut GameState, _level: i32, ch: CharId, victim: Option<CharId>, _obj: Option<ObjId>) {
+pub fn spell_retreat(
+    g: &mut GameState,
+    _level: i32,
+    ch: CharId,
+    victim: Option<CharId>,
+    _obj: Option<ObjId>,
+) {
     let victim = match victim {
         Some(v) => v,
         None => return,
@@ -953,11 +1428,16 @@ pub fn spell_retreat(g: &mut GameState, _level: i32, ch: CharId, victim: Option<
 }
 
 // ===========================================================================
-// spell_control_weather (spells.c) — weather system unported; harmless no-op
-// matching the C behaviour of "nothing visibly happens indoors".
+// spell_control_weather (spells.c) — weather system unported; C's MAG_MANUAL
+// switch has no case for this spell, so it falls through silently.
 // ===========================================================================
-pub fn spell_control_weather(g: &mut GameState, _level: i32, ch: CharId, _victim: Option<CharId>, _obj: Option<ObjId>) {
-    g.send_to_char(ch, "Ok.\r\n");
+pub fn spell_control_weather(
+    _g: &mut GameState,
+    _level: i32,
+    _ch: CharId,
+    _victim: Option<CharId>,
+    _obj: Option<ObjId>,
+) {
 }
 
 // ---------------------------------------------------------------------------
@@ -986,11 +1466,35 @@ fn add_follower(g: &mut GameState, ch: CharId, leader: CharId) {
             l.followers.push(ch);
         }
     }
-    act(g, "You now follow $N.", false, ch, None, ActArg::Char(leader), To::Char);
+    act(
+        g,
+        "You now follow $N.",
+        false,
+        ch,
+        None,
+        ActArg::Char(leader),
+        To::Char,
+    );
     if g.can_see(leader, ch) {
-        act(g, "$n starts following you.", true, ch, None, ActArg::Char(leader), To::Vict);
+        act(
+            g,
+            "$n starts following you.",
+            true,
+            ch,
+            None,
+            ActArg::Char(leader),
+            To::Vict,
+        );
     }
-    act(g, "$n starts to follow $N.", true, ch, None, ActArg::Char(leader), To::NotVict);
+    act(
+        g,
+        "$n starts to follow $N.",
+        true,
+        ch,
+        None,
+        ActArg::Char(leader),
+        To::NotVict,
+    );
 }
 
 fn stop_follower(g: &mut GameState, ch: CharId) {
@@ -1007,3 +1511,26 @@ fn stop_follower(g: &mut GameState, ch: CharId) {
 }
 
 const PK_ALLOWED: bool = false;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::Descriptor;
+
+    #[test]
+    fn control_weather_is_silent() {
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(1);
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut ch = Character::new_player("Caster".into(), Class::Cleric, Race::Human);
+        ch.desc = Some(conn);
+        let ch = g.create_char(ch);
+
+        spell_control_weather(&mut g, 1, ch, None, None);
+
+        assert!(g.descriptors.get(&conn).unwrap().outbuf.is_empty());
+    }
+}

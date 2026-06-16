@@ -117,7 +117,10 @@ impl GameState {
         if pos >= NUM_WEARS {
             return None;
         }
-        let oid = self.chars.get_mut(&cid).and_then(|ch| ch.equipment[pos].take())?;
+        let oid = self
+            .chars
+            .get_mut(&cid)
+            .and_then(|ch| ch.equipment[pos].take())?;
         if let Some(o) = self.objs.get_mut(&oid) {
             o.loc = ObjLoc::Nowhere;
         }
@@ -214,6 +217,7 @@ impl GameState {
         }
         let snoop_by = self.chars.get(&cid).and_then(|c| c.snoop_by);
         if let Some(s) = snoop_by {
+            self.send_to_char(s, "Your victim is no longer among us.\r\n");
             if let Some(sc) = self.chars.get_mut(&s) {
                 sc.snooping = None;
             }
@@ -325,7 +329,12 @@ impl GameState {
     }
 
     /// Find an object by keyword within a list of object ids (+ ordinal).
-    pub fn get_obj_in_list_vis(&self, _observer: CharId, arg: &str, list: &[ObjId]) -> Option<ObjId> {
+    pub fn get_obj_in_list_vis(
+        &self,
+        _observer: CharId,
+        arg: &str,
+        list: &[ObjId],
+    ) -> Option<ObjId> {
         let (mut count, name) = get_number(arg);
         if count == 0 {
             return None;
@@ -406,9 +415,9 @@ impl GameState {
 pub fn check_perm_duration(g: &GameState, ch: CharId, bitvector: i64) -> bool {
     g.get_char(ch)
         .map(|c| {
-            c.affected
-                .iter()
-                .any(|af| (af.bitvector & bitvector) != 0 && af.duration == -1 && af.spell_type == -1)
+            c.affected.iter().any(|af| {
+                (af.bitvector & bitvector) != 0 && af.duration == -1 && af.spell_type == -1
+            })
         })
         .unwrap_or(false)
 }
@@ -540,6 +549,7 @@ mod tests {
     use super::*;
     use crate::character::Character;
     use crate::config::Config;
+    use crate::connection::Descriptor;
     use crate::object::{Object, ObjectAffect};
     use crate::types::{Class, Race};
 
@@ -552,17 +562,36 @@ mod tests {
         let mut o = Object::new(1, "wings magic".into(), "a pair of wings".into());
         o.weight = 5;
         o.affects = vec![
-            ObjectAffect { location: APPLY_HIT, modifier: 50 },
-            ObjectAffect { location: APPLY_DEFENSE, modifier: 10 },
+            ObjectAffect {
+                location: APPLY_HIT,
+                modifier: 50,
+            },
+            ObjectAffect {
+                location: APPLY_DEFENSE,
+                modifier: 10,
+            },
         ];
         g.create_obj(o)
     }
 
     fn visible_pair() -> (GameState, CharId, CharId) {
         let mut g = fresh_game();
-        let viewer = g.create_char(Character::new_player("Viewer".into(), Class::Warrior, Race::Human));
-        let target = g.create_char(Character::new_player("Target".into(), Class::Warrior, Race::Human));
-        let rn = g.add_room(crate::room::Room::new(10, 0, "Test".into(), "A room.".into()));
+        let viewer = g.create_char(Character::new_player(
+            "Viewer".into(),
+            Class::Warrior,
+            Race::Human,
+        ));
+        let target = g.create_char(Character::new_player(
+            "Target".into(),
+            Class::Warrior,
+            Race::Human,
+        ));
+        let rn = g.add_room(crate::room::Room::new(
+            10,
+            0,
+            "Test".into(),
+            "A room.".into(),
+        ));
         g.char_to_room(viewer, rn);
         g.char_to_room(target, rn);
         (g, viewer, target)
@@ -580,7 +609,9 @@ mod tests {
     fn can_see_uses_darkness_and_infravision() {
         let (mut g, viewer, target) = visible_pair();
         let rn = g.get_char(viewer).unwrap().in_room.unwrap();
-        g.room_mut(rn).room_flags.insert(crate::room::RoomFlags::DARK);
+        g.room_mut(rn)
+            .room_flags
+            .insert(crate::room::RoomFlags::DARK);
 
         assert!(!g.can_see(viewer, target));
 
@@ -742,32 +773,55 @@ mod tests {
     #[test]
     fn plr_crash_set_on_object_movement() {
         let mut g = fresh_game();
-        let pc = g.create_char(Character::new_player("Crashy".into(), Class::Warrior, Race::Human));
+        let pc = g.create_char(Character::new_player(
+            "Crashy".into(),
+            Class::Warrior,
+            Race::Human,
+        ));
         let mob = g.create_char(Character::new_npc(0));
         let oid = {
             let o = Object::new(3, "coin".into(), "a coin".into());
             g.create_obj(o)
         };
         g.obj_to_char(oid, pc);
-        assert_ne!(g.get_char(pc).unwrap().act_flags & crate::objsave::PLR_CRASH, 0);
+        assert_ne!(
+            g.get_char(pc).unwrap().act_flags & crate::objsave::PLR_CRASH,
+            0
+        );
 
         // NPC stays unflagged.
         let oid2 = g.create_obj(Object::new(4, "stick".into(), "a stick".into()));
         g.obj_to_char(oid2, mob);
-        assert_eq!(g.get_char(mob).unwrap().act_flags & crate::objsave::PLR_CRASH, 0);
+        assert_eq!(
+            g.get_char(mob).unwrap().act_flags & crate::objsave::PLR_CRASH,
+            0
+        );
     }
 
     /// BUG 22: extract_char clears master/followers links on both sides.
     #[test]
     fn extract_char_breaks_follow_links() {
         let mut g = fresh_game();
-        let leader = g.create_char(Character::new_player("Leader".into(), Class::Warrior, Race::Human));
-        let follower = g.create_char(Character::new_player("Pet".into(), Class::Warrior, Race::Human));
+        let leader = g.create_char(Character::new_player(
+            "Leader".into(),
+            Class::Warrior,
+            Race::Human,
+        ));
+        let follower = g.create_char(Character::new_player(
+            "Pet".into(),
+            Class::Warrior,
+            Race::Human,
+        ));
         // Wire a follow link by hand (add_follower normally does this).
         g.get_char_mut(follower).unwrap().master = Some(leader);
         g.get_char_mut(leader).unwrap().followers.push(follower);
         // Place both in a room so extract_char's char_from_room is well-defined.
-        let rn = g.add_room(crate::room::Room::new(1, 0, "Void".into(), "An empty void.".into()));
+        let rn = g.add_room(crate::room::Room::new(
+            1,
+            0,
+            "Void".into(),
+            "An empty void.".into(),
+        ));
         g.char_to_room(leader, rn);
         g.char_to_room(follower, rn);
 
@@ -779,5 +833,43 @@ mod tests {
         // leader had no master — just confirm it doesn't panic and removes cleanly.
         g.extract_char(leader);
         assert!(g.get_char(leader).is_none());
+    }
+
+    #[test]
+    fn extract_char_notifies_snooper_when_victim_disappears() {
+        let mut g = fresh_game();
+        let snooper_conn = ConnId(1);
+        g.descriptors.insert(
+            snooper_conn,
+            Descriptor::new(snooper_conn, "test".to_string()),
+        );
+        let mut snooper = Character::new_player("Snooper".into(), Class::Warrior, Race::Human);
+        snooper.desc = Some(snooper_conn);
+        let snooper = g.create_char(snooper);
+        let victim = g.create_char(Character::new_player(
+            "Victim".into(),
+            Class::Warrior,
+            Race::Human,
+        ));
+        let rn = g.add_room(crate::room::Room::new(
+            1,
+            0,
+            "Void".into(),
+            "An empty void.".into(),
+        ));
+        g.char_to_room(snooper, rn);
+        g.char_to_room(victim, rn);
+        g.get_char_mut(snooper).unwrap().snooping = Some(victim);
+        g.get_char_mut(victim).unwrap().snoop_by = Some(snooper);
+
+        g.extract_char(victim);
+
+        assert_eq!(g.get_char(snooper).unwrap().snooping, None);
+        assert!(g
+            .descriptors
+            .get(&snooper_conn)
+            .unwrap()
+            .outbuf
+            .contains("Your victim is no longer among us.\r\n"));
     }
 }
