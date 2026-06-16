@@ -18,6 +18,7 @@
 
 use crate::act::{act, ActArg, To};
 use crate::character::Affect;
+use crate::constants::{strength_apply_index, STR_APP};
 use crate::flags::*;
 use crate::handler::isname;
 use crate::interpreter::{half_chop, one_argument};
@@ -2515,11 +2516,13 @@ fn can_carry_n(g: &GameState, ch: CharId) -> i32 {
         .unwrap_or(5)
 }
 
-/// CAN_CARRY_W: weight cap scaled by strength (approximation of
-/// str_app[].carry_w; the full table is in cmd_item.rs).
+/// CAN_CARRY_W(ch) = str_app[STRENGTH_APPLY_INDEX(ch)].carry_w.
 fn can_carry_w(g: &GameState, ch: CharId) -> i32 {
     g.get_char(ch)
-        .map(|c| (c.aff_abils.str as i32).max(1) * 100)
+        .map(|c| {
+            STR_APP[strength_apply_index(c.aff_abils.str as i32, c.aff_abils.str_add as i32)]
+                .carry_w
+        })
         .unwrap_or(100)
 }
 
@@ -2543,11 +2546,6 @@ fn can_see_obj(g: &GameState, ch: CharId, oid: ObjId) -> bool {
 // ===========================================================================
 
 pub fn do_recall(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
-    // GET_RECALL_LEV is not a Tier-0 Character field; the recall threshold is
-    // stored on the (not-yet-ported) player_specials autorecall slot. We use
-    // the timer-adjacent field semantics: model it on idle_tics? No — instead
-    // we faithfully reproduce the user flow using a local value derived from
-    // the unmodelled slot, which defaults to 0 (disabled), matching a fresh PC.
     threshold_command(g, ch, argument, RecallKind::Recall);
 }
 
@@ -2560,10 +2558,6 @@ enum RecallKind {
     Retreat,
 }
 
-/// Shared body for do_recall / do_retreat. The recall/retreat hp thresholds
-/// live in player_specials (not on the Tier-0 Character), so the stored value
-/// degrades to 0/disabled exactly as a freshly-loaded PC; the command echoes
-/// and validation are 1:1 with C.
 fn threshold_command(g: &mut GameState, ch: CharId, argument: &str, kind: RecallKind) {
     let (arg, _) = one_argument(argument);
     let (none_msg, cur_word, set_word, spec_word) = match kind {
@@ -2580,8 +2574,10 @@ fn threshold_command(g: &mut GameState, ch: CharId, argument: &str, kind: Recall
             "retreat",
         ),
     };
-    // The stored level (player_specials slot) is not on Character; treated as 0.
-    let cur: i32 = 0;
+    let cur = match kind {
+        RecallKind::Recall => g.get_char(ch).map(|c| c.recall_level).unwrap_or(0),
+        RecallKind::Retreat => g.get_char(ch).map(|c| c.retreat_level).unwrap_or(0),
+    };
 
     if arg.is_empty() {
         if cur != 0 {
@@ -2623,8 +2619,12 @@ fn threshold_command(g: &mut GameState, ch: CharId, argument: &str, kind: Recall
                         set_word, lev
                     ),
                 );
-                // Stored on the unmodelled slot; persistence lands with
-                // player_specials in a later batch.
+                if let Some(c) = g.get_char_mut(ch) {
+                    match kind {
+                        RecallKind::Recall => c.recall_level = lev,
+                        RecallKind::Retreat => c.retreat_level = lev,
+                    }
+                }
             }
         } else {
             match kind {
@@ -2633,6 +2633,12 @@ fn threshold_command(g: &mut GameState, ch: CharId, argument: &str, kind: Recall
                 }
                 RecallKind::Retreat => {
                     g.send_to_char(ch, "You will no longer autoretreat from combat..\r\n")
+                }
+            }
+            if let Some(c) = g.get_char_mut(ch) {
+                match kind {
+                    RecallKind::Recall => c.recall_level = 0,
+                    RecallKind::Retreat => c.retreat_level = 0,
                 }
             }
         }
@@ -3765,5 +3771,50 @@ mod tests {
         let out = &g.descriptors.get(&conn).unwrap().outbuf;
         assert!(out.contains("You have 2 training sessions.\r\n"));
         assert!(!out.contains("You have 9 training sessions.\r\n"));
+    }
+
+    #[test]
+    fn can_carry_w_uses_strength_table_for_steal_capacity() {
+        let mut g = GameState::new(Config::default());
+        let mut ch = Character::new_player("Lift".to_string(), Class::Warrior, Race::Human);
+        ch.aff_abils.str = 10;
+        ch.aff_abils.str_add = 0;
+        let ch = g.create_char(ch);
+
+        assert_eq!(can_carry_w(&g, ch), 115);
+
+        let c = g.get_char_mut(ch).unwrap();
+        c.aff_abils.str = 18;
+        c.aff_abils.str_add = 100;
+        assert_eq!(can_carry_w(&g, ch), 480);
+    }
+
+    #[test]
+    fn recall_and_retreat_threshold_commands_store_character_fields() {
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(1);
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+
+        let mut ch = Character::new_player("Runner".to_string(), Class::Warrior, Race::Human);
+        ch.desc = Some(conn);
+        ch.points.max_hit = 40;
+        let ch = g.create_char(ch);
+
+        do_recall(&mut g, ch, "19", 0);
+        assert_eq!(g.get_char(ch).unwrap().recall_level, 19);
+        do_recall(&mut g, ch, "", 0);
+        assert!(
+            g.descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("Your current recall level is 19 hit points.\r\n")
+        );
+
+        do_retreat(&mut g, ch, "17", 0);
+        assert_eq!(g.get_char(ch).unwrap().retreat_level, 17);
+        do_retreat(&mut g, ch, "0", 0);
+        assert_eq!(g.get_char(ch).unwrap().retreat_level, 0);
     }
 }

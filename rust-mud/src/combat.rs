@@ -10,6 +10,7 @@
 
 use crate::act::{act, ActArg, To};
 use crate::constants::ATTACK_HIT_TEXT;
+use crate::flags::AFF_SANCTUARY;
 use crate::object::{Object, ObjectType, ObjLoc};
 use crate::room::{RoomFlags, SectorType, EX_CLOSED};
 use crate::spell_parser::{MAX_SPELLS, TYPE_UNDEFINED};
@@ -90,6 +91,7 @@ fn stop_fighting(g: &mut GameState, ch: CharId) {
             c.position = Position::Standing;
         }
     }
+    update_position(g, ch);
 }
 
 /// One combat pulse: every fighter takes a swing (CircleMUD perform_violence).
@@ -515,6 +517,14 @@ pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, atta
     // everything else (weapons / skills / undefined) uses the physical one.
     let mt = if attacktype > 0 && attacktype <= MAX_SPELLS { 1 } else { 0 };
     dmg = (dmg as f32 * dam_multi(g, ch, victim, mt)) as i32;
+    if dmg >= 2
+        && g
+            .get_char(victim)
+            .map(|c| c.affect_flags & AFF_SANCTUARY != 0)
+            .unwrap_or(false)
+    {
+        dmg /= 2;
+    }
 
     // Victim defensive skills (fight.c do_actual_damage ~904): riposte / avoid /
     // parry / dodge. A successful defense consumes the swing AFTER engagement.
@@ -1031,4 +1041,62 @@ pub fn do_flee(g: &mut GameState, ch: CharId) {
     }
     let _ = fighting;
     g.send_to_char(ch, "PANIC!  You couldn't escape!\r\n");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+
+    fn player(g: &mut GameState, name: &str) -> CharId {
+        g.create_char(Character::new_player(
+            name.to_string(),
+            Class::Warrior,
+            Race::Human,
+        ))
+    }
+
+    #[test]
+    fn sanctuary_halves_combat_damage_of_two_or_more() {
+        let mut g = GameState::new(Config::default());
+        let attacker = player(&mut g, "Attacker");
+        let victim = player(&mut g, "Victim");
+        g.get_char_mut(victim).unwrap().affect_flags |= AFF_SANCTUARY;
+
+        damage_type(&mut g, attacker, victim, 10, TYPE_UNDEFINED);
+
+        assert_eq!(g.get_char(victim).unwrap().points.hit, 15);
+    }
+
+    #[test]
+    fn sanctuary_does_not_reduce_one_point_damage() {
+        let mut g = GameState::new(Config::default());
+        let attacker = player(&mut g, "Attacker");
+        let victim = player(&mut g, "Victim");
+        g.get_char_mut(victim).unwrap().affect_flags |= AFF_SANCTUARY;
+
+        damage_type(&mut g, attacker, victim, 1, TYPE_UNDEFINED);
+
+        assert_eq!(g.get_char(victim).unwrap().points.hit, 19);
+    }
+
+    #[test]
+    fn stop_fighting_updates_negative_hit_position() {
+        let mut g = GameState::new(Config::default());
+        let ch = player(&mut g, "Fighter");
+        let victim = player(&mut g, "Victim");
+        {
+            let c = g.get_char_mut(ch).unwrap();
+            c.fighting = Some(victim);
+            c.position = Position::Fighting;
+            c.points.hit = -4;
+        }
+
+        stop_fighting(&mut g, ch);
+
+        let c = g.get_char(ch).unwrap();
+        assert_eq!(c.fighting, None);
+        assert_eq!(c.position, Position::Incapacitated);
+    }
 }
