@@ -26,6 +26,7 @@ use crate::act::{act, ActArg, To};
 use crate::object::ObjectType;
 use crate::room::{RoomFlags, SectorType};
 use crate::state::GameState;
+use crate::syslog::{mudlog, BRF, PFT};
 use crate::types::*;
 
 // ---------------------------------------------------------------------------
@@ -486,6 +487,19 @@ pub fn advance_level(g: &mut GameState, ch: CharId) {
         hp_applied, add_mana, move_applied, add_practices, training
     );
     g.send_to_char(ch, &buf);
+    let (name, min_level) = match g.get_char(ch) {
+        Some(c) => (
+            c.player.name.clone(),
+            LVL_IMMORT.max(c.invis_level.clamp(0, Level::MAX as i32) as Level),
+        ),
+        None => return,
+    };
+    mudlog(
+        g,
+        &format!("{} advanced to level {}", name, level),
+        BRF,
+        min_level,
+    );
     // save_char(ch, NOWHERE) — async persistence handled by the save layer.
 }
 
@@ -815,6 +829,16 @@ pub fn check_idling(g: &mut GameState, ch: CharId) {
             } else {
                 crate::objsave::crash_idlesave(g, ch);
             }
+            let name = g
+                .get_char(ch)
+                .map(|c| c.player.name.clone())
+                .unwrap_or_default();
+            mudlog(
+                g,
+                &format!("{} force-rented and extracted (idle).", name),
+                PFT,
+                LVL_GOD,
+            );
             g.extract_char(ch);
         }
     }
@@ -1745,9 +1769,11 @@ mod tests {
     use super::*;
     use crate::character::Character;
     use crate::config::Config;
+    use crate::connection::Descriptor;
     use crate::object::{ExtraFlags, ObjectType, WearFlags};
     use crate::room::Room;
     use crate::world::ObjectProto;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_game() -> GameState {
         GameState::new(Config::default())
@@ -1757,6 +1783,34 @@ mod tests {
         let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
         ch.player.level = level;
         g.create_char(ch)
+    }
+
+    fn connected_player(g: &mut GameState, conn: ConnId, name: &str, level: Level) -> CharId {
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        ch.desc = Some(conn);
+        ch.player.level = level;
+        let id = g.create_char(ch);
+        g.players_by_name.insert(name.to_lowercase(), id);
+        id
+    }
+
+    fn enable_perfect_syslog(g: &mut GameState, ch: CharId) {
+        const PRF_LOG1: i64 = 1 << 16;
+        const PRF_LOG2: i64 = 1 << 17;
+
+        g.get_char_mut(ch).unwrap().prf_flags |= PRF_LOG1 | PRF_LOG2;
+    }
+
+    fn unique_temp_lib() -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("deltamud-test-{}", nanos));
+        std::fs::create_dir_all(&path).unwrap();
+        path.to_string_lossy().into_owned()
     }
 
     fn gold_brick_proto() -> ObjectProto {
@@ -1850,5 +1904,41 @@ mod tests {
         assert_eq!(c.was_in_room, Some(home));
         assert_eq!(c.prf2_flags & PRF2_MBUILDING, 0);
         assert_eq!(c.prf2_flags & PRF2_INTANGIBLE, 0);
+    }
+
+    #[test]
+    fn advance_level_logs_level_gain_to_immortals() {
+        let mut g = test_game();
+        let observer = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        enable_perfect_syslog(&mut g, observer);
+        let ch = add_player(&mut g, "Mort", 10);
+
+        advance_level(&mut g, ch);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("[ Mort advanced to level 10 ]\r\n"));
+    }
+
+    #[test]
+    fn check_idling_logs_force_rent_extraction() {
+        let mut g = test_game();
+        g.config.lib_path = unique_temp_lib();
+        let observer = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        enable_perfect_syslog(&mut g, observer);
+        let rent = g.add_room(Room::new(3, 0, "Rent".to_string(), "Rent.".to_string()));
+        let ch = add_player(&mut g, "Idle", LVL_IMMORT);
+        g.char_to_room(ch, rent);
+        {
+            let c = g.get_char_mut(ch).unwrap();
+            c.timer = 48;
+            c.was_in_room = Some(rent);
+        }
+
+        check_idling(&mut g, ch);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("[ Idle force-rented and extracted (idle). ]\r\n"));
+
+        let _ = std::fs::remove_dir_all(&g.config.lib_path);
     }
 }
