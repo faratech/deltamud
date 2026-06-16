@@ -13,7 +13,7 @@ use crate::constants::ATTACK_HIT_TEXT;
 use crate::flags::{AFF_SANCTUARY, AFF_SLEEP};
 use crate::object::{Object, ObjectType, ObjLoc};
 use crate::room::{RoomFlags, SectorType, EX_CLOSED};
-use crate::spell_parser::{MAX_SPELLS, SPELL_SLEEP, TYPE_UNDEFINED};
+use crate::spell_parser::{MAX_SPELLS, SPELL_REDIRECT_CHARGE, SPELL_SLEEP, TYPE_UNDEFINED};
 use crate::state::GameState;
 use crate::types::*;
 
@@ -39,6 +39,7 @@ const AVOID_FACTOR: i32 = 20; // spells.h
 // PRF2_* flags (structs.h) used by the intangible/ghost combat guards.
 const PRF2_MBUILDING: i64 = 1 << 6;
 const PRF2_INTANGIBLE: i64 = 1 << 9;
+const AFF_R_CHARGED: i64 = 1 << 26;
 
 // config.c — PvP gating (pk_allowed is false on this MUD).
 const PK_ALLOWED: bool = false;
@@ -313,6 +314,61 @@ pub fn hit_type(g: &mut GameState, ch: CharId, victim: CharId, ty: i32) {
     // combatants first; running it in hit() would consume the opening swing
     // before set_fighting and combat would never start (BUG 4).
     damage_type(g, ch, victim, dam, attacktype);
+    trigger_redirect_charge(g, ch, victim);
+}
+
+fn trigger_redirect_charge(g: &mut GameState, ch: CharId, victim: CharId) {
+    let charge = g.get_char(ch).and_then(|c| {
+        if c.affect_flags & AFF_R_CHARGED == 0 {
+            return None;
+        }
+        c.affected
+            .iter()
+            .find(|af| af.spell_type == SPELL_REDIRECT_CHARGE && af.bitvector == AFF_R_CHARGED)
+            .map(|af| af.modifier)
+    });
+    let Some(charge) = charge else {
+        return;
+    };
+
+    act(
+        g,
+        "You momentarily run your finger against $N's skin and a charge of electricity jumps from your body into theirs!\r\n$N CRISPS AND FRIES!!",
+        false,
+        ch,
+        None,
+        ActArg::Char(victim),
+        To::Char,
+    );
+    act(
+        g,
+        "$n touches you and you find it somewhat... &KELECTRIFYING&n!\r\nYour skin chars and crisps!",
+        false,
+        ch,
+        None,
+        ActArg::Char(victim),
+        To::Vict,
+    );
+    act(
+        g,
+        "You momentarily see a flash of light and $N FRIES to a CRISP!",
+        false,
+        ch,
+        None,
+        ActArg::Char(victim),
+        To::NotVict,
+    );
+    damage_type(g, ch, victim, charge, TYPE_UNDEFINED);
+    if let Some(c) = g.get_char_mut(ch) {
+        if let Some(pos) = c
+            .affected
+            .iter()
+            .position(|af| af.spell_type == SPELL_REDIRECT_CHARGE && af.bitvector == AFF_R_CHARGED)
+        {
+            c.affected.remove(pos);
+        }
+        c.affect_flags &= !AFF_R_CHARGED;
+    }
 }
 
 /// backstab_mult(level) (class.c): the level-banded damage multiplier applied
@@ -1109,6 +1165,41 @@ mod tests {
         assert_eq!(c.position, Position::Fighting);
         assert_eq!(c.affect_flags & AFF_SLEEP, 0);
         assert!(c.affected.iter().all(|a| a.spell_type != SPELL_SLEEP));
+    }
+
+    #[test]
+    fn hit_type_releases_redirected_charge_after_hit() {
+        let mut g = GameState::new(Config::default());
+        let ch = player(&mut g, "Charged");
+        let victim = player(&mut g, "Victim");
+        {
+            let c = g.get_char_mut(ch).unwrap();
+            c.affect_flags |= AFF_R_CHARGED;
+            c.affected.push(Affect {
+                spell_type: SPELL_REDIRECT_CHARGE,
+                duration: 100,
+                modifier: 40,
+                location: 22,
+                bitvector: AFF_R_CHARGED,
+                caster: None,
+            });
+        }
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.position = Position::Sleeping;
+            v.points.hit = 100;
+            v.points.max_hit = 100;
+        }
+
+        hit_type(&mut g, ch, victim, TYPE_UNDEFINED);
+
+        let attacker = g.get_char(ch).unwrap();
+        assert_eq!(attacker.affect_flags & AFF_R_CHARGED, 0);
+        assert!(attacker
+            .affected
+            .iter()
+            .all(|af| af.spell_type != SPELL_REDIRECT_CHARGE));
+        assert!(g.get_char(victim).unwrap().points.hit <= 59);
     }
 
     #[test]
