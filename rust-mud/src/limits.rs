@@ -1006,6 +1006,23 @@ fn env_die(g: &mut GameState, ch: CharId) {
                 g.obj_to_obj(oid, corpse);
             }
         }
+
+        // Transfer the victim's gold into the corpse (make_corpse, fight.c ~332).
+        // C mints the coins inside make_corpse, so environmental death drops gold
+        // exactly like combat death — without this, env death destroys the gold
+        // (the second half of the corpse-gold fix; see combat.rs::die).
+        let gold = g.get_char(ch).map(|c| c.points.gold).unwrap_or(0);
+        if gold > 0 {
+            let has_desc = g.get_char(ch).map(|c| c.is_npc || c.desc.is_some()).unwrap_or(false);
+            if has_desc {
+                let money = crate::combat::create_money(g, gold);
+                g.obj_to_obj(money, corpse);
+            }
+            if let Some(c) = g.get_char_mut(ch) {
+                c.points.gold = 0;
+            }
+        }
+
         g.obj_to_room(corpse, rnum);
     }
 

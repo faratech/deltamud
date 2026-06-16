@@ -764,7 +764,7 @@ fn money_desc(amount: i32) -> &'static str {
 
 /// create_money(amount) (handler.c): mint an ITEM_MONEY object worth `amount`
 /// gold coins, with value[0] = amount and matching name/short/long descriptions.
-fn create_money(g: &mut GameState, amount: i32) -> ObjId {
+pub(crate) fn create_money(g: &mut GameState, amount: i32) -> ObjId {
     let amount = amount.max(1);
     let (name, short_desc, long_desc) = if amount == 1 {
         (

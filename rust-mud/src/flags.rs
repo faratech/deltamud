@@ -29,9 +29,10 @@ pub const PRF_HOLYLIGHT: i64 = 1 << 12;
 pub const PRF_COLOR_1: i64 = 1 << 13;
 pub const PRF_COLOR_2: i64 = 1 << 14;
 
-// PLR_* — player flags (subset).
-pub const PLR_FROZEN: i64 = 1 << 1;
-pub const PLR_INVSTART: i64 = 1 << 4;
+// PLR_* — player flags (subset). Values MUST match C structs.h (act_flags is the
+// raw C bitfield, persisted as-is): PLR_FROZEN is (1<<2), PLR_INVSTART (1<<14).
+pub const PLR_FROZEN: i64 = 1 << 2;
+pub const PLR_INVSTART: i64 = 1 << 14;
 
 // MOB act flags (subset).
 pub const MOB_SPEC: i64 = 1 << 0;
