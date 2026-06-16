@@ -434,7 +434,7 @@ fn get_char_vis(g: &GameState, ch: CharId, arg: &str) -> Option<CharId> {
     if count == 0 {
         return None;
     }
-    for &cid in &g.char_list {
+    for cid in g.char_ids() {
         if crate::handler::isname(&name, &name_of(g, cid)) && g.can_see(ch, cid) {
             count -= 1;
             if count == 0 {
@@ -497,7 +497,7 @@ fn get_player_vis(g: &GameState, ch: CharId, arg: &str) -> Option<CharId> {
         }
     }
     let (mut count, name) = crate::handler::get_number(arg);
-    for &cid in &g.char_list {
+    for cid in g.char_ids() {
         if is_npc(g, cid) {
             continue;
         }
@@ -528,7 +528,7 @@ fn get_obj_vis(g: &GameState, ch: CharId, arg: &str) -> Option<ObjId> {
         }
     }
     // whole world
-    let world: Vec<ObjId> = g.obj_list.clone();
+    let world: Vec<ObjId> = g.obj_ids();
     g.get_obj_in_list_vis(ch, arg, &world)
 }
 
@@ -3310,7 +3310,7 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             let mut players = 0;
             let mut mobiles = 0;
             let mut connected = 0;
-            let chars: Vec<CharId> = g.char_list.clone();
+            let chars: Vec<CharId> = g.char_ids();
             for vict in chars {
                 if is_npc(g, vict) {
                     mobiles += 1;
@@ -3321,7 +3321,7 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                     }
                 }
             }
-            let objs = g.obj_list.len();
+            let objs = g.objs.len();
             let mut buf = String::from("Current stats:\r\n");
             buf.push_str(&format!("  {:5} players in game  {:5} connected\r\n", players, connected));
             buf.push_str(&format!("  {:5} registered\r\n", g.players_by_name.len()));

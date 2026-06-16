@@ -77,7 +77,7 @@ const LEVEL_PARAMS: &[(u8, &str)] = &[
 /// add_name() rejects any name containing a non-alpha character).
 fn collect_immortals(g: &GameState) -> Vec<(u8, String)> {
     let mut out: Vec<(u8, String)> = Vec::new();
-    for &id in &g.char_list {
+    for id in g.char_ids() {
         let c = match g.get_char(id) {
             Some(c) => c,
             None => continue,

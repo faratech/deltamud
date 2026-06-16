@@ -142,7 +142,7 @@ fn dg_get_char(g: &GameState, name: &str) -> Option<CharId> {
             _ => None,
         };
     }
-    for &cid in &g.char_list {
+    for cid in g.char_ids() {
         if let Some(c) = g.get_char(cid) {
             if isname(name, &c.player.name) && (c.is_npc || c.invis_level == 0) {
                 return Some(cid);
@@ -158,7 +158,7 @@ fn dg_get_obj(g: &GameState, name: &str) -> Option<ObjId> {
         let oid = ObjId(id);
         return if g.get_obj(oid).is_some() { Some(oid) } else { None };
     }
-    for &oid in &g.obj_list {
+    for oid in g.obj_ids() {
         if let Some(o) = g.get_obj(oid) {
             if isname(name, &o.name) {
                 return Some(oid);

@@ -252,7 +252,7 @@ pub fn mobile_activity(g: &mut GameState) {
     // Snapshot the char list so that mobs extracted mid-loop (deaths) or new
     // mobs don't disturb iteration — C walks `next_ch = ch->next` up front for
     // the same reason. We re-validate each id before acting on it.
-    let ids: Vec<CharId> = g.char_list.clone();
+    let ids: Vec<CharId> = g.char_ids();
 
     for ch in ids {
         // The char may have been extracted by an earlier iteration's combat.

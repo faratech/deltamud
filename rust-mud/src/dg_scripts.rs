@@ -139,8 +139,8 @@ fn get_char(g: &GameState, name: &str) -> Option<CharId> {
     if let Some(id) = parse_uid(name) {
         return find_char_by_uid(g, id);
     }
-    g.char_list
-        .iter()
+    g.chars
+        .keys()
         .copied()
         .find(|&c| g.get_char(c).map(|x| crate::handler::isname(name, &x.player.name)).unwrap_or(false))
 }
@@ -149,8 +149,8 @@ fn get_obj(g: &GameState, name: &str) -> Option<ObjId> {
     if let Some(id) = parse_uid(name) {
         return find_obj_by_uid(g, id);
     }
-    g.obj_list
-        .iter()
+    g.objs
+        .keys()
         .copied()
         .find(|&o| g.get_obj(o).map(|x| crate::handler::isname(name, &x.name)).unwrap_or(false))
 }
@@ -1688,7 +1688,7 @@ fn run_one_command(g: &mut GameState, go: GoRef, type_: i32, cmd: &str) -> bool 
 // the zone is non-empty unless the GLOBAL bit is set).
 // ---------------------------------------------------------------------------
 pub fn script_trigger_check(g: &mut GameState) {
-    let chars: Vec<CharId> = g.char_list.clone();
+    let chars: Vec<CharId> = g.char_ids();
     for c in chars {
         if !g.char_exists(c) {
             continue;
@@ -1698,7 +1698,7 @@ pub fn script_trigger_check(g: &mut GameState) {
             crate::dg_triggers::random_mtrigger(g, c);
         }
     }
-    let objs: Vec<ObjId> = g.obj_list.clone();
+    let objs: Vec<ObjId> = g.obj_ids();
     for o in objs {
         if g.get_obj(o).is_none() {
             continue;
@@ -1729,7 +1729,7 @@ fn zone_empty_for_room(g: &GameState, r: RoomRnum) -> bool {
         Some(room) => room.zone,
         None => return true,
     };
-    for &cid in &g.char_list {
+    for cid in g.char_ids() {
         if let Some(ch) = g.get_char(cid) {
             if !ch.is_npc && ch.desc.is_some() {
                 if let Some(rn) = ch.in_room {

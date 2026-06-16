@@ -91,10 +91,10 @@ fn stop_fighting(g: &mut GameState, ch: CharId) {
 /// One combat pulse: every fighter takes a swing (CircleMUD perform_violence).
 pub fn perform_violence(g: &mut GameState) {
     let fighters: Vec<CharId> = g
-        .char_list
+        .chars
         .iter()
-        .copied()
-        .filter(|&c| g.get_char(c).and_then(|x| x.fighting).is_some())
+        .filter(|(_, x)| x.fighting.is_some())
+        .map(|(&c, _)| c)
         .collect();
 
     for ch in fighters {

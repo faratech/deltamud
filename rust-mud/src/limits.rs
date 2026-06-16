@@ -1076,7 +1076,7 @@ fn respawn_pc(g: &mut GameState, victim: CharId) {
 pub fn point_update(g: &mut GameState) {
     // ---- characters ----
     // Snapshot the list; entities may be extracted (idle/death) mid-loop.
-    let chars: Vec<CharId> = g.char_list.clone();
+    let chars: Vec<CharId> = g.char_ids();
     for ch in chars {
         // Skip if extracted by an earlier iteration's side effect.
         if !g.char_exists(ch) {
@@ -1273,7 +1273,7 @@ pub fn point_update(g: &mut GameState) {
     }
 
     // ---- objects ----
-    let objs: Vec<ObjId> = g.obj_list.clone();
+    let objs: Vec<ObjId> = g.obj_ids();
     for oid in objs {
         if g.get_obj(oid).is_none() {
             continue;

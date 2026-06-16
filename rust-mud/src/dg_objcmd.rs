@@ -226,7 +226,7 @@ fn get_char_by_obj(g: &GameState, obj: ObjId, name: &str) -> Option<CharId> {
     }
 
     // Whole world (character_list order).
-    for &cid in &g.char_list {
+    for cid in g.char_ids() {
         if name_matches_char(g, cid, name) && visible_target(g, cid) {
             return Some(cid);
         }
@@ -296,7 +296,7 @@ fn get_obj_by_obj(g: &GameState, obj: ObjId, name: &str) -> Option<ObjId> {
     if let Some(id) = parse_uid(name) {
         return find_obj_by_id(g, id);
     }
-    for &oid in &g.obj_list {
+    for oid in g.obj_ids() {
         if name_matches_obj(g, oid, name) {
             return Some(oid);
         }

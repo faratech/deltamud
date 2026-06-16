@@ -742,7 +742,7 @@ pub fn get_char_world_vis(g: &GameState, observer: CharId, arg: &str) -> Option<
     if count == 0 {
         return None;
     }
-    for &cid in &g.char_list {
+    for cid in g.char_ids() {
         let ch = match g.get_char(cid) {
             Some(c) => c,
             None => continue,
@@ -762,7 +762,7 @@ pub fn get_obj_world_vis(g: &GameState, _observer: CharId, arg: &str) -> Option<
     if count == 0 {
         return None;
     }
-    for &oid in &g.obj_list {
+    for oid in g.obj_ids() {
         let obj = match g.get_obj(oid) {
             Some(o) => o,
             None => continue,

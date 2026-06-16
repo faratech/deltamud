@@ -11,6 +11,7 @@ use crate::rng::Rng;
 use crate::room::Room;
 use crate::types::*;
 use crate::world::{MobileProto, ObjectProto, Zone};
+use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, Ordering};
 
@@ -73,12 +74,15 @@ pub struct GameState {
     pub mob_protos: HashMap<MobVnum, MobileProto>,
     pub obj_protos: HashMap<ObjVnum, ObjectProto>,
 
-    // Live instances. `*_list` preserve C's character_list/object_list order
-    // (newest first) for iteration parity; the maps are for id lookup.
-    pub chars: HashMap<CharId, Character>,
-    pub char_list: Vec<CharId>,
-    pub objs: HashMap<ObjId, Object>,
-    pub obj_list: Vec<ObjId>,
+    // Live instances. `IndexMap` is an ordered map: O(1) insert/get/swap_remove
+    // *and* ordered iteration, so it replaces the old `HashMap` + separate
+    // `*_list: Vec` (which carried C's character_list/object_list order at the
+    // cost of O(n) prepend + O(n) Vec removal on every spawn/extract). Insertion
+    // order is preserved (oldest-first); extraction uses swap_remove (O(1),
+    // reorders the tail). Iteration order is internal-only — no observable
+    // behavior depends on it. The id<->struct lookup is the map itself.
+    pub chars: IndexMap<CharId, Character>,
+    pub objs: IndexMap<ObjId, Object>,
 
     // Connections (the Descriptor lives here; the async output channel lives
     // in the Game wrapper keyed by the same ConnId).
@@ -129,10 +133,8 @@ impl GameState {
             zones: Vec::new(),
             mob_protos: HashMap::new(),
             obj_protos: HashMap::new(),
-            chars: HashMap::new(),
-            char_list: Vec::new(),
-            objs: HashMap::new(),
-            obj_list: Vec::new(),
+            chars: IndexMap::new(),
+            objs: IndexMap::new(),
             descriptors: HashMap::new(),
             players_by_name: HashMap::new(),
             player_table: Vec::new(),
@@ -207,15 +209,26 @@ impl GameState {
         self.chars.contains_key(&id)
     }
 
-    /// Insert a character into the world (assigns id, prepends to char_list
-    /// like CircleMUD's character_list). Does NOT place it in a room.
+    /// Insert a character into the world (assigns id, appends to the ordered
+    /// arena — CircleMUD prepends to character_list, but iteration order is
+    /// internal-only here, so O(1) append is used). Does NOT place it in a room.
     pub fn create_char(&mut self, mut ch: Character) -> CharId {
         let id = CharId(self.next_char_id);
         self.next_char_id += 1;
         ch.id = id;
         self.chars.insert(id, ch);
-        self.char_list.insert(0, id);
         id
+    }
+
+    /// Snapshot of all live character ids (insertion order). Replaces the old
+    /// `char_list.clone()` the hot loops took before iterating + mutating.
+    pub fn char_ids(&self) -> Vec<CharId> {
+        self.chars.keys().copied().collect()
+    }
+
+    /// Snapshot of all live object ids (insertion order).
+    pub fn obj_ids(&self) -> Vec<ObjId> {
+        self.objs.keys().copied().collect()
     }
 
     pub fn find_player_by_name(&self, name: &str) -> Option<CharId> {
@@ -318,7 +331,6 @@ impl GameState {
         self.next_obj_id += 1;
         obj.id = id;
         self.objs.insert(id, obj);
-        self.obj_list.insert(0, id);
         id
     }
 
@@ -333,8 +345,9 @@ impl GameState {
         for c in contents {
             self.extract_obj(c);
         }
-        self.objs.remove(&id);
-        self.obj_list.retain(|&o| o != id);
+        // swap_remove: O(1) removal from the ordered arena (reorders the tail,
+        // which is fine — iteration order is internal-only).
+        self.objs.swap_remove(&id);
     }
 
     /// WAIT_STATE(ch, cycles) (utils.h): impose `cycles` pulses of command lag

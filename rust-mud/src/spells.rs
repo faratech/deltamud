@@ -350,7 +350,7 @@ pub fn spell_locate_object(g: &mut GameState, level: i32, ch: CharId, _victim: O
     let mut j = level >> 1;
     let start_j = j;
 
-    let ids: Vec<ObjId> = g.obj_list.clone();
+    let ids: Vec<ObjId> = g.obj_ids();
     for oid in ids {
         if j <= 0 {
             break;
@@ -391,7 +391,7 @@ pub fn spell_locate_target(g: &mut GameState, level: i32, ch: CharId, victim: Op
     let mut j = level >> 1;
     let start_j = j;
 
-    let ids: Vec<CharId> = g.char_list.clone();
+    let ids: Vec<CharId> = g.char_ids();
     for cid in ids {
         if j <= 0 {
             break;

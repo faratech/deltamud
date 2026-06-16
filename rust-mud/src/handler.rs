@@ -126,10 +126,10 @@ impl GameState {
     pub fn extract_char(&mut self, cid: CharId) {
         // Stop anyone targeting this character.
         let attackers: Vec<CharId> = self
-            .char_list
+            .chars
             .iter()
-            .copied()
-            .filter(|&c| self.chars.get(&c).and_then(|x| x.fighting) == Some(cid))
+            .filter(|(_, x)| x.fighting == Some(cid))
+            .map(|(&c, _)| c)
             .collect();
         for a in attackers {
             if let Some(ch) = self.chars.get_mut(&a) {
@@ -199,8 +199,9 @@ impl GameState {
                 }
             }
         }
-        self.char_list.retain(|&c| c != cid);
-        self.chars.remove(&cid);
+        // swap_remove: O(1) removal of the dead/extracted character from the
+        // ordered arena (replaces the old char_list.retain + chars.remove pair).
+        self.chars.swap_remove(&cid);
     }
 
     // ---- Visibility -----------------------------------------------------

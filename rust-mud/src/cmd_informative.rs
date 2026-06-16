@@ -2239,7 +2239,7 @@ fn perform_mortal_where(g: &mut GameState, ch: CharId, arg: &str) {
         }
     } else {
         // Print only the FIRST matching char in the zone.
-        let chars: Vec<CharId> = g.char_list.clone();
+        let chars: Vec<CharId> = g.char_ids();
         for i in chars {
             let c = match g.get_char(i) {
                 Some(c) => c,
@@ -2279,7 +2279,7 @@ fn perform_immort_where(g: &mut GameState, ch: CharId, arg: &str) {
         let mut found = false;
         let mut num = 0;
         let ch_level = g.get_char(ch).map(|c| c.player.level).unwrap_or(1);
-        let chars: Vec<CharId> = g.char_list.clone();
+        let chars: Vec<CharId> = g.char_ids();
         for i in chars {
             let c = match g.get_char(i) {
                 Some(c) => c,
@@ -2297,7 +2297,7 @@ fn perform_immort_where(g: &mut GameState, ch: CharId, arg: &str) {
         }
         // Object location search.
         num = 0;
-        let objs: Vec<ObjId> = g.obj_list.clone();
+        let objs: Vec<ObjId> = g.obj_ids();
         for k in objs {
             if !can_see_obj(g, ch, k) {
                 continue;

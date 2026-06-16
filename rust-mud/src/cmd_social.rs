@@ -756,7 +756,7 @@ fn get_char_vis(g: &GameState, ch: CharId, name: &str) -> Option<CharId> {
     if number == 0 {
         return None;
     }
-    for &cid in &g.char_list {
+    for cid in g.char_ids() {
         let target = match g.get_char(cid) {
             Some(t) => t,
             None => continue,

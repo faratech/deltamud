@@ -208,7 +208,7 @@ fn get_ch_by_id(g: &GameState, idnum: i64) -> Option<CharId> {
     if idnum < 0 {
         return None;
     }
-    g.char_list.iter().copied().find(|&cid| {
+    g.chars.keys().copied().find(|&cid| {
         g.get_char(cid)
             .map(|c| !c.is_npc && c.idnum == idnum)
             .unwrap_or(false)
@@ -219,7 +219,7 @@ fn get_ch_by_id_desc(g: &GameState, idnum: i64) -> Option<CharId> {
     if idnum < 0 {
         return None;
     }
-    g.char_list.iter().copied().find(|&cid| {
+    g.chars.keys().copied().find(|&cid| {
         g.get_char(cid)
             .map(|c| !c.is_npc && c.idnum == idnum && c.desc.is_some())
             .unwrap_or(false)

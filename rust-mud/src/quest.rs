@@ -689,7 +689,7 @@ fn generate_quest(g: &mut GameState, ch: CharId, questman: CharId) {
     // player must hunt) — C scans world[].people for GET_MOB_VNUM == chosen.
     let victim: Option<CharId> = {
         let mut found = None;
-        for &cid in &g.char_list {
+        for cid in g.char_ids() {
             if let Some(c) = g.get_char(cid) {
                 if c.is_npc && c.nr == chosen {
                     found = Some(cid);
@@ -818,7 +818,7 @@ fn deny_quest(g: &mut GameState, ch: CharId, questman: CharId) {
 /// if one exists (load path), else fall back to false.
 fn mob_proto_has_flag(g: &GameState, vnum: MobVnum, flag: i64) -> bool {
     // Any currently-loaded instance of this prototype reflects act_flags.
-    for &cid in &g.char_list {
+    for cid in g.char_ids() {
         if let Some(c) = g.get_char(cid) {
             if c.is_npc && c.nr == vnum {
                 return c.act_flags & flag != 0;
@@ -884,7 +884,7 @@ pub fn quest_on_kill(g: &mut GameState, killer: CharId, victim: CharId) -> bool 
 pub fn quest_update(g: &mut GameState) {
     // Snapshot the player ids first (C walks character_list; we avoid borrow
     // conflicts by collecting ids, then mutating each in turn).
-    let ids: Vec<CharId> = g.char_list.clone();
+    let ids: Vec<CharId> = g.char_ids();
 
     for ch in ids {
         let (is_npc, nextquest, questor) = match g.get_char(ch) {

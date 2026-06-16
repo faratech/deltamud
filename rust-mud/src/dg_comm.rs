@@ -173,7 +173,7 @@ fn find_obj_in_scope(g: &GameState, ch: CharId, name: &str) -> Option<ObjId> {
 /// the find_invis path). First non-keyword match over the char arena.
 fn find_char_anywhere(g: &GameState, name: &str) -> Option<CharId> {
     let want = name.to_lowercase();
-    for &cid in &g.char_list {
+    for cid in g.char_ids() {
         if let Some(ch) = g.get_char(cid) {
             if crate::handler::isname(&want, &ch.player.name) {
                 return Some(cid);
@@ -186,7 +186,7 @@ fn find_char_anywhere(g: &GameState, name: &str) -> Option<CharId> {
 /// Whole-world obj lookup by keyword (C dg_scripts.c get_obj(name)).
 fn find_obj_anywhere(g: &GameState, name: &str) -> Option<ObjId> {
     let want = name.to_lowercase();
-    for &oid in &g.obj_list {
+    for oid in g.obj_ids() {
         if let Some(o) = g.get_obj(oid) {
             if crate::handler::isname(&want, &o.name) {
                 return Some(oid);
@@ -371,7 +371,7 @@ pub fn send_to_zone(g: &mut GameState, msg: &str, zone_rnum: i32) {
     if msg.is_empty() {
         return;
     }
-    let ids: Vec<CharId> = g.char_list.clone();
+    let ids: Vec<CharId> = g.char_ids();
     for cid in ids {
         let in_zone = g
             .get_char(cid)

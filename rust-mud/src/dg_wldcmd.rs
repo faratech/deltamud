@@ -155,7 +155,7 @@ fn get_char_by_room(g: &GameState, room: RoomRnum, name: &str) -> Option<CharId>
         }
     }
     // Whole world.
-    for &cid in &g.char_list {
+    for cid in g.char_ids() {
         if name_matches_char(g, cid, name) && visible_target(g, cid) {
             return Some(cid);
         }
@@ -185,7 +185,7 @@ fn get_obj_by_room(g: &GameState, room: RoomRnum, name: &str) -> Option<ObjId> {
             }
         }
     }
-    for &oid in &g.obj_list {
+    for oid in g.obj_ids() {
         if name_matches_obj(g, oid, name) {
             return Some(oid);
         }
@@ -261,7 +261,7 @@ fn get_char_vis_world(g: &GameState, name: &str) -> Option<CharId> {
     if let Some(id) = parse_uid(name) {
         return find_char_by_id(g, id);
     }
-    for &cid in &g.char_list {
+    for cid in g.char_ids() {
         if name_matches_char(g, cid, name) && visible_target(g, cid) {
             return Some(cid);
         }
@@ -272,7 +272,7 @@ fn get_obj_vis_world(g: &GameState, name: &str) -> Option<ObjId> {
     if let Some(id) = parse_uid(name) {
         return find_obj_by_id(g, id);
     }
-    for &oid in &g.obj_list {
+    for oid in g.obj_ids() {
         if name_matches_obj(g, oid, name) {
             return Some(oid);
         }
