@@ -259,7 +259,7 @@ fn weight_change_object(g: &mut GameState, obj: ObjId, weight: i32) {
 pub fn spell_recall(
     g: &mut GameState,
     _level: i32,
-    _ch: CharId,
+    ch: CharId,
     victim: Option<CharId>,
     _obj: Option<ObjId>,
 ) {
@@ -270,7 +270,14 @@ pub fn spell_recall(
     if is_npc(g, victim) {
         return;
     }
-    // RIDING/RIDDEN_BY mount checks unported (no mount field); skipped.
+    if g
+        .get_char(victim)
+        .map(|c| c.riding.is_some() || c.ridden_by.is_some())
+        .unwrap_or(false)
+    {
+        g.send_to_char(ch, "The spell fails because your victim is atop a mount.\r\n");
+        return;
+    }
 
     // Arena branch (spells.c): a combatant who recalls concedes / is rebounded
     // to the prep room, an observer bounces to the observatory. arena_recall
@@ -376,7 +383,15 @@ pub fn spell_summon(
         g.send_to_char(ch, "You failed.\r\n");
         return;
     }
-    // Zone status_mode gate unported (no status field on Zone); never blocks.
+    if is_npc(g, victim) {
+        let mob_vnum = g.get_char(victim).map(|c| c.nr).unwrap_or(NOBODY);
+        if let Some(zone) = crate::olc::real_zone(g, mob_vnum) {
+            if g.zones.get(zone).map(|z| z.status_mode == 0).unwrap_or(false) {
+                g.send_to_char(ch, "You failed.\r\n");
+                return;
+            }
+        }
+    }
 
     // Arena gates (spells.c): summon may not bridge the arena boundary — block
     // if exactly one of caster/victim is currently in the arena.
@@ -1518,6 +1533,8 @@ mod tests {
     use crate::character::Character;
     use crate::config::Config;
     use crate::connection::Descriptor;
+    use crate::room::Room;
+    use crate::world::Zone;
 
     #[test]
     fn control_weather_is_silent() {
@@ -1532,5 +1549,72 @@ mod tests {
         spell_control_weather(&mut g, 1, ch, None, None);
 
         assert!(g.descriptors.get(&conn).unwrap().outbuf.is_empty());
+    }
+
+    #[test]
+    fn recall_fails_for_mounted_victim() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Stable".to_string(),
+            "A stable.".to_string(),
+        ));
+        let conn = ConnId(1);
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut ch = Character::new_player("Rider".into(), Class::Cleric, Race::Human);
+        ch.desc = Some(conn);
+        let ch = g.create_char(ch);
+        let mount = g.create_char(Character::new_npc(1));
+        g.char_to_room(ch, room);
+        g.char_to_room(mount, room);
+        g.get_char_mut(ch).unwrap().riding = Some(mount);
+
+        spell_recall(&mut g, 1, ch, Some(ch), None);
+
+        assert_eq!(g.get_char(ch).unwrap().in_room, Some(room));
+        assert!(g
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("The spell fails because your victim is atop a mount.\r\n"));
+    }
+
+    #[test]
+    fn summon_fails_for_npc_from_closed_zone() {
+        let mut g = GameState::new(Config::default());
+        g.zones.push(Zone {
+            number: 1,
+            name: "Closed".to_string(),
+            builders: String::new(),
+            lifespan: 30,
+            age: 0,
+            top: 199,
+            reset_mode: 2,
+            min_level: 0,
+            max_level: 60,
+            status_mode: 0,
+            map_x: None,
+            map_y: None,
+            reset_commands: Vec::new(),
+        });
+        let conn = ConnId(1);
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut caster = Character::new_player("Caster".into(), Class::Cleric, Race::Human);
+        caster.desc = Some(conn);
+        let caster = g.create_char(caster);
+        let victim = g.create_char(Character::new_npc(123));
+
+        spell_summon(&mut g, 20, caster, Some(victim), None);
+
+        assert!(g
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("You failed.\r\n"));
     }
 }

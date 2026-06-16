@@ -9,11 +9,11 @@
 // looked up by id every time.
 //
 // Contract gaps (see manifest `helpers_needed`/`notes`): the Rust Room has no
-// `linkrnum`/`linkmapnum`, `ROOM_WALL`/`ROOM_IMPROOM`, weather, or map-mv
-// plumbing. ROOM_ATRIUM (C bit 1<<13) IS honoured for house gating via raw bits
-// — the Rust RoomFlags bitfield mislabels that bit as NO_SUMMON, so it is tested
-// with room_is_atrium() rather than the named variant (see house.rs header for
-// the collision). Pieces with no representable backing are handled the way the
+// `linkrnum`/`linkmapnum`, weather, or map-mv plumbing. ROOM_ATRIUM (C bit
+// 1<<13) IS honoured for house gating via raw bits — the Rust RoomFlags
+// bitfield mislabels that bit as NO_SUMMON, so it is tested with
+// room_is_atrium() rather than the named variant (see house.rs header for the
+// collision). Pieces with no representable backing are handled the way the
 // surrounding C code degrades (e.g. an absent door keyword -> "door").
 
 use crate::act::{act, ActArg, To};
@@ -267,6 +267,11 @@ fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check
             g.send_to_char(ch, "You need a boat to go there.\r\n");
             return false;
         }
+    }
+
+    if g.room(to_rnum).room_flags.contains(RoomFlags::WALL) {
+        g.send_to_char(ch, "You try to walk through the wall but fail...\r\n");
+        return false;
     }
 
     // Movement cost: avg of source & destination sector loss; doubled in snow.
@@ -1234,6 +1239,11 @@ fn do_special_move(g: &mut GameState, ch: CharId) -> bool {
         return false;
     }
 
+    if g.room(to_rnum).room_flags.contains(RoomFlags::WALL) {
+        g.send_to_char(ch, "You try to walk through the wall but fail..\r\n");
+        return false;
+    }
+
     let loss = |s: SectorType| {
         constants::MOVEMENT_LOSS
             .get(s as usize)
@@ -1253,10 +1263,6 @@ fn do_special_move(g: &mut GameState, ch: CharId) -> bool {
         return false;
     }
 
-    // NOTE: ROOM_WALL / ROOM_IMPROOM (C bits 18 / 16) gates are omitted to match
-    // do_simple_move — the Rust RoomFlags bitfield does not model those bits
-    // (see this module's header).
-    //
     // Atrium / private-house gating (act.movement.c): leaving a ROOM_ATRIUM into
     // a private house is blocked for non-owners/non-guests. ATRIUM is C bit 1<<13
     // (named NO_SUMMON in the Rust RoomFlags bitfield), so it is tested raw.
@@ -2556,7 +2562,7 @@ mod tests {
     use crate::config::Config;
     use crate::connection::Descriptor;
     use crate::object::Object;
-    use crate::room::{Exit, Room};
+    use crate::room::{Exit, Room, SpecialExit};
 
     fn movement_game() -> (GameState, CharId, RoomRnum, RoomRnum) {
         let mut g = GameState::new(Config::default());
@@ -2596,6 +2602,49 @@ mod tests {
         let (mut g, ch, from, _to) = movement_game();
 
         assert!(!perform_move(&mut g, ch, NORTH as i32, false));
+        assert_eq!(g.get_char(ch).unwrap().in_room, Some(from));
+    }
+
+    #[test]
+    fn room_wall_blocks_normal_movement() {
+        let (mut g, ch, from, to) = movement_game();
+        g.rooms[to].room_flags |= RoomFlags::WALL;
+        let mut boat = Object::new(22, "boat".to_string(), "a small boat".to_string());
+        boat.obj_type = ObjectType::Boat;
+        let boat = g.create_obj(boat);
+        g.obj_to_char(boat, ch);
+
+        assert!(!perform_move(&mut g, ch, NORTH as i32, false));
+        assert_eq!(g.get_char(ch).unwrap().in_room, Some(from));
+    }
+
+    #[test]
+    fn room_wall_blocks_special_exit_movement() {
+        let mut g = GameState::new(Config::default());
+        let from = g.add_room(Room::new(
+            100,
+            0,
+            "Start".to_string(),
+            "A room.".to_string(),
+        ));
+        let mut wall = Room::new(101, 0, "Wall".to_string(), "A wall.".to_string());
+        wall.room_flags |= RoomFlags::WALL;
+        g.add_room(wall);
+        g.rooms[from].special_exit = Some(SpecialExit {
+            general_description: None,
+            keyword: None,
+            ex_name: Some("portal".to_string()),
+            leave_msg: None,
+            exit_info: 0,
+            key: NOTHING,
+            to_room: 101,
+        });
+        let mut ch = Character::new_player("Walker".to_string(), Class::Warrior, Race::Human);
+        ch.points.move_points = 80;
+        let ch = g.create_char(ch);
+        g.char_to_room(ch, from);
+
+        assert!(!perform_special_move(&mut g, ch, false));
         assert_eq!(g.get_char(ch).unwrap().in_room, Some(from));
     }
 
