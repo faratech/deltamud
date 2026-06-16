@@ -1825,10 +1825,9 @@ fn weather_show_pos(g: &mut GameState, ch: CharId, wtype: usize) -> bool {
                 let rn = g.get_char(ch).and_then(|c| c.in_room).and_then(|r| g.rooms.get(r)).map(|r| r.name.clone()).unwrap_or_default();
                 (nm, rn)
             };
-            let _ = wtype;
             mudlog(g, &format!("{} killed by weather at {}", name, roomname), LVL_IMMORT);
             // raw_kill: strip affects, death cry, weather corpse, extract/respawn.
-            weather_die(g, ch);
+            weather_die(g, ch, wtype);
             true
         }
         _ => false,
@@ -1868,7 +1867,7 @@ const WEATHER_CORPSE_NAMES: [&str; WEATHER_TOTAL] = [
 /// PC's loot, then extract. Mirrors raw_kill closely; PC respawn is the
 /// observable result of extract_char unlinking the descriptor (menu re-entry),
 /// matching C's extract_char(ch) call here.
-fn weather_die(g: &mut GameState, ch: CharId) {
+fn weather_die(g: &mut GameState, ch: CharId, wtype: usize) {
     // FIGHTING(ch) -> stop_fighting; strip all affects (C: while(ch->affected)
     // affect_remove).
     if let Some(c) = g.get_char_mut(ch) {
@@ -1884,14 +1883,10 @@ fn weather_die(g: &mut GameState, ch: CharId) {
     // neighbour (fight.c death_cry), shared with the combat death path.
     crate::combat::death_cry(g, ch);
 
-    // make_weather_corpse(ch, type) is approximated by a plain corpse holding the
-    // PC's carried + worn items (the corpse-name adjective table is preserved
-    // above for fidelity; the death-storm type that produced this corpse is not
-    // threaded down here, so the bare corpse name is used — same loot result).
     if let Some(rnum) = g.get_char(ch).and_then(|c| c.in_room) {
         increase_blood(g, rnum);
         let name = g.get_char(ch).map(|c| c.display_for_others()).unwrap_or_default();
-        let corpse = make_weather_corpse(g, &name);
+        let corpse = make_weather_corpse(g, &name, wtype);
         let carried = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
         for oid in carried {
             g.obj_from_anywhere(oid);
@@ -1914,11 +1909,20 @@ fn weather_die(g: &mut GameState, ch: CharId) {
 
 /// make_weather_corpse (maputils.c): a corpse container holding the victim's
 /// loot. values[3]=1 marks it a corpse so the object decay path reaps it.
-fn make_weather_corpse(g: &mut GameState, who: &str) -> ObjId {
+fn make_weather_corpse(g: &mut GameState, who: &str, wtype: usize) -> ObjId {
     use crate::object::{Object, ObjLoc, ObjectType};
-    let _ = WEATHER_CORPSE_NAMES; // adjective table kept for fidelity (see note).
-    let mut obj = Object::new(NOTHING, format!("corpse {}", who), format!("the corpse of {}", who));
-    obj.description = format!("The corpse of {} is lying here.", who);
+    let corpse_name = WEATHER_CORPSE_NAMES.get(wtype).copied().unwrap_or(" ");
+    let adjective = if corpse_name.starts_with(' ') {
+        ""
+    } else {
+        corpse_name
+    };
+    let mut obj = Object::new(
+        NOTHING,
+        format!("corpse {}", who),
+        format!("the {}corpse of {}", adjective, who),
+    );
+    obj.description = format!("The {}corpse of {} is lying here.", adjective, who);
     obj.obj_type = ObjectType::Container;
     obj.timer = 60;
     obj.values = [0, 0, 0, 1];
@@ -1992,5 +1996,55 @@ fn mudlog(g: &mut GameState, line: &str, min_level: u8) {
         .collect();
     for id in imms {
         g.send_to_char(id, &formatted);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+
+    fn player_in_room(g: &mut GameState, name: &str, room: RoomRnum) -> CharId {
+        let ch = g.create_char(Character::new_player(
+            name.to_string(),
+            Class::Warrior,
+            Race::Human,
+        ));
+        g.char_to_room(ch, room);
+        ch
+    }
+
+    fn weather_corpse_descriptions(wtype: usize) -> (String, String) {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Outside".to_string(),
+            "A weather test room.".to_string(),
+        ));
+        let ch = player_in_room(&mut g, "Stormvictim", room);
+
+        weather_die(&mut g, ch, wtype);
+
+        let corpse = *g.rooms[room].contents.first().expect("weather corpse");
+        let obj = g.get_obj(corpse).unwrap();
+        (obj.short_description.clone(), obj.description.clone())
+    }
+
+    #[test]
+    fn weather_corpse_uses_storm_adjective() {
+        let (short, desc) = weather_corpse_descriptions(WEATHER_FIRESTORM);
+
+        assert_eq!(short, "the burnt crispy corpse of Stormvictim");
+        assert_eq!(desc, "The burnt crispy corpse of Stormvictim is lying here.");
+    }
+
+    #[test]
+    fn weather_corpse_skips_blank_adjective_entries() {
+        let (short, desc) = weather_corpse_descriptions(WEATHER_RAINSTORM);
+
+        assert_eq!(short, "the corpse of Stormvictim");
+        assert_eq!(desc, "The corpse of Stormvictim is lying here.");
     }
 }
