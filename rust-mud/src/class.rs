@@ -197,9 +197,9 @@ pub fn find_class_bitvector(arg: char) -> i64 {
 // ---------------------------------------------------------------------------
 pub static PRAC_PARAMS: [[i32; NUM_CLASSES]; 4] = [
     /* MAG  CLE  THE  WAR  ART */
-    [95, 95, 85, 80, 90],          // learned level
-    [100, 100, 12, 12, 40],        // max per prac
-    [25, 25, 0, 0, 10],            // min per prac
+    [95, 95, 85, 80, 90],                // learned level
+    [100, 100, 12, 12, 40],              // max per prac
+    [25, 25, 0, 0, 10],                  // min per prac
     [SPELL, SPELL, SKILL, SKILL, SKILL], // prac name
 ];
 
@@ -276,16 +276,31 @@ pub fn guild_ok(class: Class, is_npc: bool, room_vnum: RoomVnum, scmd: i32) -> b
 // Per-class THAC0 at level 1, and the levels-per-point-improvement, matching the
 // shape of CircleMUD's stock table. THAC0 floors at 1 (you can always miss).
 struct Thac0Curve {
-    base: i32,          // THAC0 at level 1
+    base: i32,             // THAC0 at level 1
     levels_per_point: i32, // every N levels, THAC0 drops by 1
 }
 
 const THAC0_CURVES: [Thac0Curve; NUM_CLASSES] = [
-    /* MAG */ Thac0Curve { base: 20, levels_per_point: 3 },
-    /* CLE */ Thac0Curve { base: 20, levels_per_point: 3 },
-    /* THE */ Thac0Curve { base: 20, levels_per_point: 2 },
-    /* WAR */ Thac0Curve { base: 20, levels_per_point: 1 },
-    /* ART */ Thac0Curve { base: 20, levels_per_point: 3 },
+    /* MAG */ Thac0Curve {
+        base: 20,
+        levels_per_point: 3,
+    },
+    /* CLE */ Thac0Curve {
+        base: 20,
+        levels_per_point: 3,
+    },
+    /* THE */ Thac0Curve {
+        base: 20,
+        levels_per_point: 2,
+    },
+    /* WAR */ Thac0Curve {
+        base: 20,
+        levels_per_point: 1,
+    },
+    /* ART */ Thac0Curve {
+        base: 20,
+        levels_per_point: 3,
+    },
 ];
 
 /// `thaco(class, level)` — To-Hit-Armor-Class-0 for a class/level. Lower is
@@ -325,7 +340,8 @@ pub const NUM_SAVES: usize = 5;
 // magic; warriors save better against physical. Floors at 0 (auto-save).
 const SAVE_CURVES: [[(i32, i32); NUM_SAVES]; NUM_CLASSES] = [
     // (base, levels_per_point) for [PARA, ROD, PETRI, BREATH, SPELL]
-    /* MAG */ [(70, 3), (55, 3), (65, 3), (75, 3), (50, 3)],
+    /* MAG */
+    [(70, 3), (55, 3), (65, 3), (75, 3), (50, 3)],
     /* CLE */ [(60, 3), (70, 3), (65, 3), (75, 3), (55, 3)],
     /* THE */ [(65, 3), (62, 3), (55, 3), (68, 3), (64, 3)],
     /* WAR */ [(70, 4), (72, 4), (60, 4), (62, 4), (75, 4)],
@@ -342,7 +358,11 @@ pub fn saving_throws(class: i32, save_type: usize, level: i32) -> i32 {
     } else {
         CLASS_WARRIOR as usize
     };
-    let sidx = if save_type < NUM_SAVES { save_type } else { SAVING_PARA };
+    let sidx = if save_type < NUM_SAVES {
+        save_type
+    } else {
+        SAVING_PARA
+    };
     let (base, per) = SAVE_CURVES[cidx][sidx];
     let lvl = level.max(0);
     (base - (lvl / per)).max(0)
@@ -361,8 +381,16 @@ pub fn saving_throws(class: i32, save_type: usize, level: i32) -> i32 {
 type TitleBand = (u8, &'static str, &'static str);
 
 const TITLES_MAGE: &[TitleBand] = &[
-    (LVL_IMMORT, "the Immortal Warlock", "the Immortal Enchantress"),
-    (81, "the Demi-God of the Arts", "the Demi-Goddess of the Arts"),
+    (
+        LVL_IMMORT,
+        "the Immortal Warlock",
+        "the Immortal Enchantress",
+    ),
+    (
+        81,
+        "the Demi-God of the Arts",
+        "the Demi-Goddess of the Arts",
+    ),
     (61, "the Arch-Mage", "the Arch-Mage"),
     (41, "the Warlock", "the Witch"),
     (31, "the Sorcerer", "the Sorceress"),
@@ -374,8 +402,16 @@ const TITLES_MAGE: &[TitleBand] = &[
 ];
 
 const TITLES_CLERIC: &[TitleBand] = &[
-    (LVL_IMMORT, "the Immortal Cardinal", "the Immortal Priestess"),
-    (81, "the Demi-God of the Cloth", "the Demi-Goddess of the Cloth"),
+    (
+        LVL_IMMORT,
+        "the Immortal Cardinal",
+        "the Immortal Priestess",
+    ),
+    (
+        81,
+        "the Demi-God of the Cloth",
+        "the Demi-Goddess of the Cloth",
+    ),
     (61, "the Highpriest", "the Highpriestess"),
     (41, "the Cardinal", "the Cardinal"),
     (31, "the Canon", "the Canon"),
@@ -413,8 +449,16 @@ const TITLES_WARRIOR: &[TitleBand] = &[
 ];
 
 const TITLES_ARTISAN: &[TitleBand] = &[
-    (LVL_IMMORT, "the Immortal Artificer", "the Immortal Artificer"),
-    (81, "the Demi-God of the Craft", "the Demi-Goddess of the Craft"),
+    (
+        LVL_IMMORT,
+        "the Immortal Artificer",
+        "the Immortal Artificer",
+    ),
+    (
+        81,
+        "the Demi-God of the Craft",
+        "the Demi-Goddess of the Craft",
+    ),
     (61, "the Master Artisan", "the Master Artisan"),
     (41, "the Artisan", "the Artisan"),
     (31, "the Craftsman", "the Craftswoman"),
@@ -594,11 +638,11 @@ pub fn backstab_mult(level: i32) -> i32 {
 // ---------------------------------------------------------------------------
 
 // ITEM_ANTI_* extra flags (structs.h). Bit positions match the C #defines.
-const ITEM_ANTI_MAGIC_USER: i64 = 1 << 4;
-const ITEM_ANTI_CLERIC: i64 = 1 << 5;
-const ITEM_ANTI_THIEF: i64 = 1 << 6;
-const ITEM_ANTI_WARRIOR: i64 = 1 << 7;
-const ITEM_ANTI_ARTISAN: i64 = 1 << 18;
+const ITEM_ANTI_MAGIC_USER: i64 = 1 << 12;
+const ITEM_ANTI_CLERIC: i64 = 1 << 13;
+const ITEM_ANTI_THIEF: i64 = 1 << 14;
+const ITEM_ANTI_WARRIOR: i64 = 1 << 15;
+const ITEM_ANTI_ARTISAN: i64 = 1 << 17;
 
 /// `invalid_class(class, obj_extra_flags)` — `true` if an object with the given
 /// extra-flag bitvector is anti-`class` (the wearer can't use it). Mirrors

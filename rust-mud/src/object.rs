@@ -122,6 +122,7 @@ bitflags::bitflags! {
         const ANTI_THIEF = 1 << 14;
         const ANTI_WARRIOR = 1 << 15;
         const NO_SELL = 1 << 16;
+        const ANTI_ARTISAN = 1 << 17;
     }
 }
 

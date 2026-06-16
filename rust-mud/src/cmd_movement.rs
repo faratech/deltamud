@@ -22,8 +22,8 @@ use crate::flags::*;
 use crate::handler::isname;
 use crate::interpreter::{one_argument, search_block};
 use crate::object::{ObjLoc, ObjectType};
-use crate::room::{EX_CLOSED, EX_HIDDEN, EX_ISDOOR, EX_LOCKED, EX_PICKPROOF};
 use crate::room::{RoomFlags, SectorType};
+use crate::room::{EX_CLOSED, EX_HIDDEN, EX_ISDOOR, EX_LOCKED, EX_PICKPROOF};
 use crate::state::GameState;
 use crate::types::*;
 
@@ -87,7 +87,9 @@ const FLAGS_DOOR: [i32; 6] = [
 /// True if the room at `rnum` carries ROOM_ATRIUM (raw bit; the named RoomFlags
 /// variant for this bit is NO_SUMMON, hence the raw test).
 fn room_is_atrium(g: &GameState, rnum: RoomRnum) -> bool {
-    g.room_opt(rnum).map(|r| r.room_flags.bits() & ROOM_ATRIUM != 0).unwrap_or(false)
+    g.room_opt(rnum)
+        .map(|r| r.room_flags.bits() & ROOM_ATRIUM != 0)
+        .unwrap_or(false)
 }
 
 fn has_boat(g: &GameState, ch: CharId) -> bool {
@@ -102,18 +104,13 @@ fn has_boat(g: &GameState, ch: CharId) -> bool {
     let mut boats: Vec<ObjId> = c.carrying.clone();
     boats.extend(c.equipment.iter().flatten().copied());
     for oid in boats {
-        if g.get_obj(oid).map(|o| o.obj_type == ObjectType::Other && is_boat(o)).unwrap_or(false) {
+        if g.get_obj(oid)
+            .map(|o| o.obj_type == ObjectType::Boat)
+            .unwrap_or(false)
+        {
             return true;
         }
     }
-    false
-}
-
-// The Rust ObjectType enum has no Boat variant; DeltaMUD's ITEM_BOAT is type
-// 22. Detect it via the prototype value if it lands as `Other`. Without the
-// numeric type we cannot tell, so this is a best-effort no-op stub returning
-// false — boats then fall back to AFF_WATERWALK / immortal. (See notes.)
-fn is_boat(_o: &crate::object::Object) -> bool {
     false
 }
 
@@ -156,7 +153,10 @@ pub fn perform_move(g: &mut GameState, ch: CharId, dir: i32, need_specials_check
     }
 
     // No followers: just move.
-    let followers = g.get_char(ch).map(|c| c.followers.clone()).unwrap_or_default();
+    let followers = g
+        .get_char(ch)
+        .map(|c| c.followers.clone())
+        .unwrap_or_default();
     if followers.is_empty() {
         return do_simple_move(g, ch, dir, need_specials_check);
     }
@@ -172,7 +172,15 @@ pub fn perform_move(g: &mut GameState, ch: CharId, dir: i32, need_specials_check
             None => continue,
         };
         if krnum == Some(was_in) && kpos >= Position::Standing {
-            act(g, "You follow $N.", false, k, None, ActArg::Char(ch), To::Char);
+            act(
+                g,
+                "You follow $N.",
+                false,
+                k,
+                None,
+                ActArg::Char(ch),
+                To::Char,
+            );
             perform_move(g, k, dir as i32, true);
         }
     }
@@ -198,7 +206,14 @@ fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check
 
     // Mount state (RIDING/RIDDEN_BY). same_room: the mount/rider shares our room.
     let (aff, master, is_npc, level, riding, ridden_by) = match g.get_char(ch) {
-        Some(c) => (c.affect_flags, c.master, c.is_npc, c.player.level, c.riding, c.ridden_by),
+        Some(c) => (
+            c.affect_flags,
+            c.master,
+            c.is_npc,
+            c.player.level,
+            c.riding,
+            c.ridden_by,
+        ),
         None => return false,
     };
     let same_room = if let Some(m) = riding {
@@ -220,14 +235,25 @@ fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check
             let same = g.get_char(m).and_then(|c| c.in_room) == Some(rnum);
             if same {
                 g.send_to_char(ch, "The thought of leaving your master makes you weep.\r\n");
-                act(g, "$n bursts into tears.", false, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n bursts into tears.",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 return false;
             }
         }
     }
 
     if aff & AFF_CHAINED != 0 {
-        g.send_to_char(ch, "You try to move but find your feet are chained together!\r\n");
+        g.send_to_char(
+            ch,
+            "You try to move but find your feet are chained together!\r\n",
+        );
         return false;
     }
 
@@ -245,7 +271,10 @@ fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check
 
     // Movement cost: avg of source & destination sector loss; doubled in snow.
     let loss = |s: SectorType| {
-        constants::MOVEMENT_LOSS.get(s as usize).copied().unwrap_or(1)
+        constants::MOVEMENT_LOSS
+            .get(s as usize)
+            .copied()
+            .unwrap_or(1)
     };
     let mut need_movement = (loss(from_sect) + loss(to_sect)) / 2;
     if g.room(to_rnum).snow > 0 {
@@ -258,9 +287,33 @@ fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check
     if let Some(mount) = riding {
         let ride_skill = g.get_char(ch).map(|c| c.skill(SKILL_RIDING)).unwrap_or(0) as i32;
         if ride_skill < g.rng.number(1, 91) - g.rng.number(-4, need_movement) {
-            act(g, "$N rears backwards, throwing you to the ground.", false, ch, None, ActArg::Char(mount), To::Char);
-            act(g, "You rear backwards, throwing $n to the ground.", false, ch, None, ActArg::Char(mount), To::Vict);
-            act(g, "$N rears backwards, throwing $n to the ground.", false, ch, None, ActArg::Char(mount), To::NotVict);
+            act(
+                g,
+                "$N rears backwards, throwing you to the ground.",
+                false,
+                ch,
+                None,
+                ActArg::Char(mount),
+                To::Char,
+            );
+            act(
+                g,
+                "You rear backwards, throwing $n to the ground.",
+                false,
+                ch,
+                None,
+                ActArg::Char(mount),
+                To::Vict,
+            );
+            act(
+                g,
+                "$N rears backwards, throwing $n to the ground.",
+                false,
+                ch,
+                None,
+                ActArg::Char(mount),
+                To::NotVict,
+            );
             dismount_char(g, ch);
             let d = g.rng.dice(1, 6);
             crate::combat::damage(g, ch, ch, d);
@@ -285,12 +338,17 @@ fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check
     }
 
     // Tunnel rooms: no room while mounted; otherwise hold a single PC.
-    if (riding.is_some() || ridden_by.is_some()) && g.room(to_rnum).room_flags.contains(RoomFlags::TUNNEL) {
+    if (riding.is_some() || ridden_by.is_some())
+        && g.room(to_rnum).room_flags.contains(RoomFlags::TUNNEL)
+    {
         g.send_to_char(ch, "There isn't enough room there, while mounted.\r\n");
         return false;
     }
     if g.room(to_rnum).room_flags.contains(RoomFlags::TUNNEL) && num_pc_in_room(g, to_rnum) > 1 {
-        g.send_to_char(ch, "There isn't enough room there for more than one person!\r\n");
+        g.send_to_char(
+            ch,
+            "There isn't enough room there for more than one person!\r\n",
+        );
         return false;
     }
 
@@ -323,7 +381,10 @@ fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check
 
     // Deduct movement: an unmounted mortal pays from self; a rider's mount pays;
     // a ridden mob's rider pays (C: PRF2_INTANGIBLE-exempt, immortals exempt).
-    let intangible = g.get_char(ch).map(|c| c.prf2_flags & PRF2_INTANGIBLE != 0).unwrap_or(false);
+    let intangible = g
+        .get_char(ch)
+        .map(|c| c.prf2_flags & PRF2_INTANGIBLE != 0)
+        .unwrap_or(false);
     if !is_imm && !intangible && !is_npc && riding.is_none() && ridden_by.is_none() {
         if let Some(c) = g.get_char_mut(ch) {
             c.points.move_points -= need_movement;
@@ -339,8 +400,16 @@ fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check
     }
 
     // Leave broadcast. When riding, "$n rides $N <dir>" (unless either sneaks).
-    let mount_sneak = riding.map(|m| g.get_char(m).map(|c| c.affect_flags & AFF_SNEAK != 0).unwrap_or(false));
-    let rider_sneak = ridden_by.map(|r| g.get_char(r).map(|c| c.affect_flags & AFF_SNEAK != 0).unwrap_or(false));
+    let mount_sneak = riding.map(|m| {
+        g.get_char(m)
+            .map(|c| c.affect_flags & AFF_SNEAK != 0)
+            .unwrap_or(false)
+    });
+    let rider_sneak = ridden_by.map(|r| {
+        g.get_char(r)
+            .map(|c| c.affect_flags & AFF_SNEAK != 0)
+            .unwrap_or(false)
+    });
     if let Some(mount) = riding {
         if !mount_sneak.unwrap_or(false) {
             if aff & AFF_SNEAK != 0 {
@@ -471,7 +540,13 @@ enum DoorTarget {
 }
 
 /// find_door: locate an exit door by keyword and/or direction (act.movement.c).
-fn find_door(g: &mut GameState, ch: CharId, dtype: &str, dir: &str, cmdname: &str) -> Option<usize> {
+fn find_door(
+    g: &mut GameState,
+    ch: CharId,
+    dtype: &str,
+    dir: &str,
+    cmdname: &str,
+) -> Option<usize> {
     let rnum = g.get_char(ch).and_then(|c| c.in_room)?;
     if !dir.is_empty() {
         // A direction was specified.
@@ -496,7 +571,10 @@ fn find_door(g: &mut GameState, ch: CharId, dtype: &str, dir: &str, cmdname: &st
                 None => Some(door),
             },
             None => {
-                g.send_to_char(ch, "I really don't see how you can close anything there.\r\n");
+                g.send_to_char(
+                    ch,
+                    "I really don't see how you can close anything there.\r\n",
+                );
                 None
             }
         }
@@ -620,13 +698,10 @@ fn do_doorcmd(g: &mut GameState, ch: CharId, target: &DoorTarget, scmd: i32) {
             if let Some(other_rnum) = g.real_room(to_vnum) {
                 let back_dir = REV_DIR[*door];
                 // Does the reverse exit on the far side point back to us?
-                let back_to = g
-                    .room(other_rnum)
-                    .exits[back_dir]
+                let back_to = g.room(other_rnum).exits[back_dir]
                     .as_ref()
                     .map(|e| e.to_room);
-                let back_points_here =
-                    back_to.and_then(|v| g.real_room(v)) == Some(rnum);
+                let back_points_here = back_to.and_then(|v| g.real_room(v)) == Some(rnum);
                 if back_points_here {
                     other = Some((other_rnum, back_dir));
                 }
@@ -691,9 +766,7 @@ fn do_doorcmd(g: &mut GameState, ch: CharId, target: &DoorTarget, scmd: i32) {
             }
         }
         DoorTarget::Door(door) => {
-            let kw = g
-                .room(rnum)
-                .exits[*door]
+            let kw = g.room(rnum).exits[*door]
                 .as_ref()
                 .and_then(|e| e.keyword.clone());
             match kw {
@@ -713,14 +786,18 @@ fn do_doorcmd(g: &mut GameState, ch: CharId, target: &DoorTarget, scmd: i32) {
     if scmd == SCMD_OPEN || scmd == SCMD_CLOSE {
         if let (DoorTarget::Door(door), Some((other_rnum, back_dir))) = (target, other) {
             let _ = door;
-            let back_kw = g
-                .room(other_rnum)
-                .exits[back_dir]
+            let back_kw = g.room(other_rnum).exits[back_dir]
                 .as_ref()
                 .and_then(|e| e.keyword.clone());
-            let name = back_kw.as_deref().map(fname).unwrap_or_else(|| "door".to_string());
+            let name = back_kw
+                .as_deref()
+                .map(fname)
+                .unwrap_or_else(|| "door".to_string());
             let suffix = if scmd == SCMD_CLOSE { "d" } else { "ed" };
-            let msg = format!("The {} is {}{} from the other side.\r\n", name, verb, suffix);
+            let msg = format!(
+                "The {} is {}{} from the other side.\r\n",
+                name, verb, suffix
+            );
             let people = g.room(other_rnum).people.clone();
             for pid in people {
                 g.send_to_char(pid, &msg);
@@ -804,7 +881,10 @@ pub fn do_gen_door(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
     // generic_find FIND_OBJ_INV | FIND_OBJ_ROOM: look for a container object
     // first (inventory, then room).
     let mut target: Option<DoorTarget> = None;
-    let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let inv = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     if let Some(o) = g.get_obj_in_list_vis(ch, &dtype, &inv) {
         target = Some(DoorTarget::Obj(o));
     } else if let Some(rnum) = g.get_char(ch).and_then(|c| c.in_room) {
@@ -835,7 +915,15 @@ pub fn do_gen_door(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
 
     if !door_is_openable(g, &target, ch, rnum) {
         let verb = CMD_DOOR[subcmd as usize].to_string();
-        act(g, "You can't $F that!", false, ch, None, ActArg::Str(verb), To::Char);
+        act(
+            g,
+            "You can't $F that!",
+            false,
+            ch,
+            None,
+            ActArg::Str(verb),
+            To::Char,
+        );
     } else if door_is_open(g, &target, ch, rnum) && (flags & NEED_OPEN) != 0 {
         g.send_to_char(ch, "But it's already closed!\r\n");
     } else if !door_is_open(g, &target, ch, rnum) && (flags & NEED_CLOSED) != 0 {
@@ -849,7 +937,13 @@ pub fn do_gen_door(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
         && (subcmd == SCMD_LOCK || subcmd == SCMD_UNLOCK)
     {
         g.send_to_char(ch, "You don't seem to have the proper key.\r\n");
-    } else if ok_pick(g, ch, keynum, door_is_pickproof(g, &target, ch, rnum), subcmd) {
+    } else if ok_pick(
+        g,
+        ch,
+        keynum,
+        door_is_pickproof(g, &target, ch, rnum),
+        subcmd,
+    ) {
         do_doorcmd(g, ch, &target, subcmd);
     }
 }
@@ -867,7 +961,10 @@ pub fn do_gen_door(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
 // relocate path below is fully wired and fires the moment a link is populated.
 
 pub fn do_enter(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    let toroom = g.get_char(ch).and_then(|c| c.in_room).and_then(|r| g.room(r).linkrnum);
+    let toroom = g
+        .get_char(ch)
+        .and_then(|c| c.in_room)
+        .and_then(|r| g.room(r).linkrnum);
     let toroom = match toroom {
         Some(r) => r,
         None => {
@@ -875,7 +972,15 @@ pub fn do_enter(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
             return;
         }
     };
-    act(g, "$n ventures into the city.", true, ch, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n ventures into the city.",
+        true,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
     g.send_to_char(ch, "You venture into the city.\r\n");
     g.char_from_room(ch);
     g.char_to_room(ch, toroom);
@@ -886,7 +991,10 @@ pub fn do_enter(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
 }
 
 pub fn do_leave(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    let toroom = g.get_char(ch).and_then(|c| c.in_room).and_then(|r| g.room(r).linkmapnum);
+    let toroom = g
+        .get_char(ch)
+        .and_then(|c| c.in_room)
+        .and_then(|r| g.room(r).linkmapnum);
     let toroom = match toroom {
         Some(r) => r,
         None => {
@@ -894,7 +1002,15 @@ pub fn do_leave(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
             return;
         }
     };
-    act(g, "$n leaves the city.", true, ch, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n leaves the city.",
+        true,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
     g.send_to_char(ch, "You leave the city.\r\n");
     g.char_from_room(ch);
     g.char_to_room(ch, toroom);
@@ -922,7 +1038,12 @@ pub fn special_exit_command(g: &mut GameState, ch: CharId, cmd: &str) -> bool {
         Some(r) => r,
         None => return false,
     };
-    let ex_name = match g.room(rnum).special_exit.as_ref().and_then(|se| se.ex_name.clone()) {
+    let ex_name = match g
+        .room(rnum)
+        .special_exit
+        .as_ref()
+        .and_then(|se| se.ex_name.clone())
+    {
         Some(n) if !n.is_empty() => n,
         _ => return false,
     };
@@ -946,7 +1067,10 @@ fn perform_special_move(g: &mut GameState, ch: CharId, _need_specials_check: boo
         Some(r) => r,
         None => return false,
     };
-    if g.get_char(ch).map(|c| c.fighting.is_some()).unwrap_or(false) {
+    if g.get_char(ch)
+        .map(|c| c.fighting.is_some())
+        .unwrap_or(false)
+    {
         return false;
     }
     let se = match g.room(rnum).special_exit.clone() {
@@ -972,7 +1096,10 @@ fn perform_special_move(g: &mut GameState, ch: CharId, _need_specials_check: boo
         return false;
     }
 
-    let followers = g.get_char(ch).map(|c| c.followers.clone()).unwrap_or_default();
+    let followers = g
+        .get_char(ch)
+        .map(|c| c.followers.clone())
+        .unwrap_or_default();
     if followers.is_empty() {
         return do_special_move(g, ch);
     }
@@ -987,7 +1114,15 @@ fn perform_special_move(g: &mut GameState, ch: CharId, _need_specials_check: boo
             None => continue,
         };
         if krnum == Some(was_in) && kpos >= Position::Standing {
-            act(g, "You follow $N.", false, k, None, ActArg::Char(ch), To::Char);
+            act(
+                g,
+                "You follow $N.",
+                false,
+                k,
+                None,
+                ActArg::Char(ch),
+                To::Char,
+            );
             perform_special_move(g, k, true);
         }
     }
@@ -1012,7 +1147,14 @@ fn do_special_move(g: &mut GameState, ch: CharId) -> bool {
     };
 
     let (aff, master, is_npc, level, riding, ridden_by) = match g.get_char(ch) {
-        Some(c) => (c.affect_flags, c.master, c.is_npc, c.player.level, c.riding, c.ridden_by),
+        Some(c) => (
+            c.affect_flags,
+            c.master,
+            c.is_npc,
+            c.player.level,
+            c.riding,
+            c.ridden_by,
+        ),
         None => return false,
     };
 
@@ -1020,24 +1162,42 @@ fn do_special_move(g: &mut GameState, ch: CharId) -> bool {
         if let Some(m) = master {
             if g.get_char(m).and_then(|c| c.in_room) == Some(rnum) {
                 g.send_to_char(ch, "The thought of leaving your master makes you weep.\r\n");
-                act(g, "$n bursts into tears.", false, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n bursts into tears.",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 return false;
             }
         }
     }
     if aff & AFF_CHAINED != 0 {
-        g.send_to_char(ch, "You try to move but find your feet are chained together!\r\n");
+        g.send_to_char(
+            ch,
+            "You try to move but find your feet are chained together!\r\n",
+        );
         return false;
     }
 
     let from_sect = g.room(rnum).sector_type;
     let to_sect = g.room(to_rnum).sector_type;
-    if (from_sect == SectorType::WaterNoSwim || to_sect == SectorType::WaterNoSwim) && !has_boat(g, ch) {
+    if (from_sect == SectorType::WaterNoSwim || to_sect == SectorType::WaterNoSwim)
+        && !has_boat(g, ch)
+    {
         g.send_to_char(ch, "You need a boat to go there.\r\n");
         return false;
     }
 
-    let loss = |s: SectorType| constants::MOVEMENT_LOSS.get(s as usize).copied().unwrap_or(1);
+    let loss = |s: SectorType| {
+        constants::MOVEMENT_LOSS
+            .get(s as usize)
+            .copied()
+            .unwrap_or(1)
+    };
     let need_movement = (loss(from_sect) + loss(to_sect)) / 2;
 
     let is_imm = !is_npc && (level as u8) >= LVL_IMMORT;
@@ -1062,12 +1222,17 @@ fn do_special_move(g: &mut GameState, ch: CharId) -> bool {
         g.send_to_char(ch, "That's private property -- no trespassing!\r\n");
         return false;
     }
-    if (riding.is_some() || ridden_by.is_some()) && g.room(to_rnum).room_flags.contains(RoomFlags::TUNNEL) {
+    if (riding.is_some() || ridden_by.is_some())
+        && g.room(to_rnum).room_flags.contains(RoomFlags::TUNNEL)
+    {
         g.send_to_char(ch, "There isn't enough room there, while mounted.\r\n");
         return false;
     }
     if g.room(to_rnum).room_flags.contains(RoomFlags::TUNNEL) && num_pc_in_room(g, to_rnum) > 1 {
-        g.send_to_char(ch, "There isn't enough room there for more than one person!\r\n");
+        g.send_to_char(
+            ch,
+            "There isn't enough room there for more than one person!\r\n",
+        );
         return false;
     }
     if (level as u8) < LVL_GRGOD && g.room(to_rnum).room_flags.contains(RoomFlags::GODROOM) {
@@ -1075,7 +1240,10 @@ fn do_special_move(g: &mut GameState, ch: CharId) -> bool {
         return false;
     }
 
-    let intangible = g.get_char(ch).map(|c| c.prf2_flags & PRF2_INTANGIBLE != 0).unwrap_or(false);
+    let intangible = g
+        .get_char(ch)
+        .map(|c| c.prf2_flags & PRF2_INTANGIBLE != 0)
+        .unwrap_or(false);
     if !is_imm && !intangible && !is_npc {
         if let Some(c) = g.get_char_mut(ch) {
             c.points.move_points -= need_movement;
@@ -1114,39 +1282,122 @@ fn do_special_move(g: &mut GameState, ch: CharId) -> bool {
 // ---------------------------------------------------------------------------
 
 pub fn do_stand(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    match g.get_char(ch).map(|c| c.position).unwrap_or(Position::Standing) {
+    match g
+        .get_char(ch)
+        .map(|c| c.position)
+        .unwrap_or(Position::Standing)
+    {
         Position::Standing => {
-            act(g, "You are already standing.", false, ch, None, ActArg::None, To::Char);
+            act(
+                g,
+                "You are already standing.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
         }
         Position::Sitting => {
             act(g, "You stand up.", false, ch, None, ActArg::None, To::Char);
-            act(g, "$n clambers to $s feet.", true, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n clambers to $s feet.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             set_pos(g, ch, Position::Standing);
         }
         Position::Resting => {
-            act(g, "You stop resting, and stand up.", false, ch, None, ActArg::None, To::Char);
-            act(g, "$n stops resting, and clambers on $s feet.", true, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "You stop resting, and stand up.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
+            act(
+                g,
+                "$n stops resting, and clambers on $s feet.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             set_pos(g, ch, Position::Standing);
         }
         Position::Meditating => {
-            act(g, "You stop meditating, and stand up.", false, ch, None, ActArg::None, To::Char);
-            act(g, "$n stops meditating, and clambers on $s feet.", true, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "You stop meditating, and stand up.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
+            act(
+                g,
+                "$n stops meditating, and clambers on $s feet.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             set_pos(g, ch, Position::Standing);
         }
         Position::Sleeping => {
-            act(g, "You have to wake up first!", false, ch, None, ActArg::None, To::Char);
+            act(
+                g,
+                "You have to wake up first!",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
         }
         Position::Fighting => {
-            act(g, "Do you not consider fighting as standing?", false, ch, None, ActArg::None, To::Char);
+            act(
+                g,
+                "Do you not consider fighting as standing?",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
         }
-        Position::Stunned | Position::Incapacitated | Position::MortallyWounded | Position::Dead => {
-            act(g, "Stand up!? In your physical state!? HA!", false, ch, None, ActArg::None, To::Char);
+        Position::Stunned
+        | Position::Incapacitated
+        | Position::MortallyWounded
+        | Position::Dead => {
+            act(
+                g,
+                "Stand up!? In your physical state!? HA!",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
         }
     }
 }
 
 pub fn do_sit(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    match g.get_char(ch).map(|c| c.position).unwrap_or(Position::Standing) {
+    match g
+        .get_char(ch)
+        .map(|c| c.position)
+        .unwrap_or(Position::Standing)
+    {
         Position::Standing => {
             act(g, "You sit down.", false, ch, None, ActArg::None, To::Char);
             act(g, "$n sits down.", false, ch, None, ActArg::None, To::Room);
@@ -1156,84 +1407,276 @@ pub fn do_sit(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
             g.send_to_char(ch, "You're sitting already.\r\n");
         }
         Position::Resting => {
-            act(g, "You stop resting, and sit up.", false, ch, None, ActArg::None, To::Char);
-            act(g, "$n stops resting.", true, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "You stop resting, and sit up.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
+            act(
+                g,
+                "$n stops resting.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             set_pos(g, ch, Position::Sitting);
         }
         Position::Meditating => {
-            act(g, "You stop meditating, and open your eyes.", false, ch, None, ActArg::None, To::Char);
-            act(g, "$n stops meditating, and opens $s eyes.", true, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "You stop meditating, and open your eyes.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
+            act(
+                g,
+                "$n stops meditating, and opens $s eyes.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             set_pos(g, ch, Position::Sitting);
         }
         Position::Sleeping => {
-            act(g, "You have to wake up first.", false, ch, None, ActArg::None, To::Char);
+            act(
+                g,
+                "You have to wake up first.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
         }
         Position::Fighting => {
-            act(g, "Sit down while fighting? are you MAD?", false, ch, None, ActArg::None, To::Char);
+            act(
+                g,
+                "Sit down while fighting? are you MAD?",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
         }
         _ => {
-            act(g, "You stop floating around, and sit down.", false, ch, None, ActArg::None, To::Char);
-            act(g, "$n stops floating around, and sits down.", true, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "You stop floating around, and sit down.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
+            act(
+                g,
+                "$n stops floating around, and sits down.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             set_pos(g, ch, Position::Sitting);
         }
     }
 }
 
 pub fn do_rest(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    match g.get_char(ch).map(|c| c.position).unwrap_or(Position::Standing) {
+    match g
+        .get_char(ch)
+        .map(|c| c.position)
+        .unwrap_or(Position::Standing)
+    {
         Position::Standing => {
-            act(g, "You sit down and rest your tired bones.", false, ch, None, ActArg::None, To::Char);
-            act(g, "$n sits down and rests.", true, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "You sit down and rest your tired bones.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
+            act(
+                g,
+                "$n sits down and rests.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             set_pos(g, ch, Position::Resting);
         }
         Position::Sitting => {
-            act(g, "You rest your tired bones.", false, ch, None, ActArg::None, To::Char);
+            act(
+                g,
+                "You rest your tired bones.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
             act(g, "$n rests.", true, ch, None, ActArg::None, To::Room);
             set_pos(g, ch, Position::Resting);
         }
         Position::Resting => {
-            act(g, "You are already resting.", false, ch, None, ActArg::None, To::Char);
+            act(
+                g,
+                "You are already resting.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
         }
         Position::Meditating => {
-            act(g, "You stop meditating, and rest your tired bones.", false, ch, None, ActArg::None, To::Char);
-            act(g, "$n stops meditating, and rests.", true, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "You stop meditating, and rest your tired bones.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
+            act(
+                g,
+                "$n stops meditating, and rests.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             set_pos(g, ch, Position::Resting);
         }
         Position::Sleeping => {
-            act(g, "You have to wake up first.", false, ch, None, ActArg::None, To::Char);
+            act(
+                g,
+                "You have to wake up first.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
         }
         Position::Fighting => {
-            act(g, "Rest while fighting?  Are you MAD?", false, ch, None, ActArg::None, To::Char);
+            act(
+                g,
+                "Rest while fighting?  Are you MAD?",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
         }
         _ => {
-            act(g, "You stop floating around, and stop to rest your tired bones.", false, ch, None, ActArg::None, To::Char);
-            act(g, "$n stops floating around, and rests.", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "You stop floating around, and stop to rest your tired bones.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
+            act(
+                g,
+                "$n stops floating around, and rests.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             set_pos(g, ch, Position::Sitting);
         }
     }
 }
 
 pub fn do_sleep(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    match g.get_char(ch).map(|c| c.position).unwrap_or(Position::Standing) {
+    match g
+        .get_char(ch)
+        .map(|c| c.position)
+        .unwrap_or(Position::Standing)
+    {
         Position::Standing | Position::Sitting | Position::Resting => {
             g.send_to_char(ch, "You go to sleep.\r\n");
-            act(g, "$n lies down and falls asleep.", true, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n lies down and falls asleep.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             set_pos(g, ch, Position::Sleeping);
         }
         Position::Sleeping => {
             g.send_to_char(ch, "You are already sound asleep.\r\n");
         }
         Position::Meditating => {
-            act(g, "You stop meditating, and go to sleep.", false, ch, None, ActArg::None, To::Char);
-            act(g, "$n stops meditating, and goes to sleep.", true, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "You stop meditating, and go to sleep.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
+            act(
+                g,
+                "$n stops meditating, and goes to sleep.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             set_pos(g, ch, Position::Sleeping);
         }
         Position::Fighting => {
             g.send_to_char(ch, "Sleep while fighting?  Are you MAD?\r\n");
         }
         _ => {
-            act(g, "You stop floating around, and lie down to sleep.", false, ch, None, ActArg::None, To::Char);
-            act(g, "$n stops floating around, and lie down to sleep.", true, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "You stop floating around, and lie down to sleep.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
+            act(
+                g,
+                "$n stops floating around, and lie down to sleep.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             set_pos(g, ch, Position::Sleeping);
         }
     }
@@ -1256,10 +1699,22 @@ pub fn do_meditate(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         }
     }
 
-    match g.get_char(ch).map(|c| c.position).unwrap_or(Position::Standing) {
+    match g
+        .get_char(ch)
+        .map(|c| c.position)
+        .unwrap_or(Position::Standing)
+    {
         Position::Standing | Position::Sitting | Position::Resting => {
             g.send_to_char(ch, "You start to meditate.\r\n");
-            act(g, "$n sits down and starts to meditate.", true, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n sits down and starts to meditate.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             set_pos(g, ch, Position::Meditating);
         }
         Position::Sleeping => {
@@ -1273,8 +1728,24 @@ pub fn do_meditate(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
             g.send_to_char(ch, "Meditate while fighting?  Are you MAD?\r\n");
         }
         _ => {
-            act(g, "You stop floating around, and start to meditate.", false, ch, None, ActArg::None, To::Char);
-            act(g, "$n stops floating around, and starts to meditate.", true, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "You stop floating around, and start to meditate.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
+            act(
+                g,
+                "$n stops floating around, and starts to meditate.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             set_pos(g, ch, Position::Meditating);
         }
     }
@@ -1285,25 +1756,72 @@ pub fn do_wake(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let mut self_wake = false;
 
     if !word.is_empty() {
-        let my_pos = g.get_char(ch).map(|c| c.position).unwrap_or(Position::Standing);
+        let my_pos = g
+            .get_char(ch)
+            .map(|c| c.position)
+            .unwrap_or(Position::Standing);
         if my_pos == Position::Sleeping {
             g.send_to_char(ch, "Maybe you should wake yourself up first.\r\n");
         } else if let Some(vict) = g.get_char_room_vis(ch, &word) {
             if vict == ch {
                 self_wake = true;
             } else {
-                let vpos = g.get_char(vict).map(|c| c.position).unwrap_or(Position::Standing);
+                let vpos = g
+                    .get_char(vict)
+                    .map(|c| c.position)
+                    .unwrap_or(Position::Standing);
                 let vaff = g.get_char(vict).map(|c| c.affect_flags).unwrap_or(0);
                 if vpos > Position::Sleeping {
-                    act(g, "$E is already awake.", false, ch, None, ActArg::Char(vict), To::Char);
+                    act(
+                        g,
+                        "$E is already awake.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(vict),
+                        To::Char,
+                    );
                 } else if vaff & AFF_SLEEP != 0 {
-                    act(g, "You can't wake $M up!", false, ch, None, ActArg::Char(vict), To::Char);
+                    act(
+                        g,
+                        "You can't wake $M up!",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(vict),
+                        To::Char,
+                    );
                 } else if vpos < Position::Sleeping {
-                    act(g, "$E's in pretty bad shape!", false, ch, None, ActArg::Char(vict), To::Char);
+                    act(
+                        g,
+                        "$E's in pretty bad shape!",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(vict),
+                        To::Char,
+                    );
                 } else {
-                    act(g, "You wake $M up.", false, ch, None, ActArg::Char(vict), To::Char);
+                    act(
+                        g,
+                        "You wake $M up.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(vict),
+                        To::Char,
+                    );
                     // TO_VICT | TO_SLEEP: deliver even though they're asleep.
-                    crate::act::act_sleep(g, "You are awakened by $n.", false, ch, None, ActArg::Char(vict), To::Vict, true);
+                    crate::act::act_sleep(
+                        g,
+                        "You are awakened by $n.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(vict),
+                        To::Vict,
+                        true,
+                    );
                     set_pos(g, vict, Position::Sitting);
                 }
             }
@@ -1367,13 +1885,29 @@ pub fn do_follow(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
 
     if my_master == Some(leader) {
-        act(g, "You are already following $M.", false, ch, None, ActArg::Char(leader), To::Char);
+        act(
+            g,
+            "You are already following $M.",
+            false,
+            ch,
+            None,
+            ActArg::Char(leader),
+            To::Char,
+        );
         return;
     }
 
     if my_aff & AFF_CHARM != 0 && my_master.is_some() {
         let m = my_master.unwrap();
-        act(g, "But you only feel like following $N!", false, ch, None, ActArg::Char(m), To::Char);
+        act(
+            g,
+            "But you only feel like following $N!",
+            false,
+            ch,
+            None,
+            ActArg::Char(m),
+            To::Char,
+        );
         return;
     }
 
@@ -1386,7 +1920,15 @@ pub fn do_follow(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         stop_follower(g, ch);
     } else {
         if circle_follow(g, ch, leader) {
-            act(g, "Sorry, but following in loops is not allowed.", false, ch, None, ActArg::None, To::Char);
+            act(
+                g,
+                "Sorry, but following in loops is not allowed.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
             return;
         }
         if my_master.is_some() {
@@ -1425,11 +1967,35 @@ fn add_follower(g: &mut GameState, ch: CharId, leader: CharId) {
             l.followers.push(ch);
         }
     }
-    act(g, "You now follow $N.", false, ch, None, ActArg::Char(leader), To::Char);
+    act(
+        g,
+        "You now follow $N.",
+        false,
+        ch,
+        None,
+        ActArg::Char(leader),
+        To::Char,
+    );
     if g.can_see(leader, ch) {
-        act(g, "$n starts following you.", true, ch, None, ActArg::Char(leader), To::Vict);
+        act(
+            g,
+            "$n starts following you.",
+            true,
+            ch,
+            None,
+            ActArg::Char(leader),
+            To::Vict,
+        );
     }
-    act(g, "$n starts to follow $N.", true, ch, None, ActArg::Char(leader), To::NotVict);
+    act(
+        g,
+        "$n starts to follow $N.",
+        true,
+        ch,
+        None,
+        ActArg::Char(leader),
+        To::NotVict,
+    );
 }
 
 /// stop_follower: break ch's follow link and announce (CircleMUD stop_follower).
@@ -1438,16 +2004,67 @@ fn stop_follower(g: &mut GameState, ch: CharId) {
         Some(m) => m,
         None => return,
     };
-    let charmed = g.get_char(ch).map(|c| c.affect_flags & AFF_CHARM != 0).unwrap_or(false);
+    let charmed = g
+        .get_char(ch)
+        .map(|c| c.affect_flags & AFF_CHARM != 0)
+        .unwrap_or(false);
 
     if charmed {
-        act(g, "You realize that $N is a jerk!", false, ch, None, ActArg::Char(master), To::Char);
-        act(g, "$n realizes that $N is a jerk!", false, ch, None, ActArg::Char(master), To::NotVict);
-        act(g, "$n hates your guts!", false, ch, None, ActArg::Char(master), To::Vict);
+        act(
+            g,
+            "You realize that $N is a jerk!",
+            false,
+            ch,
+            None,
+            ActArg::Char(master),
+            To::Char,
+        );
+        act(
+            g,
+            "$n realizes that $N is a jerk!",
+            false,
+            ch,
+            None,
+            ActArg::Char(master),
+            To::NotVict,
+        );
+        act(
+            g,
+            "$n hates your guts!",
+            false,
+            ch,
+            None,
+            ActArg::Char(master),
+            To::Vict,
+        );
     } else {
-        act(g, "You stop following $N.", false, ch, None, ActArg::Char(master), To::Char);
-        act(g, "$n stops following $N.", true, ch, None, ActArg::Char(master), To::NotVict);
-        act(g, "$n stops following you.", true, ch, None, ActArg::Char(master), To::Vict);
+        act(
+            g,
+            "You stop following $N.",
+            false,
+            ch,
+            None,
+            ActArg::Char(master),
+            To::Char,
+        );
+        act(
+            g,
+            "$n stops following $N.",
+            true,
+            ch,
+            None,
+            ActArg::Char(master),
+            To::NotVict,
+        );
+        act(
+            g,
+            "$n stops following you.",
+            true,
+            ch,
+            None,
+            ActArg::Char(master),
+            To::Vict,
+        );
     }
 
     // Unlink from leader's follower list and clear master/group bit.
@@ -1515,7 +2132,11 @@ pub fn do_mount(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
     };
     let (v_is_npc, v_mountable, v_mounted) = match g.get_char(vict) {
-        Some(c) => (c.is_npc, c.act_flags & MOB_MOUNTABLE != 0, c.riding.is_some() || c.ridden_by.is_some()),
+        Some(c) => (
+            c.is_npc,
+            c.act_flags & MOB_MOUNTABLE != 0,
+            c.riding.is_some() || c.ridden_by.is_some(),
+        ),
         None => return,
     };
     if !v_is_npc {
@@ -1544,26 +2165,101 @@ pub fn do_mount(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
     if (skill as i32) <= g.rng.number(1, 101) {
-        act(g, "You try to mount $N, but slip and fall off.", false, ch, None, ActArg::Char(vict), To::Char);
-        act(g, "$n tries to mount you, but slips and falls off.", false, ch, None, ActArg::Char(vict), To::Vict);
-        act(g, "$n tries to mount $N, but slips and falls off.", true, ch, None, ActArg::Char(vict), To::NotVict);
+        act(
+            g,
+            "You try to mount $N, but slip and fall off.",
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Char,
+        );
+        act(
+            g,
+            "$n tries to mount you, but slips and falls off.",
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Vict,
+        );
+        act(
+            g,
+            "$n tries to mount $N, but slips and falls off.",
+            true,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::NotVict,
+        );
         let d = g.rng.dice(1, 2);
         crate::combat::damage(g, ch, ch, d);
         return;
     }
 
-    act(g, "You mount $N.", false, ch, None, ActArg::Char(vict), To::Char);
-    act(g, "$n mounts you.", false, ch, None, ActArg::Char(vict), To::Vict);
-    act(g, "$n mounts $N.", true, ch, None, ActArg::Char(vict), To::NotVict);
+    act(
+        g,
+        "You mount $N.",
+        false,
+        ch,
+        None,
+        ActArg::Char(vict),
+        To::Char,
+    );
+    act(
+        g,
+        "$n mounts you.",
+        false,
+        ch,
+        None,
+        ActArg::Char(vict),
+        To::Vict,
+    );
+    act(
+        g,
+        "$n mounts $N.",
+        true,
+        ch,
+        None,
+        ActArg::Char(vict),
+        To::NotVict,
+    );
     mount_char(g, ch, vict);
 
     // An untamed mob may buck a fresh rider (second skill roll).
-    let v_tamed = g.get_char(vict).map(|c| c.affect_flags & AFF_TAMED != 0).unwrap_or(false);
+    let v_tamed = g
+        .get_char(vict)
+        .map(|c| c.affect_flags & AFF_TAMED != 0)
+        .unwrap_or(false);
     let skill2 = g.get_char(ch).map(|c| c.skill(SKILL_MOUNT)).unwrap_or(0);
     if v_is_npc && !v_tamed && (skill2 as i32) <= g.rng.number(1, 101) {
-        act(g, "$N suddenly bucks upwards, throwing you violently to the ground!", false, ch, None, ActArg::Char(vict), To::Char);
-        act(g, "$n is thrown to the ground as $N violently bucks!", true, ch, None, ActArg::Char(vict), To::NotVict);
-        act(g, "You buck violently and throw $n to the ground.", false, ch, None, ActArg::Char(vict), To::Vict);
+        act(
+            g,
+            "$N suddenly bucks upwards, throwing you violently to the ground!",
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Char,
+        );
+        act(
+            g,
+            "$n is thrown to the ground as $N violently bucks!",
+            true,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::NotVict,
+        );
+        act(
+            g,
+            "You buck violently and throw $n to the ground.",
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Vict,
+        );
         dismount_char(g, ch);
         let d = g.rng.dice(1, 3);
         crate::combat::damage(g, vict, ch, d);
@@ -1589,9 +2285,33 @@ pub fn do_dismount(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         return;
     }
 
-    act(g, "You dismount $N.", false, ch, None, ActArg::Char(riding), To::Char);
-    act(g, "$n dismounts from you.", false, ch, None, ActArg::Char(riding), To::Vict);
-    act(g, "$n dismounts $N.", true, ch, None, ActArg::Char(riding), To::NotVict);
+    act(
+        g,
+        "You dismount $N.",
+        false,
+        ch,
+        None,
+        ActArg::Char(riding),
+        To::Char,
+    );
+    act(
+        g,
+        "$n dismounts from you.",
+        false,
+        ch,
+        None,
+        ActArg::Char(riding),
+        To::Vict,
+    );
+    act(
+        g,
+        "$n dismounts $N.",
+        true,
+        ch,
+        None,
+        ActArg::Char(riding),
+        To::NotVict,
+    );
     dismount_char(g, ch);
 }
 
@@ -1604,14 +2324,41 @@ pub fn do_buck(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
             return;
         }
     };
-    if g.get_char(ch).map(|c| c.affect_flags & AFF_TAMED != 0).unwrap_or(false) {
+    if g.get_char(ch)
+        .map(|c| c.affect_flags & AFF_TAMED != 0)
+        .unwrap_or(false)
+    {
         g.send_to_char(ch, "But you're tamed!\r\n");
         return;
     }
 
-    act(g, "You quickly buck, throwing $N to the ground.", false, ch, None, ActArg::Char(rider), To::Char);
-    act(g, "$n quickly bucks, throwing you to the ground.", false, ch, None, ActArg::Char(rider), To::Vict);
-    act(g, "$n quickly bucks, throwing $N to the ground.", false, ch, None, ActArg::Char(rider), To::NotVict);
+    act(
+        g,
+        "You quickly buck, throwing $N to the ground.",
+        false,
+        ch,
+        None,
+        ActArg::Char(rider),
+        To::Char,
+    );
+    act(
+        g,
+        "$n quickly bucks, throwing you to the ground.",
+        false,
+        ch,
+        None,
+        ActArg::Char(rider),
+        To::Vict,
+    );
+    act(
+        g,
+        "$n quickly bucks, throwing $N to the ground.",
+        false,
+        ch,
+        None,
+        ActArg::Char(rider),
+        To::NotVict,
+    );
     if let Some(r) = g.get_char_mut(rider) {
         r.position = Position::Sitting;
     }
@@ -1666,7 +2413,8 @@ pub fn do_tame(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     // tamed bit and recompute totals so AFF_TAMED lands on affect_flags.
     if let Some(c) = g.get_char_mut(vict) {
         // Replace any existing tame affect (same spell + APPLY_NONE).
-        c.affected.retain(|a| !(a.spell_type == SKILL_TAME as i32 && a.location == 0));
+        c.affected
+            .retain(|a| !(a.spell_type == SKILL_TAME as i32 && a.location == 0));
         c.affected.push(crate::character::Affect {
             spell_type: SKILL_TAME as i32,
             duration: 24,
@@ -1677,9 +2425,33 @@ pub fn do_tame(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         });
     }
     g.affect_total(vict);
-    act(g, "You tame $N. It will last 24 hours.", false, ch, None, ActArg::Char(vict), To::Char);
-    act(g, "$n tames you.", false, ch, None, ActArg::Char(vict), To::Vict);
-    act(g, "$n tames $N.", false, ch, None, ActArg::Char(vict), To::NotVict);
+    act(
+        g,
+        "You tame $N. It will last 24 hours.",
+        false,
+        ch,
+        None,
+        ActArg::Char(vict),
+        To::Char,
+    );
+    act(
+        g,
+        "$n tames you.",
+        false,
+        ch,
+        None,
+        ActArg::Char(vict),
+        To::Vict,
+    );
+    act(
+        g,
+        "$n tames $N.",
+        false,
+        ch,
+        None,
+        ActArg::Char(vict),
+        To::NotVict,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1699,7 +2471,12 @@ fn fname(namelist: &str) -> String {
 
 /// "a"/"an" article for a word (CircleMUD AN()).
 fn an(word: &str) -> &'static str {
-    let first = word.trim_start().chars().next().unwrap_or('x').to_ascii_lowercase();
+    let first = word
+        .trim_start()
+        .chars()
+        .next()
+        .unwrap_or('x')
+        .to_ascii_lowercase();
     if "aeiou".contains(first) {
         "an"
     } else {
@@ -1729,3 +2506,53 @@ const SKILL_TAME: u16 = 523;
 // MOB_MOUNTABLE is bit 20 in DeltaMUD's action_bits (constants::ACTION_BITS
 // index 20). Not a named const in flags.rs.
 const MOB_MOUNTABLE: i64 = 1 << 20;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::object::Object;
+    use crate::room::{Exit, Room};
+
+    fn movement_game() -> (GameState, CharId, RoomRnum, RoomRnum) {
+        let mut g = GameState::new(Config::default());
+        let from = g.add_room(Room::new(100, 0, "Dock".to_string(), "A dock.".to_string()));
+        let mut water_room = Room::new(101, 0, "Water".to_string(), "Open water.".to_string());
+        water_room.sector_type = SectorType::WaterNoSwim;
+        let to = g.add_room(water_room);
+        g.rooms[from].exits[NORTH] = Some(Exit {
+            description: None,
+            keyword: None,
+            exit_info: 0,
+            key: NOTHING,
+            to_room: 101,
+        });
+
+        let mut ch = Character::new_player("Sailor".to_string(), Class::Warrior, Race::Human);
+        ch.points.move_points = 80;
+        let ch = g.create_char(ch);
+        g.char_to_room(ch, from);
+        (g, ch, from, to)
+    }
+
+    #[test]
+    fn boat_object_allows_no_swim_water_movement() {
+        let (mut g, ch, _from, to) = movement_game();
+        let mut boat = Object::new(22, "boat".to_string(), "a small boat".to_string());
+        boat.obj_type = ObjectType::Boat;
+        let boat = g.create_obj(boat);
+        g.obj_to_char(boat, ch);
+
+        assert!(perform_move(&mut g, ch, NORTH as i32, false));
+        assert_eq!(g.get_char(ch).unwrap().in_room, Some(to));
+    }
+
+    #[test]
+    fn no_swim_water_still_requires_boat() {
+        let (mut g, ch, from, _to) = movement_game();
+
+        assert!(!perform_move(&mut g, ch, NORTH as i32, false));
+        assert_eq!(g.get_char(ch).unwrap().in_room, Some(from));
+    }
+}

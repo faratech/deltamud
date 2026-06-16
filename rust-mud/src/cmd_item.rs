@@ -11,7 +11,7 @@
 use crate::act::{act, ActArg, To};
 use crate::character::Affect;
 use crate::flags::*;
-use crate::object::{ObjLoc, ObjectType, WearFlags};
+use crate::object::{ExtraFlags, ObjLoc, ObjectType, WearFlags};
 use crate::room::SectorType;
 use crate::state::GameState;
 use crate::types::*;
@@ -157,11 +157,37 @@ fn two_arguments(argument: &str) -> (String, String) {
 /// str_app[].carry_w / .wield_w table (constants.c). Index by
 /// STRENGTH_APPLY_INDEX. Only the two columns act.item.c needs.
 const STR_APP: [(i32, i32); 31] = [
-    (0, 0), (3, 1), (3, 2), (10, 3), (25, 4), (55, 5), (80, 6), (90, 7),
-    (100, 8), (100, 9), (115, 10), (115, 11), (140, 12), (140, 13), (170, 14),
-    (170, 15), (195, 16), (220, 18), (255, 20), (640, 40), (700, 40),
-    (810, 40), (970, 40), (1130, 40), (1440, 40), (1750, 40), (280, 22),
-    (305, 24), (330, 26), (380, 28), (480, 30),
+    (0, 0),
+    (3, 1),
+    (3, 2),
+    (10, 3),
+    (25, 4),
+    (55, 5),
+    (80, 6),
+    (90, 7),
+    (100, 8),
+    (100, 9),
+    (115, 10),
+    (115, 11),
+    (140, 12),
+    (140, 13),
+    (170, 14),
+    (170, 15),
+    (195, 16),
+    (220, 18),
+    (255, 20),
+    (640, 40),
+    (700, 40),
+    (810, 40),
+    (970, 40),
+    (1130, 40),
+    (1440, 40),
+    (1750, 40),
+    (280, 22),
+    (305, 24),
+    (330, 26),
+    (380, 28),
+    (480, 30),
 ];
 
 /// STRENGTH_APPLY_INDEX(ch) (utils.h). Uses aff_abils.str / str_add.
@@ -246,7 +272,8 @@ fn can_see_obj(g: &GameState, _ch: CharId, oid: ObjId) -> bool {
 /// GET_EQ(ch, pos) — bounds-safe against the live equipment array (which is
 /// only types::NUM_WEARS(20) wide while C slots run to 21).
 fn eq_at(g: &GameState, ch: CharId, pos: usize) -> Option<ObjId> {
-    g.get_char(ch).and_then(|c| c.equipment.get(pos).copied().flatten())
+    g.get_char(ch)
+        .and_then(|c| c.equipment.get(pos).copied().flatten())
 }
 
 /// money_desc(amount) (handler.c).
@@ -375,12 +402,36 @@ fn name_to_drinkcon(g: &mut GameState, oid: ObjId, liquid: i32) {
 
 fn perform_put(g: &mut GameState, ch: CharId, obj: ObjId, cont: ObjId) {
     if obj_weight(g, cont) + obj_weight(g, obj) > obj_val(g, cont, 0) {
-        act(g, "$p won't fit in $P.", false, ch, Some(obj), ActArg::Obj(cont), To::Char);
+        act(
+            g,
+            "$p won't fit in $P.",
+            false,
+            ch,
+            Some(obj),
+            ActArg::Obj(cont),
+            To::Char,
+        );
     } else {
         g.obj_from_anywhere(obj);
         g.obj_to_obj(obj, cont);
-        act(g, "You put $p in $P.", false, ch, Some(obj), ActArg::Obj(cont), To::Char);
-        act(g, "$n puts $p in $P.", true, ch, Some(obj), ActArg::Obj(cont), To::Room);
+        act(
+            g,
+            "You put $p in $P.",
+            false,
+            ch,
+            Some(obj),
+            ActArg::Obj(cont),
+            To::Char,
+        );
+        act(
+            g,
+            "$n puts $p in $P.",
+            true,
+            ch,
+            Some(obj),
+            ActArg::Obj(cont),
+            To::Room,
+        );
     }
 }
 
@@ -394,11 +445,18 @@ pub fn do_put(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         return;
     }
     if cont_dotmode != FIND_INDIV {
-        g.send_to_char(ch, "You can only put things into one container at a time.\r\n");
+        g.send_to_char(
+            ch,
+            "You can only put things into one container at a time.\r\n",
+        );
         return;
     }
     if arg2.is_empty() {
-        let it = if obj_dotmode == FIND_INDIV { "it" } else { "them" };
+        let it = if obj_dotmode == FIND_INDIV {
+            "it"
+        } else {
+            "them"
+        };
         g.send_to_char(ch, &format!("What do you want to put {} in?\r\n", it));
         return;
     }
@@ -408,12 +466,23 @@ pub fn do_put(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     let cont = match cont {
         Some(c) => c,
         None => {
-            g.send_to_char(ch, &format!("You don't see {} {} here.\r\n", an(&arg2), arg2));
+            g.send_to_char(
+                ch,
+                &format!("You don't see {} {} here.\r\n", an(&arg2), arg2),
+            );
             return;
         }
     };
     if obj_type(g, cont) != Some(ObjectType::Container) {
-        act(g, "$p is not a container.", false, ch, Some(cont), ActArg::None, To::Char);
+        act(
+            g,
+            "$p is not a container.",
+            false,
+            ch,
+            Some(cont),
+            ActArg::None,
+            To::Char,
+        );
         return;
     }
     if obj_val(g, cont, 1) & CONT_CLOSED != 0 {
@@ -422,10 +491,16 @@ pub fn do_put(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     }
 
     if obj_dotmode == FIND_INDIV {
-        let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        let inv = g
+            .get_char(ch)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         match g.get_obj_in_list_vis(ch, &arg1, &inv) {
             None => {
-                g.send_to_char(ch, &format!("You aren't carrying {} {}.\r\n", an(&arg1), arg1));
+                g.send_to_char(
+                    ch,
+                    &format!("You aren't carrying {} {}.\r\n", an(&arg1), arg1),
+                );
             }
             Some(obj) if obj == cont => {
                 g.send_to_char(ch, "You attempt to fold it into itself, but fail.\r\n");
@@ -434,7 +509,10 @@ pub fn do_put(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         }
     } else {
         let mut found = false;
-        let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        let inv = g
+            .get_char(ch)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         for obj in inv {
             if obj != cont
                 && can_see_obj(g, ch, obj)
@@ -448,7 +526,10 @@ pub fn do_put(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
             if obj_dotmode == FIND_ALL {
                 g.send_to_char(ch, "You don't seem to have anything to put in it.\r\n");
             } else {
-                g.send_to_char(ch, &format!("You don't seem to have any {}s.\r\n", obj_name));
+                g.send_to_char(
+                    ch,
+                    &format!("You don't seem to have any {}s.\r\n", obj_name),
+                );
             }
         }
     }
@@ -462,13 +543,37 @@ pub fn do_put(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 fn can_take_obj(g: &mut GameState, ch: CharId, obj: ObjId) -> bool {
     if !is_immort(g, ch) {
         if is_carrying_n(g, ch) >= can_carry_n(g, ch) {
-            act(g, "$p: you can't carry that many items.", false, ch, Some(obj), ActArg::None, To::Char);
+            act(
+                g,
+                "$p: you can't carry that many items.",
+                false,
+                ch,
+                Some(obj),
+                ActArg::None,
+                To::Char,
+            );
             return false;
         } else if is_carrying_w(g, ch) + obj_weight(g, obj) > can_carry_w(g, ch) {
-            act(g, "$p: you can't carry that much weight.", false, ch, Some(obj), ActArg::None, To::Char);
+            act(
+                g,
+                "$p: you can't carry that much weight.",
+                false,
+                ch,
+                Some(obj),
+                ActArg::None,
+                To::Char,
+            );
             return false;
         } else if !obj_wear(g, obj, ITEM_WEAR_TAKE) {
-            act(g, "$p: you can't take that!", false, ch, Some(obj), ActArg::None, To::Char);
+            act(
+                g,
+                "$p: you can't take that!",
+                false,
+                ch,
+                Some(obj),
+                ActArg::None,
+                To::Char,
+            );
             return false;
         }
     }
@@ -479,9 +584,15 @@ fn can_take_obj(g: &mut GameState, ch: CharId, obj: ObjId) -> bool {
 fn get_check_money(g: &mut GameState, ch: CharId, obj: ObjId) {
     if obj_type(g, obj) == Some(ObjectType::Money) && obj_val(g, obj, 0) > 0 {
         let amount = obj_val(g, obj, 0);
-        let short = g.get_obj(obj).map(|o| o.short_description.clone()).unwrap_or_default();
+        let short = g
+            .get_obj(obj)
+            .map(|o| o.short_description.clone())
+            .unwrap_or_default();
         g.obj_from_anywhere(obj);
-        let mbuilding = g.get_char(ch).map(|c| c.prf2_flags & PRF2_MBUILDING != 0).unwrap_or(false);
+        let mbuilding = g
+            .get_char(ch)
+            .map(|c| c.prf2_flags & PRF2_MBUILDING != 0)
+            .unwrap_or(false);
         let mut msg = String::new();
         if !mbuilding {
             if amount > 1 {
@@ -510,9 +621,33 @@ fn boxkill(g: &mut GameState, ch: CharId, obj: ObjId) {
          The box folds along your arm and over your head, encasing your whole body!\r\n\
          It begins to condense, and the last sound you hear is the swift snapping of your spine...",
     );
-    act(g, "$p wraps around $n's body, encasing it!", true, ch, Some(obj), ActArg::None, To::Room);
-    act(g, "$p condenses!", true, ch, Some(obj), ActArg::None, To::Room);
-    act(g, "$p coldly flips back on to the floor into the center of the room, and vanishes!", true, ch, Some(obj), ActArg::None, To::Room);
+    act(
+        g,
+        "$p wraps around $n's body, encasing it!",
+        true,
+        ch,
+        Some(obj),
+        ActArg::None,
+        To::Room,
+    );
+    act(
+        g,
+        "$p condenses!",
+        true,
+        ch,
+        Some(obj),
+        ActArg::None,
+        To::Room,
+    );
+    act(
+        g,
+        "$p coldly flips back on to the floor into the center of the room, and vanishes!",
+        true,
+        ch,
+        Some(obj),
+        ActArg::None,
+        To::Room,
+    );
     if let Some(c) = g.get_char_mut(ch) {
         c.fighting = None;
         c.affected.clear();
@@ -526,12 +661,36 @@ fn boxkill(g: &mut GameState, ch: CharId, obj: ObjId) {
 fn perform_get_from_container(g: &mut GameState, ch: CharId, obj: ObjId, cont: ObjId, mode: i32) {
     if mode == FIND_OBJ_INV || can_take_obj(g, ch, obj) {
         if is_carrying_n(g, ch) >= can_carry_n(g, ch) {
-            act(g, "$p: you can't hold any more items.", false, ch, Some(obj), ActArg::None, To::Char);
+            act(
+                g,
+                "$p: you can't hold any more items.",
+                false,
+                ch,
+                Some(obj),
+                ActArg::None,
+                To::Char,
+            );
         } else {
             g.obj_from_anywhere(obj);
             g.obj_to_char(obj, ch);
-            act(g, "You get $p from $P.", false, ch, Some(obj), ActArg::Obj(cont), To::Char);
-            act(g, "$n gets $p from $P.", true, ch, Some(obj), ActArg::Obj(cont), To::Room);
+            act(
+                g,
+                "You get $p from $P.",
+                false,
+                ch,
+                Some(obj),
+                ActArg::Obj(cont),
+                To::Char,
+            );
+            act(
+                g,
+                "$n gets $p from $P.",
+                true,
+                ch,
+                Some(obj),
+                ActArg::Obj(cont),
+                To::Room,
+            );
             get_check_money(g, ch, obj);
             if obj_vnum(g, obj) == PANDORAS_BOX_VNUM {
                 boxkill(g, ch, obj);
@@ -544,9 +703,20 @@ fn get_from_container(g: &mut GameState, ch: CharId, cont: ObjId, arg: &str, mod
     let (obj_dotmode, name) = find_all_dots(arg);
 
     if obj_val(g, cont, 1) & CONT_CLOSED != 0 {
-        act(g, "$p is closed.", false, ch, Some(cont), ActArg::None, To::Char);
+        act(
+            g,
+            "$p is closed.",
+            false,
+            ch,
+            Some(cont),
+            ActArg::None,
+            To::Char,
+        );
     } else if obj_dotmode == FIND_INDIV {
-        let contains = g.get_obj(cont).map(|o| o.contains.clone()).unwrap_or_default();
+        let contains = g
+            .get_obj(cont)
+            .map(|o| o.contains.clone())
+            .unwrap_or_default();
         match g.get_obj_in_list_vis(ch, arg, &contains) {
             None => {
                 let msg = format!("There doesn't seem to be {} {} in $p.", an(arg), arg);
@@ -560,18 +730,27 @@ fn get_from_container(g: &mut GameState, ch: CharId, cont: ObjId, arg: &str, mod
             return;
         }
         let mut found = false;
-        let contains = g.get_obj(cont).map(|o| o.contains.clone()).unwrap_or_default();
+        let contains = g
+            .get_obj(cont)
+            .map(|o| o.contains.clone())
+            .unwrap_or_default();
         for obj in contains {
-            if can_see_obj(g, ch, obj)
-                && (obj_dotmode == FIND_ALL || obj_isname(g, &name, obj))
-            {
+            if can_see_obj(g, ch, obj) && (obj_dotmode == FIND_ALL || obj_isname(g, &name, obj)) {
                 found = true;
                 perform_get_from_container(g, ch, obj, cont, mode);
             }
         }
         if !found {
             if obj_dotmode == FIND_ALL {
-                act(g, "$p seems to be empty.", false, ch, Some(cont), ActArg::None, To::Char);
+                act(
+                    g,
+                    "$p seems to be empty.",
+                    false,
+                    ch,
+                    Some(cont),
+                    ActArg::None,
+                    To::Char,
+                );
             } else {
                 let msg = format!("You can't seem to find any {}s in $p.", name);
                 act(g, &msg, false, ch, Some(cont), ActArg::None, To::Char);
@@ -584,8 +763,24 @@ fn perform_get_from_room(g: &mut GameState, ch: CharId, obj: ObjId) -> bool {
     if can_take_obj(g, ch, obj) {
         g.obj_from_anywhere(obj);
         g.obj_to_char(obj, ch);
-        act(g, "You get $p.", false, ch, Some(obj), ActArg::None, To::Char);
-        act(g, "$n gets $p.", true, ch, Some(obj), ActArg::None, To::Room);
+        act(
+            g,
+            "You get $p.",
+            false,
+            ch,
+            Some(obj),
+            ActArg::None,
+            To::Char,
+        );
+        act(
+            g,
+            "$n gets $p.",
+            true,
+            ch,
+            Some(obj),
+            ActArg::None,
+            To::Room,
+        );
         get_check_money(g, ch, obj);
         if obj_vnum(g, obj) == PANDORAS_BOX_VNUM {
             boxkill(g, ch, obj);
@@ -620,9 +815,7 @@ fn get_from_room(g: &mut GameState, ch: CharId, arg: &str) {
         let mut found = false;
         let contents = g.room(rnum).contents.clone();
         for obj in contents {
-            if can_see_obj(g, ch, obj)
-                && (dotmode == FIND_ALL || obj_isname(g, &name, obj))
-            {
+            if can_see_obj(g, ch, obj) && (dotmode == FIND_ALL || obj_isname(g, &name, obj)) {
                 found = true;
                 perform_get_from_room(g, ch, obj);
             }
@@ -656,7 +849,15 @@ pub fn do_get(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
                     g.send_to_char(ch, &format!("You don't have {} {}.\r\n", an(&arg2), arg2));
                 }
                 Some(cont) if obj_type(g, cont) != Some(ObjectType::Container) => {
-                    act(g, "$p is not a container.", false, ch, Some(cont), ActArg::None, To::Char);
+                    act(
+                        g,
+                        "$p is not a container.",
+                        false,
+                        ch,
+                        Some(cont),
+                        ActArg::None,
+                        To::Char,
+                    );
                 }
                 Some(cont) => get_from_container(g, ch, cont, &arg1, mode),
             }
@@ -666,7 +867,10 @@ pub fn do_get(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
                 return;
             }
             let mut found = false;
-            let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+            let inv = g
+                .get_char(ch)
+                .map(|c| c.carrying.clone())
+                .unwrap_or_default();
             for cont in inv {
                 if can_see_obj(g, ch, cont)
                     && (cont_dotmode == FIND_ALL || obj_isname(g, &cont_name, cont))
@@ -676,7 +880,15 @@ pub fn do_get(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
                         get_from_container(g, ch, cont, &arg1, FIND_OBJ_INV);
                     } else if cont_dotmode == FIND_ALLDOT {
                         found = true;
-                        act(g, "$p is not a container.", false, ch, Some(cont), ActArg::None, To::Char);
+                        act(
+                            g,
+                            "$p is not a container.",
+                            false,
+                            ch,
+                            Some(cont),
+                            ActArg::None,
+                            To::Char,
+                        );
                     }
                 }
             }
@@ -691,7 +903,15 @@ pub fn do_get(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
                             get_from_container(g, ch, cont, &arg1, FIND_OBJ_ROOM);
                             found = true;
                         } else if cont_dotmode == FIND_ALLDOT {
-                            act(g, "$p is not a container.", false, ch, Some(cont), ActArg::None, To::Char);
+                            act(
+                                g,
+                                "$p is not a container.",
+                                false,
+                                ch,
+                                Some(cont),
+                                ActArg::None,
+                                To::Char,
+                            );
                             found = true;
                         }
                     }
@@ -701,7 +921,10 @@ pub fn do_get(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
                 if cont_dotmode == FIND_ALL {
                     g.send_to_char(ch, "You can't seem to find any containers.\r\n");
                 } else {
-                    g.send_to_char(ch, &format!("You can't seem to find any {}s here.\r\n", cont_name));
+                    g.send_to_char(
+                        ch,
+                        &format!("You can't seem to find any {}s here.\r\n", cont_name),
+                    );
                 }
             }
         }
@@ -719,7 +942,9 @@ fn in_jail(g: &GameState, ch: CharId) -> bool {
 }
 
 fn is_killer(g: &GameState, ch: CharId) -> bool {
-    g.get_char(ch).map(|c| c.act_flags & PLR_KILLER != 0).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.act_flags & PLR_KILLER != 0)
+        .unwrap_or(false)
 }
 
 fn perform_drop_gold(g: &mut GameState, ch: CharId, amount: i32, mode: i32, rdr: Option<RoomRnum>) {
@@ -741,13 +966,29 @@ fn perform_drop_gold(g: &mut GameState, ch: CharId, amount: i32, mode: i32, rdr:
                 None => return,
             };
             if mode == SCMD_DONATE {
-                g.send_to_char(ch, "You throw some gold into the air..\r\nIt disappears in a puff of smoke!\r\n");
-                act(g, "$n throws some gold into the air..\r\nIt disappears in a puff of smoke!", false, ch, None, ActArg::None, To::Room);
+                g.send_to_char(
+                    ch,
+                    "You throw some gold into the air..\r\nIt disappears in a puff of smoke!\r\n",
+                );
+                act(
+                    g,
+                    "$n throws some gold into the air..\r\nIt disappears in a puff of smoke!",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 if let Some(rdr) = rdr {
                     g.obj_to_room(obj, rdr);
                     // act with ch=NULL in C; render to the donation room directly.
-                    let line = format!("{} suddenly appears in a puff of orange smoke!\r\n",
-                        cap(&g.get_obj(obj).map(|o| o.short_description.clone()).unwrap_or_default()));
+                    let line = format!(
+                        "{} suddenly appears in a puff of orange smoke!\r\n",
+                        cap(&g
+                            .get_obj(obj)
+                            .map(|o| o.short_description.clone())
+                            .unwrap_or_default())
+                    );
                     g.send_to_room(rdr, &line, None);
                 }
             } else {
@@ -760,9 +1001,15 @@ fn perform_drop_gold(g: &mut GameState, ch: CharId, amount: i32, mode: i32, rdr:
                 }
             }
         } else {
-            let line = format!("$n drops {} which disappears in a puff of smoke!", money_desc(amount));
+            let line = format!(
+                "$n drops {} which disappears in a puff of smoke!",
+                money_desc(amount)
+            );
             act(g, &line, false, ch, None, ActArg::None, To::Room);
-            g.send_to_char(ch, "You drop some gold which disappears in a puff of smoke!\r\n");
+            g.send_to_char(
+                ch,
+                "You drop some gold which disappears in a puff of smoke!\r\n",
+            );
         }
         if let Some(c) = g.get_char_mut(ch) {
             c.points.gold -= amount;
@@ -778,7 +1025,14 @@ fn vanish(mode: i32) -> &'static str {
     }
 }
 
-fn perform_drop(g: &mut GameState, ch: CharId, obj: ObjId, mut mode: i32, sname: &str, rdr: Option<RoomRnum>) -> i32 {
+fn perform_drop(
+    g: &mut GameState,
+    ch: CharId,
+    obj: ObjId,
+    mut mode: i32,
+    sname: &str,
+    rdr: Option<RoomRnum>,
+) -> i32 {
     if !PK_ALLOWED && is_killer(g, ch) && in_jail(g, ch) {
         g.send_to_char(ch, "Sorry. You can't do that when you're in jail.\r\n");
         return 0;
@@ -810,8 +1064,13 @@ fn perform_drop(g: &mut GameState, ch: CharId, obj: ObjId, mut mode: i32, sname:
         SCMD_DONATE => {
             if let Some(rdr) = rdr {
                 g.obj_to_room(obj, rdr);
-                let line = format!("{} suddenly appears in a puff a smoke!\r\n",
-                    cap(&g.get_obj(obj).map(|o| o.short_description.clone()).unwrap_or_default()));
+                let line = format!(
+                    "{} suddenly appears in a puff a smoke!\r\n",
+                    cap(&g
+                        .get_obj(obj)
+                        .map(|o| o.short_description.clone())
+                        .unwrap_or_default())
+                );
                 g.send_to_room(rdr, &line, None);
             }
             0
@@ -865,11 +1124,17 @@ pub fn do_drop(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
 
     // Water-sector safety prompt for plain drop (C tests the remainder).
     if subcmd == SCMD_DROP {
-        let sect = g.get_char(ch).and_then(|c| c.in_room).map(|r| g.room(r).sector_type);
+        let sect = g
+            .get_char(ch)
+            .and_then(|c| c.in_room)
+            .map(|r| g.room(r).sector_type);
         if (sect == Some(SectorType::WaterSwim) || sect == Some(SectorType::WaterNoSwim))
             && !rest.contains("water")
         {
-            g.send_to_char(ch, "You must type 'water' after the object name if you really want to drop it.\r\n");
+            g.send_to_char(
+                ch,
+                "You must type 'water' after the object name if you really want to drop it.\r\n",
+            );
             return;
         }
     }
@@ -885,12 +1150,18 @@ pub fn do_drop(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
                 .map(|r| g.room(r).room_flags.bits() & ROOM_HOUSE_CRASH != 0)
                 .unwrap_or(false);
             if house_crash {
-                g.send_to_char(ch, "I'd suggest you put those coins in the bank, not under your mattress.\r\n");
+                g.send_to_char(
+                    ch,
+                    "I'd suggest you put those coins in the bank, not under your mattress.\r\n",
+                );
                 return;
             }
             perform_drop_gold(g, ch, amount, mode, rdr);
         } else {
-            g.send_to_char(ch, "Sorry, you can't do that to more than one item at a time.\r\n");
+            g.send_to_char(
+                ch,
+                "Sorry, you can't do that to more than one item at a time.\r\n",
+            );
         }
         return;
     }
@@ -908,7 +1179,10 @@ pub fn do_drop(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
     }
 
     if dotmode == FIND_ALL {
-        let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        let inv = g
+            .get_char(ch)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         if inv.is_empty() {
             g.send_to_char(ch, "You don't seem to be carrying anything.\r\n");
         } else {
@@ -921,23 +1195,35 @@ pub fn do_drop(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
             g.send_to_char(ch, &format!("What do you want to {} all of?\r\n", sname));
             return;
         }
-        let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        let inv = g
+            .get_char(ch)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         let first = g.get_obj_in_list_vis(ch, &name, &inv);
         if first.is_none() {
             g.send_to_char(ch, &format!("You don't seem to have any {}s.\r\n", name));
         }
         // Iterate every matching item in inventory.
-        let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        let inv = g
+            .get_char(ch)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         for obj in inv {
             if obj_isname(g, &name, obj) {
                 amount += perform_drop(g, ch, obj, mode, sname, rdr);
             }
         }
     } else {
-        let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        let inv = g
+            .get_char(ch)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         match g.get_obj_in_list_vis(ch, &arg, &inv) {
             None => {
-                g.send_to_char(ch, &format!("You don't seem to have {} {}.\r\n", an(&arg), arg));
+                g.send_to_char(
+                    ch,
+                    &format!("You don't seem to have {} {}.\r\n", an(&arg), arg),
+                );
             }
             Some(obj) => amount += perform_drop(g, ch, obj, mode, sname, rdr),
         }
@@ -945,7 +1231,15 @@ pub fn do_drop(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
 
     if amount != 0 && subcmd == SCMD_JUNK && !is_immort(g, ch) {
         g.send_to_char(ch, "You have been rewarded by the gods!\r\n");
-        act(g, "$n has been rewarded by the gods!", true, ch, None, ActArg::None, To::Room);
+        act(
+            g,
+            "$n has been rewarded by the gods!",
+            true,
+            ch,
+            None,
+            ActArg::None,
+            To::Room,
+        );
         if let Some(c) = g.get_char_mut(ch) {
             c.points.gold += amount;
         }
@@ -959,24 +1253,72 @@ pub fn do_drop(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
 fn perform_give(g: &mut GameState, ch: CharId, vict: CharId, obj: ObjId) {
     if !is_immort(g, ch) {
         if obj_stat(g, obj, ITEM_NODROP) {
-            act(g, "You can't let go of $p!!  Yeech!", false, ch, Some(obj), ActArg::None, To::Char);
+            act(
+                g,
+                "You can't let go of $p!!  Yeech!",
+                false,
+                ch,
+                Some(obj),
+                ActArg::None,
+                To::Char,
+            );
             return;
         }
         if is_carrying_n(g, vict) >= can_carry_n(g, vict) {
-            act(g, "$N seems to have $S hands full.", false, ch, None, ActArg::Char(vict), To::Char);
+            act(
+                g,
+                "$N seems to have $S hands full.",
+                false,
+                ch,
+                None,
+                ActArg::Char(vict),
+                To::Char,
+            );
             return;
         }
         if obj_weight(g, obj) + is_carrying_w(g, vict) > can_carry_w(g, vict) {
-            act(g, "$E can't carry that much weight.", false, ch, None, ActArg::Char(vict), To::Char);
+            act(
+                g,
+                "$E can't carry that much weight.",
+                false,
+                ch,
+                None,
+                ActArg::Char(vict),
+                To::Char,
+            );
             return;
         }
     }
 
     g.obj_from_anywhere(obj);
     g.obj_to_char(obj, vict);
-    act(g, "You give $p to $N.", false, ch, Some(obj), ActArg::Char(vict), To::Char);
-    act(g, "$n gives you $p.", false, ch, Some(obj), ActArg::Char(vict), To::Vict);
-    act(g, "$n gives $p to $N.", true, ch, Some(obj), ActArg::Char(vict), To::NotVict);
+    act(
+        g,
+        "You give $p to $N.",
+        false,
+        ch,
+        Some(obj),
+        ActArg::Char(vict),
+        To::Char,
+    );
+    act(
+        g,
+        "$n gives you $p.",
+        false,
+        ch,
+        Some(obj),
+        ActArg::Char(vict),
+        To::Vict,
+    );
+    act(
+        g,
+        "$n gives $p to $N.",
+        true,
+        ch,
+        Some(obj),
+        ActArg::Char(vict),
+        To::NotVict,
+    );
 }
 
 /// give_find_vict() (act.item.c).
@@ -1011,7 +1353,11 @@ fn perform_give_gold(g: &mut GameState, ch: CharId, vict: CharId, amount: i32) {
         return;
     }
     g.send_to_char(ch, "Ok.\r\n");
-    let line = format!("$n gives you {} gold coin{}.", amount, if amount == 1 { "" } else { "s" });
+    let line = format!(
+        "$n gives you {} gold coin{}.",
+        amount,
+        if amount == 1 { "" } else { "s" }
+    );
     act(g, &line, false, ch, None, ActArg::Char(vict), To::Vict);
     let line = format!("$n gives {} to $N.", money_desc(amount));
     act(g, &line, true, ch, None, ActArg::Char(vict), To::NotVict);
@@ -1052,10 +1398,16 @@ pub fn do_give(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         };
         let (dotmode, name) = find_all_dots(&arg);
         if dotmode == FIND_INDIV {
-            let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+            let inv = g
+                .get_char(ch)
+                .map(|c| c.carrying.clone())
+                .unwrap_or_default();
             match g.get_obj_in_list_vis(ch, &arg, &inv) {
                 None => {
-                    g.send_to_char(ch, &format!("You don't seem to have {} {}.\r\n", an(&arg), arg));
+                    g.send_to_char(
+                        ch,
+                        &format!("You don't seem to have {} {}.\r\n", an(&arg), arg),
+                    );
                 }
                 Some(obj) => perform_give(g, ch, vict, obj),
             }
@@ -1064,13 +1416,15 @@ pub fn do_give(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
                 g.send_to_char(ch, "All of what?\r\n");
                 return;
             }
-            let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+            let inv = g
+                .get_char(ch)
+                .map(|c| c.carrying.clone())
+                .unwrap_or_default();
             if inv.is_empty() {
                 g.send_to_char(ch, "You don't seem to be holding anything.\r\n");
             } else {
                 for obj in inv {
-                    if can_see_obj(g, ch, obj)
-                        && (dotmode == FIND_ALL || obj_isname(g, &name, obj))
+                    if can_see_obj(g, ch, obj) && (dotmode == FIND_ALL || obj_isname(g, &name, obj))
                     {
                         perform_give(g, ch, vict, obj);
                     }
@@ -1086,7 +1440,9 @@ pub fn do_give(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
 /// GET_COND(ch, idx).
 fn get_cond(g: &GameState, ch: CharId, idx: usize) -> i32 {
-    g.get_char(ch).map(|c| c.conditions[idx] as i32).unwrap_or(0)
+    g.get_char(ch)
+        .map(|c| c.conditions[idx] as i32)
+        .unwrap_or(0)
 }
 
 /// gain_condition(ch, condition, value) (limits.c).
@@ -1142,7 +1498,10 @@ fn apply_poison(g: &mut GameState, ch: CharId, duration: i32) {
 }
 
 fn drink_name(idx: i32) -> &'static str {
-    crate::constants::DRINKS.get(idx as usize).copied().unwrap_or("water")
+    crate::constants::DRINKS
+        .get(idx as usize)
+        .copied()
+        .unwrap_or("water")
 }
 fn drink_aff(idx: i32, cond: usize) -> i32 {
     crate::constants::DRINK_AFF
@@ -1160,7 +1519,10 @@ pub fn do_drink(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
     }
 
     let mut on_ground = false;
-    let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let inv = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     let temp = match g.get_obj_in_list_vis(ch, &arg, &inv) {
         Some(o) => o,
         None => {
@@ -1172,7 +1534,15 @@ pub fn do_drink(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
                     o
                 }
                 None => {
-                    act(g, "You can't find it!", false, ch, None, ActArg::None, To::Char);
+                    act(
+                        g,
+                        "You can't find it!",
+                        false,
+                        ch,
+                        None,
+                        ActArg::None,
+                        To::Char,
+                    );
                     return;
                 }
             }
@@ -1190,7 +1560,15 @@ pub fn do_drink(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
     }
     if get_cond(g, ch, DRUNK) > 14 && get_cond(g, ch, THIRST) > 0 {
         g.send_to_char(ch, "You can't seem to get close enough to your mouth.\r\n");
-        act(g, "$n tries to drink but misses $s mouth!", true, ch, None, ActArg::None, To::Room);
+        act(
+            g,
+            "$n tries to drink but misses $s mouth!",
+            true,
+            ch,
+            None,
+            ActArg::None,
+            To::Room,
+        );
         return;
     }
     if get_cond(g, ch, FULL) > 20 && get_cond(g, ch, THIRST) > 0 {
@@ -1214,7 +1592,15 @@ pub fn do_drink(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
             amount = g.rng.number(3, 10);
         }
     } else {
-        act(g, "$n sips from $p.", true, ch, Some(temp), ActArg::None, To::Room);
+        act(
+            g,
+            "$n sips from $p.",
+            true,
+            ch,
+            Some(temp),
+            ActArg::None,
+            To::Room,
+        );
         g.send_to_char(ch, &format!("It tastes like {}.\r\n", drink_name(liq)));
         amount = 1;
     }
@@ -1240,7 +1626,15 @@ pub fn do_drink(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
     if obj_val(g, temp, 3) != 0 {
         // Poisoned.
         g.send_to_char(ch, "Oops, it tasted rather strange!\r\n");
-        act(g, "$n chokes and utters some strange sounds.", true, ch, None, ActArg::None, To::Room);
+        act(
+            g,
+            "$n chokes and utters some strange sounds.",
+            true,
+            ch,
+            None,
+            ActArg::None,
+            To::Room,
+        );
         apply_poison(g, ch, amount * 3);
     }
 
@@ -1265,11 +1659,17 @@ pub fn do_eat(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
         g.send_to_char(ch, "Eat what?\r\n");
         return;
     }
-    let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let inv = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     let food = match g.get_obj_in_list_vis(ch, &arg, &inv) {
         Some(o) => o,
         None => {
-            g.send_to_char(ch, &format!("You don't seem to have {} {}.\r\n", an(&arg), arg));
+            g.send_to_char(
+                ch,
+                &format!("You don't seem to have {} {}.\r\n", an(&arg), arg),
+            );
             return;
         }
     };
@@ -1286,19 +1686,63 @@ pub fn do_eat(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
         return;
     }
     if get_cond(g, ch, FULL) > 20 {
-        act(g, "You are too full to eat more!", false, ch, None, ActArg::None, To::Char);
+        act(
+            g,
+            "You are too full to eat more!",
+            false,
+            ch,
+            None,
+            ActArg::None,
+            To::Char,
+        );
         return;
     }
 
     if subcmd == SCMD_EAT {
-        act(g, "You eat the $o.", false, ch, Some(food), ActArg::None, To::Char);
-        act(g, "$n eats $p.", true, ch, Some(food), ActArg::None, To::Room);
+        act(
+            g,
+            "You eat the $o.",
+            false,
+            ch,
+            Some(food),
+            ActArg::None,
+            To::Char,
+        );
+        act(
+            g,
+            "$n eats $p.",
+            true,
+            ch,
+            Some(food),
+            ActArg::None,
+            To::Room,
+        );
     } else {
-        act(g, "You nibble a little bit of the $o.", false, ch, Some(food), ActArg::None, To::Char);
-        act(g, "$n tastes a little bit of $p.", true, ch, Some(food), ActArg::None, To::Room);
+        act(
+            g,
+            "You nibble a little bit of the $o.",
+            false,
+            ch,
+            Some(food),
+            ActArg::None,
+            To::Char,
+        );
+        act(
+            g,
+            "$n tastes a little bit of $p.",
+            true,
+            ch,
+            Some(food),
+            ActArg::None,
+            To::Room,
+        );
     }
 
-    let amount = if subcmd == SCMD_EAT { obj_val(g, food, 0) } else { 1 };
+    let amount = if subcmd == SCMD_EAT {
+        obj_val(g, food, 0)
+    } else {
+        1
+    };
     gain_condition(g, ch, FULL, amount);
 
     if get_cond(g, ch, FULL) > 20 {
@@ -1307,7 +1751,15 @@ pub fn do_eat(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
 
     if obj_val(g, food, 3) != 0 && !is_immort(g, ch) {
         g.send_to_char(ch, "Oops, that tasted rather strange!\r\n");
-        act(g, "$n coughs and utters some strange sounds.", false, ch, None, ActArg::None, To::Room);
+        act(
+            g,
+            "$n coughs and utters some strange sounds.",
+            false,
+            ch,
+            None,
+            ActArg::None,
+            To::Room,
+        );
         apply_poison(g, ch, amount * 2);
     }
 
@@ -1334,28 +1786,61 @@ pub fn do_pour(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
 
     if subcmd == SCMD_POUR {
         if arg1.is_empty() {
-            act(g, "From what do you want to pour?", false, ch, None, ActArg::None, To::Char);
+            act(
+                g,
+                "From what do you want to pour?",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
             return;
         }
-        let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        let inv = g
+            .get_char(ch)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         match g.get_obj_in_list_vis(ch, &arg1, &inv) {
             None => {
-                act(g, "You can't find it!", false, ch, None, ActArg::None, To::Char);
+                act(
+                    g,
+                    "You can't find it!",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Char,
+                );
                 return;
             }
             Some(o) => from_obj = Some(o),
         }
         if obj_type(g, from_obj.unwrap()) != Some(ObjectType::LiqContainer) {
-            act(g, "You can't pour from that!", false, ch, None, ActArg::None, To::Char);
+            act(
+                g,
+                "You can't pour from that!",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
             return;
         }
     }
     if subcmd == SCMD_FILL {
         if arg1.is_empty() {
-            g.send_to_char(ch, "What do you want to fill?  And what are you filling it from?\r\n");
+            g.send_to_char(
+                ch,
+                "What do you want to fill?  And what are you filling it from?\r\n",
+            );
             return;
         }
-        let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        let inv = g
+            .get_char(ch)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         match g.get_obj_in_list_vis(ch, &arg1, &inv) {
             None => {
                 g.send_to_char(ch, "You can't find it!");
@@ -1364,42 +1849,101 @@ pub fn do_pour(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
             Some(o) => to_obj = Some(o),
         }
         if obj_type(g, to_obj.unwrap()) != Some(ObjectType::LiqContainer) {
-            act(g, "You can't fill $p!", false, ch, to_obj, ActArg::None, To::Char);
+            act(
+                g,
+                "You can't fill $p!",
+                false,
+                ch,
+                to_obj,
+                ActArg::None,
+                To::Char,
+            );
             return;
         }
         if arg2.is_empty() {
-            act(g, "What do you want to fill $p from?", false, ch, to_obj, ActArg::None, To::Char);
+            act(
+                g,
+                "What do you want to fill $p from?",
+                false,
+                ch,
+                to_obj,
+                ActArg::None,
+                To::Char,
+            );
             return;
         }
         let rnum = g.get_char(ch).and_then(|c| c.in_room);
         let contents = rnum.map(|r| g.room(r).contents.clone()).unwrap_or_default();
         match g.get_obj_in_list_vis(ch, &arg2, &contents) {
             None => {
-                g.send_to_char(ch, &format!("There doesn't seem to be {} {} here.\r\n", an(&arg2), arg2));
+                g.send_to_char(
+                    ch,
+                    &format!("There doesn't seem to be {} {} here.\r\n", an(&arg2), arg2),
+                );
                 return;
             }
             Some(o) => from_obj = Some(o),
         }
         if obj_type(g, from_obj.unwrap()) != Some(ObjectType::Fountain) {
-            act(g, "You can't fill something from $p.", false, ch, from_obj, ActArg::None, To::Char);
+            act(
+                g,
+                "You can't fill something from $p.",
+                false,
+                ch,
+                from_obj,
+                ActArg::None,
+                To::Char,
+            );
             return;
         }
     }
 
     let from = from_obj.unwrap();
     if obj_val(g, from, 1) == 0 {
-        act(g, "The $p is empty.", false, ch, Some(from), ActArg::None, To::Char);
+        act(
+            g,
+            "The $p is empty.",
+            false,
+            ch,
+            Some(from),
+            ActArg::None,
+            To::Char,
+        );
         return;
     }
 
     if subcmd == SCMD_POUR {
         if arg2.is_empty() {
-            act(g, "Where do you want it?  Out or in what?", false, ch, None, ActArg::None, To::Char);
+            act(
+                g,
+                "Where do you want it?  Out or in what?",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
             return;
         }
         if arg2 == "out" {
-            act(g, "$n empties $p.", true, ch, Some(from), ActArg::None, To::Room);
-            act(g, "You empty $p.", false, ch, Some(from), ActArg::None, To::Char);
+            act(
+                g,
+                "$n empties $p.",
+                true,
+                ch,
+                Some(from),
+                ActArg::None,
+                To::Room,
+            );
+            act(
+                g,
+                "You empty $p.",
+                false,
+                ch,
+                Some(from),
+                ActArg::None,
+                To::Char,
+            );
             let val1 = obj_val(g, from, 1);
             weight_change_object(g, from, -val1);
             if let Some(o) = g.get_obj_mut(from) {
@@ -1410,42 +1954,104 @@ pub fn do_pour(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
             name_from_drinkcon(g, from);
             return;
         }
-        let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        let inv = g
+            .get_char(ch)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         match g.get_obj_in_list_vis(ch, &arg2, &inv) {
             None => {
-                act(g, "You can't find it!", false, ch, None, ActArg::None, To::Char);
+                act(
+                    g,
+                    "You can't find it!",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Char,
+                );
                 return;
             }
             Some(o) => to_obj = Some(o),
         }
         let to_ty = obj_type(g, to_obj.unwrap());
         if to_ty != Some(ObjectType::LiqContainer) && to_ty != Some(ObjectType::Fountain) {
-            act(g, "You can't pour anything into that.", false, ch, None, ActArg::None, To::Char);
+            act(
+                g,
+                "You can't pour anything into that.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
             return;
         }
     }
 
     let to = to_obj.unwrap();
     if to == from {
-        act(g, "A most unproductive effort.", false, ch, None, ActArg::None, To::Char);
+        act(
+            g,
+            "A most unproductive effort.",
+            false,
+            ch,
+            None,
+            ActArg::None,
+            To::Char,
+        );
         return;
     }
     if obj_val(g, to, 1) != 0 && obj_val(g, to, 2) != obj_val(g, from, 2) {
-        act(g, "There is already another liquid in it!", false, ch, None, ActArg::None, To::Char);
+        act(
+            g,
+            "There is already another liquid in it!",
+            false,
+            ch,
+            None,
+            ActArg::None,
+            To::Char,
+        );
         return;
     }
     if !(obj_val(g, to, 1) < obj_val(g, to, 0)) {
-        act(g, "There is no room for more.", false, ch, None, ActArg::None, To::Char);
+        act(
+            g,
+            "There is no room for more.",
+            false,
+            ch,
+            None,
+            ActArg::None,
+            To::Char,
+        );
         return;
     }
 
     if subcmd == SCMD_POUR {
         let liq = obj_val(g, from, 2);
-        g.send_to_char(ch, &format!("You pour the {} into the {}.", drink_name(liq), arg2));
+        g.send_to_char(
+            ch,
+            &format!("You pour the {} into the {}.", drink_name(liq), arg2),
+        );
     }
     if subcmd == SCMD_FILL {
-        act(g, "You gently fill $p from $P.", false, ch, Some(to), ActArg::Obj(from), To::Char);
-        act(g, "$n gently fills $p from $P.", true, ch, Some(to), ActArg::Obj(from), To::Room);
+        act(
+            g,
+            "You gently fill $p from $P.",
+            false,
+            ch,
+            Some(to),
+            ActArg::Obj(from),
+            To::Char,
+        );
+        act(
+            g,
+            "$n gently fills $p from $P.",
+            true,
+            ch,
+            Some(to),
+            ActArg::Obj(from),
+            To::Room,
+        );
     }
 
     if obj_val(g, to, 1) == 0 {
@@ -1501,26 +2107,62 @@ pub fn do_pour(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
 fn wear_message(g: &mut GameState, ch: CharId, obj: ObjId, where_: usize) {
     const MSGS: [(&str, &str); 22] = [
         ("$n lights $p and holds it.", "You light $p and hold it."),
-        ("$n slides $p on to $s right ring finger.", "You slide $p on to your right ring finger."),
-        ("$n slides $p on to $s left ring finger.", "You slide $p on to your left ring finger."),
-        ("$n wears $p around $s neck.", "You wear $p around your neck."),
-        ("$n wears $p around $s neck.", "You wear $p around your neck."),
+        (
+            "$n slides $p on to $s right ring finger.",
+            "You slide $p on to your right ring finger.",
+        ),
+        (
+            "$n slides $p on to $s left ring finger.",
+            "You slide $p on to your left ring finger.",
+        ),
+        (
+            "$n wears $p around $s neck.",
+            "You wear $p around your neck.",
+        ),
+        (
+            "$n wears $p around $s neck.",
+            "You wear $p around your neck.",
+        ),
         ("$n wears $p on $s body.", "You wear $p on your body."),
         ("$n wears $p on $s head.", "You wear $p on your head."),
         ("$n puts $p on $s legs.", "You put $p on your legs."),
         ("$n wears $p on $s feet.", "You wear $p on your feet."),
         ("$n puts $p on $s hands.", "You put $p on your hands."),
         ("$n wears $p on $s arms.", "You wear $p on your arms."),
-        ("$n straps $p around $s arm as a shield.", "You start to use $p as a shield."),
-        ("$n wears $p about $s body.", "You wear $p around your body."),
-        ("$n wears $p around $s waist.", "You wear $p around your waist."),
-        ("$n puts $p on around $s right wrist.", "You put $p on around your right wrist."),
-        ("$n puts on $p around $s left wrist.", "You put on $p around your left wrist."),
+        (
+            "$n straps $p around $s arm as a shield.",
+            "You start to use $p as a shield.",
+        ),
+        (
+            "$n wears $p about $s body.",
+            "You wear $p around your body.",
+        ),
+        (
+            "$n wears $p around $s waist.",
+            "You wear $p around your waist.",
+        ),
+        (
+            "$n puts $p on around $s right wrist.",
+            "You put $p on around your right wrist.",
+        ),
+        (
+            "$n puts on $p around $s left wrist.",
+            "You put on $p around your left wrist.",
+        ),
         ("$n wields $p.", "You wield $p."),
         ("$n grabs $p.", "You grab $p."),
-        ("$n puts $p over $s shoulders.", "You put $p over your shoulders."),
-        ("$n puts $p around $s right ankle.", "You put $p around your right ankle."),
-        ("$n puts $p around $s left ankle.", "You put $p around your left ankle."),
+        (
+            "$n puts $p over $s shoulders.",
+            "You put $p over your shoulders.",
+        ),
+        (
+            "$n puts $p around $s right ankle.",
+            "You put $p around your right ankle.",
+        ),
+        (
+            "$n puts $p around $s left ankle.",
+            "You put $p around your left ankle.",
+        ),
         ("$n puts $p on $s face.", "You put $p on your face."),
     ];
     let (room_msg, char_msg) = MSGS.get(where_).copied().unwrap_or(("", ""));
@@ -1531,12 +2173,28 @@ fn wear_message(g: &mut GameState, ch: CharId, obj: ObjId, where_: usize) {
 fn perform_wear(g: &mut GameState, ch: CharId, obj: ObjId, mut where_: usize) {
     // wear_bitvectors[where] — required wear flag per slot.
     const WEAR_BITVECTORS: [u32; 22] = [
-        ITEM_WEAR_TAKE, ITEM_WEAR_FINGER, ITEM_WEAR_FINGER, ITEM_WEAR_NECK,
-        ITEM_WEAR_NECK, ITEM_WEAR_BODY, ITEM_WEAR_HEAD, ITEM_WEAR_LEGS,
-        ITEM_WEAR_FEET, ITEM_WEAR_HANDS, ITEM_WEAR_ARMS, ITEM_WEAR_SHIELD,
-        ITEM_WEAR_ABOUT, ITEM_WEAR_WAIST, ITEM_WEAR_WRIST, ITEM_WEAR_WRIST,
-        ITEM_WEAR_WIELD, ITEM_WEAR_TAKE, ITEM_WEAR_SHOULDERS, ITEM_WEAR_ANKLE,
-        ITEM_WEAR_ANKLE, ITEM_WEAR_FACE,
+        ITEM_WEAR_TAKE,
+        ITEM_WEAR_FINGER,
+        ITEM_WEAR_FINGER,
+        ITEM_WEAR_NECK,
+        ITEM_WEAR_NECK,
+        ITEM_WEAR_BODY,
+        ITEM_WEAR_HEAD,
+        ITEM_WEAR_LEGS,
+        ITEM_WEAR_FEET,
+        ITEM_WEAR_HANDS,
+        ITEM_WEAR_ARMS,
+        ITEM_WEAR_SHIELD,
+        ITEM_WEAR_ABOUT,
+        ITEM_WEAR_WAIST,
+        ITEM_WEAR_WRIST,
+        ITEM_WEAR_WRIST,
+        ITEM_WEAR_WIELD,
+        ITEM_WEAR_TAKE,
+        ITEM_WEAR_SHOULDERS,
+        ITEM_WEAR_ANKLE,
+        ITEM_WEAR_ANKLE,
+        ITEM_WEAR_FACE,
     ];
     const ALREADY_WEARING: [&str; 22] = [
         "You're already using a light.\r\n",
@@ -1564,7 +2222,15 @@ fn perform_wear(g: &mut GameState, ch: CharId, obj: ObjId, mut where_: usize) {
     ];
 
     if !obj_wear(g, obj, WEAR_BITVECTORS[where_]) {
-        act(g, "You can't wear $p there.", false, ch, Some(obj), ActArg::None, To::Char);
+        act(
+            g,
+            "You can't wear $p there.",
+            false,
+            ch,
+            Some(obj),
+            ActArg::None,
+            To::Char,
+        );
         return;
     }
     // For neck/finger/wrist/ankle, try slot 2 if slot 1 is full.
@@ -1577,10 +2243,53 @@ fn perform_wear(g: &mut GameState, ch: CharId, obj: ObjId, mut where_: usize) {
         g.send_to_char(ch, ALREADY_WEARING[where_]);
         return;
     }
+    if wear_restriction_zaps(g, ch, obj) {
+        act(
+            g,
+            "You are zapped by $p and instantly let go of it.",
+            false,
+            ch,
+            Some(obj),
+            ActArg::None,
+            To::Char,
+        );
+        act(
+            g,
+            "$n is zapped by $p and instantly lets go of it.",
+            false,
+            ch,
+            Some(obj),
+            ActArg::None,
+            To::Room,
+        );
+        return;
+    }
 
     wear_message(g, ch, obj, where_);
     g.obj_from_anywhere(obj);
     g.equip_char(ch, obj, where_);
+}
+
+fn wear_restriction_zaps(g: &GameState, ch: CharId, obj: ObjId) -> bool {
+    let (level, class, alignment) = match g.get_char(ch) {
+        Some(c) => (c.player.level, c.player.class, c.alignment),
+        None => return true,
+    };
+    if level >= LVL_IMMORT {
+        return false;
+    }
+
+    let obj = match g.get_obj(obj) {
+        Some(o) => o,
+        None => return true,
+    };
+    let flags = obj.extra_flags;
+    let anti_align = (flags.contains(ExtraFlags::ANTI_EVIL) && alignment <= -350)
+        || (flags.contains(ExtraFlags::ANTI_GOOD) && alignment >= 350)
+        || (flags.contains(ExtraFlags::ANTI_NEUTRAL) && alignment > -350 && alignment < 350);
+    anti_align
+        || crate::class::invalid_class(class, flags.bits() as i64)
+        || obj.min_level > level as i32
 }
 
 /// find_eq_pos() (act.item.c). Returns Some(slot) or None on failure (the C
@@ -1589,30 +2298,78 @@ fn perform_wear(g: &mut GameState, ch: CharId, obj: ObjId, mut where_: usize) {
 fn find_eq_pos(g: &mut GameState, ch: CharId, obj: ObjId, arg: Option<&str>) -> Option<usize> {
     // keywords[] indices into the slot list.
     const KEYWORDS: [&str; 22] = [
-        "!RESERVED!", "finger", "!RESERVED!", "neck", "!RESERVED!", "body",
-        "head", "legs", "feet", "hands", "arms", "shield", "about", "waist",
-        "wrist", "!RESERVED!", "!RESERVED!", "!RESERVED!", "shoulders", "ankle",
-        "face", "!RESERVED!",
+        "!RESERVED!",
+        "finger",
+        "!RESERVED!",
+        "neck",
+        "!RESERVED!",
+        "body",
+        "head",
+        "legs",
+        "feet",
+        "hands",
+        "arms",
+        "shield",
+        "about",
+        "waist",
+        "wrist",
+        "!RESERVED!",
+        "!RESERVED!",
+        "!RESERVED!",
+        "shoulders",
+        "ankle",
+        "face",
+        "!RESERVED!",
     ];
 
     match arg {
         None | Some("") => {
             let mut where_: Option<usize> = None;
-            if obj_wear(g, obj, ITEM_WEAR_FINGER) { where_ = Some(W_FINGER_R); }
-            if obj_wear(g, obj, ITEM_WEAR_NECK) { where_ = Some(W_NECK_1); }
-            if obj_wear(g, obj, ITEM_WEAR_BODY) { where_ = Some(W_BODY); }
-            if obj_wear(g, obj, ITEM_WEAR_HEAD) { where_ = Some(W_HEAD); }
-            if obj_wear(g, obj, ITEM_WEAR_LEGS) { where_ = Some(W_LEGS); }
-            if obj_wear(g, obj, ITEM_WEAR_FEET) { where_ = Some(W_FEET); }
-            if obj_wear(g, obj, ITEM_WEAR_HANDS) { where_ = Some(W_HANDS); }
-            if obj_wear(g, obj, ITEM_WEAR_ARMS) { where_ = Some(W_ARMS); }
-            if obj_wear(g, obj, ITEM_WEAR_SHIELD) { where_ = Some(W_SHIELD); }
-            if obj_wear(g, obj, ITEM_WEAR_ABOUT) { where_ = Some(W_ABOUT); }
-            if obj_wear(g, obj, ITEM_WEAR_WAIST) { where_ = Some(W_WAIST); }
-            if obj_wear(g, obj, ITEM_WEAR_WRIST) { where_ = Some(W_WRIST_R); }
-            if obj_wear(g, obj, ITEM_WEAR_SHOULDERS) { where_ = Some(W_SHOULDERS); }
-            if obj_wear(g, obj, ITEM_WEAR_ANKLE) { where_ = Some(W_ANKLE_R); }
-            if obj_wear(g, obj, ITEM_WEAR_FACE) { where_ = Some(W_FACE); }
+            if obj_wear(g, obj, ITEM_WEAR_FINGER) {
+                where_ = Some(W_FINGER_R);
+            }
+            if obj_wear(g, obj, ITEM_WEAR_NECK) {
+                where_ = Some(W_NECK_1);
+            }
+            if obj_wear(g, obj, ITEM_WEAR_BODY) {
+                where_ = Some(W_BODY);
+            }
+            if obj_wear(g, obj, ITEM_WEAR_HEAD) {
+                where_ = Some(W_HEAD);
+            }
+            if obj_wear(g, obj, ITEM_WEAR_LEGS) {
+                where_ = Some(W_LEGS);
+            }
+            if obj_wear(g, obj, ITEM_WEAR_FEET) {
+                where_ = Some(W_FEET);
+            }
+            if obj_wear(g, obj, ITEM_WEAR_HANDS) {
+                where_ = Some(W_HANDS);
+            }
+            if obj_wear(g, obj, ITEM_WEAR_ARMS) {
+                where_ = Some(W_ARMS);
+            }
+            if obj_wear(g, obj, ITEM_WEAR_SHIELD) {
+                where_ = Some(W_SHIELD);
+            }
+            if obj_wear(g, obj, ITEM_WEAR_ABOUT) {
+                where_ = Some(W_ABOUT);
+            }
+            if obj_wear(g, obj, ITEM_WEAR_WAIST) {
+                where_ = Some(W_WAIST);
+            }
+            if obj_wear(g, obj, ITEM_WEAR_WRIST) {
+                where_ = Some(W_WRIST_R);
+            }
+            if obj_wear(g, obj, ITEM_WEAR_SHOULDERS) {
+                where_ = Some(W_SHOULDERS);
+            }
+            if obj_wear(g, obj, ITEM_WEAR_ANKLE) {
+                where_ = Some(W_ANKLE_R);
+            }
+            if obj_wear(g, obj, ITEM_WEAR_FACE) {
+                where_ = Some(W_FACE);
+            }
             where_
         }
         Some(a) => {
@@ -1624,7 +2381,10 @@ fn find_eq_pos(g: &mut GameState, ch: CharId, obj: ObjId, arg: Option<&str>) -> 
             match pos {
                 Some(idx) if !a.starts_with('!') => Some(idx),
                 _ => {
-                    g.send_to_char(ch, &format!("'{}'?  What part of your body is THAT?\r\n", a));
+                    g.send_to_char(
+                        ch,
+                        &format!("'{}'?  What part of your body is THAT?\r\n", a),
+                    );
                     None
                 }
             }
@@ -1642,13 +2402,19 @@ pub fn do_wear(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     let (dotmode, name) = find_all_dots(&arg1);
 
     if !arg2.is_empty() && dotmode != FIND_INDIV {
-        g.send_to_char(ch, "You can't specify the same body location for more than one item!\r\n");
+        g.send_to_char(
+            ch,
+            "You can't specify the same body location for more than one item!\r\n",
+        );
         return;
     }
 
     if dotmode == FIND_ALL {
         let mut items_worn = 0;
-        let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        let inv = g
+            .get_char(ch)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         for obj in inv {
             if can_see_obj(g, ch, obj) {
                 if let Some(where_) = find_eq_pos(g, ch, obj, None) {
@@ -1665,33 +2431,65 @@ pub fn do_wear(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
             g.send_to_char(ch, "Wear all of what?\r\n");
             return;
         }
-        let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        let inv = g
+            .get_char(ch)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         if g.get_obj_in_list_vis(ch, &name, &inv).is_none() {
             g.send_to_char(ch, &format!("You don't seem to have any {}s.\r\n", name));
         } else {
-            let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+            let inv = g
+                .get_char(ch)
+                .map(|c| c.carrying.clone())
+                .unwrap_or_default();
             for obj in inv {
                 if obj_isname(g, &name, obj) {
                     if let Some(where_) = find_eq_pos(g, ch, obj, None) {
                         perform_wear(g, ch, obj, where_);
                     } else {
-                        act(g, "You can't wear $p.", false, ch, Some(obj), ActArg::None, To::Char);
+                        act(
+                            g,
+                            "You can't wear $p.",
+                            false,
+                            ch,
+                            Some(obj),
+                            ActArg::None,
+                            To::Char,
+                        );
                     }
                 }
             }
         }
     } else {
-        let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        let inv = g
+            .get_char(ch)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         match g.get_obj_in_list_vis(ch, &arg1, &inv) {
             None => {
-                g.send_to_char(ch, &format!("You don't seem to have {} {}.\r\n", an(&arg1), arg1));
+                g.send_to_char(
+                    ch,
+                    &format!("You don't seem to have {} {}.\r\n", an(&arg1), arg1),
+                );
             }
             Some(obj) => {
-                let arg2_opt = if arg2.is_empty() { None } else { Some(arg2.as_str()) };
+                let arg2_opt = if arg2.is_empty() {
+                    None
+                } else {
+                    Some(arg2.as_str())
+                };
                 if let Some(where_) = find_eq_pos(g, ch, obj, arg2_opt) {
                     perform_wear(g, ch, obj, where_);
                 } else if arg2.is_empty() {
-                    act(g, "You can't wear $p.", false, ch, Some(obj), ActArg::None, To::Char);
+                    act(
+                        g,
+                        "You can't wear $p.",
+                        false,
+                        ch,
+                        Some(obj),
+                        ActArg::None,
+                        To::Char,
+                    );
                 }
             }
         }
@@ -1705,11 +2503,17 @@ pub fn do_wield(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         g.send_to_char(ch, "Wield what?\r\n");
         return;
     }
-    let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let inv = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     let obj = match g.get_obj_in_list_vis(ch, &arg, &inv) {
         Some(o) => o,
         None => {
-            g.send_to_char(ch, &format!("You don't seem to have {} {}.\r\n", an(&arg), arg));
+            g.send_to_char(
+                ch,
+                &format!("You don't seem to have {} {}.\r\n", an(&arg), arg),
+            );
             return;
         }
     };
@@ -1724,8 +2528,24 @@ pub fn do_wield(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     {
         // weaponrestrictions is disabled (== 0) in config, so this branch is
         // never reached; lvl_maxdmg_weapon[] gating is preserved structurally.
-        act(g, "$p fumbles out of your inexperienced hands...", false, ch, Some(obj), ActArg::None, To::Char);
-        act(g, "$p fumbles out of $n's inexperienced hands...", false, ch, Some(obj), ActArg::None, To::Room);
+        act(
+            g,
+            "$p fumbles out of your inexperienced hands...",
+            false,
+            ch,
+            Some(obj),
+            ActArg::None,
+            To::Char,
+        );
+        act(
+            g,
+            "$p fumbles out of $n's inexperienced hands...",
+            false,
+            ch,
+            Some(obj),
+            ActArg::None,
+            To::Room,
+        );
     } else {
         perform_wear(g, ch, obj, W_WIELD);
     }
@@ -1738,11 +2558,17 @@ pub fn do_grab(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         g.send_to_char(ch, "Hold what?\r\n");
         return;
     }
-    let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let inv = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     let obj = match g.get_obj_in_list_vis(ch, &arg, &inv) {
         Some(o) => o,
         None => {
-            g.send_to_char(ch, &format!("You don't seem to have {} {}.\r\n", an(&arg), arg));
+            g.send_to_char(
+                ch,
+                &format!("You don't seem to have {} {}.\r\n", an(&arg), arg),
+            );
             return;
         }
     };
@@ -1770,10 +2596,34 @@ fn perform_remove(g: &mut GameState, ch: CharId, pos: usize) {
         None => return,
     };
     if is_carrying_n(g, ch) >= can_carry_n(g, ch) {
-        act(g, "$p: you can't carry that many items!", false, ch, Some(obj), ActArg::None, To::Char);
+        act(
+            g,
+            "$p: you can't carry that many items!",
+            false,
+            ch,
+            Some(obj),
+            ActArg::None,
+            To::Char,
+        );
     } else {
-        act(g, "You stop using $p.", false, ch, Some(obj), ActArg::None, To::Char);
-        act(g, "$n stops using $p.", true, ch, Some(obj), ActArg::None, To::Room);
+        act(
+            g,
+            "You stop using $p.",
+            false,
+            ch,
+            Some(obj),
+            ActArg::None,
+            To::Char,
+        );
+        act(
+            g,
+            "$n stops using $p.",
+            true,
+            ch,
+            Some(obj),
+            ActArg::None,
+            To::Room,
+        );
         if let Some(removed) = g.unequip_char(ch, pos) {
             g.obj_to_char(removed, ch);
         }
@@ -1815,7 +2665,10 @@ pub fn do_remove(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
                 }
             }
             if !found {
-                g.send_to_char(ch, &format!("You don't seem to be using any {}s.\r\n", name));
+                g.send_to_char(
+                    ch,
+                    &format!("You don't seem to be using any {}s.\r\n", name),
+                );
             }
         }
     } else {
@@ -1837,7 +2690,10 @@ pub fn do_remove(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         }
         match found_pos {
             None => {
-                g.send_to_char(ch, &format!("You don't seem to be using {} {}.\r\n", an(&arg), arg));
+                g.send_to_char(
+                    ch,
+                    &format!("You don't seem to be using {} {}.\r\n", an(&arg), arg),
+                );
             }
             Some(i) => perform_remove(g, ch, i),
         }
@@ -1872,15 +2728,42 @@ pub fn do_sac(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         g.send_to_char(ch, "You can't sacrifice that!\n\r");
         return;
     }
-    if g.get_obj(obj).map(|o| !o.contains.is_empty()).unwrap_or(false) {
+    if g.get_obj(obj)
+        .map(|o| !o.contains.is_empty())
+        .unwrap_or(false)
+    {
         g.send_to_char(ch, "It's not empty!\r\n");
         return;
     }
 
-    act(g, "$n sacrifices $p.", false, ch, Some(obj), ActArg::None, To::Room);
-    act(g, "You sacrifice $p.", false, ch, Some(obj), ActArg::None, To::Char);
+    act(
+        g,
+        "$n sacrifices $p.",
+        false,
+        ch,
+        Some(obj),
+        ActArg::None,
+        To::Room,
+    );
+    act(
+        g,
+        "You sacrifice $p.",
+        false,
+        ch,
+        Some(obj),
+        ActArg::None,
+        To::Char,
+    );
     if !is_immort(g, ch) {
-        act(g, "You have been rewarded by the gods!", false, ch, Some(obj), ActArg::None, To::Char);
+        act(
+            g,
+            "You have been rewarded by the gods!",
+            false,
+            ch,
+            Some(obj),
+            ActArg::None,
+            To::Char,
+        );
         if let Some(c) = g.get_char_mut(ch) {
             c.points.exp += 1;
         }
@@ -1903,11 +2786,17 @@ pub fn do_repair(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         g.send_to_char(ch, "Repair what?\r\n");
         return;
     }
-    let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let inv = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     let repair = match g.get_obj_in_list_vis(ch, &arg, &inv) {
         Some(o) => o,
         None => {
-            g.send_to_char(ch, &format!("You don't seem to have {} {}.\r\n", an(&arg), arg));
+            g.send_to_char(
+                ch,
+                &format!("You don't seem to have {} {}.\r\n", an(&arg), arg),
+            );
             return;
         }
     };
@@ -1924,11 +2813,27 @@ pub fn do_repair(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     let tslots = obj_val(g, repair, 2);
 
     if cslots == 0 && tslots == 0 {
-        act(g, "$p seems to already be indestructable!", false, ch, Some(repair), ActArg::None, To::Char);
+        act(
+            g,
+            "$p seems to already be indestructable!",
+            false,
+            ch,
+            Some(repair),
+            ActArg::None,
+            To::Char,
+        );
         return;
     }
     if cslots == tslots {
-        act(g, "$p seems to already be in perfect condition!", false, ch, Some(repair), ActArg::None, To::Char);
+        act(
+            g,
+            "$p seems to already be in perfect condition!",
+            false,
+            ch,
+            Some(repair),
+            ActArg::None,
+            To::Char,
+        );
         return;
     }
 
@@ -1938,31 +2843,85 @@ pub fn do_repair(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
             if let Some(c) = g.get_char_mut(ch) {
                 c.points.exp -= 10000;
             }
-            g.send_to_char(ch, "Your repair attempt costs you 10,000 experience points.\r\n");
+            g.send_to_char(
+                ch,
+                "Your repair attempt costs you 10,000 experience points.\r\n",
+            );
         } else {
-            g.send_to_char(ch, "You do not have enough experience to attempt to repair it!\r\n");
+            g.send_to_char(
+                ch,
+                "You do not have enough experience to attempt to repair it!\r\n",
+            );
             return;
         }
     }
 
     if cslots < 0 {
-        act(g, "You completely ruin $p and it crumbles away!", false, ch, Some(repair), ActArg::None, To::Char);
-        act(g, "$n tries to repair $p, but it crumbles away!", true, ch, Some(repair), ActArg::None, To::Room);
+        act(
+            g,
+            "You completely ruin $p and it crumbles away!",
+            false,
+            ch,
+            Some(repair),
+            ActArg::None,
+            To::Char,
+        );
+        act(
+            g,
+            "$n tries to repair $p, but it crumbles away!",
+            true,
+            ch,
+            Some(repair),
+            ActArg::None,
+            To::Room,
+        );
         g.obj_from_anywhere(repair);
         g.extract_obj(repair);
         return;
     }
 
     if percent > prob {
-        act(g, "Your clumsy attempt at repairing $p damages it even more!", false, ch, Some(repair), ActArg::None, To::Char);
-        act(g, "$n tries to repair $p, but only makes it worse!", true, ch, Some(repair), ActArg::None, To::Room);
+        act(
+            g,
+            "Your clumsy attempt at repairing $p damages it even more!",
+            false,
+            ch,
+            Some(repair),
+            ActArg::None,
+            To::Char,
+        );
+        act(
+            g,
+            "$n tries to repair $p, but only makes it worse!",
+            true,
+            ch,
+            Some(repair),
+            ActArg::None,
+            To::Room,
+        );
         if let Some(o) = g.get_obj_mut(repair) {
             o.values[1] -= 2;
             o.values[2] -= 1;
         }
     } else {
-        act(g, "You repair $p and it looks in excellent condition again!", false, ch, Some(repair), ActArg::None, To::Char);
-        act(g, "$n repairs $p, making it as good as new again!", true, ch, Some(repair), ActArg::None, To::Room);
+        act(
+            g,
+            "You repair $p and it looks in excellent condition again!",
+            false,
+            ch,
+            Some(repair),
+            ActArg::None,
+            To::Char,
+        );
+        act(
+            g,
+            "$n repairs $p, making it as good as new again!",
+            true,
+            ch,
+            Some(repair),
+            ActArg::None,
+            To::Room,
+        );
         if let Some(o) = g.get_obj_mut(repair) {
             o.values[2] -= 1;
             o.values[1] = o.values[2];
@@ -1976,7 +2935,9 @@ pub fn do_repair(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
 /// isname(arg, obj->name).
 fn obj_isname(g: &GameState, arg: &str, oid: ObjId) -> bool {
-    g.get_obj(oid).map(|o| crate::handler::isname(arg, &o.name)).unwrap_or(false)
+    g.get_obj(oid)
+        .map(|o| crate::handler::isname(arg, &o.name))
+        .unwrap_or(false)
 }
 
 /// generic_find(FIND_OBJ_INV | FIND_OBJ_ROOM): inventory first, then room.
@@ -1987,7 +2948,10 @@ fn find_obj_inv_room(g: &GameState, ch: CharId, arg: &str) -> Option<ObjId> {
 /// Same, but also reports which list the match came from (the C `mode`
 /// return: FIND_OBJ_INV or FIND_OBJ_ROOM), used by get_from_container.
 fn find_obj_inv_room_mode(g: &GameState, ch: CharId, arg: &str) -> (Option<ObjId>, i32) {
-    let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let inv = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     if let Some(o) = g.get_obj_in_list_vis(ch, arg, &inv) {
         return (Some(o), FIND_OBJ_INV);
     }
@@ -1999,4 +2963,72 @@ fn find_obj_inv_room_mode(g: &GameState, ch: CharId, arg: &str) -> (Option<ObjId
         }
     }
     (None, 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::Descriptor;
+    use crate::object::Object;
+
+    fn wearable_game(
+        extra_flags: ExtraFlags,
+        min_level: i32,
+    ) -> (GameState, CharId, ObjId, ConnId) {
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(1);
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+
+        let mut ch = Character::new_player("Wearer".to_string(), Class::Warrior, Race::Human);
+        ch.desc = Some(conn);
+        ch.player.level = 10;
+        let ch = g.create_char(ch);
+
+        let mut obj = Object::new(1000, "armor".to_string(), "a test armor".to_string());
+        obj.wear_flags = WearFlags::TAKE | WearFlags::BODY;
+        obj.extra_flags = extra_flags;
+        obj.min_level = min_level;
+        let obj = g.create_obj(obj);
+        g.obj_to_char(obj, ch);
+        (g, ch, obj, conn)
+    }
+
+    fn assert_zapped(mut g: GameState, ch: CharId, obj: ObjId, conn: ConnId) {
+        perform_wear(&mut g, ch, obj, W_BODY);
+
+        let c = g.get_char(ch).unwrap();
+        assert_eq!(c.equipment[W_BODY], None);
+        assert_eq!(g.get_obj(obj).unwrap().loc, ObjLoc::Carried(ch));
+        assert!(g
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("You are zapped by a test armor and instantly let go of it.\r\n"));
+    }
+
+    #[test]
+    fn perform_wear_rejects_anti_alignment_items() {
+        let (mut g, ch, obj, conn) = wearable_game(ExtraFlags::ANTI_GOOD, 0);
+        g.get_char_mut(ch).unwrap().alignment = 500;
+
+        assert_zapped(g, ch, obj, conn);
+    }
+
+    #[test]
+    fn perform_wear_rejects_anti_class_items() {
+        let (g, ch, obj, conn) = wearable_game(ExtraFlags::ANTI_WARRIOR, 0);
+
+        assert_zapped(g, ch, obj, conn);
+    }
+
+    #[test]
+    fn perform_wear_rejects_min_level_items() {
+        let (g, ch, obj, conn) = wearable_game(ExtraFlags::empty(), 20);
+
+        assert_zapped(g, ch, obj, conn);
+    }
 }
