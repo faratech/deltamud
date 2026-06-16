@@ -44,6 +44,7 @@ mod dg_scripts;
 mod dg_triggers;
 mod dg_wldcmd;
 mod file_loader;
+mod fight_messages;
 mod flags;
 mod game;
 mod gcmd;
@@ -416,6 +417,10 @@ async fn main() -> Result<()> {
     // Load socials (CircleMUD boot_social_messages); spliced into command
     // lookup as a fallback since they are not in the static command table.
     cmd_social::boot_socials(Some(&format!("{}/misc/socials", config.lib_path)));
+
+    // Load the combat hit-messages (fight.c load_messages, lib/misc/messages):
+    // flavourful per-skill / per-weapon death/hit/miss/god messages.
+    fight_messages::load_messages(&config.lib_path);
 
     // Content/economy subsystem boot (Batch 11). Shop data load mirrors C's
     // DB_BOOT_SHP, which boot_world() skips under no_specials (db.c:261

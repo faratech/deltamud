@@ -530,15 +530,42 @@ pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, atta
 
     update_position(g, victim);
 
-    // Damage / miss message (weapon verb table for IS_WEAPON attack types).
-    if is_weapon_type(attacktype) {
-        dam_message(g, dmg, ch, victim, attacktype);
+    // Damage / skill message (fight.c damage ~1011). A non-weapon attack type
+    // (skill / spell) always uses skill_message; a weapon type uses dam_message,
+    // except a death blow (non-mercy attacker, non-NPC) or a miss first tries
+    // the weapon's skill_message and only falls back to dam_message if none
+    // exists. Invalid (TYPE_UNDEFINED), out-of-range (>= SELF_DAMAGE) and
+    // SKILL_RIPOSTE attack types print nothing here — except TYPE_UNDEFINED,
+    // which keeps the port's generic-hit fallback for environment / dg damage.
+    const SELF_DAMAGE: i32 = 1197; // spells.h (== TYPE_STARVING)
+    const PRF2_MERCY: i64 = 1 << 7; // structs.h
+    if attacktype != TYPE_UNDEFINED && attacktype < SELF_DAMAGE && attacktype != SKILL_RIPOSTE as i32
+    {
+        if attacktype < TYPE_HIT {
+            // Non-weapon attack (skill / spell): always use skill_message.
+            crate::fight_messages::skill_message(g, dmg, ch, victim, attacktype);
+        } else {
+            // Weapon type (TYPE_HIT..SELF_DAMAGE).
+            let vict_dead =
+                g.get_char(victim).map(|c| c.position == Position::Dead).unwrap_or(false);
+            let ch_npc = g.get_char(ch).map(|c| c.is_npc).unwrap_or(true);
+            let ch_mercy =
+                g.get_char(ch).map(|c| c.prf2_flags & PRF2_MERCY != 0).unwrap_or(false);
+            // `deathblow` is not modelled in this path (false): a normal kill
+            // tries the weapon's death-blow skill_message first, per C.
+            if (vict_dead && !ch_mercy && !ch_npc) || dmg == 0 {
+                if !crate::fight_messages::skill_message(g, dmg, ch, victim, attacktype) {
+                    dam_message(g, dmg, ch, victim, attacktype);
+                }
+            } else {
+                dam_message(g, dmg, ch, victim, attacktype);
+            }
+        }
     } else if attacktype == TYPE_UNDEFINED {
         // Generic strike with no weapon flavour (environment / dg damage):
         // fall back to the plain TYPE_HIT verb so onlookers still see a hit.
         dam_message(g, dmg, ch, victim, TYPE_HIT);
     }
-    // (Spell/skill messages are emitted by the magic subsystem, as in C.)
 
     if g.get_char(victim).map(|c| c.position == Position::Dead).unwrap_or(false) {
         die(g, ch, victim);
