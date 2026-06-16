@@ -291,7 +291,9 @@ fn sprintbit(bits: i64, table: &[&str]) -> String {
 /// rcds(): immortal room-display string. CircleMUD prints the room vnum; we
 /// emit just the decimal vnum here (the C builds "vnum" into a static buffer).
 fn rcds(g: &GameState, rnum: RoomRnum) -> String {
-    g.room_opt(rnum).map(|r| r.number.to_string()).unwrap_or_else(|| "?".to_string())
+    g.room_opt(rnum)
+        .map(|r| r.number.to_string())
+        .unwrap_or_else(|| "?".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -310,7 +312,9 @@ fn room_is_dark(g: &GameState, rnum: RoomRnum) -> bool {
 }
 
 fn is_blind(g: &GameState, ch: CharId) -> bool {
-    g.get_char(ch).map(|c| c.affect_flags & AFF_BLIND != 0).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.affect_flags & AFF_BLIND != 0)
+        .unwrap_or(false)
 }
 
 /// CAN_SEE_OBJ for the (Tier-0) object model: invisible items need detect.
@@ -323,7 +327,9 @@ fn can_see_obj(g: &GameState, ch: CharId, oid: ObjId) -> bool {
     if !invis {
         return true;
     }
-    g.get_char(ch).map(|c| c.affect_flags & AFF_DETECT_INVIS != 0).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.affect_flags & AFF_DETECT_INVIS != 0)
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -368,7 +374,11 @@ fn show_obj_string(g: &mut GameState, ch: CharId, oid: ObjId, mode: i32) {
 
     if mode != 3 {
         let (extra, det_align, det_magic) = match (g.get_obj(oid), g.get_char(ch)) {
-            (Some(o), Some(c)) => (o.extra_flags.bits(), c.affect_flags & AFF_DETECT_ALIGN != 0, c.affect_flags & AFF_DETECT_MAGIC != 0),
+            (Some(o), Some(c)) => (
+                o.extra_flags.bits(),
+                c.affect_flags & AFF_DETECT_ALIGN != 0,
+                c.affect_flags & AFF_DETECT_MAGIC != 0,
+            ),
             _ => (0u64, false, false),
         };
         if extra & ITEM_INVISIBLE_BIT != 0 {
@@ -480,7 +490,9 @@ fn pers(g: &GameState, viewer: CharId, target: CharId) -> String {
     if g.can_see(viewer, target) {
         if let Some(c) = g.get_char(target) {
             return if c.is_npc {
-                c.short_desc.clone().unwrap_or_else(|| c.player.name.clone())
+                c.short_desc
+                    .clone()
+                    .unwrap_or_else(|| c.player.name.clone())
             } else {
                 c.player.name.clone()
             };
@@ -505,18 +517,36 @@ fn look_at_char(g: &mut GameState, i: CharId, ch: CharId) {
     if g.get_char(ch).and_then(|c| c.desc).is_none() {
         return;
     }
-    let desc = g.get_char(i).map(|c| c.player.description.clone()).unwrap_or_default();
+    let desc = g
+        .get_char(i)
+        .map(|c| c.player.description.clone())
+        .unwrap_or_default();
     if !desc.is_empty() {
         g.send_to_char(ch, &desc);
     } else {
-        act(g, "You see nothing special about $m.", false, i, None, ActArg::Char(ch), To::Vict);
+        act(
+            g,
+            "You see nothing special about $m.",
+            false,
+            i,
+            None,
+            ActArg::Char(ch),
+            To::Vict,
+        );
     }
 
     diag_char_to_char(g, i, ch);
 
     // Citizen/level title line (PCs only).
     let (is_npc, level, sex, race, class, home) = match g.get_char(i) {
-        Some(c) => (c.is_npc, c.player.level, c.player.sex, c.player.race, c.player.class, c.player.hometown),
+        Some(c) => (
+            c.is_npc,
+            c.player.level,
+            c.player.sex,
+            c.player.race,
+            c.player.class,
+            c.player.hometown,
+        ),
         None => return,
     };
     if !is_npc {
@@ -555,7 +585,15 @@ fn look_at_char(g: &mut GameState, i: CharId, ch: CharId) {
         .unwrap_or_default();
     let any_eq = eq.iter().any(|&(_, oid)| can_see_obj(g, ch, oid));
     if any_eq {
-        act(g, "\r\n$n is using:", false, i, None, ActArg::Char(ch), To::Vict);
+        act(
+            g,
+            "\r\n$n is using:",
+            false,
+            i,
+            None,
+            ActArg::Char(ch),
+            To::Vict,
+        );
         for (p, oid) in &eq {
             if can_see_obj(g, ch, *oid) {
                 let label = constants::WHERE.get(*p).copied().unwrap_or("");
@@ -571,8 +609,19 @@ fn look_at_char(g: &mut GameState, i: CharId, ch: CharId) {
         None => return,
     };
     if ch != i && (vch_class == Class::Thief || vch_level >= LVL_IMMORT) {
-        act(g, "\r\nYou attempt to peek at $s inventory:", false, i, None, ActArg::Char(ch), To::Vict);
-        let inv = g.get_char(i).map(|c| c.carrying.clone()).unwrap_or_default();
+        act(
+            g,
+            "\r\nYou attempt to peek at $s inventory:",
+            false,
+            i,
+            None,
+            ActArg::Char(ch),
+            To::Vict,
+        );
+        let inv = g
+            .get_char(i)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         let mut found = false;
         for oid in inv {
             if can_see_obj(g, ch, oid) && (g.rng.number(0, 20) < vch_level as i32) {
@@ -618,7 +667,10 @@ fn list_all_char(g: &GameState, i: CharId, ch: CharId) -> String {
                 if c.affect_flags & AFF_INVISIBLE != 0 {
                     buf.push('*');
                 }
-                if g.get_char(ch).map(|v| v.affect_flags & AFF_DETECT_ALIGN != 0).unwrap_or(false) {
+                if g.get_char(ch)
+                    .map(|v| v.affect_flags & AFF_DETECT_ALIGN != 0)
+                    .unwrap_or(false)
+                {
                     if c.alignment <= -350 {
                         buf.push_str("(Red Aura) ");
                     } else if c.alignment >= 350 {
@@ -638,7 +690,12 @@ fn list_all_char(g: &GameState, i: CharId, ch: CharId) -> String {
         buf = cap(c.short_desc.as_deref().unwrap_or(&c.player.name));
     } else if (c.player.level as u8) < LVL_IMMORT && c.citizen > 0 {
         // Mortal town-citizen: prefix the gendered rank title (act.informative.c).
-        buf = format!("&Y{}{} {}&Y", c.read_citizen(), c.player.name, c.get_title());
+        buf = format!(
+            "&Y{}{} {}&Y",
+            c.read_citizen(),
+            c.player.name,
+            c.get_title()
+        );
     } else {
         buf = format!("&Y{} {}&Y", c.player.name, c.get_title());
     }
@@ -688,7 +745,10 @@ fn list_all_char(g: &GameState, i: CharId, ch: CharId) -> String {
         buf.push_str(" is here struggling with thin air.");
     }
 
-    if g.get_char(ch).map(|v| v.affect_flags & AFF_DETECT_ALIGN != 0).unwrap_or(false) {
+    if g.get_char(ch)
+        .map(|v| v.affect_flags & AFF_DETECT_ALIGN != 0)
+        .unwrap_or(false)
+    {
         if c.alignment <= -350 {
             buf.push_str(" (Red Aura)");
         } else if c.alignment >= 350 {
@@ -726,7 +786,11 @@ fn push_aff_glows(buf: &mut String, c: &crate::character::Character, hssh: &str)
 /// list_char_to_char with [count] stacking (CircleMUD).
 fn list_char_to_char(g: &mut GameState, list: &[CharId], ch: CharId) {
     let mut lines: Vec<(String, i32)> = Vec::new();
-    let dark = g.get_char(ch).and_then(|c| c.in_room).map(|r| room_is_dark(g, r)).unwrap_or(false);
+    let dark = g
+        .get_char(ch)
+        .and_then(|c| c.in_room)
+        .map(|r| room_is_dark(g, r))
+        .unwrap_or(false);
     let see_dark = can_see_in_dark(g, ch);
     for &i in list {
         if i == ch {
@@ -737,7 +801,9 @@ fn list_char_to_char(g: &mut GameState, list: &[CharId], ch: CharId) {
             line = list_all_char(g, i, ch);
         } else if dark
             && !see_dark
-            && g.get_char(i).map(|c| c.affect_flags & AFF_INFRAVISION != 0).unwrap_or(false)
+            && g.get_char(i)
+                .map(|c| c.affect_flags & AFF_INFRAVISION != 0)
+                .unwrap_or(false)
         {
             line = "You see a pair of glowing red eyes looking your way.\r\n".to_string();
         } else {
@@ -762,7 +828,11 @@ fn list_char_to_char(g: &mut GameState, list: &[CharId], ch: CharId) {
 
 /// list_nostack_char_to_char (no [N] grouping) (CircleMUD).
 fn list_nostack_char_to_char(g: &mut GameState, list: &[CharId], ch: CharId) {
-    let dark = g.get_char(ch).and_then(|c| c.in_room).map(|r| room_is_dark(g, r)).unwrap_or(false);
+    let dark = g
+        .get_char(ch)
+        .and_then(|c| c.in_room)
+        .map(|r| room_is_dark(g, r))
+        .unwrap_or(false);
     let see_dark = can_see_in_dark(g, ch);
     for &i in list {
         if i == ch {
@@ -773,9 +843,14 @@ fn list_nostack_char_to_char(g: &mut GameState, list: &[CharId], ch: CharId) {
             g.send_to_char(ch, &line);
         } else if dark
             && !see_dark
-            && g.get_char(i).map(|c| c.affect_flags & AFF_INFRAVISION != 0).unwrap_or(false)
+            && g.get_char(i)
+                .map(|c| c.affect_flags & AFF_INFRAVISION != 0)
+                .unwrap_or(false)
         {
-            g.send_to_char(ch, "You see a pair of glowing red eyes looking your way.\r\n");
+            g.send_to_char(
+                ch,
+                "You see a pair of glowing red eyes looking your way.\r\n",
+            );
         }
     }
 }
@@ -789,7 +864,10 @@ fn do_auto_exits(g: &mut GameState, ch: CharId) {
         Some(r) => r,
         None => return,
     };
-    let imm = g.get_char(ch).map(|c| c.player.level >= LVL_IMMORT).unwrap_or(false);
+    let imm = g
+        .get_char(ch)
+        .map(|c| c.player.level >= LVL_IMMORT)
+        .unwrap_or(false);
     let mut buf = String::new();
     for door in 0..NUM_OF_DIRS {
         let exit = match g.room(rnum).exits[door].clone() {
@@ -831,7 +909,10 @@ pub fn look_at_room(g: &mut GameState, ch: CharId, ignore_brief: bool) {
         return;
     }
 
-    let roomflags = g.get_char(ch).map(|c| c.prf_flags & PRF_ROOMFLAGS != 0).unwrap_or(false);
+    let roomflags = g
+        .get_char(ch)
+        .map(|c| c.prf_flags & PRF_ROOMFLAGS != 0)
+        .unwrap_or(false);
     g.send_to_char(ch, "&C");
     if roomflags {
         let (vnum, name, flags) = {
@@ -847,14 +928,23 @@ pub fn look_at_room(g: &mut GameState, ch: CharId, ignore_brief: bool) {
     g.send_to_char(ch, "&n");
     g.send_to_char(ch, "\r\n");
 
-    let brief = g.get_char(ch).map(|c| c.prf_flags & PRF_BRIEF != 0).unwrap_or(false);
-    let death = g.room(rnum).room_flags.contains(crate::room::RoomFlags::DEATH);
+    let brief = g
+        .get_char(ch)
+        .map(|c| c.prf_flags & PRF_BRIEF != 0)
+        .unwrap_or(false);
+    let death = g
+        .room(rnum)
+        .room_flags
+        .contains(crate::room::RoomFlags::DEATH);
     if (!brief) || ignore_brief || death {
         let desc = g.room(rnum).description.clone();
         g.send_to_char(ch, &desc);
     }
 
-    if g.get_char(ch).map(|c| c.prf_flags & PRF_AUTOEXIT != 0).unwrap_or(false) {
+    if g.get_char(ch)
+        .map(|c| c.prf_flags & PRF_AUTOEXIT != 0)
+        .unwrap_or(false)
+    {
         do_auto_exits(g, ch);
     }
 
@@ -864,7 +954,10 @@ pub fn look_at_room(g: &mut GameState, ch: CharId, ignore_brief: bool) {
 
     // People.
     let people = g.room(rnum).people.clone();
-    if g.get_char(ch).map(|c| c.prf_flags & PRF_NOLOOKSTACK != 0).unwrap_or(false) {
+    if g.get_char(ch)
+        .map(|c| c.prf_flags & PRF_NOLOOKSTACK != 0)
+        .unwrap_or(false)
+    {
         list_nostack_char_to_char(g, &people, ch);
     } else {
         list_char_to_char(g, &people, ch);
@@ -911,22 +1004,34 @@ fn look_in_obj(g: &mut GameState, ch: CharId, arg: &str) {
     let oid = match obj {
         Some(o) => o,
         None => {
-            g.send_to_char(ch, &format!("There doesn't seem to be {} {} here.\r\n", an(arg), arg));
+            g.send_to_char(
+                ch,
+                &format!("There doesn't seem to be {} {} here.\r\n", an(arg), arg),
+            );
             return;
         }
     };
     let otype = g.get_obj(oid).map(|o| o.obj_type).unwrap();
-    if otype != ObjectType::LiqContainer && otype != ObjectType::Fountain && otype != ObjectType::Container {
+    if otype != ObjectType::LiqContainer
+        && otype != ObjectType::Fountain
+        && otype != ObjectType::Container
+    {
         g.send_to_char(ch, "There's nothing inside that!\r\n");
         return;
     }
     if otype == ObjectType::Container {
-        let closed = g.get_obj(oid).map(|o| o.values[1] & CONT_CLOSED != 0).unwrap_or(false);
+        let closed = g
+            .get_obj(oid)
+            .map(|o| o.values[1] & CONT_CLOSED != 0)
+            .unwrap_or(false);
         if closed {
             g.send_to_char(ch, "It is closed.\r\n");
             return;
         }
-        let name = g.get_obj(oid).map(|o| fname(&o.name).to_string()).unwrap_or_default();
+        let name = g
+            .get_obj(oid)
+            .map(|o| fname(&o.name).to_string())
+            .unwrap_or_default();
         g.send_to_char(ch, &name);
         match bits {
             FIND_INV => g.send_to_char(ch, " (carried): \r\n"),
@@ -934,20 +1039,32 @@ fn look_in_obj(g: &mut GameState, ch: CharId, arg: &str) {
             FIND_EQUIP => g.send_to_char(ch, " (used): \r\n"),
             _ => {}
         }
-        let contents = g.get_obj(oid).map(|o| o.contains.clone()).unwrap_or_default();
+        let contents = g
+            .get_obj(oid)
+            .map(|o| o.contains.clone())
+            .unwrap_or_default();
         list_obj_to_char(g, ch, &contents, 2, true);
     } else {
         // drink container / fountain
-        let (v0, v1, v2) = g.get_obj(oid).map(|o| (o.values[0], o.values[1], o.values[2])).unwrap();
+        let (v0, v1, v2) = g
+            .get_obj(oid)
+            .map(|o| (o.values[0], o.values[1], o.values[2]))
+            .unwrap();
         if v1 <= 0 {
             g.send_to_char(ch, "It is empty.\r\n");
         } else if v0 <= 0 || v1 > v0 {
             g.send_to_char(ch, "Its contents seem somewhat murky.\r\n");
         } else {
             let amt = ((v1 * 3) / v0) as usize;
-            let liquid = constants::COLOR_LIQUID.get(v2 as usize).copied().unwrap_or("clear");
+            let liquid = constants::COLOR_LIQUID
+                .get(v2 as usize)
+                .copied()
+                .unwrap_or("clear");
             let full = constants::FULLNESS.get(amt).copied().unwrap_or("");
-            g.send_to_char(ch, &format!("It's {}full of a {} liquid.\r\n", full, liquid));
+            g.send_to_char(
+                ch,
+                &format!("It's {}full of a {} liquid.\r\n", full, liquid),
+            );
         }
     }
 }
@@ -976,9 +1093,25 @@ fn look_at_target(g: &mut GameState, ch: CharId, arg: &str) {
         look_at_char(g, found_char, ch);
         if ch != found_char {
             if g.can_see(found_char, ch) {
-                act(g, "$n looks at you.", true, ch, None, ActArg::Char(found_char), To::Vict);
+                act(
+                    g,
+                    "$n looks at you.",
+                    true,
+                    ch,
+                    None,
+                    ActArg::Char(found_char),
+                    To::Vict,
+                );
             }
-            act(g, "$n looks at $N.", true, ch, None, ActArg::Char(found_char), To::NotVict);
+            act(
+                g,
+                "$n looks at $N.",
+                true,
+                ch,
+                None,
+                ActArg::Char(found_char),
+                To::NotVict,
+            );
         }
         return;
     }
@@ -998,7 +1131,11 @@ fn look_at_target(g: &mut GameState, ch: CharId, arg: &str) {
     // Room special exit (the `O` block): looking by its ex_name shows the
     // general description plus an open/closed door note (act.informative.c).
     if let Some(se) = g.room(rnum).special_exit.clone() {
-        let matches = se.ex_name.as_deref().map(|n| isname(arg, n)).unwrap_or(false);
+        let matches = se
+            .ex_name
+            .as_deref()
+            .map(|n| isname(arg, n))
+            .unwrap_or(false);
         if matches {
             match &se.general_description {
                 Some(d) if !d.is_empty() => {
@@ -1035,7 +1172,10 @@ fn look_at_target(g: &mut GameState, ch: CharId, arg: &str) {
         if !can_see_obj(g, ch, oid) {
             continue;
         }
-        let exdescs = g.get_obj(oid).map(|o| o.ex_descriptions.clone()).unwrap_or_default();
+        let exdescs = g
+            .get_obj(oid)
+            .map(|o| o.ex_descriptions.clone())
+            .unwrap_or_default();
         if let Some(desc) = find_exdesc(arg, &exdescs) {
             let d = desc.to_string();
             g.send_to_char(ch, &d);
@@ -1045,12 +1185,18 @@ fn look_at_target(g: &mut GameState, ch: CharId, arg: &str) {
 
     // Does the argument match an extra desc in the char's inventory?
     if !found {
-        let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        let inv = g
+            .get_char(ch)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         for oid in inv {
             if !can_see_obj(g, ch, oid) {
                 continue;
             }
-            let exdescs = g.get_obj(oid).map(|o| o.ex_descriptions.clone()).unwrap_or_default();
+            let exdescs = g
+                .get_obj(oid)
+                .map(|o| o.ex_descriptions.clone())
+                .unwrap_or_default();
             if let Some(desc) = find_exdesc(arg, &exdescs) {
                 let d = desc.to_string();
                 g.send_to_char(ch, &d);
@@ -1067,7 +1213,10 @@ fn look_at_target(g: &mut GameState, ch: CharId, arg: &str) {
             if !can_see_obj(g, ch, oid) {
                 continue;
             }
-            let exdescs = g.get_obj(oid).map(|o| o.ex_descriptions.clone()).unwrap_or_default();
+            let exdescs = g
+                .get_obj(oid)
+                .map(|o| o.ex_descriptions.clone())
+                .unwrap_or_default();
             if let Some(desc) = find_exdesc(arg, &exdescs) {
                 let d = desc.to_string();
                 g.send_to_char(ch, &d);
@@ -1110,7 +1259,10 @@ fn generic_find_obj(
     look_equip: bool,
 ) -> (Option<ObjId>, i32) {
     if look_inv {
-        let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        let inv = g
+            .get_char(ch)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         if let Some(o) = obj_in_list_vis(g, ch, arg, &inv) {
             return (Some(o), FIND_INV);
         }
@@ -1164,7 +1316,10 @@ pub fn do_look(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
     if g.get_char(ch).and_then(|c| c.desc).is_none() {
         return;
     }
-    let pos = g.get_char(ch).map(|c| c.position).unwrap_or(Position::Standing);
+    let pos = g
+        .get_char(ch)
+        .map(|c| c.position)
+        .unwrap_or(Position::Standing);
     let rnum = g.get_char(ch).and_then(|c| c.in_room);
 
     if pos < Position::Sleeping {
@@ -1179,7 +1334,10 @@ pub fn do_look(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
         if room_is_dark(g, r) && !can_see_in_dark(g, ch) {
             g.send_to_char(ch, "It is pitch black...\r\n");
             let people = g.room(r).people.clone();
-            if g.get_char(ch).map(|c| c.prf_flags & PRF_NOLOOKSTACK != 0).unwrap_or(false) {
+            if g.get_char(ch)
+                .map(|c| c.prf_flags & PRF_NOLOOKSTACK != 0)
+                .unwrap_or(false)
+            {
                 list_nostack_char_to_char(g, &people, ch);
             } else {
                 list_char_to_char(g, &people, ch);
@@ -1235,13 +1393,20 @@ pub fn do_examine(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         .map(|o| (o.obj_type, o.values[2], o.values[3]))
         .unwrap();
 
-    if otype == ObjectType::LiqContainer || otype == ObjectType::Fountain || otype == ObjectType::Container {
+    if otype == ObjectType::LiqContainer
+        || otype == ObjectType::Fountain
+        || otype == ObjectType::Container
+    {
         g.send_to_char(ch, "When you look inside, you see:\r\n");
         look_in_obj(g, ch, &arg);
     }
 
     // Condition is a percentage of total slots (DeltaMUD: tslots=v2, cslots=v3).
-    let condition = if tslots != 0 { (cslots * 100) / tslots } else { 0 };
+    let condition = if tslots != 0 {
+        (cslots * 100) / tslots
+    } else {
+        0
+    };
     let line = if condition == 0 {
         "It appears to be indestructable!\r\n"
     } else if condition <= 10 {
@@ -1277,8 +1442,14 @@ pub fn do_exits(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
         Some(r) => r,
         None => return,
     };
-    let imm = g.get_char(ch).map(|c| c.player.level >= LVL_IMMORT).unwrap_or(false);
-    let roomflags = g.get_char(ch).map(|c| c.prf_flags & PRF_ROOMFLAGS != 0).unwrap_or(false);
+    let imm = g
+        .get_char(ch)
+        .map(|c| c.player.level >= LVL_IMMORT)
+        .unwrap_or(false);
+    let roomflags = g
+        .get_char(ch)
+        .map(|c| c.prf_flags & PRF_ROOMFLAGS != 0)
+        .unwrap_or(false);
     let see_dark = can_see_in_dark(g, ch);
 
     let mut buf = String::new();
@@ -1302,7 +1473,10 @@ pub fn do_exits(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
             if imm || roomflags {
                 let vcds = rcds(g, to_rnum);
                 let name = g.room(to_rnum).name.clone();
-                line2 = format!("&Y{:<5}&n &R-&n &C[&n{}&C]&n {}\r\n", DIR_NAMES[door], vcds, name);
+                line2 = format!(
+                    "&Y{:<5}&n &R-&n &C[&n{}&C]&n {}\r\n",
+                    DIR_NAMES[door], vcds, name
+                );
             } else {
                 line2 = format!("&Y{:<5}&n &R-&n ", DIR_NAMES[door]);
                 if room_is_dark(g, to_rnum) && !see_dark {
@@ -1333,7 +1507,11 @@ pub fn do_exits(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
                 line2 = s;
             } else {
                 let kw = exit.keyword.as_deref().unwrap_or("");
-                line2 = format!("&Y{:<5}&n &R-&n The {} is closed\r\n", DIR_NAMES[door], fname(kw));
+                line2 = format!(
+                    "&Y{:<5}&n &R-&n The {} is closed\r\n",
+                    DIR_NAMES[door],
+                    fname(kw)
+                );
             }
             buf.push_str(&cap(&line2));
         }
@@ -1354,7 +1532,10 @@ pub fn do_gold(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     } else if gold == 1 {
         g.send_to_char(ch, "You have one miserable little gold coin.\r\n");
     } else {
-        g.send_to_char(ch, &format!("You have {} gold coins.\r\n", numdisplay(gold as i64)));
+        g.send_to_char(
+            ch,
+            &format!("You have {} gold coins.\r\n", numdisplay(gold as i64)),
+        );
     }
 }
 
@@ -1372,7 +1553,10 @@ pub fn do_checkbail(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     let bail = g.get_char(ch).map(|c| c.bail_amt).unwrap_or(0);
     g.send_to_char(
         ch,
-        &format!("Bail for this offence has been set at {} gold coins.\r\n", bail),
+        &format!(
+            "Bail for this offence has been set at {} gold coins.\r\n",
+            bail
+        ),
     );
 }
 
@@ -1402,18 +1586,51 @@ pub fn do_worth(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     let bank = c.points.bank_gold;
     let eq: Vec<ObjId> = c.equipment.iter().flatten().copied().collect();
     let inv = c.carrying.clone();
-    let eq_val: i32 = eq.iter().filter_map(|o| g.get_obj(*o).map(|x| x.cost)).sum();
-    let inven_val: i32 = inv.iter().filter_map(|o| g.get_obj(*o).map(|x| x.cost)).sum();
+    let eq_val: i32 = eq
+        .iter()
+        .filter_map(|o| g.get_obj(*o).map(|x| x.cost))
+        .sum();
+    let inven_val: i32 = inv
+        .iter()
+        .filter_map(|o| g.get_obj(*o).map(|x| x.cost))
+        .sum();
 
-    g.send_to_char(ch, &format!("You have {} gold coins on hand.\r\n", numdisplay(gold as i64)));
-    g.send_to_char(ch, &format!("You have {} gold coins in the bank.\r\n", numdisplay(bank as i64)));
-    g.send_to_char(ch, &format!("You have inventory worth {} gold coins.\r\n", numdisplay(inven_val as i64)));
-    g.send_to_char(ch, &format!("You have equipment worth {} gold coins.\r\n", numdisplay(eq_val as i64)));
+    g.send_to_char(
+        ch,
+        &format!(
+            "You have {} gold coins on hand.\r\n",
+            numdisplay(gold as i64)
+        ),
+    );
+    g.send_to_char(
+        ch,
+        &format!(
+            "You have {} gold coins in the bank.\r\n",
+            numdisplay(bank as i64)
+        ),
+    );
+    g.send_to_char(
+        ch,
+        &format!(
+            "You have inventory worth {} gold coins.\r\n",
+            numdisplay(inven_val as i64)
+        ),
+    );
+    g.send_to_char(
+        ch,
+        &format!(
+            "You have equipment worth {} gold coins.\r\n",
+            numdisplay(eq_val as i64)
+        ),
+    );
     if gold + inven_val + eq_val == 0 {
         g.send_to_char(ch, "Ouch! Looks like you're broke!\r\n");
     } else {
         let net = gold as i64 + bank as i64 + inven_val as i64 + eq_val as i64;
-        g.send_to_char(ch, &format!("For a net worth of {} gold coins.\r\n", numdisplay(net)));
+        g.send_to_char(
+            ch,
+            &format!("For a net worth of {} gold coins.\r\n", numdisplay(net)),
+        );
     }
 }
 
@@ -1430,10 +1647,16 @@ pub fn do_status(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         match g.get_char_room_vis(ch, &target_name) {
             Some(v) if !g.get_char(v).map(|c| c.is_npc).unwrap_or(true) => {
                 if ch_level < g.get_char(v).map(|c| c.player.level).unwrap_or(1) {
-                    g.send_to_char(ch, "You can't see the score of people above your level.\r\n");
+                    g.send_to_char(
+                        ch,
+                        "You can't see the score of people above your level.\r\n",
+                    );
                     return;
                 }
-                let name = g.get_char(v).map(|c| c.player.name.clone()).unwrap_or_default();
+                let name = g
+                    .get_char(v)
+                    .map(|c| c.player.name.clone())
+                    .unwrap_or_default();
                 g.send_to_char(ch, &format!("&W***** Score for {} ***** &n\r\n", name));
                 (v, format!("{} is", name))
             }
@@ -1450,8 +1673,17 @@ pub fn do_status(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     };
 
     // Inventory + eq worth.
-    let eq_val: i32 = c.equipment.iter().flatten().filter_map(|o| g.get_obj(*o).map(|x| x.cost)).sum();
-    let inven_val: i32 = c.carrying.iter().filter_map(|o| g.get_obj(*o).map(|x| x.cost)).sum();
+    let eq_val: i32 = c
+        .equipment
+        .iter()
+        .flatten()
+        .filter_map(|o| g.get_obj(*o).map(|x| x.cost))
+        .sum();
+    let inven_val: i32 = c
+        .carrying
+        .iter()
+        .filter_map(|o| g.get_obj(*o).map(|x| x.cost))
+        .sum();
 
     let mut buf = String::new();
     buf.push_str(&format!(
@@ -1505,18 +1737,46 @@ pub fn do_status(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     ));
     buf.push_str("&b---------------------------------------------------------------------&n\r\n");
 
-    buf.push_str(&format!("&CHit Pts   :&n {:<5} ", numdisplay(c.points.hit as i64)));
-    buf.push_str(&format!("(max: {:<5})      ", numdisplay(c.points.max_hit as i64)));
-    buf.push_str(&format!("&CMana Pts     :&n {:<5} ", numdisplay(c.points.mana as i64)));
-    buf.push_str(&format!("(max: {:<5})\r\n", numdisplay(c.points.max_mana as i64)));
+    buf.push_str(&format!(
+        "&CHit Pts   :&n {:<5} ",
+        numdisplay(c.points.hit as i64)
+    ));
+    buf.push_str(&format!(
+        "(max: {:<5})      ",
+        numdisplay(c.points.max_hit as i64)
+    ));
+    buf.push_str(&format!(
+        "&CMana Pts     :&n {:<5} ",
+        numdisplay(c.points.mana as i64)
+    ));
+    buf.push_str(&format!(
+        "(max: {:<5})\r\n",
+        numdisplay(c.points.max_mana as i64)
+    ));
 
-    buf.push_str(&format!("&CMove Pts  :&n {:<5} ", numdisplay(c.points.move_points as i64)));
-    buf.push_str(&format!("(max: {:<5})      ", numdisplay(c.points.max_move as i64)));
-    buf.push_str(&format!("&CAlignment    :&n {} \r\n", numdisplay(c.alignment as i64)));
+    buf.push_str(&format!(
+        "&CMove Pts  :&n {:<5} ",
+        numdisplay(c.points.move_points as i64)
+    ));
+    buf.push_str(&format!(
+        "(max: {:<5})      ",
+        numdisplay(c.points.max_move as i64)
+    ));
+    buf.push_str(&format!(
+        "&CAlignment    :&n {} \r\n",
+        numdisplay(c.alignment as i64)
+    ));
 
     let tnl = exp_to_level(c.player.level as i32) - c.points.exp;
-    buf.push_str(&format!("&CExp Pts   :&n {:<12}            ", numdisplay(c.points.exp)));
-    let tnl_str = if c.player.level < 100 { numdisplay(tnl) } else { "N/A".to_string() };
+    buf.push_str(&format!(
+        "&CExp Pts   :&n {:<12}            ",
+        numdisplay(c.points.exp)
+    ));
+    let tnl_str = if c.player.level < 100 {
+        numdisplay(tnl)
+    } else {
+        "N/A".to_string()
+    };
     buf.push_str(&format!("&CExp to Level :&n {} \r\n", tnl_str));
 
     buf.push_str(&format!(
@@ -1554,7 +1814,9 @@ pub fn do_status(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     // Position line.
     let pl = match c.position {
         Position::Dead => format!("{} DEAD!\r\n", person),
-        Position::MortallyWounded => format!("{} mortally wounded!  You should seek help!\r\n", person),
+        Position::MortallyWounded => {
+            format!("{} mortally wounded!  You should seek help!\r\n", person)
+        }
         Position::Incapacitated => format!("{} incapacitated, slowly fading away...\r\n", person),
         Position::Stunned => format!("{} stunned! Unable to move!\r\n", person),
         Position::Sleeping => format!("{} sleeping.\r\n", person),
@@ -1613,30 +1875,48 @@ pub fn do_status(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         buf.push_str(&format!("{} able to see other people's auras.\r\n", person));
     }
     if af & AFF_DETECT_INVIS != 0 {
-        buf.push_str(&format!("{} sensitive to the presence of invisible things.\r\n", person));
+        buf.push_str(&format!(
+            "{} sensitive to the presence of invisible things.\r\n",
+            person
+        ));
     }
     if af & AFF_SENSE_LIFE2 != 0 {
-        buf.push_str(&format!("{} sensitive to the presence of life.\r\n", person));
+        buf.push_str(&format!(
+            "{} sensitive to the presence of life.\r\n",
+            person
+        ));
     }
     if af & AFF_CURSE != 0 {
         buf.push_str(&format!("{} under someone's curse!\r\n", person));
     }
     if af & AFF_SLEEP != 0 {
-        buf.push_str(&format!("{} sleeping and are unable to wake up.\r\n", person));
+        buf.push_str(&format!(
+            "{} sleeping and are unable to wake up.\r\n",
+            person
+        ));
     }
     if af & AFF_SANCTUARY != 0 {
         buf.push_str(&format!("{} protected by Sanctuary.\r\n", person));
     }
     if af & AFF_CONVERGENCE != 0 {
         let pron = if same { "your" } else { his };
-        buf.push_str(&format!("{} able to converge {} magic power.\r\n", person, pron));
+        buf.push_str(&format!(
+            "{} able to converge {} magic power.\r\n",
+            person, pron
+        ));
     }
     if af & AFF_AUTUS != 0 {
         let pron = if same { "your" } else { his };
-        buf.push_str(&format!("{} able to conserve {} mana use.\r\n", person, pron));
+        buf.push_str(&format!(
+            "{} able to conserve {} mana use.\r\n",
+            person, pron
+        ));
     }
     if af & AFF_NOPORTAL != 0 {
-        buf.push_str(&format!("{} protected by the heavens from mortal portals.\r\n", person));
+        buf.push_str(&format!(
+            "{} protected by the heavens from mortal portals.\r\n",
+            person
+        ));
     }
     if af & AFF_POISON != 0 {
         buf.push_str(&format!("{} poisoned!\r\n", person));
@@ -1645,7 +1925,11 @@ pub fn do_status(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         buf.push_str(&format!("{} sick with the plague!\r\n", person));
     }
     if af & AFF_CHARM != 0 {
-        let (who, verb) = if same { ("You", " have") } else { (cap_he, " has") };
+        let (who, verb) = if same {
+            ("You", " have")
+        } else {
+            (cap_he, " has")
+        };
         buf.push_str(&format!("{}{} been charmed!\r\n", who, verb));
     }
     if af & AFF_INFRAVISION != 0 {
@@ -1663,7 +1947,10 @@ pub fn do_status(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         buf.push_str(&format!("{} currently sneaking about.\r\n", person));
     }
     if af & AFF_HIDE != 0 {
-        buf.push_str(&format!("{} currently hidden from plain sight.\r\n", person));
+        buf.push_str(&format!(
+            "{} currently hidden from plain sight.\r\n",
+            person
+        ));
     }
 
     g.send_to_char(ch, &buf);
@@ -1671,7 +1958,10 @@ pub fn do_status(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
 pub fn do_inventory(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     g.send_to_char(ch, "You are carrying:\r\n");
-    let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let inv = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     list_obj_to_char(g, ch, &inv, 1, true);
 }
 
@@ -1710,8 +2000,14 @@ pub fn do_time(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     let hour12 = if hours % 12 == 0 { 12 } else { hours % 12 };
     let ampm = if hours >= 12 { "pm" } else { "am" };
     let weekday = (((35 * month) + day + 1) % 7).rem_euclid(7) as usize;
-    let weekday_name = constants::WEEKDAYS.get(weekday).copied().unwrap_or(constants::WEEKDAYS[0]);
-    g.send_to_char(ch, &format!("It is {} o'clock {}, on {}\r\n", hour12, ampm, weekday_name));
+    let weekday_name = constants::WEEKDAYS
+        .get(weekday)
+        .copied()
+        .unwrap_or(constants::WEEKDAYS[0]);
+    g.send_to_char(
+        ch,
+        &format!("It is {} o'clock {}, on {}\r\n", hour12, ampm, weekday_name),
+    );
 
     let day1 = day + 1;
     let suf = if day1 == 1 {
@@ -1731,8 +2027,17 @@ pub fn do_time(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     } else {
         "th"
     };
-    let month_name = constants::MONTH_NAME.get(month as usize).copied().unwrap_or(constants::MONTH_NAME[0]);
-    g.send_to_char(ch, &format!("The {}{} Day of the {}, Year {}.\r\n", day1, suf, month_name, year));
+    let month_name = constants::MONTH_NAME
+        .get(month as usize)
+        .copied()
+        .unwrap_or(constants::MONTH_NAME[0]);
+    g.send_to_char(
+        ch,
+        &format!(
+            "The {}{} Day of the {}, Year {}.\r\n",
+            day1, suf, month_name, year
+        ),
+    );
 }
 
 pub fn do_help(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
@@ -1817,15 +2122,31 @@ pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         } else if first == '-' {
             let mode = arg.chars().nth(1).unwrap_or(' ');
             match mode {
-                'f' => { who_fight = true; rest = after; }
-                'o' => { outlaws = true; rest = after; }
-                'z' => { who_zone = true; rest = after; }
-                'q' => { who_quest = true; rest = after; }
+                'f' => {
+                    who_fight = true;
+                    rest = after;
+                }
+                'o' => {
+                    outlaws = true;
+                    rest = after;
+                }
+                'z' => {
+                    who_zone = true;
+                    rest = after;
+                }
+                'q' => {
+                    who_quest = true;
+                    rest = after;
+                }
                 'l' => {
                     let (lv, r) = half_chop(&after);
                     let mut it = lv.split('-');
-                    if let Some(l) = it.next().and_then(|s| s.parse::<u8>().ok()) { low = l; }
-                    if let Some(h) = it.next().and_then(|s| s.parse::<u8>().ok()) { high = h; }
+                    if let Some(l) = it.next().and_then(|s| s.parse::<u8>().ok()) {
+                        low = l;
+                    }
+                    if let Some(h) = it.next().and_then(|s| s.parse::<u8>().ok()) {
+                        high = h;
+                    }
                     rest = r;
                 }
                 'n' => {
@@ -1833,8 +2154,14 @@ pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
                     name_search = n;
                     rest = r;
                 }
-                'a' => { who_arena = true; rest = after; }
-                'r' => { who_room = true; rest = after; }
+                'a' => {
+                    who_arena = true;
+                    rest = after;
+                }
+                'r' => {
+                    who_room = true;
+                    rest = after;
+                }
                 'c' => {
                     let (cl, r) = half_chop(&after);
                     for c in cl.chars() {
@@ -1842,9 +2169,18 @@ pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
                     }
                     rest = r;
                 }
-                'i' => { nomort = true; rest = after; }
-                'm' => { noimm = true; rest = after; }
-                _ => { g.send_to_char(ch, WHO_USAGE); return; }
+                'i' => {
+                    nomort = true;
+                    rest = after;
+                }
+                'm' => {
+                    noimm = true;
+                    rest = after;
+                }
+                _ => {
+                    g.send_to_char(ch, WHO_USAGE);
+                    return;
+                }
             }
         } else {
             g.send_to_char(ch, WHO_USAGE);
@@ -1922,7 +2258,11 @@ pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
                     c.get_title()
                 );
             } else {
-                line = format!("&B[&n100 &YHero &B]&n {} {}&n", c.player.name, c.get_title());
+                line = format!(
+                    "&B[&n100 &YHero &B]&n {} {}&n",
+                    c.player.name,
+                    c.get_title()
+                );
             }
         } else if is_citizen {
             line = format!(
@@ -1982,16 +2322,21 @@ pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
             line.push_str(" (&Kdead&n)");
         }
         if who_arena {
-            line.push_str(&format!(
-                " (Arena Wins/Losses: {}/{})",
-                c.wins, c.losses
-            ));
+            line.push_str(&format!(" (Arena Wins/Losses: {}/{})", c.wins, c.losses));
         }
         if who_fight {
             if let Some(opp) = c.fighting {
-                let ch_imm = g.get_char(ch).map(|x| x.player.level >= LVL_IMMORT).unwrap_or(false);
+                let ch_imm = g
+                    .get_char(ch)
+                    .map(|x| x.player.level >= LVL_IMMORT)
+                    .unwrap_or(false);
                 if ch_imm && lvl < LVL_IMMORT {
-                    line.push_str(&format!(" (Fighting {})", g.get_char(opp).map(|o| o.player.name.clone()).unwrap_or_default()));
+                    line.push_str(&format!(
+                        " (Fighting {})",
+                        g.get_char(opp)
+                            .map(|o| o.player.name.clone())
+                            .unwrap_or_default()
+                    ));
                 }
             }
         }
@@ -2049,7 +2394,11 @@ pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         );
     }
     if mortals > 0 {
-        let head = if wizards > 0 { tail.clone() } else { "There".to_string() };
+        let head = if wizards > 0 {
+            tail.clone()
+        } else {
+            "There".to_string()
+        };
         tail = format!(
             "{} {} {} visible mortal{}.",
             head,
@@ -2079,24 +2428,48 @@ pub fn do_users(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         if arg.starts_with('-') {
             let mode = arg.chars().nth(1).unwrap_or(' ');
             match mode {
-                'o' | 'k' => { outlaws = true; rest = after; }
-                'p' => { rest = after; }
-                'd' => { rest = after; }
+                'o' | 'k' => {
+                    outlaws = true;
+                    rest = after;
+                }
+                'p' => {
+                    rest = after;
+                }
+                'd' => {
+                    rest = after;
+                }
                 'l' => {
                     let (lv, r) = half_chop(&after);
                     let mut it = lv.split('-');
-                    if let Some(l) = it.next().and_then(|s| s.parse::<u8>().ok()) { low = l; }
-                    if let Some(h) = it.next().and_then(|s| s.parse::<u8>().ok()) { high = h; }
+                    if let Some(l) = it.next().and_then(|s| s.parse::<u8>().ok()) {
+                        low = l;
+                    }
+                    if let Some(h) = it.next().and_then(|s| s.parse::<u8>().ok()) {
+                        high = h;
+                    }
                     rest = r;
                 }
-                'n' => { let (n, r) = half_chop(&after); name_search = n; rest = r; }
-                'h' => { let (n, r) = half_chop(&after); host_search = n; rest = r; }
+                'n' => {
+                    let (n, r) = half_chop(&after);
+                    name_search = n;
+                    rest = r;
+                }
+                'h' => {
+                    let (n, r) = half_chop(&after);
+                    host_search = n;
+                    rest = r;
+                }
                 'c' => {
                     let (cl, r) = half_chop(&after);
-                    for c in cl.chars() { showclass |= find_class_bitvector(c); }
+                    for c in cl.chars() {
+                        showclass |= find_class_bitvector(c);
+                    }
                     rest = r;
                 }
-                _ => { g.send_to_char(ch, USERS_FORMAT); return; }
+                _ => {
+                    g.send_to_char(ch, USERS_FORMAT);
+                    return;
+                }
             }
         } else {
             g.send_to_char(ch, USERS_FORMAT);
@@ -2106,7 +2479,9 @@ pub fn do_users(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
     let mut header = String::new();
     header.push_str("Num Class   Name         State          Idl Login@   Site\r\n");
-    header.push_str("--- ------- ------------ -------------- --- -------- ------------------------\r\n");
+    header.push_str(
+        "--- ------- ------------ -------------- --- -------- ------------------------\r\n",
+    );
     g.send_to_char(ch, &header);
 
     let mut num_can_see = 0;
@@ -2159,7 +2534,10 @@ pub fn do_users(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         num_can_see += 1;
     }
 
-    g.send_to_char(ch, &format!("\r\n{} visible sockets connected.\r\n", num_can_see));
+    g.send_to_char(
+        ch,
+        &format!("\r\n{} visible sockets connected.\r\n", num_can_see),
+    );
 }
 
 /// do_gen_ps — page various static text blocks. Most text bodies are not in the
@@ -2171,7 +2549,10 @@ pub fn do_gen_ps(g: &mut GameState, ch: CharId, _arg: &str, subcmd: i32) {
         10 => g.send_to_char(ch, "\x1b[H\x1b[J"), // SCMD_CLEAR
         11 => {
             // SCMD_WHOAMI
-            let name = g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default();
+            let name = g
+                .get_char(ch)
+                .map(|c| c.player.name.clone())
+                .unwrap_or_default();
             g.send_to_char(ch, &format!("{}\r\n", name));
         }
         6 => {
@@ -2230,10 +2611,20 @@ fn perform_mortal_where(g: &mut GameState, ch: CharId, arg: &str) {
         let players: Vec<CharId> = g.players_by_name.values().copied().collect();
         for i in players {
             let ok = g.can_see(ch, i)
-                && g.get_char(i).and_then(|c| c.in_room).map(|r| g.room(r).zone == ch_zone).unwrap_or(false);
+                && g.get_char(i)
+                    .and_then(|c| c.in_room)
+                    .map(|r| g.room(r).zone == ch_zone)
+                    .unwrap_or(false);
             if ok {
-                let name = g.get_char(i).map(|c| c.player.name.clone()).unwrap_or_default();
-                let rname = g.get_char(i).and_then(|c| c.in_room).map(|r| g.room(r).name.clone()).unwrap_or_default();
+                let name = g
+                    .get_char(i)
+                    .map(|c| c.player.name.clone())
+                    .unwrap_or_default();
+                let rname = g
+                    .get_char(i)
+                    .and_then(|c| c.in_room)
+                    .map(|r| g.room(r).name.clone())
+                    .unwrap_or_default();
                 g.send_to_char(ch, &format!("&Y{:<20} &R-&n {}\r\n", name, rname));
             }
         }
@@ -2245,10 +2636,16 @@ fn perform_mortal_where(g: &mut GameState, ch: CharId, arg: &str) {
                 Some(c) => c,
                 None => continue,
             };
-            let in_zone = c.in_room.map(|r| g.room(r).zone == ch_zone).unwrap_or(false);
+            let in_zone = c
+                .in_room
+                .map(|r| g.room(r).zone == ch_zone)
+                .unwrap_or(false);
             if in_zone && g.can_see(ch, i) && isname(arg, &c.player.name) {
                 let name = c.player.name.clone();
-                let rname = c.in_room.map(|r| g.room(r).name.clone()).unwrap_or_default();
+                let rname = c
+                    .in_room
+                    .map(|r| g.room(r).name.clone())
+                    .unwrap_or_default();
                 g.send_to_char(ch, &format!("&Y{:<25} &R-&n {}\r\n", name, rname));
                 return;
             }
@@ -2272,7 +2669,10 @@ fn perform_immort_where(g: &mut GameState, ch: CharId, arg: &str) {
                 let rnum = c.in_room.unwrap();
                 let vcds = rcds(g, rnum);
                 let rname = g.room(rnum).name.clone();
-                g.send_to_char(ch, &format!("&Y{:<20} &R- &C[&n{}&C]&n {}\r\n", name, vcds, rname));
+                g.send_to_char(
+                    ch,
+                    &format!("&Y{:<20} &R- &C[&n{}&C]&n {}\r\n", name, vcds, rname),
+                );
             }
         }
     } else {
@@ -2285,14 +2685,24 @@ fn perform_immort_where(g: &mut GameState, ch: CharId, arg: &str) {
                 Some(c) => c,
                 None => continue,
             };
-            if g.can_see(ch, i) && c.in_room.is_some() && isname(arg, &c.player.name) && !(ch_level < c.player.level) {
+            if g.can_see(ch, i)
+                && c.in_room.is_some()
+                && isname(arg, &c.player.name)
+                && !(ch_level < c.player.level)
+            {
                 found = true;
                 num += 1;
                 let name = c.player.name.clone();
                 let rnum = c.in_room.unwrap();
                 let vcds = rcds(g, rnum);
                 let rname = g.room(rnum).name.clone();
-                g.send_to_char(ch, &format!("M&c{:3}&n. {:<25} &R-&n &C[&n{}&C]&n {}\r\n", num, name, vcds, rname));
+                g.send_to_char(
+                    ch,
+                    &format!(
+                        "M&c{:3}&n. {:<25} &R-&n &C[&n{}&C]&n {}\r\n",
+                        num, name, vcds, rname
+                    ),
+                );
             }
         }
         // Object location search.
@@ -2349,8 +2759,15 @@ fn print_object_location(g: &mut GameState, num: i32, oid: ObjId, ch: CharId, re
             }
         }
         ObjLoc::Contained(container) => {
-            let cshort = g.get_obj(container).map(|o| o.short_description.clone()).unwrap_or_default();
-            buf.push_str(&format!("inside {}{}\r\n", cshort, if recur { ", which is" } else { " " }));
+            let cshort = g
+                .get_obj(container)
+                .map(|o| o.short_description.clone())
+                .unwrap_or_default();
+            buf.push_str(&format!(
+                "inside {}{}\r\n",
+                cshort,
+                if recur { ", which is" } else { " " }
+            ));
             g.send_to_char(ch, &buf);
             if recur {
                 print_object_location(g, 0, container, ch, recur);
@@ -2365,7 +2782,10 @@ fn print_object_location(g: &mut GameState, num: i32, oid: ObjId, ch: CharId, re
 
 pub fn do_where(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     let (arg, _) = one_argument(argument);
-    let imm = g.get_char(ch).map(|c| c.player.level >= LVL_IMMORT).unwrap_or(false);
+    let imm = g
+        .get_char(ch)
+        .map(|c| c.player.level >= LVL_IMMORT)
+        .unwrap_or(false);
     if imm {
         perform_immort_where(g, ch, &arg);
     } else {
@@ -2380,11 +2800,29 @@ pub fn do_where(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 fn estimate_difficulty(g: &GameState, ch: CharId, victim: CharId) -> i32 {
     let (cl, cd, cmd, cp, cmp, ct) = g
         .get_char(ch)
-        .map(|c| (c.player.level as i32, c.points.defense as i32, c.points.mdefense as i32, c.points.power as i32, c.points.mpower as i32, c.points.technique as i32))
+        .map(|c| {
+            (
+                c.player.level as i32,
+                c.points.defense as i32,
+                c.points.mdefense as i32,
+                c.points.power as i32,
+                c.points.mpower as i32,
+                c.points.technique as i32,
+            )
+        })
         .unwrap_or((0, 0, 0, 0, 0, 0));
     let (vl, vd, vmd, vp, vmp, vt) = g
         .get_char(victim)
-        .map(|c| (c.player.level as i32, c.points.defense as i32, c.points.mdefense as i32, c.points.power as i32, c.points.mpower as i32, c.points.technique as i32))
+        .map(|c| {
+            (
+                c.player.level as i32,
+                c.points.defense as i32,
+                c.points.mdefense as i32,
+                c.points.power as i32,
+                c.points.mpower as i32,
+                c.points.technique as i32,
+            )
+        })
         .unwrap_or((0, 0, 0, 0, 0, 0));
     (vl - cl) + (vd - cd) + (vmd - cmd) + (vp - cp) + (vmp - cmp) + (vt - ct)
 }
@@ -2402,7 +2840,10 @@ pub fn do_consider(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) 
         g.send_to_char(ch, "Easy!  Very easy indeed!\r\n");
         return;
     }
-    let (vlevel, vnpc) = g.get_char(victim).map(|c| (c.player.level, c.is_npc)).unwrap_or((1, false));
+    let (vlevel, vnpc) = g
+        .get_char(victim)
+        .map(|c| (c.player.level, c.is_npc))
+        .unwrap_or((1, false));
     if vlevel >= 101 {
         g.send_to_char(ch, "Now that's not a smart thing to even think about!\r\n");
         return;
@@ -2504,7 +2945,10 @@ pub fn do_color(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         c.prf_flags &= !(PRF_COLOR_1 | PRF_COLOR_2);
         c.prf_flags |= (PRF_COLOR_1 * (tp & 1) as i64) | ((PRF_COLOR_2 * (tp & 2) as i64) >> 1);
     }
-    g.send_to_char(ch, &format!("Your &Rcolor&n is now {}.\r\n", CTYPES[tp as usize]));
+    g.send_to_char(
+        ch,
+        &format!("Your &Rcolor&n is now {}.\r\n", CTYPES[tp as usize]),
+    );
 }
 
 pub fn do_toggle(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
@@ -2580,10 +3024,18 @@ pub fn do_commands(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
                 let vl = g.get_char(v).map(|c| c.player.level).unwrap_or(1);
                 let cl = g.get_char(ch).map(|c| c.player.level).unwrap_or(1);
                 if cl < vl {
-                    g.send_to_char(ch, "You can't see the commands of people above your level.\r\n");
+                    g.send_to_char(
+                        ch,
+                        "You can't see the commands of people above your level.\r\n",
+                    );
                     return;
                 }
-                (v, g.get_char(v).map(|c| c.player.name.clone()).unwrap_or_default())
+                (
+                    v,
+                    g.get_char(v)
+                        .map(|c| c.player.name.clone())
+                        .unwrap_or_default(),
+                )
             }
             _ => {
                 g.send_to_char(ch, "Who is that?\r\n");
@@ -2654,13 +3106,15 @@ pub fn do_commands(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
 pub fn do_players(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     // Backed by a SQL query in C (SELECT name,act,level from player_main); the
     // contract has no DB handle here, so list the currently-loaded players.
-    let mut buf = String::from(
-        "\r\nKey:\r\n&RDeleted &YImmortal &BBuilder\r\n&GHero    &WMortal\r\n\r\n",
-    );
+    let mut buf =
+        String::from("\r\nKey:\r\n&RDeleted &YImmortal &BBuilder\r\n&GHero    &WMortal\r\n\r\n");
     let mut names: Vec<(String, u8)> = g
         .players_by_name
         .values()
-        .filter_map(|&id| g.get_char(id).map(|c| (c.player.name.clone(), c.player.level)))
+        .filter_map(|&id| {
+            g.get_char(id)
+                .map(|c| (c.player.name.clone(), c.player.level))
+        })
         .collect();
     names.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
     let mut count = 0;
@@ -2715,7 +3169,11 @@ pub fn do_forage(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     }
     use crate::room::SectorType;
     let sect = sect.unwrap_or(SectorType::Inside);
-    if sect != SectorType::Field && sect != SectorType::Forest && sect != SectorType::Hills && sect != SectorType::Mountain {
+    if sect != SectorType::Field
+        && sect != SectorType::Forest
+        && sect != SectorType::Hills
+        && sect != SectorType::Mountain
+    {
         g.send_to_char(ch, "You cannot forage on this type of terrain!\r\n");
         return;
     }
@@ -2729,7 +3187,15 @@ pub fn do_forage(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         return;
     }
     g.send_to_char(ch, "You start searching the area for signs of food.\r\n");
-    act(g, "$n starts foraging the area for food.\r\n", false, ch, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n starts foraging the area for food.\r\n",
+        false,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
 
     if g.rng.number(1, 101) > skill {
         g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 2);
@@ -2755,9 +3221,20 @@ pub fn do_forage(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     }
     if let Some(oid) = g.load_object(item_no) {
         g.obj_to_char(oid, ch);
-        let short = g.get_obj(oid).map(|o| o.short_description.clone()).unwrap_or_default();
+        let short = g
+            .get_obj(oid)
+            .map(|o| o.short_description.clone())
+            .unwrap_or_default();
         g.send_to_char(ch, &format!("You have found {}!\r\n", short));
-        act(g, "$n has found something in his forage attempt.\r\n", false, ch, None, ActArg::None, To::Room);
+        act(
+            g,
+            "$n has found something in his forage attempt.\r\n",
+            false,
+            ch,
+            None,
+            ActArg::None,
+            To::Room,
+        );
     }
 }
 
@@ -2811,23 +3288,63 @@ pub fn do_scan(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     ];
 
     if is_blind(g, ch) {
-        act(g, "You can't see anything, you're blind!", true, ch, None, ActArg::None, To::Char);
+        act(
+            g,
+            "You can't see anything, you're blind!",
+            true,
+            ch,
+            None,
+            ActArg::None,
+            To::Char,
+        );
         return;
     }
-    let (mv, level) = g.get_char(ch).map(|c| (c.points.move_points, c.player.level)).unwrap_or((0, 1));
+    let (mv, level) = g
+        .get_char(ch)
+        .map(|c| (c.points.move_points, c.player.level))
+        .unwrap_or((0, 1));
     if mv < 3 && level < LVL_IMMORT {
-        act(g, "You are too exhausted.", true, ch, None, ActArg::None, To::Char);
+        act(
+            g,
+            "You are too exhausted.",
+            true,
+            ch,
+            None,
+            ActArg::None,
+            To::Char,
+        );
         return;
     }
 
-    // SKILL_SCAN not on the Tier-0 skill set; immortals get full range.
-    let mut maxdis = 1 + ((g.get_char(ch).map(|c| c.skill(0) as i32).unwrap_or(0) * 5) / 100);
+    let mut maxdis = 1
+        + ((g
+            .get_char(ch)
+            .map(|c| c.skill(crate::spell_parser::SKILL_SCAN as u16) as i32)
+            .unwrap_or(0)
+            * 5)
+            / 100);
     if level >= LVL_IMMORT {
         maxdis = 7;
     }
 
-    act(g, "You quickly scan the area and see:", true, ch, None, ActArg::None, To::Char);
-    act(g, "$n quickly scans the area.", false, ch, None, ActArg::None, To::Room);
+    act(
+        g,
+        "You quickly scan the area and see:",
+        true,
+        ch,
+        None,
+        ActArg::None,
+        To::Char,
+    );
+    act(
+        g,
+        "$n quickly scans the area.",
+        false,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
     if level < LVL_IMMORT {
         if let Some(c) = g.get_char_mut(ch) {
             c.points.move_points -= 3;
@@ -2846,10 +3363,21 @@ pub fn do_scan(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
                 let people = g.room(cur).people.clone();
                 for i in people {
                     if !(i == ch && dis == 0) && g.can_see(ch, i) {
-                        let name = g.get_char(i).map(|c| c.player.name.clone()).unwrap_or_default();
-                        let to_the = if dis > 0 && dir < (NUM_OF_DIRS - 2) { "to the " } else { "" };
+                        let name = g
+                            .get_char(i)
+                            .map(|c| c.player.name.clone())
+                            .unwrap_or_default();
+                        let to_the = if dis > 0 && dir < (NUM_OF_DIRS - 2) {
+                            "to the "
+                        } else {
+                            ""
+                        };
                         let dname = if dis > 0 { DIR_NAMES[dir] } else { "" };
-                        let wards = if dis > 0 && dir > (NUM_OF_DIRS - 3) { "wards" } else { "" };
+                        let wards = if dis > 0 && dir > (NUM_OF_DIRS - 3) {
+                            "wards"
+                        } else {
+                            ""
+                        };
                         let line = format!(
                             "&Y{:>33}&R:&W {}{}{}{}&n",
                             name,
@@ -2878,7 +3406,15 @@ pub fn do_scan(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         }
     }
     if found == 0 {
-        act(g, "Nobody anywhere near you.", true, ch, None, ActArg::None, To::Char);
+        act(
+            g,
+            "Nobody anywhere near you.",
+            true,
+            ch,
+            None,
+            ActArg::None,
+            To::Char,
+        );
     }
 }
 
@@ -2888,7 +3424,10 @@ pub fn do_rnum(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         None => return,
     };
     let vnum = g.room(rnum).number;
-    g.send_to_char(ch, &format!("You are in room {} (real room: {}).\r\n", vnum, rnum));
+    g.send_to_char(
+        ch,
+        &format!("You are in room {} (real room: {}).\r\n", vnum, rnum),
+    );
 }
 
 pub fn do_levels(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
@@ -2896,7 +3435,8 @@ pub fn do_levels(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "You ain't nothin' but a hound-dog.\r\n");
         return;
     }
-    let mut buf = String::from("Total/per-level experience points needed to complete each level:\r\n\r\n");
+    let mut buf =
+        String::from("Total/per-level experience points needed to complete each level:\r\n\r\n");
     let mut lastxp = 0i64;
     for i in 1..(LVL_IMMORT as i32) {
         let xp = exp_to_level(i);
@@ -2910,3 +3450,61 @@ pub fn do_levels(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     g.send_to_char(ch, &buf);
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::Descriptor;
+    use crate::room::{Exit, Room};
+
+    #[test]
+    fn scan_uses_trained_scan_skill_for_distance() {
+        let mut g = GameState::new(Config::default());
+        let r0 = g.add_room(Room::new(100, 0, "Start".to_string(), "Start.".to_string()));
+        let r1 = g.add_room(Room::new(
+            101,
+            0,
+            "Middle".to_string(),
+            "Middle.".to_string(),
+        ));
+        let r2 = g.add_room(Room::new(102, 0, "Far".to_string(), "Far.".to_string()));
+        g.rooms[r0].exits[NORTH] = Some(Exit {
+            description: None,
+            keyword: None,
+            exit_info: 0,
+            key: NOTHING,
+            to_room: 101,
+        });
+        g.rooms[r1].exits[NORTH] = Some(Exit {
+            description: None,
+            keyword: None,
+            exit_info: 0,
+            key: NOTHING,
+            to_room: 102,
+        });
+
+        let conn = ConnId(1);
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut scanner = Character::new_player("Scanner".to_string(), Class::Warrior, Race::Human);
+        scanner.desc = Some(conn);
+        scanner.points.move_points = 10;
+        scanner.set_skill(crate::spell_parser::SKILL_SCAN as u16, 20);
+        let scanner = g.create_char(scanner);
+        g.char_to_room(scanner, r0);
+
+        let target = g.create_char(Character::new_player(
+            "Target".to_string(),
+            Class::Warrior,
+            Race::Human,
+        ));
+        g.char_to_room(target, r2);
+
+        do_scan(&mut g, scanner, "", 0);
+
+        let out = &g.descriptors.get(&conn).unwrap().outbuf;
+        assert!(out.contains("Target"));
+        assert!(out.contains("nearby to the north"));
+    }
+}

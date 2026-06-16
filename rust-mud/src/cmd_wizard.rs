@@ -1284,7 +1284,7 @@ fn do_stat_object(g: &mut GameState, ch: CharId, j: ObjId) {
             },
             o.obj_type as i32,
             o.wear_flags.bits() as i64,
-            0i64, // obj affect bitvector (set-char-bits) not modelled separately
+            o.bitvector,
             o.extra_flags.bits() as i64,
             o.weight,
             o.cost,
@@ -5651,6 +5651,7 @@ pub fn do_vwear(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             22 => ObjectType::Treasure,
             23 => ObjectType::Armor,
             24 => ObjectType::Potion,
+            25 => ObjectType::Worn,
             26 => ObjectType::Other,
             27 => ObjectType::Trash,
             28 => ObjectType::Container,
@@ -5658,7 +5659,13 @@ pub fn do_vwear(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             30 => ObjectType::Key,
             31 => ObjectType::Food,
             32 => ObjectType::Money,
+            33 => ObjectType::Pen,
+            34 => ObjectType::Boat,
             35 => ObjectType::Fountain,
+            36 => ObjectType::Portal,
+            37 => ObjectType::HpRegen,
+            38 => ObjectType::MpRegen,
+            39 => ObjectType::MvRegen,
             _ => ObjectType::Other,
         };
         vwear_obj(g, ch, item_type);
@@ -6502,7 +6509,9 @@ mod tests {
     use crate::character::Character;
     use crate::config::Config;
     use crate::connection::Descriptor;
+    use crate::object::{ExtraFlags, Object, WearFlags};
     use crate::room::Room;
+    use crate::world::ObjectProto;
 
     fn connected_player(g: &mut GameState, conn: ConnId, name: &str, level: Level) -> CharId {
         g.descriptors
@@ -6533,5 +6542,60 @@ mod tests {
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
         assert!(out.contains("Okay.\r\n"));
         assert!(out.contains("(GC) Imm has advanced Mort to level 10."));
+    }
+
+    fn object_proto(vnum: ObjVnum, obj_type: ObjectType, short: &str) -> ObjectProto {
+        ObjectProto {
+            vnum,
+            name: short.to_string(),
+            short_desc: short.to_string(),
+            description: format!("{} is here.", short),
+            obj_type,
+            wear_flags: WearFlags::TAKE,
+            extra_flags: ExtraFlags::empty(),
+            weight: 1,
+            cost: 0,
+            rent: 0,
+            values: [0; 4],
+            curr_slots: 0,
+            total_slots: 0,
+            obj_class: -1,
+            min_level: 0,
+            bitvector: 0,
+            action_description: String::new(),
+            affects: Vec::new(),
+            ex_descriptions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn do_stat_object_reports_object_bitvector() {
+        let mut g = GameState::new(Config::default());
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        let mut obj = Object::new(1234, "cloak".to_string(), "a shimmering cloak".to_string());
+        obj.bitvector = crate::flags::AFF_INVISIBLE;
+        let obj = g.create_obj(obj);
+
+        do_stat_object(&mut g, imm, obj);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("Set char bits : INVIS"));
+        assert!(!out.contains("Set char bits : NOBITS"));
+    }
+
+    #[test]
+    fn do_vwear_maps_boat_keyword_to_boat_objects() {
+        let mut g = GameState::new(Config::default());
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        g.obj_protos
+            .insert(2222, object_proto(2222, ObjectType::Boat, "a river boat"));
+        g.obj_protos
+            .insert(3333, object_proto(3333, ObjectType::Other, "a plain thing"));
+
+        do_vwear(&mut g, imm, "boat", 0);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("[ 2222] a river boat"));
+        assert!(!out.contains("[ 3333] a plain thing"));
     }
 }
