@@ -6,6 +6,7 @@
 use crate::combat;
 use crate::connection::{render_color, ConState, Descriptor, GameMessage};
 use crate::interpreter::command_interpreter;
+use crate::metrics::Metrics;
 use crate::state::GameState;
 use crate::types::*;
 use crate::DatabaseInterface;
@@ -95,6 +96,9 @@ pub struct Game {
     /// Character-creation choices accumulated across nanny steps.
     pending: HashMap<ConnId, PendingChoices>,
     lib_path: String,
+    /// Lock-free observability counters, shared with the metrics HTTP task.
+    /// Updated on the heartbeat hot path (atomics, no mutex).
+    metrics: Arc<Metrics>,
 }
 
 impl Game {
@@ -105,7 +109,15 @@ impl Game {
             outputs: HashMap::new(),
             pending: HashMap::new(),
             lib_path: "./lib".to_string(),
+            metrics: Arc::new(Metrics::new()),
         }
+    }
+
+    /// Install the shared metrics handle (main.rs creates one Arc and shares it
+    /// with both the Game and the HTTP task). Defaults to a private Metrics so
+    /// the Game is usable without one (e.g. in tests).
+    pub fn set_metrics(&mut self, metrics: Arc<Metrics>) {
+        self.metrics = metrics;
     }
 
     pub fn state_mut(&mut self) -> &mut GameState {
@@ -230,6 +242,7 @@ impl Game {
         match msg {
             GameMessage::NewConnection { id, host, raw_fd, output_tx } => {
                 info!("New connection from {}", host);
+                self.metrics.inc_connections();
                 let mut d = Descriptor::with_fd(id, host, raw_fd);
                 d.write("\r\n&YWelcome to DeltaMUD!&n\r\n\r\n");
                 self.state.descriptors.insert(id, d);
@@ -312,6 +325,7 @@ impl Game {
                 None => continue,
             };
             if let Some(ch) = self.state.descriptors.get(&cid).and_then(|d| d.character) {
+                self.metrics.inc_commands();
                 dispatch_command_isolated(&mut self.state, ch, &input, "input-queue");
             }
             let st = self.state.descriptors.get(&cid).map(|d| d.state);
@@ -809,9 +823,36 @@ impl Game {
         // server. Catch it, log it (the panic hook also records a backtrace), and
         // continue on the next pulse. (Does not protect against a stack overflow /
         // abort — those are not unwinding panics.)
+        // Time the whole pulse (the perf-relevant work lives in heartbeat_inner).
+        // std::time::Instant is monotonic and cheap; record the duration in
+        // microseconds into the lock-free metrics so /metrics can expose a tiny
+        // deltamud_heartbeat_tick_micros and its high-water mark.
+        let start = std::time::Instant::now();
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.heartbeat_inner();
         }));
+        let micros = start.elapsed().as_micros() as u64;
+        self.metrics.record_tick_micros(micros);
+        self.metrics.set_pulse(self.state.pulse);
+
+        // Refresh the world-size gauges periodically (every 10 pulses ~= 1s) to
+        // keep the per-pulse cost negligible. players = playing descriptors;
+        // mobs = NPC characters; objs = world objects.
+        if self.state.pulse % 10 == 0 {
+            let players = self
+                .state
+                .descriptors
+                .values()
+                .filter(|d| d.state == ConState::Playing && d.character.is_some())
+                .count() as u64;
+            let total_chars = self.state.chars.len() as u64;
+            // mobs = all characters minus the player-controlled ones.
+            let mobs = total_chars.saturating_sub(players);
+            self.metrics.set_players(players);
+            self.metrics.set_mobs(mobs);
+            self.metrics.set_objs(self.state.objs.len() as u64);
+        }
+
         if let Err(e) = r {
             log::error!(
                 "PANIC in heartbeat (pulse {}): {} — skipping rest of pulse",

@@ -56,6 +56,7 @@ mod limits;
 mod magic;
 mod mail;
 mod maputils;
+mod metrics;
 mod misc;
 mod mobact;
 mod mock_database;
@@ -95,7 +96,7 @@ use std::net::IpAddr;
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::sync::Semaphore;
@@ -230,6 +231,56 @@ fn read_copyover_state(lib_path: &str) -> Vec<CopyoverEntry> {
         }
     }
     out
+}
+
+/// Minimal raw-TCP HTTP responder for the metrics + health endpoints. Bound on
+/// `MUD_METRICS_PORT` when set. NO web framework: we read the request line, look
+/// at the path, and write a fixed HTTP/1.1 response, one request per connection
+/// (Connection: close). This keeps the dependency surface at zero new crates and
+/// is plenty for a Prometheus scrape / liveness probe.
+async fn serve_metrics(listener: TcpListener, metrics: Arc<metrics::Metrics>) {
+    loop {
+        let (mut sock, _peer) = match listener.accept().await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("metrics accept() error: {}", e);
+                continue;
+            }
+        };
+        let metrics = metrics.clone();
+        tokio::spawn(async move {
+            // Read just enough to see the request line. A real scrape sends a
+            // short request; cap the read so a slow/hostile client can't pin us.
+            let mut buf = [0u8; 1024];
+            let n = match sock.read(&mut buf).await {
+                Ok(0) => return,
+                Ok(n) => n,
+                Err(_) => return,
+            };
+            let req = String::from_utf8_lossy(&buf[..n]);
+            let path = req
+                .split_whitespace()
+                .nth(1) // METHOD <path> HTTP/1.1
+                .unwrap_or("/");
+
+            let (status, body) = if path == "/metrics" || path.starts_with("/metrics?") {
+                ("200 OK", metrics.render_prometheus())
+            } else if path == "/health" || path.starts_with("/health?") {
+                ("200 OK", format!("ok\nplayers {}\n", metrics.players_now()))
+            } else {
+                ("404 Not Found", "not found\n".to_string())
+            };
+
+            let resp = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+                status = status,
+                len = body.len(),
+                body = body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        });
+    }
 }
 
 /// Database abstraction (CircleMUD dbinterface.c). Implemented by the
@@ -413,12 +464,38 @@ async fn main() -> Result<()> {
     let lib_path = config.lib_path.clone();
     let (game_tx, game_rx) = mpsc::channel(256);
 
+    // Lock-free observability counters, shared between the Game task (writer on
+    // the heartbeat hot path) and the optional metrics HTTP task (reader).
+    let metrics = Arc::new(metrics::Metrics::new());
+
+    // Optional metrics/health HTTP endpoint. Disabled unless MUD_METRICS_PORT is
+    // set (no extra listening socket in the default config). Raw-TCP responder —
+    // no web framework, no new crates.
+    if let Ok(mport) = std::env::var("MUD_METRICS_PORT") {
+        match mport.parse::<u16>() {
+            Ok(port) if port > 0 => {
+                let addr = format!("0.0.0.0:{}", port);
+                match TcpListener::bind(&addr).await {
+                    Ok(mlistener) => {
+                        info!("Metrics endpoint listening on {} (/metrics, /health)", addr);
+                        let m = metrics.clone();
+                        tokio::spawn(async move { serve_metrics(mlistener, m).await });
+                    }
+                    Err(e) => warn!("Could not bind metrics port {}: {}", port, e),
+                }
+            }
+            _ => warn!("MUD_METRICS_PORT={:?} is not a valid port; metrics disabled", mport),
+        }
+    }
+
     // Keep a handle to the shared DB for copyover re-seeding (same Arc the game
     // task uses, so re-seeds land in the live MockDatabase before recovery).
     let db_for_recovery = db.clone();
 
+    let game_metrics = metrics.clone();
     let game_handle = tokio::spawn(async move {
         let mut game = game::Game::new(state, db);
+        game.set_metrics(game_metrics);
         game.load_text_files(&lib_path).await;
         game.prime_zones();
         if let Err(e) = game.run(game_rx).await {

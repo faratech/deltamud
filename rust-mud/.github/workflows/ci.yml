@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    paths:
+      - 'rust-mud/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - 'rust-mud/**'
+      - '.github/workflows/ci.yml'
+
+defaults:
+  run:
+    working-directory: rust-mud
+
+jobs:
+  build-test-clippy:
+    name: build / test / clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry, index, and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-mud
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Test
+        run: cargo test
+
+      # Clippy is informational: keep it visible without blocking the pipeline on
+      # the port's known dead-code/style noise. Flip to `-- -D warnings` to gate.
+      - name: Clippy
+        run: cargo clippy --all-targets
