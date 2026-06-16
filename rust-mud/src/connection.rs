@@ -20,6 +20,13 @@ const WILL: u8 = 251;
 const SB: u8 = 250; // Subnegotiation begin
 const SE: u8 = 240; // Subnegotiation end
 
+// Out-of-band protocol options we DO support (everything else is still refused).
+// GMCP (Generic Mud Communication Protocol, "Atcp2"/option 201) carries JSON
+// out-of-band data for modern clients (Mudlet/Mudslinger gauges + auto-mapper).
+// MSSP (Mud Server Status Protocol, option 70) lets crawlers read server status.
+const TELOPT_GMCP: u8 = 201;
+const TELOPT_MSSP: u8 = 70;
+
 /// Byte-level telnet input filter. Strips IAC command sequences from a raw byte
 /// stream so negotiation a client sends on connect (Mudlet's NAWS/TTYPE/GMCP
 /// hello, plain `IAC DO/WILL` bursts) never corrupts the input line — notably
@@ -34,6 +41,11 @@ struct TelnetFilter {
     state: TelnetState,
     /// Accumulated printable bytes of the line in progress.
     line: Vec<u8>,
+    /// Option byte of the subnegotiation currently being consumed (the byte
+    /// right after IAC SB). We consume the whole payload regardless, but tracking
+    /// it lets us recognize an incoming GMCP `IAC SB GMCP ... IAC SE` (e.g. the
+    /// client's Core.Hello / Core.Supports.Set) without choking on it.
+    subneg_opt: u8,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -44,10 +56,23 @@ enum TelnetState {
     Iac,
     /// Saw IAC <WILL|WONT|DO|DONT>; next byte is the option.
     Negotiate(u8),
-    /// Inside IAC SB ...; consuming subnegotiation data until IAC SE.
+    /// Saw IAC SB; next byte is the subnegotiation option.
+    SubnegOpt,
+    /// Inside IAC SB <opt> ...; consuming subnegotiation data until IAC SE.
     Subneg,
     /// Inside subnegotiation and saw an IAC; next byte is SE (end) or escaped.
     SubnegIac,
+}
+
+/// A client capability we just learned about from telnet negotiation, surfaced
+/// out of `TelnetFilter::feed` so the input loop can notify the Game (which owns
+/// the live player/world data the client wants out-of-band).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientCap {
+    /// Client sent `IAC DO GMCP`: it wants out-of-band JSON (gauges, mapper).
+    EnableGmcp,
+    /// Client sent `IAC DO MSSP`: it wants the one-shot server status block.
+    RequestMssp,
 }
 
 impl TelnetFilter {
@@ -55,13 +80,23 @@ impl TelnetFilter {
         TelnetFilter {
             state: TelnetState::Data,
             line: Vec::with_capacity(256),
+            subneg_opt: 0,
         }
     }
 
     /// Feed raw bytes. Completed lines (terminated by `\n`, with a trailing
     /// `\r` stripped) are passed to `on_line` as owned Strings (lossy UTF-8).
-    /// Refusal bytes to send back to the client are appended to `refuse`.
-    fn feed<F: FnMut(String)>(&mut self, data: &[u8], refuse: &mut Vec<u8>, mut on_line: F) {
+    /// Reply bytes to send back to the client (option refusals, plus the
+    /// `IAC WILL <opt>` accepts for GMCP/MSSP) are appended to `reply`. Any
+    /// capabilities the client just enabled are pushed into `caps` so the input
+    /// loop can hand them to the Game.
+    fn feed<F: FnMut(String)>(
+        &mut self,
+        data: &[u8],
+        reply: &mut Vec<u8>,
+        caps: &mut Vec<ClientCap>,
+        mut on_line: F,
+    ) {
         for &b in data {
             match self.state {
                 TelnetState::Data => match b {
@@ -88,26 +123,55 @@ impl TelnetFilter {
                         self.state = TelnetState::Data;
                     }
                     WILL | WONT | DO | DONT => self.state = TelnetState::Negotiate(b),
-                    SB => self.state = TelnetState::Subneg,
+                    SB => self.state = TelnetState::SubnegOpt,
                     // Any other 2-byte IAC command (NOP, GA, AYT, etc.): consume.
                     _ => self.state = TelnetState::Data,
                 },
                 TelnetState::Negotiate(verb) => {
-                    // We support no telnet options. Refuse so the client doesn't
-                    // wait: answer DO/WILL with WONT/DONT respectively. We do not
-                    // reply to WONT/DONT (no further response is required).
-                    match verb {
-                        DO => refuse.extend_from_slice(&[IAC, WONT, b]),
-                        WILL => refuse.extend_from_slice(&[IAC, DONT, b]),
-                        _ => {} // WONT / DONT: nothing to send.
+                    // We support GMCP and MSSP; for those, ACCEPT (IAC WILL <opt>)
+                    // when the client says DO, and notify the Game. All OTHER
+                    // options are still refused so the client doesn't wait:
+                    // answer DO/WILL with WONT/DONT respectively. We do not reply
+                    // to WONT/DONT (no further response is required).
+                    match (verb, b) {
+                        (DO, TELOPT_GMCP) => {
+                            reply.extend_from_slice(&[IAC, WILL, TELOPT_GMCP]);
+                            caps.push(ClientCap::EnableGmcp);
+                        }
+                        (DO, TELOPT_MSSP) => {
+                            reply.extend_from_slice(&[IAC, WILL, TELOPT_MSSP]);
+                            caps.push(ClientCap::RequestMssp);
+                        }
+                        // Client agreeing to a WILL we never sent, or turning an
+                        // option off: nothing more to do for GMCP/MSSP.
+                        (WILL, TELOPT_GMCP) | (WILL, TELOPT_MSSP) => {}
+                        (DONT, TELOPT_GMCP) | (DONT, TELOPT_MSSP)
+                        | (WONT, TELOPT_GMCP) | (WONT, TELOPT_MSSP) => {}
+                        (DO, _) => reply.extend_from_slice(&[IAC, WONT, b]),
+                        (WILL, _) => reply.extend_from_slice(&[IAC, DONT, b]),
+                        _ => {} // WONT / DONT for unsupported options: nothing to send.
                     }
                     self.state = TelnetState::Data;
+                }
+                TelnetState::SubnegOpt => {
+                    // The byte right after IAC SB is the option (GMCP, MSSP, ...).
+                    // We don't currently act on inbound subneg payloads (a GMCP
+                    // Core.Hello / Core.Supports.Set is consumed and ignored), but
+                    // record the option so the consume loop is explicit.
+                    self.subneg_opt = b;
+                    self.state = if b == IAC {
+                        // Degenerate IAC SB IAC ...: treat as end-of-subneg scan.
+                        TelnetState::SubnegIac
+                    } else {
+                        TelnetState::Subneg
+                    };
                 }
                 TelnetState::Subneg => {
                     if b == IAC {
                         self.state = TelnetState::SubnegIac;
                     }
-                    // else: still inside subneg payload, consume the byte.
+                    // else: still inside subneg payload, consume the byte. This
+                    // swallows the whole GMCP `<package> <json>` blob safely.
                 }
                 TelnetState::SubnegIac => {
                     if b == SE {
@@ -160,6 +224,10 @@ pub struct Descriptor {
     pub state: ConState,
     /// Stack of nested input contexts; empty == normal command/menu input.
     pub editors: Vec<InputContext>,
+    /// True once the client negotiated GMCP (`IAC DO GMCP`). When set, the Game
+    /// pushes Char.Vitals + Room.Info out-of-band after each command so Mudlet's
+    /// gauges and the GMCP mapper stay live.
+    pub gmcp: bool,
     pub character: Option<CharId>,
     pub original: Option<CharId>, // for `switch`
     /// Output accumulated this pulse; flushed by the Game task.
@@ -189,6 +257,7 @@ impl Descriptor {
             raw_fd,
             state: ConState::GetName,
             editors: Vec::new(),
+            gmcp: false,
             character: None,
             original: None,
             outbuf: String::new(),
@@ -306,6 +375,16 @@ pub enum GameMessage {
         conn_id: ConnId,
         input: String,
     },
+    /// Client negotiated GMCP (`IAC DO GMCP`). The Game flips the descriptor's
+    /// gmcp flag and starts pushing out-of-band Char.Vitals/Room.Info.
+    EnableGmcp {
+        conn_id: ConnId,
+    },
+    /// Client requested the MSSP status block (`IAC DO MSSP`). The Game builds it
+    /// (it needs the live player count / uptime) and sends it once.
+    SendMssp {
+        conn_id: ConnId,
+    },
     Disconnect {
         conn_id: ConnId,
     },
@@ -374,16 +453,30 @@ async fn run_input_loop<R: AsyncReadExt + Unpin>(
         };
 
         let mut lines: Vec<String> = Vec::new();
-        let mut refuse: Vec<u8> = Vec::new();
-        filter.feed(&buf[..n], &mut refuse, |line| lines.push(line));
+        let mut reply: Vec<u8> = Vec::new();
+        let mut caps: Vec<ClientCap> = Vec::new();
+        filter.feed(&buf[..n], &mut reply, &mut caps, |line| lines.push(line));
 
-        // Send negotiation refusals (IAC WONT/DONT <opt>) back to the client so
-        // it doesn't block waiting for a reply. The writer only ever calls
-        // `.as_bytes()`, so wrapping the raw bytes in a String is lossless.
-        if !refuse.is_empty() {
-            let msg = unsafe { String::from_utf8_unchecked(refuse) };
+        // Send negotiation replies (IAC WONT/DONT for refused options, IAC WILL
+        // for the GMCP/MSSP we accept) back to the client so it doesn't block
+        // waiting for a reply. The writer only ever calls `.as_bytes()`, so
+        // wrapping the raw bytes in a String is lossless.
+        if !reply.is_empty() {
+            let msg = unsafe { String::from_utf8_unchecked(reply) };
             if output_tx.send(msg).await.is_err() {
                 break;
+            }
+        }
+
+        // Forward any newly-negotiated capabilities to the Game, which owns the
+        // live player/world data the out-of-band channel needs.
+        for cap in caps {
+            let msg = match cap {
+                ClientCap::EnableGmcp => GameMessage::EnableGmcp { conn_id },
+                ClientCap::RequestMssp => GameMessage::SendMssp { conn_id },
+            };
+            if game_tx.send(msg).await.is_err() {
+                return;
             }
         }
 

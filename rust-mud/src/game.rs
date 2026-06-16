@@ -31,6 +31,59 @@ use tokio::time::{interval, Duration};
 const IAC_WILL_ECHO: [u8; 3] = [0xFF, 0xFB, 0x01]; // IAC WILL ECHO
 const IAC_WONT_ECHO: [u8; 3] = [0xFF, 0xFC, 0x01]; // IAC WONT ECHO
 
+// Telnet framing for out-of-band subnegotiations (GMCP/MSSP). A subneg is
+// `IAC SB <opt> <payload> IAC SE`. These bytes, like the ECHO negotiation
+// above, must reach the socket verbatim and so go down the raw-bytes channel,
+// never through render_color (whose `.chars()` pass would mangle the lone 0xFF).
+const IAC: u8 = 0xFF;
+const SB: u8 = 0xFA; // Subnegotiation begin
+const SE: u8 = 0xF0; // Subnegotiation end
+const TELOPT_GMCP: u8 = 201; // Generic Mud Communication Protocol
+const TELOPT_MSSP: u8 = 70; // Mud Server Status Protocol
+
+// MSSP control bytes (Mud Server Status Protocol): each datum is
+// `MSSP_VAR <name> MSSP_VAL <value>` inside the IAC SB MSSP ... IAC SE frame.
+const MSSP_VAR: u8 = 1;
+const MSSP_VAL: u8 = 2;
+
+/// Wrap a payload in an `IAC SB <opt> ... IAC SE` telnet subnegotiation frame.
+/// 0xFF (IAC) bytes inside JSON/MSSP payloads are vanishingly unlikely (ASCII
+/// JSON, printable MSSP values), so no IAC-doubling is needed for our content;
+/// we emit the frame verbatim.
+fn telnet_subneg(opt: u8, payload: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(payload.len() + 5);
+    v.push(IAC);
+    v.push(SB);
+    v.push(opt);
+    v.extend_from_slice(payload);
+    v.push(IAC);
+    v.push(SE);
+    v
+}
+
+/// Minimal JSON string escaper for hand-rolled GMCP payloads: escapes the two
+/// characters that would break a JSON string literal (`"` and `\`) and strips
+/// control bytes (newlines, the lone IAC) that have no place in a one-line
+/// GMCP message. Room/zone names can carry color codes (`&x`) or quotes; this
+/// keeps the emitted JSON valid without pulling in serde.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            // Drop other control chars (incl. a stray 0xFF) and the color-code
+            // introducer so the JSON stays clean for the client/mapper.
+            c if (c as u32) < 0x20 => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// True if `s` is one of the password-entry connection states (the only states
 /// whose prompts must suppress client-side echo).
 fn is_password_state(s: ConState) -> bool {
@@ -99,6 +152,9 @@ pub struct Game {
     /// Lock-free observability counters, shared with the metrics HTTP task.
     /// Updated on the heartbeat hot path (atomics, no mutex).
     metrics: Arc<Metrics>,
+    /// Unix timestamp the Game task started, for the MSSP UPTIME datum (which
+    /// reports the server boot time per the MSSP spec).
+    started_at: i64,
 }
 
 impl Game {
@@ -110,6 +166,7 @@ impl Game {
             pending: HashMap::new(),
             lib_path: "./lib".to_string(),
             metrics: Arc::new(Metrics::new()),
+            started_at: chrono::Utc::now().timestamp(),
         }
     }
 
@@ -254,6 +311,12 @@ impl Game {
             }
             GameMessage::Input { conn_id, input } => {
                 self.handle_input(conn_id, input).await;
+            }
+            GameMessage::EnableGmcp { conn_id } => {
+                self.enable_gmcp(conn_id);
+            }
+            GameMessage::SendMssp { conn_id } => {
+                self.send_mssp(conn_id);
             }
             GameMessage::Disconnect { conn_id } => {
                 self.disconnect(conn_id).await;
@@ -1006,6 +1069,13 @@ impl Game {
                 d.write(&prompt);
             }
         }
+
+        // Out-of-band GMCP push: after the prompt (i.e. after every command, so
+        // the state is fresh) send Char.Vitals + Room.Info to a GMCP-enabled,
+        // in-world descriptor. Mudlet's gauges + the GMCP mapper feed off these.
+        if state == ConState::Playing {
+            self.push_gmcp_update(conn_id);
+        }
     }
 
     // ---- small helpers --------------------------------------------------
@@ -1038,6 +1108,125 @@ impl Game {
             .get(&conn_id)
             .and_then(|d| d.temp_name.clone())
             .unwrap_or_default()
+    }
+
+    // ---- GMCP (out-of-band JSON) ---------------------------------------
+
+    /// Handle `GameMessage::EnableGmcp`: flip the descriptor's gmcp flag (set in
+    /// connection.rs after we replied `IAC WILL GMCP`) and, if the connection is
+    /// already in-world, push an initial Char.Vitals/Room.Info so a client that
+    /// negotiates mid-session lights its gauges/mapper immediately rather than
+    /// waiting for the next command.
+    fn enable_gmcp(&mut self, conn_id: ConnId) {
+        let playing = match self.state.descriptors.get_mut(&conn_id) {
+            Some(d) => {
+                d.gmcp = true;
+                d.state == ConState::Playing
+            }
+            None => return,
+        };
+        if playing {
+            self.push_gmcp_update(conn_id);
+        }
+    }
+
+    /// Send the per-command GMCP snapshot (`Char.Vitals` + `Room.Info`) to a
+    /// GMCP-enabled descriptor that has a playing character. JSON is hand-rolled
+    /// (no serde dep): small, one-line, with `"`/`\` escaped in names. Bytes go
+    /// down the raw-bytes channel verbatim, never through render_color.
+    fn push_gmcp_update(&self, conn_id: ConnId) {
+        let d = match self.state.descriptors.get(&conn_id) {
+            Some(d) if d.gmcp => d,
+            _ => return,
+        };
+        let ch = match d.character {
+            Some(c) => c,
+            None => return,
+        };
+        let c = match self.state.get_char(ch) {
+            Some(c) => c,
+            None => return,
+        };
+
+        // Char.Vitals — current/max HP, mana, move.
+        let p = &c.points;
+        let vitals = format!(
+            "Char.Vitals {{\"hp\":{},\"maxhp\":{},\"mana\":{},\"maxmana\":{},\"move\":{},\"maxmove\":{}}}",
+            p.hit, p.max_hit, p.mana, p.max_mana, p.move_points, p.max_move
+        );
+        self.send_raw_bytes(conn_id, &telnet_subneg(TELOPT_GMCP, vitals.as_bytes()));
+
+        // Room.Info — vnum, name, zone, and the open cardinal exits as
+        // {dir: dest-vnum}. Only emitted when the char is in a real room.
+        if let Some(rnum) = c.in_room {
+            if let Some(room) = self.state.room_opt(rnum) {
+                let zone_name = self
+                    .state
+                    .zones
+                    .get(room.zone as usize)
+                    .map(|z| z.name.as_str())
+                    .unwrap_or("");
+                let dir_keys = ["n", "e", "s", "w", "u", "d"];
+                let mut exits = String::new();
+                let mut first = true;
+                for (i, key) in dir_keys.iter().enumerate() {
+                    if let Some(ex) = room.exits.get(i).and_then(|e| e.as_ref()) {
+                        if !first {
+                            exits.push(',');
+                        }
+                        first = false;
+                        exits.push_str(&format!("\"{}\":{}", key, ex.to_room));
+                    }
+                }
+                let room_info = format!(
+                    "Room.Info {{\"num\":{},\"name\":\"{}\",\"zone\":\"{}\",\"exits\":{{{}}}}}",
+                    room.number,
+                    json_escape(&room.name),
+                    json_escape(zone_name),
+                    exits
+                );
+                self.send_raw_bytes(conn_id, &telnet_subneg(TELOPT_GMCP, room_info.as_bytes()));
+            }
+        }
+    }
+
+    // ---- MSSP (Mud Server Status Protocol) -----------------------------
+
+    /// Handle `GameMessage::SendMssp`: build and send the one-shot MSSP status
+    /// block (`IAC SB MSSP <VAR name VAL value>... IAC SE`). Crawlers/listing
+    /// sites read this to index the server. PLAYERS/UPTIME need the live Game,
+    /// which is why this is driven from here rather than connection.rs.
+    fn send_mssp(&self, conn_id: ConnId) {
+        // Count players currently in-world (a character attached, in Playing).
+        let players = self
+            .state
+            .descriptors
+            .values()
+            .filter(|d| d.state == ConState::Playing && d.character.is_some())
+            .count();
+        // Listen port: read MUD_PORT exactly as config.rs does (the Game isn't
+        // handed the Config), defaulting to the CircleMUD default 4000.
+        let port: u16 = std::env::var("MUD_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4000);
+
+        let mut payload: Vec<u8> = Vec::with_capacity(128);
+        let mut add = |name: &str, value: &str| {
+            payload.push(MSSP_VAR);
+            payload.extend_from_slice(name.as_bytes());
+            payload.push(MSSP_VAL);
+            payload.extend_from_slice(value.as_bytes());
+        };
+        add("NAME", "DeltaMUD");
+        add("PLAYERS", &players.to_string());
+        // MSSP UPTIME = unix timestamp the server booted.
+        add("UPTIME", &self.started_at.to_string());
+        add("PORT", &port.to_string());
+        add("CODEBASE", "DeltaMUD-Rust");
+        add("FAMILY", "CircleMUD");
+
+        self.send_raw_bytes(conn_id, &telnet_subneg(TELOPT_MSSP, &payload));
     }
 }
 
