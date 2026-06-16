@@ -181,10 +181,10 @@ pub fn mana_gain(g: &GameState, ch: CharId) -> i32 {
 
         // Position calculations
         match pos {
-            Position::Sleeping => gain <<= 1,           // mult by 2
-            Position::Meditating => gain <<= 3,         // mult by 8
-            Position::Resting => gain += gain >> 1,     // + 1/2
-            Position::Sitting => gain += gain >> 2,     // + 1/4
+            Position::Sleeping => gain <<= 1,       // mult by 2
+            Position::Meditating => gain <<= 3,     // mult by 8
+            Position::Resting => gain += gain >> 1, // + 1/2
+            Position::Sitting => gain += gain >> 2, // + 1/4
             _ => {}
         }
 
@@ -409,7 +409,7 @@ pub fn advance_level(g: &mut GameState, ch: CharId) {
     // add_hp = con_app[GET_CON].hitp.
     let mut add_hp = crate::constants::CON_APP
         [crate::constants::app_index(con, crate::constants::CON_APP.len())]
-        .hitp;
+    .hitp;
     let add_mana;
     let add_move;
 
@@ -450,7 +450,7 @@ pub fn advance_level(g: &mut GameState, ch: CharId) {
     // add_practices: casters MAX(2, wis_app.bonus); others MIN(2, MAX(1, bonus)).
     let wis_bonus = crate::constants::WIS_APP
         [crate::constants::app_index(wis, crate::constants::WIS_APP.len())]
-        .bonus;
+    .bonus;
     let add_practices = if class == CLASS_MAGIC_USER || class == CLASS_CLERIC {
         2.max(wis_bonus)
     } else {
@@ -465,8 +465,12 @@ pub fn advance_level(g: &mut GameState, ch: CharId) {
         c.points.max_move += move_applied;
         if level > 1 {
             c.points.max_mana += add_mana;
+            c.newbie = 0;
         }
         c.spells_to_learn += add_practices;
+        if training > 0 {
+            c.training = c.training.saturating_add(training as u8);
+        }
 
         if is_immort_now {
             for i in 0..NUM_CONDITIONS {
@@ -483,6 +487,16 @@ pub fn advance_level(g: &mut GameState, ch: CharId) {
     );
     g.send_to_char(ch, &buf);
     // save_char(ch, NOWHERE) — async persistence handled by the save layer.
+}
+
+fn give_oldbie_reward(g: &mut GameState, ch: CharId) {
+    const GOLD_BRICK_VNUM: ObjVnum = 3014;
+
+    for _ in 0..2 {
+        if let Some(obj) = g.load_object(GOLD_BRICK_VNUM) {
+            g.obj_to_char(obj, ch);
+        }
+    }
 }
 
 /// gain_exp (limits.c): award `gain` XP, capping per kill, leveling the PC up
@@ -540,7 +554,10 @@ pub fn gain_exp(g: &mut GameState, ch: CharId, gain: i64) {
             // autowiz (autowiz.rs) replaces the C system() call; its internal level
             // gate means real work only happens the moment the player reaches HERO.
             crate::autowiz::check_autowiz(g, ch);
-            let name = g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default();
+            let name = g
+                .get_char(ch)
+                .map(|c| c.player.name.clone())
+                .unwrap_or_default();
             let new_level = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
             g.send_to_all_players(&format!(
                 "&m[&YINFO&m]&n {} has advanced to level {}!\r\n",
@@ -583,10 +600,7 @@ pub fn gain_exp(g: &mut GameState, ch: CharId, gain: i64) {
 
 /// gain_exp_regardless (limits.c): uncapped XP grant that can level a PC all the
 /// way to LVL_IMPL (used by immortal set/restore). At LVL_GETSTUFF the C code
-/// calls do_oldbie + the reward message; do_oldbie is marked "disabled in the
-/// code" by its own author comment (and the equivalent block in the normal
-/// gain_exp path is `//`-commented out), so the starter-gear loop is treated as
-/// off. The reward message still fires, matching the enabled (message) behavior.
+/// calls do_oldbie and sends the gold-brick reward message.
 pub fn gain_exp_regardless(g: &mut GameState, ch: CharId, gain: i64) {
     let is_npc = g.get_char(ch).map(|c| c.is_npc).unwrap_or(true);
     if is_npc {
@@ -625,17 +639,19 @@ pub fn gain_exp_regardless(g: &mut GameState, ch: CharId, gain: i64) {
         // check_autowiz(ch): C calls it here too (limits.c gain_exp_regardless);
         // the immortal-leveling path can cross LVL_HERO/IMMORT, so regenerate.
         crate::autowiz::check_autowiz(g, ch);
-        let name = g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default();
+        let name = g
+            .get_char(ch)
+            .map(|c| c.player.name.clone())
+            .unwrap_or_default();
         let new_level = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
         g.send_to_all_players(&format!(
             "&m[&YINFO&m]&n {} has advanced to level {}!\r\n",
             name, new_level
         ));
-        // LVL_GETSTUFF == 3: C calls do_oldbie (starter gear), but do_oldbie is
-        // author-marked "disabled in the code" and the same block is commented
-        // out in the normal gain_exp path, so the gear loop is intentionally
-        // off. The reward message still fires, matching the enabled behavior.
+        // LVL_GETSTUFF == 3: C calls do_oldbie (two object vnum 3014 gold
+        // bricks) before sending the reward message.
         if new_level == 3 {
+            give_oldbie_reward(g, ch);
             g.send_to_char(
                 ch,
                 "&YThe gods have rewarded you for getting to level 3!&n\r\nTwo gold bricks fall from the sky into your hands.&n\r\n",
@@ -706,7 +722,10 @@ pub fn gain_condition(g: &mut GameState, ch: CharId, condition: usize, value: i3
 /// degrade to the player-visible actions (messages + room moves) while the
 /// rent/crash saves are handled by the save layer (see manifest gaps).
 pub fn check_idling(g: &mut GameState, ch: CharId) {
-    let lockout = g.get_char(ch).map(|c| c.prf2_flags & PRF2_LOCKOUT != 0).unwrap_or(false);
+    let lockout = g
+        .get_char(ch)
+        .map(|c| c.prf2_flags & PRF2_LOCKOUT != 0)
+        .unwrap_or(false);
     if lockout {
         if let Some(c) = g.get_char_mut(ch) {
             c.timer = 0;
@@ -722,7 +741,10 @@ pub fn check_idling(g: &mut GameState, ch: CharId) {
     };
 
     if timer > 5 && mbuilding {
-        g.send_to_char(ch, "Build mode, my friend, was not made for you to idle in.\r\n");
+        g.send_to_char(
+            ch,
+            "Build mode, my friend, was not made for you to idle in.\r\n",
+        );
         // command_interpreter(ch, "build off") — build OLC not ported; the
         // build-off transition is left to the build subsystem.
         return;
@@ -754,7 +776,15 @@ pub fn check_idling(g: &mut GameState, ch: CharId) {
                     }
                 }
             }
-            act(g, "$n disappears into the void.", true, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n disappears into the void.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             g.send_to_char(ch, "You have been idle, and are pulled into a void.\r\n");
             // save_char(ch, NOWHERE); Crash_crashsave(ch) (limits.c) — protect the
             // idle player's objects before they sit in the void.
@@ -858,11 +888,43 @@ fn update_char_objects(g: &mut GameState, ch: CharId) {
                 o.values[2]
             };
             if i == 1 {
-                act(g, "Your light begins to flicker and fade.", false, ch, None, ActArg::None, To::Char);
-                act(g, "$n's light begins to flicker and fade.", false, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "Your light begins to flicker and fade.",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Char,
+                );
+                act(
+                    g,
+                    "$n's light begins to flicker and fade.",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
             } else if i == 0 {
-                act(g, "Your light sputters out and dies.", false, ch, None, ActArg::None, To::Char);
-                act(g, "$n's light sputters out and dies.", false, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "Your light sputters out and dies.",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Char,
+                );
+                act(
+                    g,
+                    "$n's light sputters out and dies.",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 if let Some(rnum) = g.get_char(ch).and_then(|c| c.in_room) {
                     let cur = g.room(rnum).light;
                     g.room_mut(rnum).light = cur.saturating_sub(1);
@@ -883,7 +945,10 @@ fn update_char_objects(g: &mut GameState, ch: CharId) {
     // Inventory timers tick by 1 (the C only walks the head of ->carrying; our
     // update_object recursion + this list walk reproduces the head + sibling +
     // contents traversal of the C linked list).
-    let inv: Vec<ObjId> = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let inv: Vec<ObjId> = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     for oid in inv {
         update_object(g, oid, 1);
     }
@@ -916,20 +981,61 @@ fn env_damage(g: &mut GameState, ch: CharId, dmg: i32) {
     let pos = g.get_char(ch).map(|c| c.position).unwrap_or(Position::Dead);
     match pos {
         Position::MortallyWounded => {
-            act(g, "$n is mortally wounded, and will die soon, if not aided.", true, ch, None, ActArg::None, To::Room);
-            g.send_to_char(ch, "You are mortally wounded, and will die soon, if not aided.\r\n");
+            act(
+                g,
+                "$n is mortally wounded, and will die soon, if not aided.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            g.send_to_char(
+                ch,
+                "You are mortally wounded, and will die soon, if not aided.\r\n",
+            );
         }
         Position::Incapacitated => {
-            act(g, "$n is incapacitated and will slowly die, if not aided.", true, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n is incapacitated and will slowly die, if not aided.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             // NB: exact C string preserves the source typo ("incapacitated an").
-            g.send_to_char(ch, "You are incapacitated an will slowly die, if not aided.\r\n");
+            g.send_to_char(
+                ch,
+                "You are incapacitated an will slowly die, if not aided.\r\n",
+            );
         }
         Position::Stunned => {
-            act(g, "$n is stunned, but will probably regain consciousness again.", true, ch, None, ActArg::None, To::Room);
-            g.send_to_char(ch, "You're stunned, but will probably regain consciousness again.\r\n");
+            act(
+                g,
+                "$n is stunned, but will probably regain consciousness again.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            g.send_to_char(
+                ch,
+                "You're stunned, but will probably regain consciousness again.\r\n",
+            );
         }
         Position::Dead => {
-            act(g, "$n is dead!  R.I.P.", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n is dead!  R.I.P.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             g.send_to_char(ch, "You are dead!  Sorry...\r\n");
             env_die(g, ch);
         }
@@ -991,15 +1097,25 @@ fn env_die(g: &mut GameState, ch: CharId) {
     // make_corpse(ch): corpse holding carried + worn items.
     let rnum = g.get_char(ch).and_then(|c| c.in_room);
     if let Some(rnum) = rnum {
-        let name = g.get_char(ch).map(|c| c.display_for_others()).unwrap_or_default();
+        let name = g
+            .get_char(ch)
+            .map(|c| c.display_for_others())
+            .unwrap_or_default();
         let corpse = make_corpse(g, &name);
-        let carried = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        let carried = g
+            .get_char(ch)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         for oid in carried {
             g.obj_from_anywhere(oid);
             g.obj_to_obj(oid, corpse);
         }
         let worn: Vec<usize> = (0..NUM_WEARS)
-            .filter(|&p| g.get_char(ch).map(|c| c.equipment[p].is_some()).unwrap_or(false))
+            .filter(|&p| {
+                g.get_char(ch)
+                    .map(|c| c.equipment[p].is_some())
+                    .unwrap_or(false)
+            })
             .collect();
         for p in worn {
             if let Some(oid) = g.unequip_char(ch, p) {
@@ -1013,7 +1129,10 @@ fn env_die(g: &mut GameState, ch: CharId) {
         // (the second half of the corpse-gold fix; see combat.rs::die).
         let gold = g.get_char(ch).map(|c| c.points.gold).unwrap_or(0);
         if gold > 0 {
-            let has_desc = g.get_char(ch).map(|c| c.is_npc || c.desc.is_some()).unwrap_or(false);
+            let has_desc = g
+                .get_char(ch)
+                .map(|c| c.is_npc || c.desc.is_some())
+                .unwrap_or(false);
             if has_desc {
                 let money = crate::combat::create_money(g, gold);
                 g.obj_to_obj(money, corpse);
@@ -1055,15 +1174,30 @@ fn ghost_pc(g: &mut GameState, ch: CharId) {
         c.death_timer = 96; // two mud-hours (96 half-minute tics)
     }
     g.char_to_room(ch, rnum);
-    g.send_to_char(ch, "You suddenly find yourself floating in space... you feel nothing.\r\n");
-    act(g, "$n slowly materializes before you...\r\n", false, ch, None, ActArg::None, To::Room);
+    g.send_to_char(
+        ch,
+        "You suddenly find yourself floating in space... you feel nothing.\r\n",
+    );
+    act(
+        g,
+        "$n slowly materializes before you...\r\n",
+        false,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
 }
 
 /// Make a player/NPC corpse container (matches combat.rs make_corpse so corpses
 /// look identical regardless of which subsystem produced the death).
 fn make_corpse(g: &mut GameState, who: &str) -> ObjId {
     use crate::object::Object;
-    let mut obj = Object::new(NOTHING, format!("corpse {}", who), format!("the corpse of {}", who));
+    let mut obj = Object::new(
+        NOTHING,
+        format!("corpse {}", who),
+        format!("the corpse of {}", who),
+    );
     obj.description = format!("The corpse of {} is lying here.", who);
     obj.obj_type = ObjectType::Container;
     obj.timer = 60;
@@ -1076,7 +1210,10 @@ fn make_corpse(g: &mut GameState, who: &str) -> ObjId {
 /// combat.rs respawn_pc).
 fn respawn_pc(g: &mut GameState, victim: CharId) {
     g.char_from_room(victim);
-    let home = g.get_char(victim).map(|c| c.player.hometown).unwrap_or(3001);
+    let home = g
+        .get_char(victim)
+        .map(|c| c.player.hometown)
+        .unwrap_or(3001);
     let rnum = g.real_room(home).or_else(|| g.real_room(3001)).unwrap_or(0);
     if let Some(c) = g.get_char_mut(victim) {
         c.points.hit = 1;
@@ -1084,7 +1221,10 @@ fn respawn_pc(g: &mut GameState, victim: CharId) {
         c.fighting = None;
     }
     g.char_to_room(victim, rnum);
-    g.send_to_char(victim, "\r\nYou feel your spirit drawn back to a familiar place...\r\n");
+    g.send_to_char(
+        victim,
+        "\r\nYou feel your spirit drawn back to a familiar place...\r\n",
+    );
     crate::cmd_informative::look_at_room(g, victim, false);
 }
 
@@ -1136,7 +1276,15 @@ pub fn point_update(g: &mut GameState) {
                         // re-enters the game alive at hometown.
                         respawn_pc(g, ch);
                         if g.char_exists(ch) {
-                            act(g, "A white mist appears and $n steps out.\r\n", false, ch, None, ActArg::None, To::Room);
+                            act(
+                                g,
+                                "A white mist appears and $n steps out.\r\n",
+                                false,
+                                ch,
+                                None,
+                                ActArg::None,
+                                To::Room,
+                            );
                         }
                     }
                 }
@@ -1173,7 +1321,10 @@ pub fn point_update(g: &mut GameState) {
             }
 
             // Poison damage.
-            let poisoned = g.get_char(ch).map(|c| c.affect_flags & AFF_POISON != 0).unwrap_or(false);
+            let poisoned = g
+                .get_char(ch)
+                .map(|c| c.affect_flags & AFF_POISON != 0)
+                .unwrap_or(false);
             if poisoned {
                 env_damage(g, ch, 2); // SPELL_POISON
                 if !g.char_exists(ch) {
@@ -1181,12 +1332,21 @@ pub fn point_update(g: &mut GameState) {
                 }
             }
             // C re-checks position <= STUNNED and runs update_pos.
-            if g.get_char(ch).map(|c| c.position <= Position::Stunned).unwrap_or(false) {
+            if g.get_char(ch)
+                .map(|c| c.position <= Position::Stunned)
+                .unwrap_or(false)
+            {
                 update_pos(g, ch);
             }
-            let plagued = g.get_char(ch).map(|c| c.affect_flags & AFF_PLAGUED != 0).unwrap_or(false);
+            let plagued = g
+                .get_char(ch)
+                .map(|c| c.affect_flags & AFF_PLAGUED != 0)
+                .unwrap_or(false);
             if plagued {
-                g.send_to_char(ch, "&RYou feel the effects of a deadly plague ravage through your body.&n");
+                g.send_to_char(
+                    ch,
+                    "&RYou feel the effects of a deadly plague ravage through your body.&n",
+                );
             }
         } else if pos == Position::Incapacitated {
             env_damage(g, ch, 1); // TYPE_SUFFERING
@@ -1226,7 +1386,15 @@ pub fn point_update(g: &mut GameState) {
                     .map(|r| g.room(r).sector_type == SectorType::WaterNoSwim)
                     .unwrap_or(false);
                 if in_noswim && !has_boat(g, ch) {
-                    act(g, "$n thrashes about in the water straining to stay afloat.", false, ch, None, ActArg::None, To::Room);
+                    act(
+                        g,
+                        "$n thrashes about in the water straining to stay afloat.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::None,
+                        To::Room,
+                    );
                     g.send_to_char(ch, "You are drowning!\r\n");
                     let dmg = g.get_char(ch).map(|c| c.points.max_hit / 5).unwrap_or(0);
                     env_damage(g, ch, dmg); // TYPE_DROWNING
@@ -1239,13 +1407,22 @@ pub fn point_update(g: &mut GameState) {
             // Hunger / thirst messaging + escalating starvation/dehydration.
             let level = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
             if level < LVL_IMMORT {
-                let thirst = g.get_char(ch).map(|c| c.conditions[THIRST] as i32).unwrap_or(0);
+                let thirst = g
+                    .get_char(ch)
+                    .map(|c| c.conditions[THIRST] as i32)
+                    .unwrap_or(0);
                 if thirst < 0 && thirst > -12 {
                     g.send_to_char(ch, "You are extremely thirsty.\r\n");
                 } else if thirst <= -12 && thirst >= -20 {
-                    g.send_to_char(ch, "You are suffering from dehydration and must get something to drink.\r\n");
+                    g.send_to_char(
+                        ch,
+                        "You are suffering from dehydration and must get something to drink.\r\n",
+                    );
                 } else if thirst < -20 && thirst > -24 {
-                    g.send_to_char(ch, "You are now dying of thirst! You must get something to drink quickly.\r\n");
+                    g.send_to_char(
+                        ch,
+                        "You are now dying of thirst! You must get something to drink quickly.\r\n",
+                    );
                     let dmg = g.get_char(ch).map(|c| c.points.max_hit / 4).unwrap_or(0);
                     env_damage(g, ch, dmg); // TYPE_STARVING
                     if !g.char_exists(ch) {
@@ -1262,16 +1439,25 @@ pub fn point_update(g: &mut GameState) {
 
                 // Hunger. C's bracket: note the first "very hungry" is a bare
                 // `if` (can co-fire with the chained block below it).
-                let full = g.get_char(ch).map(|c| c.conditions[FULL] as i32).unwrap_or(0);
+                let full = g
+                    .get_char(ch)
+                    .map(|c| c.conditions[FULL] as i32)
+                    .unwrap_or(0);
                 if full < 0 && full >= -23 {
                     g.send_to_char(ch, "You are very hungry.\r\n");
                 }
                 if full < -23 && full > -36 {
                     g.send_to_char(ch, "You are extremely hungry.\r\n");
                 } else if full <= -36 && full >= -48 {
-                    g.send_to_char(ch, "You are suffering from starvation and must get something to eat.\r\n");
+                    g.send_to_char(
+                        ch,
+                        "You are suffering from starvation and must get something to eat.\r\n",
+                    );
                 } else if full < -48 && full > -60 {
-                    g.send_to_char(ch, "You are now dying of hunger! You must get something to eat soon.\r\n");
+                    g.send_to_char(
+                        ch,
+                        "You are now dying of hunger! You must get something to eat soon.\r\n",
+                    );
                     let dmg = g.get_char(ch).map(|c| c.points.max_hit / 8).unwrap_or(0);
                     env_damage(g, ch, dmg); // TYPE_STARVING
                     if !g.char_exists(ch) {
@@ -1323,7 +1509,10 @@ pub fn point_update(g: &mut GameState) {
         // timer down and pop when it expires. ITEM_PORTAL is not representable
         // by ObjectType yet, so this never fires (portals fall through to the
         // generic timer path); the dedicated puff-of-smoke message degrades.
-        let is_portal = g.get_obj(oid).map(|o| o.obj_type as i32 == ITEM_PORTAL).unwrap_or(false);
+        let is_portal = g
+            .get_obj(oid)
+            .map(|o| o.obj_type as i32 == ITEM_PORTAL)
+            .unwrap_or(false);
         let is_portal_on_ground = is_portal && is_on_ground(g, oid);
         if is_portal_on_ground {
             let t = {
@@ -1361,16 +1550,43 @@ pub fn point_update(g: &mut GameState) {
                 // Decay messaging: carried-by-char vs on-the-ground.
                 let carried = carried_by(g, oid);
                 if let Some(cid) = carried {
-                    act(g, "$p decays in your hands.", false, cid, Some(oid), ActArg::None, To::Char);
+                    act(
+                        g,
+                        "$p decays in your hands.",
+                        false,
+                        cid,
+                        Some(oid),
+                        ActArg::None,
+                        To::Char,
+                    );
                 } else if let Some(rnum) = obj_room_of(g, oid) {
                     if let Some(&someone) = g.room(rnum).people.first() {
-                        act(g, "A quivering horde of maggots consumes $p.", true, someone, Some(oid), ActArg::None, To::Room);
-                        act(g, "A quivering horde of maggots consumes $p.", true, someone, Some(oid), ActArg::None, To::Char);
+                        act(
+                            g,
+                            "A quivering horde of maggots consumes $p.",
+                            true,
+                            someone,
+                            Some(oid),
+                            ActArg::None,
+                            To::Room,
+                        );
+                        act(
+                            g,
+                            "A quivering horde of maggots consumes $p.",
+                            true,
+                            someone,
+                            Some(oid),
+                            ActArg::None,
+                            To::Char,
+                        );
                     }
                 }
 
                 // Spill contents to wherever the corpse is.
-                let contents = g.get_obj(oid).map(|o| o.contains.clone()).unwrap_or_default();
+                let contents = g
+                    .get_obj(oid)
+                    .map(|o| o.contains.clone())
+                    .unwrap_or_default();
                 let dest = corpse_spill_dest(g, oid);
                 for jj in contents {
                     g.obj_from_anywhere(jj);
@@ -1391,10 +1607,7 @@ pub fn point_update(g: &mut GameState) {
         } else {
             // Generic timed object: count down and fire timer_otrigger at 0
             // (limits.c: `if (!GET_OBJ_TIMER(j)) timer_otrigger(j)` — no extract).
-            let fires = g
-                .get_obj(oid)
-                .map(|o| o.timer > 0)
-                .unwrap_or(false);
+            let fires = g.get_obj(oid).map(|o| o.timer > 0).unwrap_or(false);
             if fires {
                 let t = {
                     let o = g.get_obj_mut(oid).unwrap();
@@ -1438,7 +1651,10 @@ fn obj_room_of(g: &GameState, oid: ObjId) -> Option<RoomRnum> {
 
 /// True if the object is on the ground (not carried, not inside a container).
 fn is_on_ground(g: &GameState, oid: ObjId) -> bool {
-    matches!(g.get_obj(oid).map(|o| o.loc), Some(ObjLoc::Room(_)) | Some(ObjLoc::Nowhere))
+    matches!(
+        g.get_obj(oid).map(|o| o.loc),
+        Some(ObjLoc::Room(_)) | Some(ObjLoc::Nowhere)
+    )
 }
 
 /// The character carrying an object, if any (CircleMUD obj->carried_by).
@@ -1464,12 +1680,18 @@ fn corpse_spill_dest(g: &GameState, oid: ObjId) -> SpillDest {
 fn has_boat(g: &GameState, ch: CharId) -> bool {
     if let Some(c) = g.get_char(ch) {
         for &oid in &c.carrying {
-            if g.get_obj(oid).map(|o| o.obj_type as i32 == ITEM_BOAT).unwrap_or(false) {
+            if g.get_obj(oid)
+                .map(|o| o.obj_type as i32 == ITEM_BOAT)
+                .unwrap_or(false)
+            {
                 return true;
             }
         }
         for slot in c.equipment.iter().flatten() {
-            if g.get_obj(*slot).map(|o| o.obj_type as i32 == ITEM_BOAT).unwrap_or(false) {
+            if g.get_obj(*slot)
+                .map(|o| o.obj_type as i32 == ITEM_BOAT)
+                .unwrap_or(false)
+            {
                 return true;
             }
         }
@@ -1519,4 +1741,82 @@ fn act_obj_to_room(g: &mut GameState, msg: &str, oid: ObjId) {
     }
     out.push_str("\r\n");
     g.send_to_room(rnum, &out, None);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::object::{ExtraFlags, ObjectType, WearFlags};
+    use crate::world::ObjectProto;
+
+    fn test_game() -> GameState {
+        GameState::new(Config::default())
+    }
+
+    fn add_player(g: &mut GameState, name: &str, level: Level) -> CharId {
+        let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        ch.player.level = level;
+        g.create_char(ch)
+    }
+
+    fn gold_brick_proto() -> ObjectProto {
+        ObjectProto {
+            vnum: 3014,
+            name: "gold brick".to_string(),
+            short_desc: "a gold brick".to_string(),
+            description: "A gold brick lies here.".to_string(),
+            obj_type: ObjectType::Treasure,
+            wear_flags: WearFlags::TAKE,
+            extra_flags: ExtraFlags::empty(),
+            weight: 1,
+            cost: 1,
+            rent: 0,
+            values: [0; 4],
+            curr_slots: 0,
+            total_slots: 0,
+            obj_class: 0,
+            min_level: 0,
+            bitvector: 0,
+            action_description: String::new(),
+            affects: Vec::new(),
+            ex_descriptions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn advance_level_persists_training_and_clears_newbie() {
+        let mut g = test_game();
+        let ch = add_player(&mut g, "Mort", 10);
+
+        {
+            let c = g.get_char_mut(ch).unwrap();
+            c.training = 2;
+            c.newbie = 1;
+        }
+
+        advance_level(&mut g, ch);
+
+        let c = g.get_char(ch).unwrap();
+        assert_eq!(c.training, 3);
+        assert_eq!(c.newbie, 0);
+    }
+
+    #[test]
+    fn gain_exp_regardless_awards_level_three_gold_bricks() {
+        let mut g = test_game();
+        g.obj_protos.insert(3014, gold_brick_proto());
+        let ch = add_player(&mut g, "Mort", 1);
+
+        gain_exp_regardless(&mut g, ch, exp_to_level(2));
+
+        let c = g.get_char(ch).unwrap();
+        assert_eq!(c.player.level, 3);
+        assert_eq!(c.carrying.len(), 2);
+        assert!(c.carrying.iter().all(|oid| g
+            .get_obj(*oid)
+            .map(|o| o.item_number == 3014)
+            .unwrap_or(false)));
+    }
 }

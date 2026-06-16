@@ -256,77 +256,749 @@ fn skillo(table: &mut [SpellInfoType], skill: i32) {
     spello(table, skill, 0, 0, 0, 0, 0, false, 0);
 }
 
+fn spell_level(table: &mut [SpellInfoType], spell: i32, class: usize, level: i32) {
+    if spell >= 0 && (spell as usize) < table.len() && class < NUM_CLASSES {
+        table[spell as usize].min_level[class] = level;
+    }
+}
+
+/// init_spell_levels() (class.c): assign the mortal class/level table after
+/// mag_assign_spells has initialized every castable spell to LVL_IMMORT.
+fn init_spell_levels(table: &mut [SpellInfoType]) {
+    const MAG: usize = 0;
+    const CLE: usize = 1;
+    const THE: usize = 2;
+    const WAR: usize = 3;
+    const ART: usize = 4;
+
+    for &(spell, class, level) in &[
+        // Magic users.
+        (SKILL_MOUNT, MAG, 2),
+        (SKILL_RIDING, MAG, 3),
+        (SPELL_DETECT_INVIS, MAG, 4),
+        (SPELL_DETECT_MAGIC, MAG, 5),
+        (SPELL_INFRAVISION, MAG, 8),
+        (SPELL_INVISIBLE, MAG, 9),
+        (SPELL_ARMOR, MAG, 10),
+        (SPELL_LOCATE_OBJECT, MAG, 13),
+        (SPELL_STRENGTH, MAG, 15),
+        (SKILL_MEDITATE, MAG, 17),
+        (SPELL_SLEEP, MAG, 19),
+        (SKILL_TAME, MAG, 21),
+        (SPELL_BLINDNESS, MAG, 23),
+        (SPELL_DETECT_POISON, MAG, 24),
+        (SPELL_CURSE, MAG, 27),
+        (SPELL_POISON, MAG, 29),
+        (SPELL_FEAR, MAG, 29),
+        (SPELL_CLONE, MAG, 31),
+        (SPELL_CHARM, MAG, 33),
+        (SPELL_RECHARGE, MAG, 33),
+        (SPELL_SENSE_LIFE, MAG, 34),
+        (SPELL_ENCHANT_WEAPON, MAG, 35),
+        (SPELL_PORTAL, MAG, 35),
+        (SPELL_STONE_SKIN, MAG, 37),
+        (SPELL_GROUP_STONE_SKIN, MAG, 40),
+        (SKILL_DODGE, MAG, 42),
+        (SPELL_REDIRECT_CHARGE, MAG, 60),
+        (SPELL_AUTUS, MAG, 75),
+        (SPELL_CONVERGENCE, MAG, 80),
+        (SPELL_RESIST_PORTAL, MAG, 85),
+        (SPELL_HOME, MAG, 90),
+        (SPELL_WATERWALK, MAG, 95),
+        // Clerics.
+        (SPELL_CURE_LIGHT, CLE, 1),
+        (SPELL_ARMOR, CLE, 3),
+        (SKILL_MOUNT, CLE, 5),
+        (SKILL_RIDING, CLE, 7),
+        (SPELL_CREATE_FOOD, CLE, 9),
+        (SPELL_CREATE_WATER, CLE, 11),
+        (SPELL_DETECT_POISON, CLE, 13),
+        (SPELL_DETECT_ALIGN, CLE, 15),
+        (SPELL_CURE_BLIND, CLE, 17),
+        (SPELL_BLESS, CLE, 19),
+        (SPELL_SENSE_LIFE, CLE, 21),
+        (SPELL_DETECT_INVIS, CLE, 23),
+        (SKILL_MEDITATE, CLE, 25),
+        (SPELL_BLINDNESS, CLE, 27),
+        (SPELL_INFRAVISION, CLE, 29),
+        (SKILL_TAME, CLE, 33),
+        (SPELL_POISON, CLE, 35),
+        (SPELL_GROUP_ARMOR, CLE, 37),
+        (SPELL_CURE_CRITIC, CLE, 39),
+        (SPELL_SUMMON, CLE, 41),
+        (SPELL_REMOVE_POISON, CLE, 43),
+        (SPELL_WORD_OF_RECALL, CLE, 45),
+        (SPELL_EARTHQUAKE, CLE, 47),
+        (SPELL_SANCTUARY, CLE, 53),
+        (SPELL_HEAL, CLE, 57),
+        (SPELL_CONTROL_WEATHER, CLE, 59),
+        (SPELL_GROUP_HEAL, CLE, 63),
+        (SKILL_DODGE, CLE, 65),
+        (SPELL_REMOVE_CURSE, CLE, 67),
+        (SPELL_ANIMATE_DEAD, CLE, 69),
+        (SPELL_STONE_SKIN, CLE, 71),
+        (SPELL_GROUP_STONE_SKIN, CLE, 73),
+        (SPELL_PORTAL, CLE, 77),
+        (SPELL_RECHARGE, CLE, 79),
+        (SPELL_LOCATE_TARGET, CLE, 85),
+        (SPELL_REGEN_MANA, CLE, 91),
+        (SPELL_WATERWALK, CLE, 93),
+        (SPELL_WORD_OF_RETREAT, CLE, 95),
+        // Thieves.
+        (SKILL_SNEAK, THE, 1),
+        (SKILL_MOUNT, THE, 3),
+        (SKILL_RIDING, THE, 5),
+        (SKILL_PICK_LOCK, THE, 7),
+        (SKILL_BACKSTAB, THE, 9),
+        (SKILL_STEAL, THE, 11),
+        (SKILL_HIDE, THE, 13),
+        (SKILL_TRACK, THE, 15),
+        (SKILL_TAME, THE, 17),
+        (SKILL_SECOND_ATTACK, THE, 19),
+        (SKILL_LISTEN, THE, 21),
+        (SKILL_FORAGE, THE, 23),
+        (SKILL_SCAN, THE, 25),
+        (SKILL_CAMOUFLAGE, THE, 27),
+        (SKILL_BLANKET, THE, 29),
+        (SKILL_CIRCLE, THE, 31),
+        (SKILL_TRIP, THE, 33),
+        (SKILL_DISARM, THE, 35),
+        (SKILL_TARGET, THE, 37),
+        (SKILL_AVOID, THE, 39),
+        // Warriors.
+        (SKILL_KICK, WAR, 1),
+        (SKILL_MOUNT, WAR, 3),
+        (SKILL_RIDING, WAR, 5),
+        (SKILL_RESCUE, WAR, 7),
+        (SKILL_TAME, WAR, 9),
+        (SKILL_TRACK, WAR, 11),
+        (SKILL_SECOND_ATTACK, WAR, 13),
+        (SKILL_BASH, WAR, 15),
+        (SKILL_FORAGE, WAR, 17),
+        (SKILL_SCAN, WAR, 19),
+        (SKILL_ADRENALINE, WAR, 20),
+        (SKILL_THIRD_ATTACK, WAR, 21),
+        (SKILL_RIPOSTE, WAR, 23),
+        (SKILL_SPEED, WAR, 25),
+        (SKILL_BERSERK, WAR, 27),
+        (SKILL_RAM_DOOR, WAR, 29),
+        (SKILL_PARRY, WAR, 31),
+        (SKILL_CHAIN_FOOTING, WAR, 50),
+        (SKILL_BLOODLUST, WAR, 60),
+        (SKILL_CARNALRAGE, WAR, 75),
+        // Artisans.
+        (SKILL_MOUNT, ART, 1),
+        (SKILL_RIDING, ART, 3),
+        (SKILL_SCRIBE, ART, 5),
+        (SKILL_TAME, ART, 7),
+        (SKILL_BREW, ART, 11),
+        (SKILL_REPAIR, ART, 21),
+        (SKILL_TAN, ART, 25),
+        (SKILL_FILLET, ART, 31),
+        (SKILL_CARVE, ART, 33),
+        (SKILL_FORGE, ART, 35),
+        (SKILL_DODGE, ART, 37),
+    ] {
+        spell_level(table, spell, class, level);
+    }
+}
+
 /// mag_assign_spells (spell_parser.c) — the full spello/skillo table.
 fn build_spell_info() -> Vec<SpellInfoType> {
     let mut t = vec![SpellInfoType::unused(); (TOP_SPELL_DEFINE + 1) as usize];
 
-    spello(&mut t, SPELL_ANIMATE_DEAD, 175, 150, 3, POS_STANDING, TAR_OBJ_ROOM, false, MAG_SUMMONS);
-    spello(&mut t, SPELL_ARMOR, 30, 15, 3, POS_FIGHTING, TAR_CHAR_ROOM, false, MAG_AFFECTS);
-    spello(&mut t, SPELL_BLESS, 35, 5, 3, POS_STANDING, TAR_CHAR_ROOM | TAR_OBJ_INV, false, MAG_AFFECTS | MAG_ALTER_OBJS);
-    spello(&mut t, SPELL_BLINDNESS, 35, 25, 1, POS_STANDING, TAR_CHAR_ROOM | TAR_NOT_SELF, false, MAG_AFFECTS);
-    spello(&mut t, SPELL_CHARM, 75, 50, 2, POS_FIGHTING, TAR_CHAR_ROOM | TAR_NOT_SELF, true, MAG_MANUAL);
-    spello(&mut t, SPELL_CLONE, 200, 150, 5, POS_STANDING, TAR_CHAR_ROOM | TAR_SELF_ONLY, false, MAG_SUMMONS);
-    spello(&mut t, SPELL_CONTROL_WEATHER, 75, 25, 5, POS_STANDING, TAR_IGNORE, false, MAG_MANUAL);
-    spello(&mut t, SPELL_CREATE_FOOD, 30, 5, 4, POS_STANDING, TAR_IGNORE, false, MAG_CREATIONS);
-    spello(&mut t, SPELL_CREATE_WATER, 30, 5, 4, POS_STANDING, TAR_OBJ_INV | TAR_OBJ_EQUIP, false, MAG_MANUAL);
-    spello(&mut t, SPELL_CURE_BLIND, 30, 5, 2, POS_STANDING, TAR_CHAR_ROOM, false, MAG_UNAFFECTS);
-    spello(&mut t, SPELL_CURE_CRITIC, 30, 10, 2, POS_FIGHTING, TAR_CHAR_ROOM, false, MAG_POINTS);
-    spello(&mut t, SPELL_CURE_LIGHT, 30, 10, 2, POS_FIGHTING, TAR_CHAR_ROOM, false, MAG_POINTS);
-    spello(&mut t, SPELL_CURSE, 80, 50, 2, POS_STANDING, TAR_CHAR_ROOM | TAR_OBJ_INV, true, MAG_AFFECTS | MAG_ALTER_OBJS);
-    spello(&mut t, SPELL_DETECT_ALIGN, 20, 10, 2, POS_STANDING, TAR_CHAR_ROOM | TAR_SELF_ONLY, false, MAG_AFFECTS);
-    spello(&mut t, SPELL_DETECT_INVIS, 20, 10, 2, POS_STANDING, TAR_CHAR_ROOM | TAR_SELF_ONLY, false, MAG_AFFECTS);
-    spello(&mut t, SPELL_DETECT_MAGIC, 20, 10, 2, POS_STANDING, TAR_CHAR_ROOM | TAR_SELF_ONLY, false, MAG_AFFECTS);
-    spello(&mut t, SPELL_DETECT_POISON, 15, 5, 1, POS_STANDING, TAR_CHAR_ROOM | TAR_OBJ_INV | TAR_OBJ_ROOM, false, MAG_MANUAL);
-    spello(&mut t, SPELL_EARTHQUAKE, 40, 25, 3, POS_FIGHTING, TAR_IGNORE, true, MAG_AREAS);
-    spello(&mut t, SPELL_ENCHANT_WEAPON, 150, 100, 10, POS_STANDING, TAR_OBJ_INV | TAR_OBJ_EQUIP, false, MAG_MANUAL);
-    spello(&mut t, SPELL_GROUP_ARMOR, 50, 30, 2, POS_STANDING, TAR_IGNORE, false, MAG_GROUPS);
-    spello(&mut t, SPELL_GROUP_HEAL, 80, 60, 5, POS_STANDING, TAR_IGNORE, false, MAG_GROUPS);
-    spello(&mut t, SPELL_HEAL, 60, 40, 3, POS_FIGHTING, TAR_CHAR_ROOM, false, MAG_POINTS | MAG_AFFECTS | MAG_UNAFFECTS);
-    spello(&mut t, SPELL_INFRAVISION, 25, 10, 1, POS_STANDING, TAR_CHAR_ROOM | TAR_SELF_ONLY, false, MAG_AFFECTS);
-    spello(&mut t, SPELL_INVISIBLE, 35, 25, 1, POS_STANDING, TAR_CHAR_ROOM | TAR_OBJ_INV | TAR_OBJ_ROOM, false, MAG_AFFECTS | MAG_ALTER_OBJS);
-    spello(&mut t, SPELL_LOCATE_OBJECT, 25, 20, 1, POS_STANDING, TAR_OBJ_WORLD, false, MAG_MANUAL);
-    spello(&mut t, SPELL_LOCATE_TARGET, 100, 20, 1, POS_STANDING, TAR_CHAR_WORLD, false, MAG_MANUAL);
-    spello(&mut t, SPELL_POISON, 50, 20, 3, POS_STANDING, TAR_CHAR_ROOM | TAR_NOT_SELF | TAR_OBJ_INV, true, MAG_AFFECTS | MAG_ALTER_OBJS);
-    spello(&mut t, SPELL_REMOVE_CURSE, 45, 25, 5, POS_STANDING, TAR_CHAR_ROOM | TAR_OBJ_INV, false, MAG_UNAFFECTS | MAG_ALTER_OBJS);
-    spello(&mut t, SPELL_SANCTUARY, 110, 85, 5, POS_STANDING, TAR_CHAR_ROOM, false, MAG_AFFECTS);
-    spello(&mut t, SPELL_SLEEP, 40, 25, 5, POS_STANDING, TAR_CHAR_ROOM, true, MAG_AFFECTS);
-    spello(&mut t, SPELL_STRENGTH, 35, 30, 1, POS_STANDING, TAR_CHAR_ROOM, false, MAG_AFFECTS);
-    spello(&mut t, SPELL_SUMMON, 75, 50, 3, POS_STANDING, TAR_CHAR_WORLD | TAR_NOT_SELF, false, MAG_MANUAL);
-    spello(&mut t, SPELL_WORD_OF_RECALL, 20, 10, 2, POS_FIGHTING, TAR_CHAR_ROOM | TAR_SELF_ONLY, false, MAG_MANUAL);
-    spello(&mut t, SPELL_REMOVE_POISON, 40, 8, 4, POS_STANDING, TAR_CHAR_ROOM | TAR_OBJ_INV | TAR_OBJ_ROOM, false, MAG_UNAFFECTS | MAG_ALTER_OBJS);
-    spello(&mut t, SPELL_SENSE_LIFE, 20, 10, 2, POS_STANDING, TAR_CHAR_ROOM | TAR_SELF_ONLY, false, MAG_AFFECTS);
-    spello(&mut t, SPELL_STONE_SKIN, 120, 60, 3, POS_STANDING, TAR_CHAR_ROOM | TAR_SELF_ONLY, false, MAG_AFFECTS);
-    spello(&mut t, SPELL_FEAR, 100, 50, 1, POS_FIGHTING, TAR_CHAR_ROOM | TAR_NOT_SELF, true, MAG_MANUAL);
-    spello(&mut t, SPELL_RECHARGE, 150, 75, 1, POS_STANDING, TAR_CHAR_ROOM | TAR_NOT_SELF | TAR_OBJ_INV | TAR_OBJ_ROOM, false, MAG_MANUAL);
-    spello(&mut t, SPELL_PORTAL, 170, 100, 5, POS_STANDING, TAR_CHAR_WORLD | TAR_NOT_SELF, false, MAG_MANUAL);
-    spello(&mut t, SPELL_GROUP_STONE_SKIN, 240, 120, 2, POS_STANDING, TAR_IGNORE, false, MAG_GROUPS);
-    spello(&mut t, SPELL_CONVERGENCE, 110, 85, 5, POS_STANDING, TAR_CHAR_ROOM, false, MAG_AFFECTS);
-    spello(&mut t, SPELL_AUTUS, 140, 100, 5, POS_STANDING, TAR_CHAR_ROOM, false, MAG_AFFECTS);
-    spello(&mut t, SPELL_RESIST_PORTAL, 200, 100, 2, POS_STANDING, TAR_CHAR_ROOM | TAR_SELF_ONLY, false, MAG_AFFECTS);
-    spello(&mut t, SPELL_REGEN_MANA, 150, 150, 0, POS_FIGHTING, TAR_CHAR_ROOM | TAR_NOT_SELF, false, MAG_POINTS);
-    spello(&mut t, SPELL_HOME, 80, 20, 1, POS_FIGHTING, TAR_CHAR_ROOM | TAR_SELF_ONLY, false, MAG_MANUAL);
-    spello(&mut t, SPELL_WORD_OF_RETREAT, 30, 20, 1, POS_FIGHTING, TAR_CHAR_ROOM | TAR_SELF_ONLY, false, MAG_MANUAL);
-    spello(&mut t, SPELL_WATERWALK, 200, 150, 1, POS_FIGHTING, TAR_CHAR_ROOM | TAR_SELF_ONLY, false, MAG_AFFECTS);
-    spello(&mut t, SPELL_REDIRECT_CHARGE, 200, 100, 5, POS_STANDING, TAR_CHAR_ROOM, false, MAG_AFFECTS);
+    spello(
+        &mut t,
+        SPELL_ANIMATE_DEAD,
+        175,
+        150,
+        3,
+        POS_STANDING,
+        TAR_OBJ_ROOM,
+        false,
+        MAG_SUMMONS,
+    );
+    spello(
+        &mut t,
+        SPELL_ARMOR,
+        30,
+        15,
+        3,
+        POS_FIGHTING,
+        TAR_CHAR_ROOM,
+        false,
+        MAG_AFFECTS,
+    );
+    spello(
+        &mut t,
+        SPELL_BLESS,
+        35,
+        5,
+        3,
+        POS_STANDING,
+        TAR_CHAR_ROOM | TAR_OBJ_INV,
+        false,
+        MAG_AFFECTS | MAG_ALTER_OBJS,
+    );
+    spello(
+        &mut t,
+        SPELL_BLINDNESS,
+        35,
+        25,
+        1,
+        POS_STANDING,
+        TAR_CHAR_ROOM | TAR_NOT_SELF,
+        false,
+        MAG_AFFECTS,
+    );
+    spello(
+        &mut t,
+        SPELL_CHARM,
+        75,
+        50,
+        2,
+        POS_FIGHTING,
+        TAR_CHAR_ROOM | TAR_NOT_SELF,
+        true,
+        MAG_MANUAL,
+    );
+    spello(
+        &mut t,
+        SPELL_CLONE,
+        200,
+        150,
+        5,
+        POS_STANDING,
+        TAR_CHAR_ROOM | TAR_SELF_ONLY,
+        false,
+        MAG_SUMMONS,
+    );
+    spello(
+        &mut t,
+        SPELL_CONTROL_WEATHER,
+        75,
+        25,
+        5,
+        POS_STANDING,
+        TAR_IGNORE,
+        false,
+        MAG_MANUAL,
+    );
+    spello(
+        &mut t,
+        SPELL_CREATE_FOOD,
+        30,
+        5,
+        4,
+        POS_STANDING,
+        TAR_IGNORE,
+        false,
+        MAG_CREATIONS,
+    );
+    spello(
+        &mut t,
+        SPELL_CREATE_WATER,
+        30,
+        5,
+        4,
+        POS_STANDING,
+        TAR_OBJ_INV | TAR_OBJ_EQUIP,
+        false,
+        MAG_MANUAL,
+    );
+    spello(
+        &mut t,
+        SPELL_CURE_BLIND,
+        30,
+        5,
+        2,
+        POS_STANDING,
+        TAR_CHAR_ROOM,
+        false,
+        MAG_UNAFFECTS,
+    );
+    spello(
+        &mut t,
+        SPELL_CURE_CRITIC,
+        30,
+        10,
+        2,
+        POS_FIGHTING,
+        TAR_CHAR_ROOM,
+        false,
+        MAG_POINTS,
+    );
+    spello(
+        &mut t,
+        SPELL_CURE_LIGHT,
+        30,
+        10,
+        2,
+        POS_FIGHTING,
+        TAR_CHAR_ROOM,
+        false,
+        MAG_POINTS,
+    );
+    spello(
+        &mut t,
+        SPELL_CURSE,
+        80,
+        50,
+        2,
+        POS_STANDING,
+        TAR_CHAR_ROOM | TAR_OBJ_INV,
+        true,
+        MAG_AFFECTS | MAG_ALTER_OBJS,
+    );
+    spello(
+        &mut t,
+        SPELL_DETECT_ALIGN,
+        20,
+        10,
+        2,
+        POS_STANDING,
+        TAR_CHAR_ROOM | TAR_SELF_ONLY,
+        false,
+        MAG_AFFECTS,
+    );
+    spello(
+        &mut t,
+        SPELL_DETECT_INVIS,
+        20,
+        10,
+        2,
+        POS_STANDING,
+        TAR_CHAR_ROOM | TAR_SELF_ONLY,
+        false,
+        MAG_AFFECTS,
+    );
+    spello(
+        &mut t,
+        SPELL_DETECT_MAGIC,
+        20,
+        10,
+        2,
+        POS_STANDING,
+        TAR_CHAR_ROOM | TAR_SELF_ONLY,
+        false,
+        MAG_AFFECTS,
+    );
+    spello(
+        &mut t,
+        SPELL_DETECT_POISON,
+        15,
+        5,
+        1,
+        POS_STANDING,
+        TAR_CHAR_ROOM | TAR_OBJ_INV | TAR_OBJ_ROOM,
+        false,
+        MAG_MANUAL,
+    );
+    spello(
+        &mut t,
+        SPELL_EARTHQUAKE,
+        40,
+        25,
+        3,
+        POS_FIGHTING,
+        TAR_IGNORE,
+        true,
+        MAG_AREAS,
+    );
+    spello(
+        &mut t,
+        SPELL_ENCHANT_WEAPON,
+        150,
+        100,
+        10,
+        POS_STANDING,
+        TAR_OBJ_INV | TAR_OBJ_EQUIP,
+        false,
+        MAG_MANUAL,
+    );
+    spello(
+        &mut t,
+        SPELL_GROUP_ARMOR,
+        50,
+        30,
+        2,
+        POS_STANDING,
+        TAR_IGNORE,
+        false,
+        MAG_GROUPS,
+    );
+    spello(
+        &mut t,
+        SPELL_GROUP_HEAL,
+        80,
+        60,
+        5,
+        POS_STANDING,
+        TAR_IGNORE,
+        false,
+        MAG_GROUPS,
+    );
+    spello(
+        &mut t,
+        SPELL_HEAL,
+        60,
+        40,
+        3,
+        POS_FIGHTING,
+        TAR_CHAR_ROOM,
+        false,
+        MAG_POINTS | MAG_AFFECTS | MAG_UNAFFECTS,
+    );
+    spello(
+        &mut t,
+        SPELL_INFRAVISION,
+        25,
+        10,
+        1,
+        POS_STANDING,
+        TAR_CHAR_ROOM | TAR_SELF_ONLY,
+        false,
+        MAG_AFFECTS,
+    );
+    spello(
+        &mut t,
+        SPELL_INVISIBLE,
+        35,
+        25,
+        1,
+        POS_STANDING,
+        TAR_CHAR_ROOM | TAR_OBJ_INV | TAR_OBJ_ROOM,
+        false,
+        MAG_AFFECTS | MAG_ALTER_OBJS,
+    );
+    spello(
+        &mut t,
+        SPELL_LOCATE_OBJECT,
+        25,
+        20,
+        1,
+        POS_STANDING,
+        TAR_OBJ_WORLD,
+        false,
+        MAG_MANUAL,
+    );
+    spello(
+        &mut t,
+        SPELL_LOCATE_TARGET,
+        100,
+        20,
+        1,
+        POS_STANDING,
+        TAR_CHAR_WORLD,
+        false,
+        MAG_MANUAL,
+    );
+    spello(
+        &mut t,
+        SPELL_POISON,
+        50,
+        20,
+        3,
+        POS_STANDING,
+        TAR_CHAR_ROOM | TAR_NOT_SELF | TAR_OBJ_INV,
+        true,
+        MAG_AFFECTS | MAG_ALTER_OBJS,
+    );
+    spello(
+        &mut t,
+        SPELL_REMOVE_CURSE,
+        45,
+        25,
+        5,
+        POS_STANDING,
+        TAR_CHAR_ROOM | TAR_OBJ_INV,
+        false,
+        MAG_UNAFFECTS | MAG_ALTER_OBJS,
+    );
+    spello(
+        &mut t,
+        SPELL_SANCTUARY,
+        110,
+        85,
+        5,
+        POS_STANDING,
+        TAR_CHAR_ROOM,
+        false,
+        MAG_AFFECTS,
+    );
+    spello(
+        &mut t,
+        SPELL_SLEEP,
+        40,
+        25,
+        5,
+        POS_STANDING,
+        TAR_CHAR_ROOM,
+        true,
+        MAG_AFFECTS,
+    );
+    spello(
+        &mut t,
+        SPELL_STRENGTH,
+        35,
+        30,
+        1,
+        POS_STANDING,
+        TAR_CHAR_ROOM,
+        false,
+        MAG_AFFECTS,
+    );
+    spello(
+        &mut t,
+        SPELL_SUMMON,
+        75,
+        50,
+        3,
+        POS_STANDING,
+        TAR_CHAR_WORLD | TAR_NOT_SELF,
+        false,
+        MAG_MANUAL,
+    );
+    spello(
+        &mut t,
+        SPELL_WORD_OF_RECALL,
+        20,
+        10,
+        2,
+        POS_FIGHTING,
+        TAR_CHAR_ROOM | TAR_SELF_ONLY,
+        false,
+        MAG_MANUAL,
+    );
+    spello(
+        &mut t,
+        SPELL_REMOVE_POISON,
+        40,
+        8,
+        4,
+        POS_STANDING,
+        TAR_CHAR_ROOM | TAR_OBJ_INV | TAR_OBJ_ROOM,
+        false,
+        MAG_UNAFFECTS | MAG_ALTER_OBJS,
+    );
+    spello(
+        &mut t,
+        SPELL_SENSE_LIFE,
+        20,
+        10,
+        2,
+        POS_STANDING,
+        TAR_CHAR_ROOM | TAR_SELF_ONLY,
+        false,
+        MAG_AFFECTS,
+    );
+    spello(
+        &mut t,
+        SPELL_STONE_SKIN,
+        120,
+        60,
+        3,
+        POS_STANDING,
+        TAR_CHAR_ROOM | TAR_SELF_ONLY,
+        false,
+        MAG_AFFECTS,
+    );
+    spello(
+        &mut t,
+        SPELL_FEAR,
+        100,
+        50,
+        1,
+        POS_FIGHTING,
+        TAR_CHAR_ROOM | TAR_NOT_SELF,
+        true,
+        MAG_MANUAL,
+    );
+    spello(
+        &mut t,
+        SPELL_RECHARGE,
+        150,
+        75,
+        1,
+        POS_STANDING,
+        TAR_CHAR_ROOM | TAR_NOT_SELF | TAR_OBJ_INV | TAR_OBJ_ROOM,
+        false,
+        MAG_MANUAL,
+    );
+    spello(
+        &mut t,
+        SPELL_PORTAL,
+        170,
+        100,
+        5,
+        POS_STANDING,
+        TAR_CHAR_WORLD | TAR_NOT_SELF,
+        false,
+        MAG_MANUAL,
+    );
+    spello(
+        &mut t,
+        SPELL_GROUP_STONE_SKIN,
+        240,
+        120,
+        2,
+        POS_STANDING,
+        TAR_IGNORE,
+        false,
+        MAG_GROUPS,
+    );
+    spello(
+        &mut t,
+        SPELL_CONVERGENCE,
+        110,
+        85,
+        5,
+        POS_STANDING,
+        TAR_CHAR_ROOM,
+        false,
+        MAG_AFFECTS,
+    );
+    spello(
+        &mut t,
+        SPELL_AUTUS,
+        140,
+        100,
+        5,
+        POS_STANDING,
+        TAR_CHAR_ROOM,
+        false,
+        MAG_AFFECTS,
+    );
+    spello(
+        &mut t,
+        SPELL_RESIST_PORTAL,
+        200,
+        100,
+        2,
+        POS_STANDING,
+        TAR_CHAR_ROOM | TAR_SELF_ONLY,
+        false,
+        MAG_AFFECTS,
+    );
+    spello(
+        &mut t,
+        SPELL_REGEN_MANA,
+        150,
+        150,
+        0,
+        POS_FIGHTING,
+        TAR_CHAR_ROOM | TAR_NOT_SELF,
+        false,
+        MAG_POINTS,
+    );
+    spello(
+        &mut t,
+        SPELL_HOME,
+        80,
+        20,
+        1,
+        POS_FIGHTING,
+        TAR_CHAR_ROOM | TAR_SELF_ONLY,
+        false,
+        MAG_MANUAL,
+    );
+    spello(
+        &mut t,
+        SPELL_WORD_OF_RETREAT,
+        30,
+        20,
+        1,
+        POS_FIGHTING,
+        TAR_CHAR_ROOM | TAR_SELF_ONLY,
+        false,
+        MAG_MANUAL,
+    );
+    spello(
+        &mut t,
+        SPELL_WATERWALK,
+        200,
+        150,
+        1,
+        POS_FIGHTING,
+        TAR_CHAR_ROOM | TAR_SELF_ONLY,
+        false,
+        MAG_AFFECTS,
+    );
+    spello(
+        &mut t,
+        SPELL_REDIRECT_CHARGE,
+        200,
+        100,
+        5,
+        POS_STANDING,
+        TAR_CHAR_ROOM,
+        false,
+        MAG_AFFECTS,
+    );
 
     // Non-castable spells.
-    spello(&mut t, SPELL_IDENTIFY, 0, 0, 0, 0, TAR_CHAR_ROOM | TAR_OBJ_INV | TAR_OBJ_ROOM, false, MAG_MANUAL);
+    spello(
+        &mut t,
+        SPELL_IDENTIFY,
+        0,
+        0,
+        0,
+        0,
+        TAR_CHAR_ROOM | TAR_OBJ_INV | TAR_OBJ_ROOM,
+        false,
+        MAG_MANUAL,
+    );
 
     // Skills — just make immortals able by default.
     for &sk in &[
-        SKILL_BACKSTAB, SKILL_BASH, SKILL_HIDE, SKILL_KICK, SKILL_BERSERK,
-        SKILL_PICK_LOCK, SKILL_RAM_DOOR, SKILL_PUNCH, SKILL_RESCUE, SKILL_SNEAK,
-        SKILL_CAMOUFLAGE, SKILL_BLANKET, SKILL_STEAL, SKILL_TRACK, SKILL_FORAGE,
-        SKILL_SCAN, SKILL_BREW, SKILL_FORGE, SKILL_SCRIBE, SKILL_SPEED,
-        SKILL_MOUNT, SKILL_RIDING, SKILL_TAME, SKILL_SECOND_ATTACK,
-        SKILL_THIRD_ATTACK, SKILL_LISTEN, SKILL_MEDITATE, SKILL_REPAIR,
-        SKILL_TAN, SKILL_FILLET, SKILL_CARVE, SKILL_DODGE, SKILL_PARRY,
-        SKILL_AVOID, SKILL_RIPOSTE, SKILL_CIRCLE, SKILL_TRIP, SKILL_TARGET,
-        SKILL_DISARM, SKILL_CHAIN_FOOTING, SKILL_ADRENALINE, SKILL_BLOODLUST,
+        SKILL_BACKSTAB,
+        SKILL_BASH,
+        SKILL_HIDE,
+        SKILL_KICK,
+        SKILL_BERSERK,
+        SKILL_PICK_LOCK,
+        SKILL_RAM_DOOR,
+        SKILL_PUNCH,
+        SKILL_RESCUE,
+        SKILL_SNEAK,
+        SKILL_CAMOUFLAGE,
+        SKILL_BLANKET,
+        SKILL_STEAL,
+        SKILL_TRACK,
+        SKILL_FORAGE,
+        SKILL_SCAN,
+        SKILL_BREW,
+        SKILL_FORGE,
+        SKILL_SCRIBE,
+        SKILL_SPEED,
+        SKILL_MOUNT,
+        SKILL_RIDING,
+        SKILL_TAME,
+        SKILL_SECOND_ATTACK,
+        SKILL_THIRD_ATTACK,
+        SKILL_LISTEN,
+        SKILL_MEDITATE,
+        SKILL_REPAIR,
+        SKILL_TAN,
+        SKILL_FILLET,
+        SKILL_CARVE,
+        SKILL_DODGE,
+        SKILL_PARRY,
+        SKILL_AVOID,
+        SKILL_RIPOSTE,
+        SKILL_CIRCLE,
+        SKILL_TRIP,
+        SKILL_TARGET,
+        SKILL_DISARM,
+        SKILL_CHAIN_FOOTING,
+        SKILL_ADRENALINE,
+        SKILL_BLOODLUST,
         SKILL_CARNALRAGE,
     ] {
         skillo(&mut t, sk);
     }
+
+    init_spell_levels(&mut t);
 
     t
 }
@@ -511,18 +1183,60 @@ pub fn find_skill_num(name: &str) -> i32 {
 // syls[] garble table (spell_parser.c) — used by say_spell.
 // ===========================================================================
 const SYLS: &[(&str, &str)] = &[
-    (" ", " "), ("ar", "abra"), ("ate", "i"), ("cau", "kada"), ("blind", "nose"),
-    ("bur", "mosa"), ("cu", "judi"), ("de", "oculo"), ("dis", "mar"),
-    ("ect", "kamina"), ("en", "uns"), ("gro", "cra"), ("light", "dies"),
-    ("lo", "hi"), ("magi", "kari"), ("mon", "bar"), ("mor", "zak"),
-    ("move", "sido"), ("ness", "lacri"), ("ning", "illa"), ("per", "duda"),
-    ("ra", "gru"), ("re", "candus"), ("son", "sabru"), ("tect", "infra"),
-    ("tri", "cula"), ("ven", "nofo"), ("word of", "inset"),
-    ("a", "i"), ("b", "v"), ("c", "q"), ("d", "m"), ("e", "o"), ("f", "y"),
-    ("g", "t"), ("h", "p"), ("i", "u"), ("j", "y"), ("k", "t"), ("l", "r"),
-    ("m", "w"), ("n", "b"), ("o", "a"), ("p", "s"), ("q", "d"), ("r", "f"),
-    ("s", "g"), ("t", "h"), ("u", "e"), ("v", "z"), ("w", "x"), ("x", "n"),
-    ("y", "l"), ("z", "k"),
+    (" ", " "),
+    ("ar", "abra"),
+    ("ate", "i"),
+    ("cau", "kada"),
+    ("blind", "nose"),
+    ("bur", "mosa"),
+    ("cu", "judi"),
+    ("de", "oculo"),
+    ("dis", "mar"),
+    ("ect", "kamina"),
+    ("en", "uns"),
+    ("gro", "cra"),
+    ("light", "dies"),
+    ("lo", "hi"),
+    ("magi", "kari"),
+    ("mon", "bar"),
+    ("mor", "zak"),
+    ("move", "sido"),
+    ("ness", "lacri"),
+    ("ning", "illa"),
+    ("per", "duda"),
+    ("ra", "gru"),
+    ("re", "candus"),
+    ("son", "sabru"),
+    ("tect", "infra"),
+    ("tri", "cula"),
+    ("ven", "nofo"),
+    ("word of", "inset"),
+    ("a", "i"),
+    ("b", "v"),
+    ("c", "q"),
+    ("d", "m"),
+    ("e", "o"),
+    ("f", "y"),
+    ("g", "t"),
+    ("h", "p"),
+    ("i", "u"),
+    ("j", "y"),
+    ("k", "t"),
+    ("l", "r"),
+    ("m", "w"),
+    ("n", "b"),
+    ("o", "a"),
+    ("p", "s"),
+    ("q", "d"),
+    ("r", "f"),
+    ("s", "g"),
+    ("t", "h"),
+    ("u", "e"),
+    ("v", "z"),
+    ("w", "x"),
+    ("x", "n"),
+    ("y", "l"),
+    ("z", "k"),
 ];
 
 /// Garble a spell name for hearers of a different class (spell_parser.c).
@@ -569,12 +1283,19 @@ pub fn mag_manacost(g: &GameState, ch: CharId, spellnum: i32) -> i32 {
 
 /// say_spell(ch, spellnum, tch, tobj) (spell_parser.c): broadcast the spoken
 /// words to the room — garbled for hearers of a different class.
-pub fn say_spell(g: &mut GameState, ch: CharId, spellnum: i32, tch: Option<CharId>, tobj: Option<ObjId>) {
+pub fn say_spell(
+    g: &mut GameState,
+    ch: CharId,
+    spellnum: i32,
+    tch: Option<CharId>,
+    tobj: Option<ObjId>,
+) {
     let real = raw_spell_name(spellnum).to_string();
     let garbled = garble_spell(spellnum);
 
     let ch_room = g.get_char(ch).and_then(|c| c.in_room);
-    let tch_same_room = tch.and_then(|t| g.get_char(t).and_then(|c| c.in_room)) == ch_room && tch.is_some();
+    let tch_same_room =
+        tch.and_then(|t| g.get_char(t).and_then(|c| c.in_room)) == ch_room && tch.is_some();
     let tobj_here = tobj
         .map(|o| {
             let here = g.get_obj(o).map(|x| match x.loc {
@@ -603,8 +1324,13 @@ pub fn say_spell(g: &mut GameState, ch: CharId, spellnum: i32, tch: Option<CharI
     let buf2 = template.replace("{}", &garbled); // other-class hearers
 
     // Per-recipient render: same class hears the real words, otherwise garble.
-    let ch_class = g.get_char(ch).map(|c| c.player.class).unwrap_or(Class::Warrior);
-    let people = ch_room.map(|r| g.room(r).people.clone()).unwrap_or_default();
+    let ch_class = g
+        .get_char(ch)
+        .map(|c| c.player.class)
+        .unwrap_or(Class::Warrior);
+    let people = ch_room
+        .map(|r| g.room(r).people.clone())
+        .unwrap_or_default();
     let vict_arg = match tch {
         Some(v) => ActArg::Char(v),
         None => ActArg::None,
@@ -646,13 +1372,27 @@ pub fn say_spell(g: &mut GameState, ch: CharId, spellnum: i32, tch: Option<CharI
 /// this port only exposes To::Char/Vict/Room/NotVict; say_spell needs to render
 /// a $n-message to an arbitrary bystander with per-viewer substitution, so we
 /// re-implement the minimal substitution inline and send directly.
-fn render_to(g: &mut GameState, msg: &str, ch: CharId, obj: Option<ObjId>, vict: &ActArg, viewer: CharId) {
+fn render_to(
+    g: &mut GameState,
+    msg: &str,
+    ch: CharId,
+    obj: Option<ObjId>,
+    vict: &ActArg,
+    viewer: CharId,
+) {
     let text = perform_act_str(g, msg, ch, obj, vict, viewer);
     g.send_to_char(viewer, &text);
 }
 
 /// Minimal $-code substitution mirroring act.rs::perform_act for one viewer.
-fn perform_act_str(g: &GameState, orig: &str, ch: CharId, obj: Option<ObjId>, vict: &ActArg, viewer: CharId) -> String {
+fn perform_act_str(
+    g: &GameState,
+    orig: &str,
+    ch: CharId,
+    obj: Option<ObjId>,
+    vict: &ActArg,
+    viewer: CharId,
+) -> String {
     let mut out = String::with_capacity(orig.len() + 16);
     let mut chars = orig.chars().peekable();
     while let Some(c) = chars.next() {
@@ -698,7 +1438,9 @@ fn pers(g: &GameState, viewer: CharId, cid: CharId) -> String {
     if g.can_see(viewer, cid) {
         if let Some(c) = g.get_char(cid) {
             return if c.is_npc {
-                c.short_desc.clone().unwrap_or_else(|| c.player.name.clone())
+                c.short_desc
+                    .clone()
+                    .unwrap_or_else(|| c.player.name.clone())
             } else {
                 c.player.name.clone()
             };
@@ -719,7 +1461,11 @@ fn obj_disp(g: &GameState, oid: ObjId, fname_only: bool) -> String {
     match g.get_obj(oid) {
         Some(o) => {
             if fname_only {
-                o.name.split_whitespace().next().unwrap_or("something").to_string()
+                o.name
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("something")
+                    .to_string()
             } else {
                 o.short_description.clone()
             }
@@ -797,7 +1543,10 @@ pub fn cast_spell(
     }
     let si = spell_info(spellnum);
 
-    let pos = g.get_char(ch).map(|c| c.position).unwrap_or(Position::Standing);
+    let pos = g
+        .get_char(ch)
+        .map(|c| c.position)
+        .unwrap_or(Position::Standing);
     if (pos as i32) < si.min_position {
         let msg = match pos {
             Position::Sleeping => "You dream about great magical powers.\r\n",
@@ -811,7 +1560,10 @@ pub fn cast_spell(
     }
 
     // Charmed casters won't hurt their master.
-    let charmed_master = g.get_char(ch).map(|c| c.affect_flags & AFF_CHARM != 0 && c.master == tch && tch.is_some()).unwrap_or(false);
+    let charmed_master = g
+        .get_char(ch)
+        .map(|c| c.affect_flags & AFF_CHARM != 0 && c.master == tch && tch.is_some())
+        .unwrap_or(false);
     if charmed_master {
         g.send_to_char(ch, "You are afraid you might hurt your master!\r\n");
         return 0;
@@ -824,8 +1576,15 @@ pub fn cast_spell(
         g.send_to_char(ch, "You cannot cast this spell upon yourself!\r\n");
         return 0;
     }
-    if si.routines & MAG_GROUPS != 0 && g.get_char(ch).map(|c| c.affect_flags & AFF_GROUP == 0).unwrap_or(true) {
-        g.send_to_char(ch, "You can't cast this spell if you're not in a group!\r\n");
+    if si.routines & MAG_GROUPS != 0
+        && g.get_char(ch)
+            .map(|c| c.affect_flags & AFF_GROUP == 0)
+            .unwrap_or(true)
+    {
+        g.send_to_char(
+            ch,
+            "You can't cast this spell if you're not in a group!\r\n",
+        );
         return 0;
     }
     g.send_to_char(ch, OK);
@@ -863,7 +1622,10 @@ pub fn do_cast(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let s = match tokens.next() {
         // s2 == NULL  ->  no closing context, "must be enclosed".
         None => {
-            g.send_to_char(ch, "Spell names must be enclosed in the Holy Magic Symbols: '\r\n");
+            g.send_to_char(
+                ch,
+                "Spell names must be enclosed in the Holy Magic Symbols: '\r\n",
+            );
             return;
         }
         Some(name) => name,
@@ -885,13 +1647,20 @@ pub fn do_cast(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let si = spell_info(spellnum);
 
     // Class min-level gate.
-    let (level, class) = g.get_char(ch).map(|c| (c.player.level as i32, c.player.class as usize)).unwrap_or((1, 0));
+    let (level, class) = g
+        .get_char(ch)
+        .map(|c| (c.player.level as i32, c.player.class as usize))
+        .unwrap_or((1, 0));
     let class = class.min(NUM_CLASSES - 1);
     if level < si.min_level[class] {
         g.send_to_char(ch, "You do not know that spell!\r\n");
         return;
     }
-    if g.get_char(ch).map(|c| c.skill(spellnum as u16)).unwrap_or(0) == 0 {
+    if g.get_char(ch)
+        .map(|c| c.skill(spellnum as u16))
+        .unwrap_or(0)
+        == 0
+    {
         g.send_to_char(ch, "You are unfamiliar with that spell.\r\n");
         return;
     }
@@ -920,21 +1689,31 @@ pub fn do_cast(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             }
         }
         if !target && si.targets & TAR_OBJ_INV != 0 {
-            let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+            let inv = g
+                .get_char(ch)
+                .map(|c| c.carrying.clone())
+                .unwrap_or_default();
             if let Some(o) = g.get_obj_in_list_vis(ch, t, &inv) {
                 tobj = Some(o);
                 target = true;
             }
         }
         if !target && si.targets & TAR_OBJ_EQUIP != 0 {
-            let eq: Vec<ObjId> = g.get_char(ch).map(|c| c.equipment.iter().flatten().copied().collect()).unwrap_or_default();
+            let eq: Vec<ObjId> = g
+                .get_char(ch)
+                .map(|c| c.equipment.iter().flatten().copied().collect())
+                .unwrap_or_default();
             if let Some(o) = g.get_obj_in_list_vis(ch, t, &eq) {
                 tobj = Some(o);
                 target = true;
             }
         }
         if !target && si.targets & TAR_OBJ_ROOM != 0 {
-            let contents = g.get_char(ch).and_then(|c| c.in_room).map(|r| g.room(r).contents.clone()).unwrap_or_default();
+            let contents = g
+                .get_char(ch)
+                .and_then(|c| c.in_room)
+                .map(|r| g.room(r).contents.clone())
+                .unwrap_or_default();
             if let Some(o) = g.get_obj_in_list_vis(ch, t, &contents) {
                 tobj = Some(o);
                 target = true;
@@ -975,7 +1754,10 @@ pub fn do_cast(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
 
     if target && tch == Some(ch) && si.violent {
-        g.send_to_char(ch, "You shouldn't cast that on yourself -- could be bad for your health!\r\n");
+        g.send_to_char(
+            ch,
+            "You shouldn't cast that on yourself -- could be bad for your health!\r\n",
+        );
         return;
     }
     if !target {
@@ -984,14 +1766,20 @@ pub fn do_cast(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
 
     let mana = mag_manacost(g, ch, spellnum);
-    let (cur_mana, is_imm) = g.get_char(ch).map(|c| (c.points.mana, c.player.level >= LVL_IMMORT)).unwrap_or((0, false));
+    let (cur_mana, is_imm) = g
+        .get_char(ch)
+        .map(|c| (c.points.mana, c.player.level >= LVL_IMMORT))
+        .unwrap_or((0, false));
     if mana > 0 && cur_mana < mana && !is_imm {
         g.send_to_char(ch, "You haven't the energy to cast that spell!\r\n");
         return;
     }
 
     // Throw the dice — 101 is total failure.
-    let skill = g.get_char(ch).map(|c| c.skill(spellnum as u16) as i32).unwrap_or(0);
+    let skill = g
+        .get_char(ch)
+        .map(|c| c.skill(spellnum as u16) as i32)
+        .unwrap_or(0);
     if g.rng.number(0, 101) > skill {
         // Lost concentration.
         g.set_wait_state(ch, PULSE_VIOLENCE as i32);
@@ -1037,7 +1825,9 @@ pub fn do_skillset(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     };
     // Skill name is the text between the first pair of single quotes.
     let skillname = match rest.find('\'').and_then(|q1| {
-        rest[q1 + 1..].find('\'').map(|q2| (&rest[q1 + 1..q1 + 1 + q2], &rest[q1 + 1 + q2 + 1..]))
+        rest[q1 + 1..]
+            .find('\'')
+            .map(|q2| (&rest[q1 + 1..q1 + 1 + q2], &rest[q1 + 1 + q2 + 1..]))
     }) {
         Some((sk, _)) => sk.to_string(),
         None => {
@@ -1046,7 +1836,12 @@ pub fn do_skillset(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
     };
     let after = rest.rsplit('\'').next().unwrap_or("");
-    let value: i32 = after.trim().split_whitespace().next().and_then(|s| s.parse().ok()).unwrap_or(-1);
+    let value: i32 = after
+        .trim()
+        .split_whitespace()
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(-1);
     let spellnum = find_skill_num(&skillname);
     if spellnum <= 0 {
         g.send_to_char(ch, "Unrecognized skill.\r\n");
@@ -1061,6 +1856,42 @@ pub fn do_skillset(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
     g.send_to_char(
         ch,
-        &format!("You change {}'s {} to {}.\r\n", name, skill_name(spellnum), value),
+        &format!(
+            "You change {}'s {} to {}.\r\n",
+            name,
+            skill_name(spellnum),
+            value
+        ),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spell_levels_are_assigned_for_mortal_spellcasters() {
+        let armor = spell_info(SPELL_ARMOR);
+        assert_eq!(armor.min_level[Class::MagicUser as usize], 10);
+        assert_eq!(armor.min_level[Class::Cleric as usize], 3);
+
+        let cure_light = spell_info(SPELL_CURE_LIGHT);
+        assert_eq!(cure_light.min_level[Class::Cleric as usize], 1);
+        assert_eq!(
+            cure_light.min_level[Class::MagicUser as usize],
+            LVL_IMMORT as i32
+        );
+    }
+
+    #[test]
+    fn skill_levels_are_assigned_for_mortal_classes() {
+        let kick = spell_info(SKILL_KICK);
+        assert_eq!(kick.min_level[Class::Warrior as usize], 1);
+
+        let sneak = spell_info(SKILL_SNEAK);
+        assert_eq!(sneak.min_level[Class::Thief as usize], 1);
+
+        let scribe = spell_info(SKILL_SCRIBE);
+        assert_eq!(scribe.min_level[Class::Artisan as usize], 5);
+    }
 }

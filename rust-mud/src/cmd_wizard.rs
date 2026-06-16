@@ -35,6 +35,7 @@ use crate::dg_handler::{self, ScriptKey, OBJ_TRIGGER, WLD_TRIGGER};
 use crate::flags::*;
 use crate::gcmd::*;
 use crate::interpreter::{command_interpreter, half_chop, is_abbrev, one_argument, search_block};
+use crate::limits::{exp_to_level, gain_exp_regardless};
 use crate::object::{ObjLoc, ObjectType};
 use crate::state::GameState;
 use crate::syslog::{BRF, CMP, NRM, PFT};
@@ -141,12 +142,20 @@ fn cap(s: &str) -> String {
 
 /// ONOFF(): C macro -> "ON"/"OFF".
 fn onoff(b: bool) -> &'static str {
-    if b { "ON" } else { "OFF" }
+    if b {
+        "ON"
+    } else {
+        "OFF"
+    }
 }
 
 /// YESNO().
 fn yesno(b: bool) -> &'static str {
-    if b { "YES" } else { "NO" }
+    if b {
+        "YES"
+    } else {
+        "NO"
+    }
 }
 
 /// sprinttype(): index a "\n"-terminated name table by ordinal, with the
@@ -227,7 +236,9 @@ fn is_npc(g: &GameState, id: CharId) -> bool {
 }
 
 fn name_of(g: &GameState, id: CharId) -> String {
-    g.get_char(id).map(|c| c.player.name.clone()).unwrap_or_default()
+    g.get_char(id)
+        .map(|c| c.player.name.clone())
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -236,16 +247,44 @@ fn name_of(g: &GameState, id: CharId) -> String {
 // script_stat to label GET_TRIG_TYPE.
 // ---------------------------------------------------------------------------
 const TRIG_TYPES: &[&str] = &[
-    "Global", "Random", "Command", "Speech", "Act", "Death", "Greet", "Greet-All", "Entry",
-    "Receive", "Fight", "HitPrcnt", "Bribe", "Load", "Memory", "\n",
+    "Global",
+    "Random",
+    "Command",
+    "Speech",
+    "Act",
+    "Death",
+    "Greet",
+    "Greet-All",
+    "Entry",
+    "Receive",
+    "Fight",
+    "HitPrcnt",
+    "Bribe",
+    "Load",
+    "Memory",
+    "\n",
 ];
 const OTRIG_TYPES: &[&str] = &[
     "Global", "Random", "Command", "Fight", "UNUSED", "Timer", "Get", "Drop", "Give", "Wear",
     "UNUSED", "Remove", "UNUSED", "Load", "UNUSED", "\n",
 ];
 const WTRIG_TYPES: &[&str] = &[
-    "Global", "Random", "Command", "Speech", "UNUSED", "Zone Reset", "Enter", "Drop", "UNUSED",
-    "UNUSED", "UNUSED", "UNUSED", "UNUSED", "UNUSED", "UNUSED", "\n",
+    "Global",
+    "Random",
+    "Command",
+    "Speech",
+    "UNUSED",
+    "Zone Reset",
+    "Enter",
+    "Drop",
+    "UNUSED",
+    "UNUSED",
+    "UNUSED",
+    "UNUSED",
+    "UNUSED",
+    "UNUSED",
+    "UNUSED",
+    "\n",
 ];
 
 /// real_zone(number): the zone rnum whose `number*100..=top` range covers a
@@ -304,7 +343,10 @@ fn script_stat(g: &mut GameState, ch: CharId, key: ScriptKey) {
     let globals = dg_handler::global_vars(key);
     g.send_to_char(
         ch,
-        &format!("Global Variables: {}\r\n", if globals.is_empty() { "None" } else { "" }),
+        &format!(
+            "Global Variables: {}\r\n",
+            if globals.is_empty() { "None" } else { "" }
+        ),
     );
     g.send_to_char(ch, &format!("Global context: {}\r\n", context));
     for (gname, gvalue, gctx) in &globals {
@@ -339,9 +381,16 @@ fn script_stat(g: &mut GameState, ch: CharId, key: ScriptKey) {
             x if x == WLD_TRIGGER => ("Rooms", WTRIG_TYPES),
             _ => ("Mobiles", TRIG_TYPES),
         };
-        g.send_to_char(ch, &format!("  Trigger Intended Assignment: {}\r\n", assign));
+        g.send_to_char(
+            ch,
+            &format!("  Trigger Intended Assignment: {}\r\n", assign),
+        );
         let typebits = sprintbit(t.trigger_type, table);
-        let arg = if t.arglist.is_empty() { "None" } else { &t.arglist };
+        let arg = if t.arglist.is_empty() {
+            "None"
+        } else {
+            &t.arglist
+        };
         g.send_to_char(
             ch,
             &format!(
@@ -359,7 +408,10 @@ fn script_stat(g: &mut GameState, ch: CharId, key: ScriptKey) {
             g.send_to_char(ch, &format!("    Current line: {}\r\n", curr));
             g.send_to_char(
                 ch,
-                &format!("  Variables: {}\r\n", if t.var_list.is_empty() { "None" } else { "" }),
+                &format!(
+                    "  Variables: {}\r\n",
+                    if t.var_list.is_empty() { "None" } else { "" }
+                ),
             );
             for tv in &t.var_list {
                 let shown = if tv.value.starts_with(crate::dg_scripts::UID_CHAR) {
@@ -393,7 +445,9 @@ fn can_see_obj(g: &GameState, ch: CharId, oid: ObjId) -> bool {
     if !invis {
         return true;
     }
-    g.get_char(ch).map(|c| c.affect_flags & AFF_DETECT_INVIS != 0).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.affect_flags & AFF_DETECT_INVIS != 0)
+        .unwrap_or(false)
 }
 
 /// skill_name(num): spell/skill name (spell_parser.c). Backed by the ported
@@ -469,7 +523,10 @@ fn try_defer_offline(g: &mut GameState, ch: CharId, name: &str, command: &str) -
     }
     // Offline but in the persistent index -> bridge it.
     if g.get_id_by_name(first).is_some() {
-        g.send_to_char(ch, &format!("[ Loading {} from the player file... ]\r\n", first));
+        g.send_to_char(
+            ch,
+            &format!("[ Loading {} from the player file... ]\r\n", first),
+        );
         g.queue_offline_op(ch, first, command);
         return true;
     }
@@ -546,7 +603,11 @@ fn find_target_room(g: &mut GameState, ch: CharId, rawroomstr: &str) -> Option<R
 
     // cdsr(): named map-coordinate room shortcut — not modelled (returns -1).
     let location: RoomRnum;
-    if roomstr.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+    if roomstr
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
         && !roomstr.contains('.')
     {
         let tmp = atoi(&roomstr);
@@ -591,7 +652,10 @@ fn find_target_room(g: &mut GameState, ch: CharId, rawroomstr: &str) -> Option<R
             return None;
         }
         if (flags & ROOM_PRIVATE_BIT) != 0 && g.room(location).people.len() > 1 {
-            g.send_to_char(ch, "There's a private conversation going on in that room.\r\n");
+            g.send_to_char(
+                ch,
+                "There's a private conversation going on in that room.\r\n",
+            );
             return None;
         }
         if (flags & ROOM_HOUSE_BIT) != 0 {
@@ -622,7 +686,10 @@ pub fn do_echo(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
     };
     let name = name_of(g, ch);
     let people = g.room(rnum).people.clone();
-    let ch_norepeat = g.get_char(ch).map(|c| c.prf_flags & PRF_NOREPEAT != 0).unwrap_or(false);
+    let ch_norepeat = g
+        .get_char(ch)
+        .map(|c| c.prf_flags & PRF_NOREPEAT != 0)
+        .unwrap_or(false);
     for vict in people {
         if vict == ch {
             if ch_norepeat {
@@ -638,13 +705,20 @@ pub fn do_echo(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
         }
         // isignore / PLR_WRITING gating: ignore lists aren't modelled, and
         // PLR_WRITING is checked against the writer's act_flags.
-        let writing = g.get_char(vict).map(|c| c.act_flags & PLR_WRITING != 0).unwrap_or(false);
+        let writing = g
+            .get_char(vict)
+            .map(|c| c.act_flags & PLR_WRITING != 0)
+            .unwrap_or(false);
         if writing {
             continue;
         }
         if subcmd == SCMD_EMOTE {
             // PERS(ch, vict): visible name else "someone".
-            let pers = if g.can_see(vict, ch) { name.clone() } else { "someone".to_string() };
+            let pers = if g.can_see(vict, ch) {
+                name.clone()
+            } else {
+                "someone".to_string()
+            };
             g.send_to_char(vict, &pers);
             g.send_to_char(vict, " ");
         }
@@ -670,7 +744,10 @@ pub fn do_send(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     };
     g.send_to_char(vict, &message);
     g.send_to_char(vict, "\r\n");
-    if g.get_char(ch).map(|c| c.prf_flags & PRF_NOREPEAT != 0).unwrap_or(false) {
+    if g.get_char(ch)
+        .map(|c| c.prf_flags & PRF_NOREPEAT != 0)
+        .unwrap_or(false)
+    {
         g.send_to_char(ch, "Sent.\r\n");
     } else {
         let vname = name_of(g, vict);
@@ -809,14 +886,38 @@ pub fn do_trans(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 }
 
 fn transfer_one(g: &mut GameState, ch: CharId, victim: CharId) {
-    act(g, "$n disappears in a mushroom cloud.", false, victim, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n disappears in a mushroom cloud.",
+        false,
+        victim,
+        None,
+        ActArg::None,
+        To::Room,
+    );
     g.char_from_room(victim);
     let dest = g.get_char(ch).and_then(|c| c.in_room);
     if let Some(rnum) = dest {
         g.char_to_room(victim, rnum);
     }
-    act(g, "$n arrives from a puff of smoke.", false, victim, None, ActArg::None, To::Room);
-    act(g, "$n has transferred you!", false, ch, None, ActArg::Char(victim), To::Vict);
+    act(
+        g,
+        "$n arrives from a puff of smoke.",
+        false,
+        victim,
+        None,
+        ActArg::None,
+        To::Room,
+    );
+    act(
+        g,
+        "$n has transferred you!",
+        false,
+        ch,
+        None,
+        ActArg::Char(victim),
+        To::Vict,
+    );
     look_at_room(g, victim);
 }
 
@@ -853,11 +954,35 @@ pub fn do_teleport(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         None => return,
     };
     g.send_to_char(ch, OK);
-    act(g, "$n disappears in a puff of smoke.", false, victim, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n disappears in a puff of smoke.",
+        false,
+        victim,
+        None,
+        ActArg::None,
+        To::Room,
+    );
     g.char_from_room(victim);
     g.char_to_room(victim, target);
-    act(g, "$n arrives from a puff of smoke.", false, victim, None, ActArg::None, To::Room);
-    act(g, "$n has teleported you!", false, ch, None, ActArg::Char(victim), To::Vict);
+    act(
+        g,
+        "$n arrives from a puff of smoke.",
+        false,
+        victim,
+        None,
+        ActArg::None,
+        To::Room,
+    );
+    act(
+        g,
+        "$n has teleported you!",
+        false,
+        ch,
+        None,
+        ActArg::Char(victim),
+        To::Vict,
+    );
     look_at_room(g, victim);
     let vname = name_of(g, victim);
     let cname = name_of(g, ch);
@@ -875,7 +1000,8 @@ pub fn do_teleport(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 // ===========================================================================
 pub fn do_vnum(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let (kind, name, _rest) = two_arguments(arg);
-    if kind.is_empty() || name.is_empty() || (!is_abbrev(&kind, "mob") && !is_abbrev(&kind, "obj")) {
+    if kind.is_empty() || name.is_empty() || (!is_abbrev(&kind, "mob") && !is_abbrev(&kind, "obj"))
+    {
         g.send_to_char(ch, "Usage: vnum { obj | mob } <name>\r\n");
         return;
     }
@@ -946,7 +1072,11 @@ fn do_stat_room(g: &mut GameState, ch: CharId) {
 
     let (name, sector, vnum, zone_num, light, flags, has_desc, desc, exits) = {
         let rm = g.room(rnum);
-        let zone_num = g.zones.get(rm.zone as usize).map(|z| z.number).unwrap_or(rm.zone);
+        let zone_num = g
+            .zones
+            .get(rm.zone as usize)
+            .map(|z| z.number)
+            .unwrap_or(rm.zone);
         (
             rm.name.clone(),
             rm.sector_type as i32,
@@ -980,7 +1110,12 @@ fn do_stat_room(g: &mut GameState, ch: CharId) {
     }
 
     // Extra descs.
-    let extra: Vec<String> = g.room(rnum).extra_descriptions.iter().map(|(k, _)| k.clone()).collect();
+    let extra: Vec<String> = g
+        .room(rnum)
+        .extra_descriptions
+        .iter()
+        .map(|(k, _)| k.clone())
+        .collect();
     if !extra.is_empty() {
         let mut line = String::from("Extra descs:&c");
         for k in &extra {
@@ -1010,7 +1145,12 @@ fn do_stat_room(g: &mut GameState, ch: CharId) {
             "MOB"
         };
         let nm = name_of(g, k);
-        buf.push_str(&format!("{} {}({})", if found > 0 { "," } else { "" }, nm, kind));
+        buf.push_str(&format!(
+            "{} {}({})",
+            if found > 0 { "," } else { "" },
+            nm,
+            kind
+        ));
         found += 1;
         if buf.len() >= 62 {
             if idx + 1 < total {
@@ -1042,7 +1182,10 @@ fn do_stat_room(g: &mut GameState, ch: CharId) {
                 idx += 1;
                 continue;
             }
-            let short = g.get_obj(j).map(|o| o.short_description.clone()).unwrap_or_default();
+            let short = g
+                .get_obj(j)
+                .map(|o| o.short_description.clone())
+                .unwrap_or_default();
             buf.push_str(&format!("{} {}", if found > 0 { "," } else { "" }, short));
             found += 1;
             if buf.len() >= 62 {
@@ -1098,18 +1241,47 @@ fn do_stat_object(g: &mut GameState, ch: CharId, j: ObjId) {
         g.send_to_char(ch, "You don't have permissions to that zone.\r\n");
         return;
     }
-    let (vnum, short, namelist, ldesc, otype, wear, bitvector, extra, weight, cost, rent, timer,
-         minlvl, loc, contained_in, carried_by, worn_by, values, contains, affects,
-         curr_slots, total_slots) = {
+    let (
+        vnum,
+        short,
+        namelist,
+        ldesc,
+        otype,
+        wear,
+        bitvector,
+        extra,
+        weight,
+        cost,
+        rent,
+        timer,
+        minlvl,
+        loc,
+        contained_in,
+        carried_by,
+        worn_by,
+        values,
+        contains,
+        affects,
+        curr_slots,
+        total_slots,
+    ) = {
         let o = match g.get_obj(j) {
             Some(o) => o,
             None => return,
         };
         (
             o.item_number,
-            if o.short_description.is_empty() { "<None>".to_string() } else { o.short_description.clone() },
+            if o.short_description.is_empty() {
+                "<None>".to_string()
+            } else {
+                o.short_description.clone()
+            },
             o.name.clone(),
-            if o.description.is_empty() { "None".to_string() } else { o.description.clone() },
+            if o.description.is_empty() {
+                "None".to_string()
+            } else {
+                o.description.clone()
+            },
             o.obj_type as i32,
             o.wear_flags.bits() as i64,
             0i64, // obj affect bitvector (set-char-bits) not modelled separately
@@ -1120,18 +1292,30 @@ fn do_stat_object(g: &mut GameState, ch: CharId, j: ObjId) {
             o.timer,
             o.level,
             o.loc,
-            match o.loc { ObjLoc::Contained(c) => Some(c), _ => None },
-            match o.loc { ObjLoc::Carried(c) => Some(c), _ => None },
-            match o.loc { ObjLoc::Worn(c, _) => Some(c), _ => None },
+            match o.loc {
+                ObjLoc::Contained(c) => Some(c),
+                _ => None,
+            },
+            match o.loc {
+                ObjLoc::Carried(c) => Some(c),
+                _ => None,
+            },
+            match o.loc {
+                ObjLoc::Worn(c, _) => Some(c),
+                _ => None,
+            },
             o.values,
             o.contains.clone(),
             o.affects.clone(),
-            o.curr_slots, // GET_OBJ_CSLOTS
+            o.curr_slots,  // GET_OBJ_CSLOTS
             o.total_slots, // GET_OBJ_TSLOTS
         )
     };
 
-    g.send_to_char(ch, &format!("Name: '&y{}&n', Aliases: {}\r\n", short, namelist));
+    g.send_to_char(
+        ch,
+        &format!("Name: '&y{}&n', Aliases: {}\r\n", short, namelist),
+    );
     let typestr = sprinttype(otype, constants::ITEM_TYPES);
     let rnum = "None"; // obj_index rnum/specproc not surfaced
     g.send_to_char(
@@ -1144,11 +1328,20 @@ fn do_stat_object(g: &mut GameState, ch: CharId, j: ObjId) {
     g.send_to_char(ch, &format!("L-Des: {}\r\n", ldesc));
 
     g.send_to_char(ch, "Can be worn on: ");
-    g.send_to_char(ch, &format!("{}\r\n", sprintbit(wear, constants::WEAR_BITS)));
+    g.send_to_char(
+        ch,
+        &format!("{}\r\n", sprintbit(wear, constants::WEAR_BITS)),
+    );
     g.send_to_char(ch, "Set char bits : ");
-    g.send_to_char(ch, &format!("{}\r\n", sprintbit(bitvector, constants::AFFECTED_BITS)));
+    g.send_to_char(
+        ch,
+        &format!("{}\r\n", sprintbit(bitvector, constants::AFFECTED_BITS)),
+    );
     g.send_to_char(ch, "Extra flags   : ");
-    g.send_to_char(ch, &format!("{}\r\n", sprintbit(extra, constants::EXTRA_BITS)));
+    g.send_to_char(
+        ch,
+        &format!("{}\r\n", sprintbit(extra, constants::EXTRA_BITS)),
+    );
 
     g.send_to_char(
         ch,
@@ -1165,7 +1358,10 @@ fn do_stat_object(g: &mut GameState, ch: CharId, j: ObjId) {
     }
     line.push_str(", In object: ");
     line.push_str(&match contained_in {
-        Some(c) => g.get_obj(c).map(|o| o.short_description.clone()).unwrap_or_else(|| "None".to_string()),
+        Some(c) => g
+            .get_obj(c)
+            .map(|o| o.short_description.clone())
+            .unwrap_or_else(|| "None".to_string()),
         None => "None".to_string(),
     });
     line.push_str(", Carried by: ");
@@ -1192,15 +1388,24 @@ fn do_stat_object(g: &mut GameState, ch: CharId, j: ObjId) {
         }
         ObjectType::Scroll | ObjectType::Potion => format!(
             "Spells: (Level {}) {}, {}, {}",
-            values[0], skill_name(values[1]), skill_name(values[2]), skill_name(values[3])
+            values[0],
+            skill_name(values[1]),
+            skill_name(values[2]),
+            skill_name(values[3])
         ),
         ObjectType::Wand | ObjectType::Staff => format!(
             "Spell: {} at level {}, {} (of {}) charges remaining",
-            skill_name(values[3]), values[0], values[2], values[1]
+            skill_name(values[3]),
+            values[0],
+            values[2],
+            values[1]
         ),
         ObjectType::Weapon => format!(
             "Todam: {}d{} (avg-dmg {:.1}), Message type: {}",
-            values[1], values[2], ((values[2] + 1) as f64 / 2.0) * values[1] as f64, values[3]
+            values[1],
+            values[2],
+            ((values[2] + 1) as f64 / 2.0) * values[1] as f64,
+            values[3]
         ),
         ObjectType::Armor => format!("Defense-app: [{}]", values[0]),
         ObjectType::Container => format!(
@@ -1212,12 +1417,18 @@ fn do_stat_object(g: &mut GameState, ch: CharId, j: ObjId) {
         ),
         ObjectType::LiqContainer | ObjectType::Fountain => format!(
             "Capacity: {}, Contains: {}, Poisoned: {}, Liquid: {}",
-            values[0], values[1], yesno(values[3] != 0),
+            values[0],
+            values[1],
+            yesno(values[3] != 0),
             sprinttype(values[2], constants::DRINKS)
         ),
         ObjectType::Note => format!("Tongue: {}", values[0]),
         ObjectType::Key => String::new(),
-        ObjectType::Food => format!("Makes full: {}, Poisoned: {}", values[0], yesno(values[3] != 0)),
+        ObjectType::Food => format!(
+            "Makes full: {}, Poisoned: {}",
+            values[0],
+            yesno(values[3] != 0)
+        ),
         ObjectType::Money => format!("Coins: {}", values[0]),
         _ => format!(
             "Values 0-3: [{}] [{}] [{}] [{}]",
@@ -1226,7 +1437,13 @@ fn do_stat_object(g: &mut GameState, ch: CharId, j: ObjId) {
     };
     // act.wizard.c do_stat_object: "Quality: [%d] [%d]" with
     // GET_OBJ_CSLOTS / GET_OBJ_TSLOTS (obj_flags.curr_slots / total_slots).
-    g.send_to_char(ch, &format!("{}\r\nQuality: [{}] [{}]\r\n", detail, curr_slots, total_slots));
+    g.send_to_char(
+        ch,
+        &format!(
+            "{}\r\nQuality: [{}] [{}]\r\n",
+            detail, curr_slots, total_slots
+        ),
+    );
 
     // Contents.
     if !contains.is_empty() {
@@ -1235,7 +1452,10 @@ fn do_stat_object(g: &mut GameState, ch: CharId, j: ObjId) {
         let mut idx = 0usize;
         let total = contains.len();
         for j2 in contains {
-            let short = g.get_obj(j2).map(|o| o.short_description.clone()).unwrap_or_default();
+            let short = g
+                .get_obj(j2)
+                .map(|o| o.short_description.clone())
+                .unwrap_or_default();
             buf.push_str(&format!("{} {}", if found > 0 { "," } else { "" }, short));
             found += 1;
             if buf.len() >= 62 {
@@ -1265,7 +1485,12 @@ fn do_stat_object(g: &mut GameState, ch: CharId, j: ObjId) {
             let loc = sprinttype(a.location, constants::APPLY_TYPES);
             g.send_to_char(
                 ch,
-                &format!("{} {:+} to {}", if found > 0 { "," } else { "" }, a.modifier, loc),
+                &format!(
+                    "{} {:+} to {}",
+                    if found > 0 { "," } else { "" },
+                    a.modifier,
+                    loc
+                ),
             );
             found += 1;
         }
@@ -1344,15 +1569,29 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
     let quest_obj = kc.quest_obj;
     let wins = kc.wins;
     let losses = kc.losses;
-    let damnodice = g.mob_protos.get(&mob_vnum).map(|m| m.damnodice).unwrap_or(0);
-    let damsizedice = g.mob_protos.get(&mob_vnum).map(|m| m.damsizedice).unwrap_or(0);
+    let damnodice = g
+        .mob_protos
+        .get(&mob_vnum)
+        .map(|m| m.damnodice)
+        .unwrap_or(0);
+    let damsizedice = g
+        .mob_protos
+        .get(&mob_vnum)
+        .map(|m| m.damsizedice)
+        .unwrap_or(0);
 
     let sexstr = match sex {
         Gender::Neutral => "NEUTRAL-SEX",
         Gender::Male => "MALE",
         Gender::Female => "FEMALE",
     };
-    let kind = if !npc { "PC" } else if mob_vnum == NOBODY { "NPC" } else { "MOB" };
+    let kind = if !npc {
+        "PC"
+    } else if mob_vnum == NOBODY {
+        "NPC"
+    } else {
+        "MOB"
+    };
     let mut hdr = format!(
         "{} {} '{}'  IDNum: [{:5}], In room [{:5}]",
         sexstr, kind, kname, idnum, in_room_vnum
@@ -1385,7 +1624,10 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
 
     g.send_to_char(
         ch,
-        &format!("L-Des: {}", long_descr.unwrap_or_else(|| "<None>\r\n".to_string())),
+        &format!(
+            "L-Des: {}",
+            long_descr.unwrap_or_else(|| "<None>\r\n".to_string())
+        ),
     );
 
     let classstr = if npc {
@@ -1409,7 +1651,12 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
     } else {
         format!(
             "{}{}, Lev: [&y{:2}&n], XP: [&y{:7}&n], Align: [{:4}], Cstat: [{}]\r\n",
-            class_label, classstr, klevel, exp, align, citizen + 1
+            class_label,
+            classstr,
+            klevel,
+            exp,
+            align,
+            citizen + 1
         )
     };
     g.send_to_char(ch, &lvl_line);
@@ -1428,9 +1675,7 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
             ch,
             &format!(
                 "Hometown: [{}], Speaks: [{}/{}/{}], (STL[{}]/per[{}]/NSTL[{}]) Clan: [{}]\r\n",
-                hometown,
-                talks[0] as i32, talks[1] as i32, talks[2] as i32,
-                0, 0, 0, clan
+                hometown, talks[0] as i32, talks[1] as i32, talks[2] as i32, 0, 0, 0, clan
             ),
         );
     }
@@ -1447,16 +1692,24 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
         ch,
         &format!(
             "Hit p.:[&g{}/{}+{}&n]  Mana p.:[&g{}/{}+{}&n]  Move p.:[&g{}/{}+{}&n]\r\n",
-            points.hit, points.max_hit, 0,
-            points.mana, points.max_mana, 0,
-            points.move_points, points.max_move, 0
+            points.hit,
+            points.max_hit,
+            0,
+            points.mana,
+            points.max_mana,
+            0,
+            points.move_points,
+            points.max_move,
+            0
         ),
     );
     g.send_to_char(
         ch,
         &format!(
             "Coins: [{:9}], Bank: [{:9}] (Total: {})\r\n",
-            points.gold, points.bank_gold, points.gold + points.bank_gold
+            points.gold,
+            points.bank_gold,
+            points.gold + points.bank_gold
         ),
     );
     g.send_to_char(
@@ -1521,19 +1774,28 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
     let dposstr = sprinttype(default_pos, constants::POSITION_TYPES);
     g.send_to_char(
         ch,
-        &format!("Default position: {}, Idle Timer (in tics) [{}]\r\n", dposstr, timer),
+        &format!(
+            "Default position: {}, Idle Timer (in tics) [{}]\r\n",
+            dposstr, timer
+        ),
     );
 
     if npc {
         let flagstr = sprintbit(act_flags, constants::ACTION_BITS);
         g.send_to_char(ch, &format!("NPC flags: &c{}&n\r\n", flagstr));
     } else {
-        let mut qline = format!("Quest Next: [{}], Quest Timeleft: [{}]", next_quest, countdown);
+        let mut qline = format!(
+            "Quest Next: [{}], Quest Timeleft: [{}]",
+            next_quest, countdown
+        );
         if quest_mob > 0 {
             qline.push_str(&format!(", On Quest for Mob: [{}]", quest_mob));
         }
         if quest_mob < 0 {
-            qline.push_str(&format!(", Killed target mob of level: [{}]", quest_mob.abs()));
+            qline.push_str(&format!(
+                ", Killed target mob of level: [{}]",
+                quest_mob.abs()
+            ));
         }
         if quest_obj > 0 {
             qline.push_str(&format!(", On Quest for Obj: [{}]", quest_obj));
@@ -1543,15 +1805,24 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
 
         g.send_to_char(
             ch,
-            &format!("PLR : &c{}&n\r\n", sprintbit(act_flags, constants::PLAYER_BITS)),
+            &format!(
+                "PLR : &c{}&n\r\n",
+                sprintbit(act_flags, constants::PLAYER_BITS)
+            ),
         );
         g.send_to_char(
             ch,
-            &format!("PRF : &g{}&n\r\n", sprintbit(prf_flags, constants::PREFERENCE_BITS)),
+            &format!(
+                "PRF : &g{}&n\r\n",
+                sprintbit(prf_flags, constants::PREFERENCE_BITS)
+            ),
         );
         g.send_to_char(
             ch,
-            &format!("PRF2: &g{}&n\r\n", sprintbit(prf2_flags, constants::PREFERENCE2_BITS)),
+            &format!(
+                "PRF2: &g{}&n\r\n",
+                sprintbit(prf2_flags, constants::PREFERENCE2_BITS)
+            ),
         );
     }
 
@@ -1592,7 +1863,11 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
     let mut found = 0;
     let total = followers.len();
     for (i, fol) in followers.iter().enumerate() {
-        let pers = if g.can_see(ch, *fol) { name_of(g, *fol) } else { "someone".to_string() };
+        let pers = if g.can_see(ch, *fol) {
+            name_of(g, *fol)
+        } else {
+            "someone".to_string()
+        };
         buf.push_str(&format!("{} {}", if found > 0 { "," } else { "" }, pers));
         found += 1;
         if buf.len() >= 62 {
@@ -1614,7 +1889,10 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
     // AFF bitvector.
     g.send_to_char(
         ch,
-        &format!("AFF: &y{}&n\r\n", sprintbit(affect_flags, constants::AFFECTED_BITS)),
+        &format!(
+            "AFF: &y{}&n\r\n",
+            sprintbit(affect_flags, constants::AFFECTED_BITS)
+        ),
     );
 
     // Active spell affects.
@@ -1701,12 +1979,18 @@ pub fn do_stat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
     } else {
         // Bareword: equipment, inventory, room chars, room objs, world char/obj.
-        let eq: Vec<ObjId> = g.get_char(ch).map(|c| c.equipment.iter().flatten().copied().collect()).unwrap_or_default();
+        let eq: Vec<ObjId> = g
+            .get_char(ch)
+            .map(|c| c.equipment.iter().flatten().copied().collect())
+            .unwrap_or_default();
         if let Some(o) = g.get_obj_in_list_vis(ch, &kind, &eq) {
             do_stat_object(g, ch, o);
             return;
         }
-        let inv: Vec<ObjId> = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        let inv: Vec<ObjId> = g
+            .get_char(ch)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         if let Some(o) = g.get_obj_in_list_vis(ch, &kind, &inv) {
             do_stat_object(g, ch, o);
             return;
@@ -1756,10 +2040,16 @@ pub fn do_shutdown(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
         send_to_all(g, "&m[&YINFO&m]&n Shutting down.\r\n");
     } else if option.eq_ignore_ascii_case("reboot") {
         log_line(g, &format!("(GC) Reboot by {}.", cname));
-        send_to_all(g, "&m[&YINFO&m]&n Rebooting.. come back in a minute or two.\r\n");
+        send_to_all(
+            g,
+            "&m[&YINFO&m]&n Rebooting.. come back in a minute or two.\r\n",
+        );
     } else if option.eq_ignore_ascii_case("now") {
         log_line(g, &format!("(GC) Shutdown NOW by {}.", cname));
-        send_to_all(g, "&m[&YINFO&m]&n Rebooting.. come back in a minute or two.\r\n");
+        send_to_all(
+            g,
+            "&m[&YINFO&m]&n Rebooting.. come back in a minute or two.\r\n",
+        );
     } else if option.eq_ignore_ascii_case("die") {
         log_line(g, &format!("(GC) Shutdown by {}.", cname));
         send_to_all(g, "&m[&YINFO&m]&n Shutting down for maintenance.\r\n");
@@ -1865,7 +2155,11 @@ pub fn do_switch(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         Some(c) => c,
         None => return,
     };
-    let already = g.descriptors.get(&conn).map(|d| d.original.is_some()).unwrap_or(false);
+    let already = g
+        .descriptors
+        .get(&conn)
+        .map(|d| d.original.is_some())
+        .unwrap_or(false);
     let (name, _rest) = one_argument(arg);
     if already {
         g.send_to_char(ch, "You're already switched.\r\n");
@@ -1939,7 +2233,14 @@ pub fn do_return(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
 // ===========================================================================
 pub fn do_load(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let (kind, numstr, _rest) = two_arguments(arg);
-    if kind.is_empty() || numstr.is_empty() || !numstr.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    if kind.is_empty()
+        || numstr.is_empty()
+        || !numstr
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+    {
         g.send_to_char(ch, "Usage: load { obj | mob } <number>\r\n");
         return;
     }
@@ -1978,12 +2279,39 @@ pub fn do_load(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             }
         };
         g.char_to_room(mob, rnum);
-        let short = g.get_char(mob).and_then(|c| c.short_desc.clone()).unwrap_or_default();
+        let short = g
+            .get_char(mob)
+            .and_then(|c| c.short_desc.clone())
+            .unwrap_or_default();
         let line = format!("[WATCHDOG] {} loads mobile {}: {}", cname, number, short);
         mudlog(g, &line, CMP, LVL_IMPL);
-        act(g, "$n makes a quaint, magical gesture with one hand.", true, ch, None, ActArg::None, To::Room);
-        act(g, "$n has created $N!", false, ch, None, ActArg::Char(mob), To::Room);
-        act(g, "You create $N.", false, ch, None, ActArg::Char(mob), To::Char);
+        act(
+            g,
+            "$n makes a quaint, magical gesture with one hand.",
+            true,
+            ch,
+            None,
+            ActArg::None,
+            To::Room,
+        );
+        act(
+            g,
+            "$n has created $N!",
+            false,
+            ch,
+            None,
+            ActArg::Char(mob),
+            To::Room,
+        );
+        act(
+            g,
+            "You create $N.",
+            false,
+            ch,
+            None,
+            ActArg::Char(mob),
+            To::Char,
+        );
         crate::dg_triggers::load_mtrigger(g, mob);
     } else if is_abbrev(&kind, "obj") {
         if !g.obj_protos.contains_key(&number) {
@@ -1999,16 +2327,44 @@ pub fn do_load(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         };
         if level_of(g, ch) < LVL_IMMORT {
             if let Some(o) = g.get_obj_mut(obj) {
-                o.extra_flags = crate::object::ExtraFlags::from_bits_retain(o.extra_flags.bits() | ITEM_NORENT);
+                o.extra_flags =
+                    crate::object::ExtraFlags::from_bits_retain(o.extra_flags.bits() | ITEM_NORENT);
             }
         }
         g.obj_to_char(obj, ch);
-        let short = g.get_obj(obj).map(|o| o.short_description.clone()).unwrap_or_default();
+        let short = g
+            .get_obj(obj)
+            .map(|o| o.short_description.clone())
+            .unwrap_or_default();
         let line = format!("[WATCHDOG] {} loads object {}: {}", cname, number, short);
         mudlog(g, &line, CMP, LVL_IMPL);
-        act(g, "$n makes a strange magical gesture.", true, ch, None, ActArg::None, To::Room);
-        act(g, "$n has created $p!", false, ch, Some(obj), ActArg::None, To::Room);
-        act(g, "You create $p.", false, ch, Some(obj), ActArg::None, To::Char);
+        act(
+            g,
+            "$n makes a strange magical gesture.",
+            true,
+            ch,
+            None,
+            ActArg::None,
+            To::Room,
+        );
+        act(
+            g,
+            "$n has created $p!",
+            false,
+            ch,
+            Some(obj),
+            ActArg::None,
+            To::Room,
+        );
+        act(
+            g,
+            "You create $p.",
+            false,
+            ch,
+            Some(obj),
+            ActArg::None,
+            To::Char,
+        );
         crate::dg_triggers::load_otrigger(g, obj);
     } else {
         g.send_to_char(ch, "That'll have to be either 'obj' or 'mob'.\r\n");
@@ -2029,7 +2385,10 @@ pub fn do_aload(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
         return;
     }
     if !(is_abbrev(&kind, "mob") || is_abbrev(&kind, "obj")) {
-        g.send_to_char(ch, "Usage: aload { obj | mob } <startnumber> <endnumber>\r\n");
+        g.send_to_char(
+            ch,
+            "Usage: aload { obj | mob } <startnumber> <endnumber>\r\n",
+        );
         return;
     }
     if frm > to {
@@ -2047,7 +2406,14 @@ pub fn do_aload(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
 // ===========================================================================
 pub fn do_vstat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let (kind, numstr, _rest) = two_arguments(arg);
-    if kind.is_empty() || numstr.is_empty() || !numstr.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    if kind.is_empty()
+        || numstr.is_empty()
+        || !numstr
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+    {
         g.send_to_char(ch, "Usage: vstat { obj | mob } <number>\r\n");
         return;
     }
@@ -2110,7 +2476,12 @@ pub fn do_purge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 }
                 let cname = name_of(g, ch);
                 let vname = name_of(g, vict);
-                mudlog(g, &format!("(GC) {} has purged {}.", cname, vname), BRF, LVL_GOD);
+                mudlog(
+                    g,
+                    &format!("(GC) {} has purged {}.", cname, vname),
+                    BRF,
+                    LVL_GOD,
+                );
                 // close the player's socket: drop the descriptor link.
                 if let Some(conn) = g.get_char(vict).and_then(|c| c.desc) {
                     if let Some(d) = g.descriptors.get_mut(&conn) {
@@ -2128,11 +2499,22 @@ pub fn do_purge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                     && ch_level < LVL_GRGOD
                     && mob_vnum != NOBODY
                 {
-                    g.send_to_char(ch, "You do not have permission to purge from this zone.\r\n");
+                    g.send_to_char(
+                        ch,
+                        "You do not have permission to purge from this zone.\r\n",
+                    );
                     return;
                 }
             }
-            act(g, "$n disintegrates $N.", false, ch, None, ActArg::Char(vict), To::NotVict);
+            act(
+                g,
+                "$n disintegrates $N.",
+                false,
+                ch,
+                None,
+                ActArg::Char(vict),
+                To::NotVict,
+            );
             g.extract_char(vict);
             g.send_to_char(ch, OK);
         } else {
@@ -2143,10 +2525,21 @@ pub fn do_purge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                     && ch_level < LVL_GRGOD
                     && obj_vnum != NOTHING
                 {
-                    g.send_to_char(ch, "You do not have permission to purge from this zone.\r\n");
+                    g.send_to_char(
+                        ch,
+                        "You do not have permission to purge from this zone.\r\n",
+                    );
                     return;
                 }
-                act(g, "$n destroys $p.", false, ch, Some(obj), ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n destroys $p.",
+                    false,
+                    ch,
+                    Some(obj),
+                    ActArg::None,
+                    To::Room,
+                );
                 g.obj_from_anywhere(obj);
                 g.extract_obj(obj);
                 g.send_to_char(ch, OK);
@@ -2157,7 +2550,15 @@ pub fn do_purge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     } else {
         // No argument: clean the whole room (mobs + ground objects). Each
         // extraction is gated on can_edit_zone (or GRGOD+, or no proto).
-        act(g, "$n gestures... You are surrounded by scorching flames!", false, ch, None, ActArg::None, To::Room);
+        act(
+            g,
+            "$n gestures... You are surrounded by scorching flames!",
+            false,
+            ch,
+            None,
+            ActArg::None,
+            To::Room,
+        );
         g.send_to_room(rnum, "The world seems a little cleaner.\r\n", None);
 
         let people = g.rooms[rnum].people.clone();
@@ -2166,14 +2567,20 @@ pub fn do_purge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 continue;
             }
             let mob_vnum = g.get_char(vict).map(|c| c.nr).unwrap_or(NOBODY);
-            if can_edit_zone(g, ch, real_zone(g, mob_vnum)) || ch_level >= LVL_GRGOD || mob_vnum == NOBODY {
+            if can_edit_zone(g, ch, real_zone(g, mob_vnum))
+                || ch_level >= LVL_GRGOD
+                || mob_vnum == NOBODY
+            {
                 g.extract_char(vict);
             }
         }
         let objs = g.rooms[rnum].contents.clone();
         for obj in objs {
             let obj_vnum = g.get_obj(obj).map(|o| o.item_number).unwrap_or(NOTHING);
-            if can_edit_zone(g, ch, real_zone(g, obj_vnum)) || ch_level >= LVL_GRGOD || obj_vnum == NOTHING {
+            if can_edit_zone(g, ch, real_zone(g, obj_vnum))
+                || ch_level >= LVL_GRGOD
+                || obj_vnum == NOTHING
+            {
                 g.obj_from_anywhere(obj);
                 g.extract_obj(obj);
             }
@@ -2193,13 +2600,19 @@ pub fn do_syslog(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         let tp = (if prf & PRF_LOG1 != 0 { 1 } else { 0 })
             + (if prf & PRF_LOG2 != 0 { 2 } else { 0 })
             + (if prf & PRF_LOG3 != 0 { 4 } else { 0 });
-        g.send_to_char(ch, &format!("Your syslog is currently {}.\r\n", LOGTYPES[tp as usize]));
+        g.send_to_char(
+            ch,
+            &format!("Your syslog is currently {}.\r\n", LOGTYPES[tp as usize]),
+        );
         return;
     }
     let tp = match search_block(&name, LOGTYPES) {
         Some(i) if LOGTYPES[i] != "\n" => i as i64,
         _ => {
-            g.send_to_char(ch, "Usage: syslog { Off | Brief | Normal | Perfect | Complete }\r\n");
+            g.send_to_char(
+                ch,
+                "Usage: syslog { Off | Brief | Normal | Perfect | Complete }\r\n",
+            );
             return;
         }
     };
@@ -2209,7 +2622,10 @@ pub fn do_syslog(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         c.prf_flags |= if tp & 2 != 0 { PRF_LOG2 } else { 0 };
         c.prf_flags |= if tp & 4 != 0 { PRF_LOG3 } else { 0 };
     }
-    g.send_to_char(ch, &format!("Your syslog is now {}.\r\n", LOGTYPES[tp as usize]));
+    g.send_to_char(
+        ch,
+        &format!("Your syslog is now {}.\r\n", LOGTYPES[tp as usize]),
+    );
 }
 
 // ===========================================================================
@@ -2242,7 +2658,10 @@ pub fn do_advance(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
     if newlevel > LVL_IMPL as i32 {
-        g.send_to_char(ch, &format!("{} is the highest possible level.\r\n", LVL_IMPL));
+        g.send_to_char(
+            ch,
+            &format!("{} is the highest possible level.\r\n", LVL_IMPL),
+        );
         return;
     }
     if newlevel > level_of(g, ch) as i32 {
@@ -2259,8 +2678,6 @@ pub fn do_advance(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             v.points.exp = 0;
             v.player.level = newlevel as u8;
         }
-        // gain_exp_regardless(exp_to_level(newlevel-2)) — exp tables live in
-        // class.c; we set exp via the same path below (exp:=0 here).
         g.send_to_char(
             victim,
             "You are momentarily enveloped by darkness!\r\nYou feel somewhat diminished.\r\n",
@@ -2279,7 +2696,20 @@ pub fn do_advance(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     g.send_to_char(ch, OK);
     let cname = name_of(g, ch);
     let vname = name_of(g, victim);
-    log_line(g, &format!("(GC) {} has advanced {} to level {} (from {})", cname, vname, newlevel, oldlevel));
+    log_line(
+        g,
+        &format!(
+            "(GC) {} has advanced {} to level {} (from {})",
+            cname, vname, newlevel, oldlevel
+        ),
+    );
+    g.send_to_char(
+        ch,
+        &format!(
+            "(GC) {} has advanced {} to level {}.",
+            cname, vname, newlevel
+        ),
+    );
     if let Some(v) = g.get_char_mut(victim) {
         v.player.level = newlevel as u8;
         v.points.exp = 0;
@@ -2298,6 +2728,7 @@ pub fn do_advance(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             LVL_IMPL,
         );
     }
+    gain_exp_regardless(g, victim, exp_to_level(newlevel - 1));
     // check_autowiz: C reaches autowiz here via gain_exp_regardless()->check_autowiz(),
     // which regenerates the wizlist/immlist when the (re-leveled) victim is now
     // >= LVL_HERO. The level gate lives inside check_autowiz, matching C: advancing
@@ -2357,10 +2788,23 @@ pub fn do_restore(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
     update_pos(g, vict);
     g.send_to_char(ch, OK);
-    act(g, "You have been fully healed by $N!", false, vict, None, ActArg::Char(ch), To::Char);
+    act(
+        g,
+        "You have been fully healed by $N!",
+        false,
+        vict,
+        None,
+        ActArg::Char(ch),
+        To::Char,
+    );
     let cname = name_of(g, ch);
     let vname = name_of(g, vict);
-    mudlog(g, &format!("(GC) {} restored by {}", vname, cname), BRF, LVL_GOD);
+    mudlog(
+        g,
+        &format!("(GC) {} restored by {}", vname, cname),
+        BRF,
+        LVL_GOD,
+    );
 }
 
 /// update_pos (fight.c): recompute position from hit points.
@@ -2414,7 +2858,12 @@ pub fn do_invis(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 fn perform_immort_vis(g: &mut GameState, ch: CharId) {
     let (invis, hidden_or_invis) = g
         .get_char(ch)
-        .map(|c| (c.invis_level, c.affect_flags & (AFF_HIDE | AFF_INVISIBLE) != 0))
+        .map(|c| {
+            (
+                c.invis_level,
+                c.affect_flags & (AFF_HIDE | AFF_INVISIBLE) != 0,
+            )
+        })
         .unwrap_or((0, false));
     if invis == 0 && !hidden_or_invis {
         g.send_to_char(ch, "You are already fully visible.\r\n");
@@ -2425,7 +2874,15 @@ fn perform_immort_vis(g: &mut GameState, ch: CharId) {
         c.affect_flags &= !(AFF_HIDE | AFF_INVISIBLE);
     }
     // appear(): show to the room.
-    act(g, "$n slowly fades into existence.", false, ch, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n slowly fades into existence.",
+        false,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
     g.send_to_char(ch, "You are now fully visible.\r\n");
 }
 
@@ -2445,10 +2902,26 @@ fn perform_immort_invis(g: &mut GameState, ch: CharId, level: i32) {
         }
         let tlvl = level_of(g, tch) as i32;
         if tlvl >= cur_invis && tlvl < level {
-            act(g, "You blink and suddenly realize that $n is gone.", false, ch, None, ActArg::Char(tch), To::Vict);
+            act(
+                g,
+                "You blink and suddenly realize that $n is gone.",
+                false,
+                ch,
+                None,
+                ActArg::Char(tch),
+                To::Vict,
+            );
         }
         if tlvl < cur_invis && tlvl >= level {
-            act(g, "You suddenly realize that $n is standing beside you.", false, ch, None, ActArg::Char(tch), To::Vict);
+            act(
+                g,
+                "You suddenly realize that $n is standing beside you.",
+                false,
+                ch,
+                None,
+                ActArg::Char(tch),
+                To::Vict,
+            );
         }
     }
     if let Some(c) = g.get_char_mut(ch) {
@@ -2473,13 +2946,21 @@ pub fn do_gecho(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             g.send_to_char(pt, &body);
         }
     }
-    if g.get_char(ch).map(|c| c.prf_flags & PRF_NOREPEAT != 0).unwrap_or(false) {
+    if g.get_char(ch)
+        .map(|c| c.prf_flags & PRF_NOREPEAT != 0)
+        .unwrap_or(false)
+    {
         g.send_to_char(ch, OK);
     } else {
         g.send_to_char(ch, &body);
     }
     let cname = name_of(g, ch);
-    mudlog(g, &format!("(GC) gecho by {}: {}", cname, argument), NRM, LVL_IMPL);
+    mudlog(
+        g,
+        &format!("(GC) gecho by {}: {}", cname, argument),
+        NRM,
+        LVL_IMPL,
+    );
 }
 
 /// delete_doubledollar(): collapse "$$" -> "$" (CircleMUD).
@@ -2523,7 +3004,11 @@ pub fn do_gcureplague(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
 // ===========================================================================
 pub fn do_poofset(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
     let argument = arg.trim_start();
-    let value = if argument.is_empty() { None } else { Some(argument.to_string()) };
+    let value = if argument.is_empty() {
+        None
+    } else {
+        Some(argument.to_string())
+    };
     if let Some(c) = g.get_char_mut(ch) {
         match subcmd {
             SCMD_POOFIN => c.poofin = value,
@@ -2606,7 +3091,10 @@ pub fn do_wizlock(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let line = match restrict {
         0 => format!("The game is {} completely open.\r\n", when),
         1 => format!("The game is {} closed to new players.\r\n", when),
-        _ => format!("Only level {} and above may enter the game {}.\r\n", restrict, when),
+        _ => format!(
+            "Only level {} and above may enter the game {}.\r\n",
+            restrict, when
+        ),
     };
     g.send_to_char(ch, &line);
 }
@@ -2637,7 +3125,11 @@ pub fn do_date(g: &mut GameState, ch: CharId, _arg: &str, subcmd: i32) {
             ch,
             &format!(
                 "Up since {}: {} day{}, {}:{:02}\r\n",
-                tmstr, d, if d == 1 { "" } else { "s" }, h, m
+                tmstr,
+                d,
+                if d == 1 { "" } else { "s" },
+                h,
+                m
             ),
         );
     }
@@ -2746,7 +3238,9 @@ pub fn do_force(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
 
-    if ch_level < LVL_GRGOD || (!who.eq_ignore_ascii_case("all") && !who.eq_ignore_ascii_case("room")) {
+    if ch_level < LVL_GRGOD
+        || (!who.eq_ignore_ascii_case("all") && !who.eq_ignore_ascii_case("room"))
+    {
         let vict = match get_char_vis(g, ch, &who) {
             Some(v) => v,
             None => {
@@ -2763,7 +3257,12 @@ pub fn do_force(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         let cname = name_of(g, ch);
         let vname = name_of(g, vict);
         let lvl = LVL_GOD.max(invis_lev(g, ch) as u8);
-        mudlog(g, &format!("(GC) {} forced {} to {}", cname, vname, to_force), NRM, lvl);
+        mudlog(
+            g,
+            &format!("(GC) {} forced {} to {}", cname, vname, to_force),
+            NRM,
+            lvl,
+        );
         command_interpreter(g, vict, &to_force);
     } else if who.eq_ignore_ascii_case("room") {
         g.send_to_char(ch, OK);
@@ -2774,7 +3273,12 @@ pub fn do_force(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         };
         let rvnum = g.room(rnum).number;
         let lvl = LVL_GOD.max(invis_lev(g, ch) as u8);
-        mudlog(g, &format!("(GC) {} forced room {} to {}", cname, rvnum, to_force), NRM, lvl);
+        mudlog(
+            g,
+            &format!("(GC) {} forced room {} to {}", cname, rvnum, to_force),
+            NRM,
+            lvl,
+        );
         let people = g.rooms[rnum].people.clone();
         for vict in people {
             if level_of(g, vict) >= ch_level {
@@ -2788,7 +3292,12 @@ pub fn do_force(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, OK);
         let cname = name_of(g, ch);
         let lvl = LVL_GOD.max(invis_lev(g, ch) as u8);
-        mudlog(g, &format!("(GC) {} forced all to {}", cname, to_force), NRM, lvl);
+        mudlog(
+            g,
+            &format!("(GC) {} forced all to {}", cname, to_force),
+            NRM,
+            lvl,
+        );
         let players: Vec<CharId> = g.players_by_name.values().copied().collect();
         for vict in players {
             if level_of(g, vict) >= ch_level {
@@ -2844,7 +3353,9 @@ pub fn do_wiznet(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             let mut any = false;
             for d in &players {
                 let online_god = level_of(g, *d) >= LVL_IMMORT
-                    && g.get_char(*d).map(|c| c.prf_flags & PRF_NOWIZ == 0).unwrap_or(false)
+                    && g.get_char(*d)
+                        .map(|c| c.prf_flags & PRF_NOWIZ == 0)
+                        .unwrap_or(false)
                     && (g.can_see(ch, *d) || ch_is_impl);
                 if online_god {
                     if !any {
@@ -2852,8 +3363,14 @@ pub fn do_wiznet(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                         any = true;
                     }
                     let nm = name_of(g, *d);
-                    let writing = g.get_char(*d).map(|c| c.act_flags & PLR_WRITING != 0).unwrap_or(false);
-                    let mailing = g.get_char(*d).map(|c| c.act_flags & PLR_MAILING != 0).unwrap_or(false);
+                    let writing = g
+                        .get_char(*d)
+                        .map(|c| c.act_flags & PLR_WRITING != 0)
+                        .unwrap_or(false);
+                    let mailing = g
+                        .get_char(*d)
+                        .map(|c| c.act_flags & PLR_MAILING != 0)
+                        .unwrap_or(false);
                     if writing {
                         out.push_str(&format!("  {} (Writing)\r\n", nm));
                     } else if mailing {
@@ -2866,7 +3383,9 @@ pub fn do_wiznet(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             let mut any2 = false;
             for d in &players {
                 let offline_god = level_of(g, *d) >= LVL_IMMORT
-                    && g.get_char(*d).map(|c| c.prf_flags & PRF_NOWIZ != 0).unwrap_or(false)
+                    && g.get_char(*d)
+                        .map(|c| c.prf_flags & PRF_NOWIZ != 0)
+                        .unwrap_or(false)
                     && g.can_see(ch, *d);
                 if offline_god {
                     if !any2 {
@@ -2885,7 +3404,10 @@ pub fn do_wiznet(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         _ => {}
     }
 
-    if g.get_char(ch).map(|c| c.prf_flags & PRF_NOWIZ != 0).unwrap_or(false) {
+    if g.get_char(ch)
+        .map(|c| c.prf_flags & PRF_NOWIZ != 0)
+        .unwrap_or(false)
+    {
         g.send_to_char(ch, "You are offline!\r\n");
         return;
     }
@@ -2898,20 +3420,47 @@ pub fn do_wiznet(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let cname = name_of(g, ch);
     let (buf1, buf2);
     if level > LVL_IMMORT as i32 {
-        buf1 = format!("{}: <{}> {}{}\r\n", cname, level, if emote { "<--- " } else { "" }, argument);
-        buf2 = format!("Someone: <{}> {}{}\r\n", level, if emote { "<--- " } else { "" }, argument);
+        buf1 = format!(
+            "{}: <{}> {}{}\r\n",
+            cname,
+            level,
+            if emote { "<--- " } else { "" },
+            argument
+        );
+        buf2 = format!(
+            "Someone: <{}> {}{}\r\n",
+            level,
+            if emote { "<--- " } else { "" },
+            argument
+        );
     } else {
-        buf1 = format!("{}: {}{}\r\n", cname, if emote { "<--- " } else { "" }, argument);
-        buf2 = format!("Someone: {}{}\r\n", if emote { "<--- " } else { "" }, argument);
+        buf1 = format!(
+            "{}: {}{}\r\n",
+            cname,
+            if emote { "<--- " } else { "" },
+            argument
+        );
+        buf2 = format!(
+            "Someone: {}{}\r\n",
+            if emote { "<--- " } else { "" },
+            argument
+        );
     }
 
     let ch_conn = g.get_char(ch).and_then(|c| c.desc);
-    let ch_norepeat = g.get_char(ch).map(|c| c.prf_flags & PRF_NOREPEAT != 0).unwrap_or(false);
+    let ch_norepeat = g
+        .get_char(ch)
+        .map(|c| c.prf_flags & PRF_NOREPEAT != 0)
+        .unwrap_or(false);
     let players: Vec<CharId> = g.players_by_name.values().copied().collect();
     for d in players {
         let recv = level_of(g, d) >= level as u8
-            && g.get_char(d).map(|c| c.prf_flags & PRF_NOWIZ == 0).unwrap_or(false)
-            && g.get_char(d).map(|c| c.act_flags & (PLR_WRITING | PLR_MAILING) == 0).unwrap_or(false);
+            && g.get_char(d)
+                .map(|c| c.prf_flags & PRF_NOWIZ == 0)
+                .unwrap_or(false)
+            && g.get_char(d)
+                .map(|c| c.act_flags & (PLR_WRITING | PLR_MAILING) == 0)
+                .unwrap_or(false);
         let is_self_norepeat = g.get_char(d).and_then(|c| c.desc) == ch_conn && ch_norepeat;
         if recv && !is_self_norepeat {
             g.send_to_char(d, "&c");
@@ -2954,7 +3503,9 @@ pub fn do_zreset(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
 
     let zone_idx: Option<usize> = if name.starts_with('.') {
-        g.get_char(ch).and_then(|c| c.in_room).map(|r| g.rooms[r].zone as usize)
+        g.get_char(ch)
+            .and_then(|c| c.in_room)
+            .map(|r| g.rooms[r].zone as usize)
     } else {
         let j = atoi(&name);
         g.zones.iter().position(|z| z.number == j)
@@ -2972,7 +3523,12 @@ pub fn do_zreset(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             g.reset_zone(znum);
             g.send_to_char(ch, &format!("Reset zone {} (#{}): {}.\r\n", i, znum, zname));
             let lvl = LVL_GRGOD.max(invis_lev(g, ch) as u8);
-            mudlog(g, &format!("(GC) {} reset zone {} ({})", cname, i, zname), NRM, lvl);
+            mudlog(
+                g,
+                &format!("(GC) {} reset zone {} ({})", cname, i, zname),
+                NRM,
+                lvl,
+            );
         }
         _ => g.send_to_char(ch, "Invalid zone number.\r\n"),
     }
@@ -3022,7 +3578,10 @@ pub fn do_wizutil(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
             );
         }
         SCMD_PARDON => {
-            let flagged = g.get_char(vict).map(|c| c.act_flags & (PLR_THIEF | PLR_KILLER) != 0).unwrap_or(false);
+            let flagged = g
+                .get_char(vict)
+                .map(|c| c.act_flags & (PLR_THIEF | PLR_KILLER) != 0)
+                .unwrap_or(false);
             if !flagged {
                 g.send_to_char(ch, "Your victim is not flagged.\r\n");
                 return;
@@ -3038,21 +3597,50 @@ pub fn do_wizutil(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
         SCMD_NOTITLE => {
             let result = plr_tog_chk(g, vict, PLR_NOTITLE);
             let m = logmin(g);
-            mudlog(g, &format!("(GC) Notitle {} for {} by {}.", onoff(result), vname, cname), NRM, m);
-            g.send_to_char(ch, &format!("(GC) Notitle {} for {} by {}.\r\n", onoff(result), vname, cname));
+            mudlog(
+                g,
+                &format!("(GC) Notitle {} for {} by {}.", onoff(result), vname, cname),
+                NRM,
+                m,
+            );
+            g.send_to_char(
+                ch,
+                &format!(
+                    "(GC) Notitle {} for {} by {}.\r\n",
+                    onoff(result),
+                    vname,
+                    cname
+                ),
+            );
         }
         SCMD_SQUELCH => {
             let result = plr_tog_chk(g, vict, PLR_NOSHOUT);
             let m = logmin(g);
-            mudlog(g, &format!("(GC) Squelch {} for {} by {}.", onoff(result), vname, cname), BRF, m);
-            g.send_to_char(ch, &format!("(GC) Squelch {} for {} by {}.\r\n", onoff(result), vname, cname));
+            mudlog(
+                g,
+                &format!("(GC) Squelch {} for {} by {}.", onoff(result), vname, cname),
+                BRF,
+                m,
+            );
+            g.send_to_char(
+                ch,
+                &format!(
+                    "(GC) Squelch {} for {} by {}.\r\n",
+                    onoff(result),
+                    vname,
+                    cname
+                ),
+            );
         }
         SCMD_FREEZE => {
             if ch == vict {
                 g.send_to_char(ch, "Oh, yeah, THAT'S real smart...\r\n");
                 return;
             }
-            if g.get_char(vict).map(|c| c.act_flags & PLR_FROZEN != 0).unwrap_or(false) {
+            if g.get_char(vict)
+                .map(|c| c.act_flags & PLR_FROZEN != 0)
+                .unwrap_or(false)
+            {
                 g.send_to_char(ch, "Your victim is already pretty cold.\r\n");
                 return;
             }
@@ -3063,7 +3651,15 @@ pub fn do_wizutil(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
             }
             g.send_to_char(vict, "A bitter wind suddenly rises and drains every erg of heat from your body!\r\nYou feel frozen!\r\n");
             g.send_to_char(ch, "Frozen.\r\n");
-            act(g, "A sudden cold wind conjured from nowhere freezes $n!", false, vict, None, ActArg::None, To::Room);
+            act(
+                g,
+                "A sudden cold wind conjured from nowhere freezes $n!",
+                false,
+                vict,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             let m = logmin(g);
             mudlog(g, &format!("(GC) {} frozen by {}.", vname, cname), BRF, m);
             // A frozen immortal is filtered out of the autowiz roster (PLR_FROZEN);
@@ -3071,13 +3667,24 @@ pub fn do_wizutil(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
             crate::autowiz::check_autowiz(g, vict);
         }
         SCMD_THAW => {
-            if !g.get_char(vict).map(|c| c.act_flags & PLR_FROZEN != 0).unwrap_or(false) {
-                g.send_to_char(ch, "Sorry, your victim is not morbidly encased in ice at the moment.\r\n");
+            if !g
+                .get_char(vict)
+                .map(|c| c.act_flags & PLR_FROZEN != 0)
+                .unwrap_or(false)
+            {
+                g.send_to_char(
+                    ch,
+                    "Sorry, your victim is not morbidly encased in ice at the moment.\r\n",
+                );
                 return;
             }
             let freeze_lev = g.get_char(vict).map(|c| c.freeze_level).unwrap_or(0);
             if freeze_lev > level_of(g, ch) {
-                let hmhr = match g.get_char(vict).map(|c| c.player.sex).unwrap_or(Gender::Neutral) {
+                let hmhr = match g
+                    .get_char(vict)
+                    .map(|c| c.player.sex)
+                    .unwrap_or(Gender::Neutral)
+                {
                     Gender::Male => "him",
                     Gender::Female => "her",
                     Gender::Neutral => "it",
@@ -3092,24 +3699,43 @@ pub fn do_wizutil(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
                 return;
             }
             let m = logmin(g);
-            mudlog(g, &format!("(GC) {} un-frozen by {}.", vname, cname), BRF, m);
+            mudlog(
+                g,
+                &format!("(GC) {} un-frozen by {}.", vname, cname),
+                BRF,
+                m,
+            );
             if let Some(v) = g.get_char_mut(vict) {
                 v.act_flags &= !PLR_FROZEN;
             }
             g.send_to_char(vict, "A fireball suddenly explodes in front of you, melting the ice!\r\nYou feel thawed.\r\n");
             g.send_to_char(ch, "Thawed.\r\n");
-            act(g, "A sudden fireball conjured from nowhere thaws $n!", false, vict, None, ActArg::None, To::Room);
+            act(
+                g,
+                "A sudden fireball conjured from nowhere thaws $n!",
+                false,
+                vict,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             // Thawing an immortal restores them to the autowiz roster; regenerate.
             crate::autowiz::check_autowiz(g, vict);
         }
         SCMD_UNAFFECT => {
-            let had = g.get_char(vict).map(|c| !c.affected.is_empty()).unwrap_or(false);
+            let had = g
+                .get_char(vict)
+                .map(|c| !c.affected.is_empty())
+                .unwrap_or(false);
             if had {
                 if let Some(v) = g.get_char_mut(vict) {
                     v.affected.clear();
                 }
                 g.affect_total(vict);
-                g.send_to_char(vict, "There is a brief flash of light!\r\nYou feel slightly different.\r\n");
+                g.send_to_char(
+                    vict,
+                    "There is a brief flash of light!\r\nYou feel slightly different.\r\n",
+                );
                 g.send_to_char(ch, "All spells removed.\r\n");
             } else {
                 g.send_to_char(ch, "Your victim does not have any affections!\r\n");
@@ -3190,7 +3816,10 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
     let argument = arg.trim_start();
     let ch_level = level_of(g, ch);
-    let ch_trust = g.get_char(ch).map(|c| c.trust.max(c.player.level as i32)).unwrap_or(0);
+    let ch_trust = g
+        .get_char(ch)
+        .map(|c| c.trust.max(c.player.level as i32))
+        .unwrap_or(0);
 
     if argument.is_empty() {
         let mut buf = String::from("Show options:\r\n");
@@ -3201,7 +3830,11 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             }
             if *lvl <= ch_level {
                 j += 1;
-                buf.push_str(&format!("{:<15}{}", cmd, if j % 5 == 0 { "\r\n" } else { "" }));
+                buf.push_str(&format!(
+                    "{:<15}{}",
+                    cmd,
+                    if j % 5 == 0 { "\r\n" } else { "" }
+                ));
             }
         }
         buf.push_str("\r\n");
@@ -3231,7 +3864,10 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             // zone
             let mut buf = String::new();
             if self_flag {
-                let zidx = g.get_char(ch).and_then(|c| c.in_room).map(|r| g.rooms[r].zone as usize);
+                let zidx = g
+                    .get_char(ch)
+                    .and_then(|c| c.in_room)
+                    .map(|r| g.rooms[r].zone as usize);
                 if let Some(z) = zidx.and_then(|i| g.zones.get(i)).cloned() {
                     print_zone_to_buf(&mut buf, &z);
                 }
@@ -3273,21 +3909,26 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 Some(p) => {
                     let (nm, sex, lvl, cls, gold, bank, exp, align) = g
                         .get_char(p)
-                        .map(|c| (
-                            c.player.name.clone(),
-                            c.player.sex as usize,
-                            c.player.level,
-                            c.player.class,
-                            c.points.gold,
-                            c.points.bank_gold,
-                            c.points.exp,
-                            c.alignment,
-                        ))
+                        .map(|c| {
+                            (
+                                c.player.name.clone(),
+                                c.player.sex as usize,
+                                c.player.level,
+                                c.player.class,
+                                c.points.gold,
+                                c.points.bank_gold,
+                                c.points.exp,
+                                c.alignment,
+                            )
+                        })
                         .unwrap();
                     let gname = constants::GENDERS.get(sex).copied().unwrap_or("Neutral");
                     let mut buf = format!(
                         "Player: {:<12} ({}) [{:2} {}]\r\n",
-                        nm, gname, lvl, class_abbrev(cls)
+                        nm,
+                        gname,
+                        lvl,
+                        class_abbrev(cls)
                     );
                     buf.push_str(&format!(
                         "Au: {:<8}  Bal: {:<8}  Exp: {:<8}  Align: {:<5}  Lessons: {:<3}\r\n",
@@ -3326,11 +3967,26 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             }
             let objs = g.objs.len();
             let mut buf = String::from("Current stats:\r\n");
-            buf.push_str(&format!("  {:5} players in game  {:5} connected\r\n", players, connected));
+            buf.push_str(&format!(
+                "  {:5} players in game  {:5} connected\r\n",
+                players, connected
+            ));
             buf.push_str(&format!("  {:5} registered\r\n", g.players_by_name.len()));
-            buf.push_str(&format!("  {:5} mobiles          {:5} prototypes\r\n", mobiles, g.mob_protos.len()));
-            buf.push_str(&format!("  {:5} objects          {:5} prototypes\r\n", objs, g.obj_protos.len()));
-            buf.push_str(&format!("  {:5} rooms            {:5} zones\r\n", g.rooms.len(), g.zones.len()));
+            buf.push_str(&format!(
+                "  {:5} mobiles          {:5} prototypes\r\n",
+                mobiles,
+                g.mob_protos.len()
+            ));
+            buf.push_str(&format!(
+                "  {:5} objects          {:5} prototypes\r\n",
+                objs,
+                g.obj_protos.len()
+            ));
+            buf.push_str(&format!(
+                "  {:5} rooms            {:5} zones\r\n",
+                g.rooms.len(),
+                g.zones.len()
+            ));
             buf.push_str(&format!("  {:5} large bufs\r\n", 0));
             buf.push_str(&format!("  {:5} buf switches     {:5} overflows\r\n", 0, 0));
             g.send_to_char(ch, &buf);
@@ -3344,7 +4000,10 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                     if let Some(ex) = &g.rooms[r].exits[j] {
                         if g.real_room(ex.to_room) == Some(0) {
                             k += 1;
-                            buf.push_str(&format!("{:2}: [{:5}] {}\r\n", k, g.rooms[r].number, g.rooms[r].name));
+                            buf.push_str(&format!(
+                                "{:2}: [{:5}] {}\r\n",
+                                k, g.rooms[r].number, g.rooms[r].name
+                            ));
                         }
                     }
                 }
@@ -3358,7 +4017,10 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             for r in 0..g.rooms.len() {
                 if g.rooms[r].room_flags.bits() & ROOM_DEATH_BIT != 0 {
                     j += 1;
-                    buf.push_str(&format!("{:2}: [{:5}] {}\r\n", j, g.rooms[r].number, g.rooms[r].name));
+                    buf.push_str(&format!(
+                        "{:2}: [{:5}] {}\r\n",
+                        j, g.rooms[r].number, g.rooms[r].name
+                    ));
                 }
             }
             g.send_to_char(ch, &buf);
@@ -3370,7 +4032,10 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             for r in 0..g.rooms.len() {
                 if g.rooms[r].room_flags.bits() & ROOM_GODROOM_BIT != 0 {
                     j += 1;
-                    buf.push_str(&format!("{:2}: [{:5}] {}\r\n", j, g.rooms[r].number, g.rooms[r].name));
+                    buf.push_str(&format!(
+                        "{:2}: [{:5}] {}\r\n",
+                        j, g.rooms[r].number, g.rooms[r].name
+                    ));
                 }
             }
             g.send_to_char(ch, &buf);
@@ -3412,7 +4077,13 @@ struct SetField {
 }
 
 const fn sf(switchnum: i32, cmd: &'static str, level: u8, pcnpc: u8, typ: u8) -> SetField {
-    SetField { switchnum, cmd, level, pcnpc, typ }
+    SetField {
+        switchnum,
+        cmd,
+        level,
+        pcnpc,
+        typ,
+    }
 }
 
 static SET_FIELDS: &[SetField] = &[
@@ -3580,7 +4251,13 @@ fn parse_race(c: char) -> i32 {
 
 /// perform_set: apply one set field. Returns true on a change that should be
 /// saved. `ch` is None for recursive setall-style calls (no permission echo).
-fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize, val_arg: &str) -> bool {
+fn perform_set(
+    g: &mut GameState,
+    ch: Option<CharId>,
+    vict: CharId,
+    mode: usize,
+    val_arg: &str,
+) -> bool {
     let field = &SET_FIELDS[mode];
     let switchmode = field.switchnum;
     let mut on = false;
@@ -3633,12 +4310,28 @@ fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize,
                     g.send_to_char(cch, "Value must be 'on' or 'off'.\r\n");
                     return false;
                 }
-                mudlog(g, &format!("(GC) {} set {} {} for {}.", cname, field.cmd, onoff(on), vname), BRF, m);
+                mudlog(
+                    g,
+                    &format!(
+                        "(GC) {} set {} {} for {}.",
+                        cname,
+                        field.cmd,
+                        onoff(on),
+                        vname
+                    ),
+                    BRF,
+                    m,
+                );
                 output = format!("{}'s {} set {}.", vname, field.cmd, onoff(on));
             }
             T_NUMBER => {
                 value = atoi(val_arg);
-                mudlog(g, &format!("(GC) {} set {}'s {} to {}.", cname, vname, field.cmd, value), BRF, m);
+                mudlog(
+                    g,
+                    &format!("(GC) {} set {}'s {} to {}.", cname, vname, field.cmd, value),
+                    BRF,
+                    m,
+                );
                 output = format!("{}'s {} set to {}.", vname, field.cmd, value);
             }
             _ => {
@@ -3713,48 +4406,177 @@ fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize,
         2 => {
             // set_title.
             if let Some(v) = g.get_char_mut(vict) {
-                v.player.title = if val_arg.is_empty() { None } else { Some(val_arg.to_string()) };
+                v.player.title = if val_arg.is_empty() {
+                    None
+                } else {
+                    Some(val_arg.to_string())
+                };
             }
             let vname = name_of(g, vict);
-            let title = g.get_char(vict).map(|c| c.get_title()).unwrap_or(vname.clone());
+            let title = g
+                .get_char(vict)
+                .map(|c| c.get_title())
+                .unwrap_or(vname.clone());
             output = format!("{}'s title is now: {}", vname, title);
         }
         3 => {
             set_or_remove_prf(g, PRF_SUMMONABLE);
             output = format!("Nosummon {} for {}.\r\n", onoff(!on), name_of(g, vict));
         }
-        4 => { let nv = range_i32(1, 5000, value); if let Some(v) = g.get_char_mut(vict) { v.points.max_hit = nv; } g.affect_total(vict); }
-        5 => { let nv = range_i32(1, 5000, value); if let Some(v) = g.get_char_mut(vict) { v.points.max_mana = nv; } g.affect_total(vict); }
-        6 => { let nv = range_i32(1, 5000, value); if let Some(v) = g.get_char_mut(vict) { v.points.max_move = nv; } g.affect_total(vict); }
-        7 => { let mh = g.get_char(vict).map(|c| c.points.max_hit).unwrap_or(0); let nv = range_i32(-9, mh, value); if let Some(v) = g.get_char_mut(vict) { v.points.hit = nv; } g.affect_total(vict); }
-        8 => { let mm = g.get_char(vict).map(|c| c.points.max_mana).unwrap_or(0); let nv = range_i32(0, mm, value); if let Some(v) = g.get_char_mut(vict) { v.points.mana = nv; } g.affect_total(vict); }
-        9 => { let mm = g.get_char(vict).map(|c| c.points.max_move).unwrap_or(0); let nv = range_i32(0, mm, value); if let Some(v) = g.get_char_mut(vict) { v.points.move_points = nv; } g.affect_total(vict); }
-        10 => { let nv = range_i32(-1000, 1000, value); if let Some(v) = g.get_char_mut(vict) { v.alignment = nv; } g.affect_total(vict); }
+        4 => {
+            let nv = range_i32(1, 5000, value);
+            if let Some(v) = g.get_char_mut(vict) {
+                v.points.max_hit = nv;
+            }
+            g.affect_total(vict);
+        }
+        5 => {
+            let nv = range_i32(1, 5000, value);
+            if let Some(v) = g.get_char_mut(vict) {
+                v.points.max_mana = nv;
+            }
+            g.affect_total(vict);
+        }
+        6 => {
+            let nv = range_i32(1, 5000, value);
+            if let Some(v) = g.get_char_mut(vict) {
+                v.points.max_move = nv;
+            }
+            g.affect_total(vict);
+        }
+        7 => {
+            let mh = g.get_char(vict).map(|c| c.points.max_hit).unwrap_or(0);
+            let nv = range_i32(-9, mh, value);
+            if let Some(v) = g.get_char_mut(vict) {
+                v.points.hit = nv;
+            }
+            g.affect_total(vict);
+        }
+        8 => {
+            let mm = g.get_char(vict).map(|c| c.points.max_mana).unwrap_or(0);
+            let nv = range_i32(0, mm, value);
+            if let Some(v) = g.get_char_mut(vict) {
+                v.points.mana = nv;
+            }
+            g.affect_total(vict);
+        }
+        9 => {
+            let mm = g.get_char(vict).map(|c| c.points.max_move).unwrap_or(0);
+            let nv = range_i32(0, mm, value);
+            if let Some(v) = g.get_char_mut(vict) {
+                v.points.move_points = nv;
+            }
+            g.affect_total(vict);
+        }
+        10 => {
+            let nv = range_i32(-1000, 1000, value);
+            if let Some(v) = g.get_char_mut(vict) {
+                v.alignment = nv;
+            }
+            g.affect_total(vict);
+        }
         11 => {
-            let hi = if is_npc(g, vict) || vict_immortal { MAX_STAT } else { MAX_PLAYER_STAT };
+            let hi = if is_npc(g, vict) || vict_immortal {
+                MAX_STAT
+            } else {
+                MAX_PLAYER_STAT
+            };
             let nv = range_i32(3, hi as i32, value) as i8;
-            if let Some(v) = g.get_char_mut(vict) { v.real_abils.str = nv; v.real_abils.str_add = 0; }
+            if let Some(v) = g.get_char_mut(vict) {
+                v.real_abils.str = nv;
+                v.real_abils.str_add = 0;
+            }
             g.affect_total(vict);
         }
         12 => {
             let nv = range_i32(0, 100, value);
             if let Some(v) = g.get_char_mut(vict) {
                 v.real_abils.str_add = nv as i8;
-                if value > 0 { v.real_abils.str = MAX_PLAYER_STAT; }
+                if value > 0 {
+                    v.real_abils.str = MAX_PLAYER_STAT;
+                }
             }
             g.affect_total(vict);
         }
-        13 => { let hi = stat_hi(g, vict); let nv = range_i32(3, hi, value) as i8; if let Some(v) = g.get_char_mut(vict) { v.real_abils.intel = nv; } g.affect_total(vict); }
-        14 => { let hi = stat_hi(g, vict); let nv = range_i32(3, hi, value) as i8; if let Some(v) = g.get_char_mut(vict) { v.real_abils.wis = nv; } g.affect_total(vict); }
-        15 => { let hi = stat_hi(g, vict); let nv = range_i32(3, hi, value) as i8; if let Some(v) = g.get_char_mut(vict) { v.real_abils.dex = nv; } g.affect_total(vict); }
-        16 => { let hi = stat_hi(g, vict); let nv = range_i32(3, hi, value) as i8; if let Some(v) = g.get_char_mut(vict) { v.real_abils.con = nv; } g.affect_total(vict); }
-        17 => { let hi = stat_hi(g, vict); let nv = range_i32(3, hi, value) as i8; if let Some(v) = g.get_char_mut(vict) { v.real_abils.cha = nv; } g.affect_total(vict); }
-        18 => { let nv = range_i32(-750, 750, value) as i16; if let Some(v) = g.get_char_mut(vict) { v.points.defense = nv; } g.affect_total(vict); }
-        19 => { let nv = range_i32(0, 100_000_000, value); if let Some(v) = g.get_char_mut(vict) { v.points.gold = nv; } }
-        20 => { let nv = range_i32(0, 100_000_000, value); if let Some(v) = g.get_char_mut(vict) { v.points.bank_gold = nv; } }
-        21 => { let nv = range_i32(0, 50_000_000, value); if let Some(v) = g.get_char_mut(vict) { v.points.exp = nv as i64; } }
-        22 => { let nv = range_i32(-750, 750, value) as i16; if let Some(v) = g.get_char_mut(vict) { v.points.power = nv; } g.affect_total(vict); }
-        23 => { let nv = range_i32(-750, 750, value) as i16; if let Some(v) = g.get_char_mut(vict) { v.points.mdefense = nv; } g.affect_total(vict); }
+        13 => {
+            let hi = stat_hi(g, vict);
+            let nv = range_i32(3, hi, value) as i8;
+            if let Some(v) = g.get_char_mut(vict) {
+                v.real_abils.intel = nv;
+            }
+            g.affect_total(vict);
+        }
+        14 => {
+            let hi = stat_hi(g, vict);
+            let nv = range_i32(3, hi, value) as i8;
+            if let Some(v) = g.get_char_mut(vict) {
+                v.real_abils.wis = nv;
+            }
+            g.affect_total(vict);
+        }
+        15 => {
+            let hi = stat_hi(g, vict);
+            let nv = range_i32(3, hi, value) as i8;
+            if let Some(v) = g.get_char_mut(vict) {
+                v.real_abils.dex = nv;
+            }
+            g.affect_total(vict);
+        }
+        16 => {
+            let hi = stat_hi(g, vict);
+            let nv = range_i32(3, hi, value) as i8;
+            if let Some(v) = g.get_char_mut(vict) {
+                v.real_abils.con = nv;
+            }
+            g.affect_total(vict);
+        }
+        17 => {
+            let hi = stat_hi(g, vict);
+            let nv = range_i32(3, hi, value) as i8;
+            if let Some(v) = g.get_char_mut(vict) {
+                v.real_abils.cha = nv;
+            }
+            g.affect_total(vict);
+        }
+        18 => {
+            let nv = range_i32(-750, 750, value) as i16;
+            if let Some(v) = g.get_char_mut(vict) {
+                v.points.defense = nv;
+            }
+            g.affect_total(vict);
+        }
+        19 => {
+            let nv = range_i32(0, 100_000_000, value);
+            if let Some(v) = g.get_char_mut(vict) {
+                v.points.gold = nv;
+            }
+        }
+        20 => {
+            let nv = range_i32(0, 100_000_000, value);
+            if let Some(v) = g.get_char_mut(vict) {
+                v.points.bank_gold = nv;
+            }
+        }
+        21 => {
+            let nv = range_i32(0, 50_000_000, value);
+            if let Some(v) = g.get_char_mut(vict) {
+                v.points.exp = nv as i64;
+            }
+        }
+        22 => {
+            let nv = range_i32(-750, 750, value) as i16;
+            if let Some(v) = g.get_char_mut(vict) {
+                v.points.power = nv;
+            }
+            g.affect_total(vict);
+        }
+        23 => {
+            let nv = range_i32(-750, 750, value) as i16;
+            if let Some(v) = g.get_char_mut(vict) {
+                v.points.mdefense = nv;
+            }
+            g.affect_total(vict);
+        }
         24 => {
             if let Some(cch) = ch {
                 if level_of(g, cch) < LVL_IMPL && cch != vict {
@@ -3763,7 +4585,9 @@ fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize,
                 }
             }
             let nv = range_i32(0, vict_level as i32, value);
-            if let Some(v) = g.get_char_mut(vict) { v.invis_level = nv; }
+            if let Some(v) = g.get_char_mut(vict) {
+                v.invis_level = nv;
+            }
         }
         25 => {
             if let Some(cch) = ch {
@@ -3783,43 +4607,71 @@ fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize,
             }
             set_or_remove_act(g, PLR_FROZEN);
         }
-        27 | 28 => { let nv = range_i32(0, 100, value); if let Some(v) = g.get_char_mut(vict) { v.spells_to_learn = nv; } }
-        29 => { let nv = range_i32(-100, 24, value); if let Some(v) = g.get_char_mut(vict) { v.conditions[DRUNK] = nv as i8; } }
-        30 => { let nv = range_i32(-100, 24, value); if let Some(v) = g.get_char_mut(vict) { v.conditions[FULL] = nv as i8; } }
-        31 => { let nv = range_i32(-100, 24, value); if let Some(v) = g.get_char_mut(vict) { v.conditions[THIRST] = nv as i8; } }
+        27 | 28 => {
+            let nv = range_i32(0, 100, value);
+            if let Some(v) = g.get_char_mut(vict) {
+                v.spells_to_learn = nv;
+            }
+        }
+        29 => {
+            let nv = range_i32(-100, 24, value);
+            if let Some(v) = g.get_char_mut(vict) {
+                v.conditions[DRUNK] = nv as i8;
+            }
+        }
+        30 => {
+            let nv = range_i32(-100, 24, value);
+            if let Some(v) = g.get_char_mut(vict) {
+                v.conditions[FULL] = nv as i8;
+            }
+        }
+        31 => {
+            let nv = range_i32(-100, 24, value);
+            if let Some(v) = g.get_char_mut(vict) {
+                v.conditions[THIRST] = nv as i8;
+            }
+        }
         32 => set_or_remove_act(g, PLR_KILLER),
         33 => set_or_remove_act(g, PLR_THIEF),
         34 => {
             let ch_level = ch.map(|c| level_of(g, c)).unwrap_or(LVL_IMPL);
             if value > ch_level as i32 || value > LVL_IMPL as i32 {
-                if let Some(cch) = ch { g.send_to_char(cch, "You can't do that.\r\n"); }
+                if let Some(cch) = ch {
+                    g.send_to_char(cch, "You can't do that.\r\n");
+                }
                 return false;
             }
             let nv = range_i32(0, LVL_IMPL as i32, value);
-            if let Some(v) = g.get_char_mut(vict) { v.player.level = nv as u8; }
-        }
-        35 => {
-            match g.real_room(value) {
-                Some(i) => {
-                    g.char_from_room(vict);
-                    g.char_to_room(vict, i);
-                }
-                None => {
-                    if let Some(cch) = ch { g.send_to_char(cch, "No room exists with that number.\r\n"); }
-                    return false;
-                }
+            if let Some(v) = g.get_char_mut(vict) {
+                v.player.level = nv as u8;
             }
         }
+        35 => match g.real_room(value) {
+            Some(i) => {
+                g.char_from_room(vict);
+                g.char_to_room(vict, i);
+            }
+            None => {
+                if let Some(cch) = ch {
+                    g.send_to_char(cch, "No room exists with that number.\r\n");
+                }
+                return false;
+            }
+        },
         36 => set_or_remove_prf(g, PRF_ROOMFLAGS),
         37 => set_or_remove_act(g, PLR_SITEOK),
         38 => set_or_remove_act(g, PLR_DELETED),
         39 => {
             let i = parse_class(val_arg.chars().next().unwrap_or(' '));
             if i < 0 {
-                if let Some(cch) = ch { g.send_to_char(cch, "That is not a class.\r\n"); }
+                if let Some(cch) = ch {
+                    g.send_to_char(cch, "That is not a class.\r\n");
+                }
                 return false;
             }
-            if let Some(v) = g.get_char_mut(vict) { v.player.class = Class::from_u8(i as u8); }
+            if let Some(v) = g.get_char_mut(vict) {
+                v.player.class = Class::from_u8(i as u8);
+            }
         }
         40 => set_or_remove_act(g, PLR_NOWIZLIST),
         41 => set_or_remove_prf2(g, PRF2_QCHAN),
@@ -3827,7 +4679,9 @@ fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize,
             if is_number(val_arg) {
                 value = atoi(val_arg);
                 if g.real_room(value).is_some() || value == -1 {
-                    if let Some(v) = g.get_char_mut(vict) { v.load_room = value; }
+                    if let Some(v) = g.get_char_mut(vict) {
+                        v.load_room = value;
+                    }
                     let vname = name_of(g, vict);
                     if value == -1 {
                         output = format!("{}'s loadroom turned off.", vname);
@@ -3835,11 +4689,15 @@ fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize,
                         output = format!("{} will enter at room #{}.", vname, value);
                     }
                 } else {
-                    if let Some(cch) = ch { g.send_to_char(cch, "That room does not exist!\r\n"); }
+                    if let Some(cch) = ch {
+                        g.send_to_char(cch, "That room does not exist!\r\n");
+                    }
                     return false;
                 }
             } else {
-                if let Some(cch) = ch { g.send_to_char(cch, "Must be a room's virtual number.\r\n"); }
+                if let Some(cch) = ch {
+                    g.send_to_char(cch, "Must be a room's virtual number.\r\n");
+                }
                 return false;
             }
         }
@@ -3850,7 +4708,9 @@ fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize,
             if ch_idnum != 1 || !is_npc(g, vict) {
                 return false;
             }
-            if let Some(v) = g.get_char_mut(vict) { v.idnum = value as i64; }
+            if let Some(v) = g.get_char_mut(vict) {
+                v.idnum = value as i64;
+            }
         }
         45 => {
             // passwd — C stores CRYPT(val_arg, GET_NAME) into GET_PASSWD(vict).
@@ -3859,7 +4719,9 @@ fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize,
             // from this sync path — so the guard + echo run, but persisting the
             // new hash needs a Character password field + DB save (one note).
             if vict_level >= LVL_GRGOD {
-                if let Some(cch) = ch { g.send_to_char(cch, "You cannot change that.\r\n"); }
+                if let Some(cch) = ch {
+                    g.send_to_char(cch, "You cannot change that.\r\n");
+                }
                 return false;
             }
             output = format!("Password changed to '{}'.", val_arg);
@@ -3873,39 +4735,58 @@ fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize,
             } else if val_arg.eq_ignore_ascii_case("neutral") {
                 Gender::Neutral
             } else {
-                if let Some(cch) = ch { g.send_to_char(cch, "Must be 'male', 'female', or 'neutral'.\r\n"); }
+                if let Some(cch) = ch {
+                    g.send_to_char(cch, "Must be 'male', 'female', or 'neutral'.\r\n");
+                }
                 return false;
             };
-            if let Some(v) = g.get_char_mut(vict) { v.player.sex = sex; }
+            if let Some(v) = g.get_char_mut(vict) {
+                v.player.sex = sex;
+            }
         }
         49 => set_or_remove_prf(g, PRF_AFK),
         50 => {
             let i = parse_race(val_arg.chars().next().unwrap_or(' '));
             if i < 0 {
-                if let Some(cch) = ch { g.send_to_char(cch, "That is not a race.\r\n"); }
+                if let Some(cch) = ch {
+                    g.send_to_char(cch, "That is not a race.\r\n");
+                }
                 return false;
             }
-            if let Some(v) = g.get_char_mut(vict) { v.player.race = Race::from_u8(i as u8); }
+            if let Some(v) = g.get_char_mut(vict) {
+                v.player.race = Race::from_u8(i as u8);
+            }
         }
         51 => {
             // hometown: parse_town(*val_arg) — the home-town menu letter (a..c).
             let i = crate::class::parse_town(val_arg.chars().next().unwrap_or(' '));
             if i == -1 {
-                if let Some(cch) = ch { g.send_to_char(cch, "That is not a hometown.\r\n"); }
+                if let Some(cch) = ch {
+                    g.send_to_char(cch, "That is not a hometown.\r\n");
+                }
                 return false;
             }
-            if let Some(v) = g.get_char_mut(vict) { v.player.hometown = i; }
+            if let Some(v) = g.get_char_mut(vict) {
+                v.player.hometown = i;
+            }
         }
         52 => {
             let ch_level = ch.map(|c| level_of(g, c)).unwrap_or(LVL_IMPL);
             if value > ch_level as i32 || value > LVL_IMPL as i32 {
-                if let Some(cch) = ch { g.send_to_char(cch, "You can't do that.\r\n"); }
+                if let Some(cch) = ch {
+                    g.send_to_char(cch, "You can't do that.\r\n");
+                }
                 // C `break`s (no return) — fall through to save anyway.
             } else if let Some(v) = g.get_char_mut(vict) {
                 v.trust = value;
             }
         }
-        53 => { let nv = range_i32(0, 100, value); if let Some(v) = g.get_char_mut(vict) { v.spells_to_learn = nv; } }
+        53 => {
+            let nv = range_i32(0, 100, value);
+            if let Some(v) = g.get_char_mut(vict) {
+                v.spells_to_learn = nv;
+            }
+        }
         // 54..=108: per-player god-command bitvectors (godcmds1..4). Each cmd*
         // field flips one GCMD bit; the grant/revoke aggregates (103..=108) set
         // or recursively walk the set_fields table.
@@ -3995,22 +4876,44 @@ fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize,
         106 => grant_cmd_tier(g, vict, LVL_GOD, val_arg),
         107 | 108 => grant_cmd_tier(g, vict, LVL_GRGOD, val_arg),
         109 => {}
-        110 => { if let Some(v) = g.get_char_mut(vict) { v.wins = value as u8; } }
-        111 => { if let Some(v) = g.get_char_mut(vict) { v.losses = value as u8; } }
+        110 => {
+            if let Some(v) = g.get_char_mut(vict) {
+                v.wins = value as u8;
+            }
+        }
+        111 => {
+            if let Some(v) = g.get_char_mut(vict) {
+                v.losses = value as u8;
+            }
+        }
         112 => set_or_remove_gcmd2(g, GCMD2_RESPEC),
         113 => set_or_remove_prf2(g, PRF2_LOCKOUT),
         114 => {
             if on {
                 if let Some(cch) = ch {
-                    g.send_to_char(cch, "Sorry. But setting QUESTOR flag ON for a player will cause problems.\r\n");
+                    g.send_to_char(
+                        cch,
+                        "Sorry. But setting QUESTOR flag ON for a player will cause problems.\r\n",
+                    );
                 }
                 return false;
             }
             set_or_remove_act(g, PLR_QUESTOR);
-            if let Some(v) = g.get_char_mut(vict) { v.quest_mob = 0; v.quest_obj = 0; }
+            if let Some(v) = g.get_char_mut(vict) {
+                v.quest_mob = 0;
+                v.quest_obj = 0;
+            }
         }
-        115 => { if let Some(v) = g.get_char_mut(vict) { v.next_quest = value; } }
-        116 => { if let Some(v) = g.get_char_mut(vict) { v.quest_points = value; } }
+        115 => {
+            if let Some(v) = g.get_char_mut(vict) {
+                v.next_quest = value;
+            }
+        }
+        116 => {
+            if let Some(v) = g.get_char_mut(vict) {
+                v.quest_points = value;
+            }
+        }
         117 => set_or_remove_gcmd2(g, GCMD2_QUESTMOBS),
         118 => set_or_remove_gcmd2(g, GCMD2_REWARD),
         119 => set_or_remove_act(g, PLR_MULTIOK),
@@ -4027,12 +4930,26 @@ fn perform_set(g: &mut GameState, ch: Option<CharId>, vict: CharId, mode: usize,
         124 => set_or_remove_gcmd3(g, GCMD3_MAP),
         125 => set_or_remove_gcmd3(g, GCMD3_LWEATHER),
         126 => set_or_remove_gcmd3(g, GCMD3_PFILECLEAN),
-        127 => { let nv = range_i32(-750, 750, value) as i16; if let Some(v) = g.get_char_mut(vict) { v.points.mpower = nv; } g.affect_total(vict); }
-        128 => { let nv = range_i32(-750, 750, value) as i16; if let Some(v) = g.get_char_mut(vict) { v.points.technique = nv; } g.affect_total(vict); }
+        127 => {
+            let nv = range_i32(-750, 750, value) as i16;
+            if let Some(v) = g.get_char_mut(vict) {
+                v.points.mpower = nv;
+            }
+            g.affect_total(vict);
+        }
+        128 => {
+            let nv = range_i32(-750, 750, value) as i16;
+            if let Some(v) = g.get_char_mut(vict) {
+                v.points.technique = nv;
+            }
+            g.affect_total(vict);
+        }
         129 => set_or_remove_prf2(g, PRF2_INTANGIBLE),
         130 => set_or_remove_gcmd3(g, GCMD3_REBALANCE),
         _ => {
-            if let Some(cch) = ch { g.send_to_char(cch, "Can't set that!\r\n"); }
+            if let Some(cch) = ch {
+                g.send_to_char(cch, "Can't set that!\r\n");
+            }
             return false;
         }
     }
@@ -4099,7 +5016,10 @@ pub fn do_set(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             && g.find_player_by_name(&fname).is_none()
             && g.get_id_by_name(&fname).is_some()
         {
-            g.send_to_char(ch, &format!("[ Loading {} from the player file... ]\r\n", fname));
+            g.send_to_char(
+                ch,
+                &format!("[ Loading {} from the player file... ]\r\n", fname),
+            );
             g.queue_offline_op(ch, &fname, &format!("set player {} {}", fname, frest));
             return;
         }
@@ -4119,7 +5039,13 @@ pub fn do_set(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         // pk_allowed global not surfaced; mirror the report line.
         let (mode, _r) = half_chop(&rest);
         let allowed = mode.eq_ignore_ascii_case("ON");
-        g.send_to_char(ch, &format!("Legal PKs are now {}.\r\n", if allowed { "Allowed" } else { "Disallowed" }));
+        g.send_to_char(
+            ch,
+            &format!(
+                "Legal PKs are now {}.\r\n",
+                if allowed { "Allowed" } else { "Disallowed" }
+            ),
+        );
         return;
     }
     let _ = is_mob;
@@ -4129,7 +5055,10 @@ pub fn do_set(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     if name.is_empty() || field.is_empty() {
         let mut buf = String::from("Usage: set <victim> <field> <value>\r\nFields:\r\n");
         let mut k = 0;
-        let ch_trust = g.get_char(ch).map(|c| c.trust.max(c.player.level as i32)).unwrap_or(0);
+        let ch_trust = g
+            .get_char(ch)
+            .map(|c| c.trust.max(c.player.level as i32))
+            .unwrap_or(0);
         for f in SET_FIELDS {
             if f.level as i32 > ch_trust {
                 continue;
@@ -4144,7 +5073,10 @@ pub fn do_set(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 buf.push_str("\r\n");
             }
         }
-        buf.push_str(&format!("\r\nThere are {} set fields available to you.\r\n", k));
+        buf.push_str(&format!(
+            "\r\nThere are {} set fields available to you.\r\n",
+            k
+        ));
         g.send_to_char(ch, &buf);
         return;
     }
@@ -4205,7 +5137,12 @@ pub fn do_rewiz(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     g.send_to_char(ch, "You have reloaded the autowiz system.\r\n");
     let cname = name_of(g, ch);
     let m = LVL_GOD.max(invis_lev(g, ch) as u8); // C MAX(LVL_GOD, GET_INVIS_LEV(ch))
-    mudlog(g, &format!("(GC) {} initiated reload of the autowiz system.", cname), BRF, m);
+    mudlog(
+        g,
+        &format!("(GC) {} initiated reload of the autowiz system.", cname),
+        BRF,
+        m,
+    );
     crate::autowiz::check_autowiz(g, ch);
 }
 
@@ -4223,15 +5160,21 @@ pub fn do_rlist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let first = atoi(&a);
     let last = atoi(&b);
     if first < 0 || first > MAX_ROOM_VNUM || last < 0 || last > MAX_ROOM_VNUM {
-        g.send_to_char(ch, "Values must be between 0 and highest possible vnum.\n\r");
+        g.send_to_char(
+            ch,
+            "Values must be between 0 and highest possible vnum.\n\r",
+        );
         return;
     }
     if first >= last {
         g.send_to_char(ch, "Second value must be greater than first.\n\r");
         return;
     }
-    let mut rows: Vec<(RoomVnum, i32, String)> =
-        g.rooms.iter().map(|r| (r.number, r.zone, r.name.clone())).collect();
+    let mut rows: Vec<(RoomVnum, i32, String)> = g
+        .rooms
+        .iter()
+        .map(|r| (r.number, r.zone, r.name.clone()))
+        .collect();
     rows.sort_by_key(|r| r.0);
     let mut found = 0;
     let mut out = String::new();
@@ -4241,7 +5184,10 @@ pub fn do_rlist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
         if vnum >= first {
             found += 1;
-            out.push_str(&format!("{:5}. [{:5}] ({:3}) {}\r\n", found, vnum, zone, name));
+            out.push_str(&format!(
+                "{:5}. [{:5}] ({:3}) {}\r\n",
+                found, vnum, zone, name
+            ));
         }
     }
     g.send_to_char(ch, &out);
@@ -4259,15 +5205,21 @@ pub fn do_mlist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let first = atoi(&a);
     let last = atoi(&b);
     if first < 0 || first > MAX_ROOM_VNUM || last < 0 || last > MAX_ROOM_VNUM {
-        g.send_to_char(ch, "Values must be between 0 and highest possible vnum.\n\r");
+        g.send_to_char(
+            ch,
+            "Values must be between 0 and highest possible vnum.\n\r",
+        );
         return;
     }
     if first >= last {
         g.send_to_char(ch, "Second value must be greater than first.\n\r");
         return;
     }
-    let mut rows: Vec<(MobVnum, String)> =
-        g.mob_protos.values().map(|m| (m.vnum, m.short_desc.clone())).collect();
+    let mut rows: Vec<(MobVnum, String)> = g
+        .mob_protos
+        .values()
+        .map(|m| (m.vnum, m.short_desc.clone()))
+        .collect();
     rows.sort_by_key(|r| r.0);
     let mut found = 0;
     let mut out = String::new();
@@ -4295,15 +5247,21 @@ pub fn do_olist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let first = atoi(&a);
     let last = atoi(&b);
     if first < 0 || first > MAX_ROOM_VNUM || last < 0 || last > MAX_ROOM_VNUM {
-        g.send_to_char(ch, "Values must be between 0 and highest possible vnum.\n\r");
+        g.send_to_char(
+            ch,
+            "Values must be between 0 and highest possible vnum.\n\r",
+        );
         return;
     }
     if first >= last {
         g.send_to_char(ch, "Second value must be greater than first.\n\r");
         return;
     }
-    let mut rows: Vec<(ObjVnum, String)> =
-        g.obj_protos.values().map(|o| (o.vnum, o.short_desc.clone())).collect();
+    let mut rows: Vec<(ObjVnum, String)> = g
+        .obj_protos
+        .values()
+        .map(|o| (o.vnum, o.short_desc.clone()))
+        .collect();
     rows.sort_by_key(|r| r.0);
     let mut found = 0;
     let mut out = String::new();
@@ -4340,7 +5298,12 @@ pub fn do_isay(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let line = format!("&m[&YINFO&m]&n{}\r\n", arg);
     send_to_all(g, &line);
     let cname = name_of(g, ch);
-    mudlog(g, &format!("(GC) Isay by {}: {}", cname, line.trim_end()), NRM, LVL_IMPL);
+    mudlog(
+        g,
+        &format!("(GC) Isay by {}: {}", cname, line.trim_end()),
+        NRM,
+        LVL_IMPL,
+    );
 }
 
 pub fn do_mcasters(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
@@ -4406,7 +5369,12 @@ pub fn do_setreboot(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             }
             WARN_MIN.store(warn_min, Ordering::Relaxed);
             WARN_HR.store(warn_hr, Ordering::Relaxed);
-            format!("(GC) {} has set auto reboot time for {}:{}", cname, hr, REBOOT_MIN.load(Ordering::Relaxed))
+            format!(
+                "(GC) {} has set auto reboot time for {}:{}",
+                cname,
+                hr,
+                REBOOT_MIN.load(Ordering::Relaxed)
+            )
         };
         mudlog(g, &logline, NRM, LVL_GOD);
     }
@@ -4420,7 +5388,10 @@ pub fn do_setreboot(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 pub fn do_esave(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let (a, _b, _r) = two_arguments(arg);
     if a.is_empty() {
-        g.send_to_char(ch, "You must supply a zone number or '*' for all zones.\r\n");
+        g.send_to_char(
+            ch,
+            "You must supply a zone number or '*' for all zones.\r\n",
+        );
         return;
     }
     let cname = name_of(g, ch);
@@ -4431,7 +5402,12 @@ pub fn do_esave(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     // only clears the dirty flag — that delegation lives in olc.rs).
     let lvl = LVL_BUILDER.max(invis_lev(g, ch) as u8);
     if a.starts_with('*') {
-        mudlog(g, &format!("OLC: {} saves ALL info for ALL zones.", cname), PFT, lvl);
+        mudlog(
+            g,
+            &format!("OLC: {} saves ALL info for ALL zones.", cname),
+            PFT,
+            lvl,
+        );
         for zr in 0..g.zones.len() {
             let (named, has_top) = {
                 let z = &g.zones[zr];
@@ -4444,7 +5420,12 @@ pub fn do_esave(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             }
         }
     } else {
-        mudlog(g, &format!("OLC: {} saves ALL info for zone {}.", cname, a), PFT, lvl);
+        mudlog(
+            g,
+            &format!("OLC: {} saves ALL info for zone {}.", cname, a),
+            PFT,
+            lvl,
+        );
         // do_olc resolves the save target as real_zone(atoi(arg)*100).
         let znum = atoi(&a);
         if let Some(zr) = crate::olc::real_zone(g, znum * 100) {
@@ -4465,7 +5446,10 @@ pub fn do_copyto(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let rroom = match g.real_room(iroom) {
         Some(r) => r,
         None => {
-            g.send_to_char(ch, &format!("There is no room with the number {}.\r\n", iroom));
+            g.send_to_char(
+                ch,
+                &format!("There is no room with the number {}.\r\n", iroom),
+            );
             return;
         }
     };
@@ -4474,7 +5458,9 @@ pub fn do_copyto(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
     let cur = g.get_char(ch).and_then(|c| c.in_room);
-    let desc = cur.map(|r| g.rooms[r].description.clone()).unwrap_or_default();
+    let desc = cur
+        .map(|r| g.rooms[r].description.clone())
+        .unwrap_or_default();
     if !desc.is_empty() {
         g.rooms[rroom].description = desc;
         // olc_add_to_save_list(zone_table[real_zone(iroom)].number, OLC_SAVE_ROOM)
@@ -4482,7 +5468,10 @@ pub fn do_copyto(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         if let Some(znum) = g.zones.get(zr as usize).map(|z| z.number) {
             crate::olc::olc_add_to_save_list(znum, crate::olc::OLC_SAVE_ROOM);
         }
-        g.send_to_char(ch, &format!("You copy the description to room {}.\r\n", iroom));
+        g.send_to_char(
+            ch,
+            &format!("You copy the description to room {}.\r\n", iroom),
+        );
     } else {
         g.send_to_char(ch, "This room has no description!\r\n");
     }
@@ -4533,7 +5522,10 @@ pub fn do_dig(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         key: NOTHING,
         to_room: there_vnum,
     });
-    g.send_to_char(ch, &format!("You make an exit {} to room {}.\r\n", dir_s, iroom));
+    g.send_to_char(
+        ch,
+        &format!("You make an exit {} to room {}.\r\n", dir_s, iroom),
+    );
 }
 
 pub fn do_areas(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
@@ -4550,8 +5542,14 @@ pub fn do_areas(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
         buf.push_str(&format!(
             " &W{:<30.30}&n &b(&Y{} to {}&b)&n {}\r\n",
-            z.name, z.min_level, z.max_level,
-            if z.reset_mode != 0 { "Open." } else { "Closed." }
+            z.name,
+            z.min_level,
+            z.max_level,
+            if z.reset_mode != 0 {
+                "Open."
+            } else {
+                "Closed."
+            }
         ));
     }
     g.send_to_char(ch, &buf);
@@ -4560,17 +5558,46 @@ pub fn do_areas(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 pub fn do_vwear(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     // (cmd, level) listing table.
     let fields: [(&str, u8); 40] = [
-        ("nothing", LVL_GOD), ("finger", LVL_GOD), ("neck", LVL_GOD), ("body", LVL_GOD),
-        ("head", LVL_GOD), ("legs", LVL_GOD), ("feet", LVL_GOD), ("hands", LVL_GOD),
-        ("shield", LVL_GOD), ("arms", LVL_GOD), ("about", LVL_GOD), ("waist", LVL_GOD),
-        ("wrist", LVL_GOD), ("wield", LVL_GOD), ("hold", LVL_GOD), ("shoulders", LVL_GOD),
-        ("ankle", LVL_GOD), ("face", LVL_GOD),
-        ("light", LVL_GOD), ("scroll", LVL_GOD), ("wand", LVL_GOD), ("staff", LVL_GOD),
-        ("treasure", LVL_GOD), ("armor", LVL_GOD), ("potion", LVL_GOD), ("worn", LVL_GOD),
-        ("other", LVL_GOD), ("trash", LVL_GOD), ("container", LVL_GOD), ("liquid", LVL_GOD),
-        ("key", LVL_GOD), ("food", LVL_GOD), ("money", LVL_GOD), ("pen", LVL_GOD),
-        ("boat", LVL_GOD), ("fountain", LVL_GOD), ("portal", LVL_GOD), ("hpregen", LVL_GOD),
-        ("mpregen", LVL_GOD), ("mvregen", LVL_GOD),
+        ("nothing", LVL_GOD),
+        ("finger", LVL_GOD),
+        ("neck", LVL_GOD),
+        ("body", LVL_GOD),
+        ("head", LVL_GOD),
+        ("legs", LVL_GOD),
+        ("feet", LVL_GOD),
+        ("hands", LVL_GOD),
+        ("shield", LVL_GOD),
+        ("arms", LVL_GOD),
+        ("about", LVL_GOD),
+        ("waist", LVL_GOD),
+        ("wrist", LVL_GOD),
+        ("wield", LVL_GOD),
+        ("hold", LVL_GOD),
+        ("shoulders", LVL_GOD),
+        ("ankle", LVL_GOD),
+        ("face", LVL_GOD),
+        ("light", LVL_GOD),
+        ("scroll", LVL_GOD),
+        ("wand", LVL_GOD),
+        ("staff", LVL_GOD),
+        ("treasure", LVL_GOD),
+        ("armor", LVL_GOD),
+        ("potion", LVL_GOD),
+        ("worn", LVL_GOD),
+        ("other", LVL_GOD),
+        ("trash", LVL_GOD),
+        ("container", LVL_GOD),
+        ("liquid", LVL_GOD),
+        ("key", LVL_GOD),
+        ("food", LVL_GOD),
+        ("money", LVL_GOD),
+        ("pen", LVL_GOD),
+        ("boat", LVL_GOD),
+        ("fountain", LVL_GOD),
+        ("portal", LVL_GOD),
+        ("hpregen", LVL_GOD),
+        ("mpregen", LVL_GOD),
+        ("mvregen", LVL_GOD),
     ];
     let argument = arg.trim_start();
     let ch_level = level_of(g, ch);
@@ -4583,7 +5610,11 @@ pub fn do_vwear(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             }
             if *lvl <= ch_level {
                 j += 1;
-                buf.push_str(&format!("{:<15}{}", cmd, if j % 5 == 0 { "\r\n" } else { "" }));
+                buf.push_str(&format!(
+                    "{:<15}{}",
+                    cmd,
+                    if j % 5 == 0 { "\r\n" } else { "" }
+                ));
             }
         }
         buf.push_str("\r\n");
@@ -4613,11 +5644,21 @@ pub fn do_vwear(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         vwear_object(g, ch, bit);
     } else {
         let item_type = match l {
-            18 => ObjectType::Light, 19 => ObjectType::Scroll, 20 => ObjectType::Wand,
-            21 => ObjectType::Staff, 22 => ObjectType::Treasure, 23 => ObjectType::Armor,
-            24 => ObjectType::Potion, 26 => ObjectType::Other, 27 => ObjectType::Trash,
-            28 => ObjectType::Container, 29 => ObjectType::LiqContainer, 30 => ObjectType::Key,
-            31 => ObjectType::Food, 32 => ObjectType::Money, 35 => ObjectType::Fountain,
+            18 => ObjectType::Light,
+            19 => ObjectType::Scroll,
+            20 => ObjectType::Wand,
+            21 => ObjectType::Staff,
+            22 => ObjectType::Treasure,
+            23 => ObjectType::Armor,
+            24 => ObjectType::Potion,
+            26 => ObjectType::Other,
+            27 => ObjectType::Trash,
+            28 => ObjectType::Container,
+            29 => ObjectType::LiqContainer,
+            30 => ObjectType::Key,
+            31 => ObjectType::Food,
+            32 => ObjectType::Money,
+            35 => ObjectType::Fountain,
             _ => ObjectType::Other,
         };
         vwear_obj(g, ch, item_type);
@@ -4715,7 +5756,9 @@ pub fn do_tedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, &buf);
         return;
     }
-    let l = files.iter().position(|(c, _, _, _)| c.starts_with(&field.to_lowercase()));
+    let l = files
+        .iter()
+        .position(|(c, _, _, _)| c.starts_with(&field.to_lowercase()));
     match l {
         Some(i) if ch_level >= files[i].1 => {
             let (_, _, rel, size) = files[i];
@@ -4728,7 +5771,15 @@ pub fn do_tedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             if !current.is_empty() {
                 g.send_to_char(ch, &current);
             }
-            act(g, "$n begins editing a scroll.", true, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n begins editing a scroll.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             crate::modify::start_textfile_editing(g, conn, path, &current, size);
         }
         Some(_) => g.send_to_char(ch, "You are not godly enough for that!\r\n"),
@@ -4770,28 +5821,47 @@ pub fn do_rename(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
     // Uniqueness: the MySQL player table isn't surfaced; check live players.
-    if g.find_player_by_name(&tmp).map(|id| id != victim).unwrap_or(false) {
+    if g.find_player_by_name(&tmp)
+        .map(|id| id != victim)
+        .unwrap_or(false)
+    {
         g.send_to_char(ch, "There is already a player with that name.\r\n");
         return;
     }
     let oldname = name_of(g, victim);
     g.send_to_char(ch, &format!("You have renamed {} to {}.\r\n", oldname, tmp));
     let cname = name_of(g, ch);
-    mudlog(g, &format!("{} has renamed {} to {}", cname, oldname, arg2), NRM, LVL_GOD);
+    mudlog(
+        g,
+        &format!("{} has renamed {} to {}", cname, oldname, arg2),
+        NRM,
+        LVL_GOD,
+    );
     // Re-key the players_by_name index and update the name.
     g.players_by_name.remove(&oldname.to_lowercase());
     if let Some(v) = g.get_char_mut(victim) {
         v.player.name = tmp.clone();
     }
     g.players_by_name.insert(tmp.to_lowercase(), victim);
-    g.send_to_char(victim, &format!("&GYou have been renamed to {} by the gods.&n\r\n", tmp));
+    g.send_to_char(
+        victim,
+        &format!("&GYou have been renamed to {} by the gods.&n\r\n", tmp),
+    );
 }
 
 // ===========================================================================
 // do_peace
 // ===========================================================================
 pub fn do_peace(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    act(g, "$n decides that everyone should just be friends.", false, ch, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n decides that everyone should just be friends.",
+        false,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
     let rnum = match g.get_char(ch).and_then(|c| c.in_room) {
         Some(r) => r,
         None => return,
@@ -4800,7 +5870,10 @@ pub fn do_peace(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     let ch_level = level_of(g, ch);
     let people = g.rooms[rnum].people.clone();
     for vict in people {
-        let fighting = g.get_char(vict).map(|c| c.fighting.is_some()).unwrap_or(false);
+        let fighting = g
+            .get_char(vict)
+            .map(|c| c.fighting.is_some())
+            .unwrap_or(false);
         if fighting && level_of(g, vict) <= ch_level {
             if let Some(v) = g.get_char_mut(vict) {
                 v.fighting = None;
@@ -4872,7 +5945,8 @@ pub fn do_delsnow(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
 // do_tmobdie / do_wrestrict / do_respec / do_questmobs / do_reward / do_levelme
 // ===========================================================================
 static MOBDIE_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static WEAPONRESTRICTIONS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static WEAPONRESTRICTIONS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 pub fn do_tmobdie(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     let cname = name_of(g, ch);
@@ -4894,12 +5968,22 @@ pub fn do_wrestrict(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     if WEAPONRESTRICTIONS.load(Ordering::Relaxed) {
         WEAPONRESTRICTIONS.store(false, Ordering::Relaxed);
         let lvl = LVL_IMPL.max(invis_lev(g, ch) as u8);
-        mudlog(g, &format!("(GC) {} has disabled weapon restrictions.", cname), PFT, lvl);
+        mudlog(
+            g,
+            &format!("(GC) {} has disabled weapon restrictions.", cname),
+            PFT,
+            lvl,
+        );
         g.send_to_char(ch, "Weapon restrictions now disabled\r\n");
     } else {
         WEAPONRESTRICTIONS.store(true, Ordering::Relaxed);
         let lvl = LVL_IMPL.max(invis_lev(g, ch) as u8);
-        mudlog(g, &format!("(GC) {} has enabled weapon restrictions.", cname), PFT, lvl);
+        mudlog(
+            g,
+            &format!("(GC) {} has enabled weapon restrictions.", cname),
+            PFT,
+            lvl,
+        );
         g.send_to_char(ch, "Weapon restrictions now enabled\r\n");
     }
 }
@@ -4956,7 +6040,14 @@ pub fn do_questmobs(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
 pub fn do_reward(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let (target, vnum_s, _r) = two_arguments(arg);
-    if target.is_empty() || vnum_s.is_empty() || !vnum_s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    if target.is_empty()
+        || vnum_s.is_empty()
+        || !vnum_s
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+    {
         g.send_to_char(ch, "Usage: reward <playername|room|all> <object vnum>\r\n");
         return;
     }
@@ -4989,12 +6080,39 @@ pub fn do_reward(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             return;
         }
         if let Some(obj) = g.load_object(obj_vnum) {
-            act(g, "$n rewards $N with $p.", false, ch, Some(obj), ActArg::Char(victim), To::NotVict);
-            act(g, "$n rewards you for your efforts with $p.", false, ch, Some(obj), ActArg::Char(victim), To::Vict);
+            act(
+                g,
+                "$n rewards $N with $p.",
+                false,
+                ch,
+                Some(obj),
+                ActArg::Char(victim),
+                To::NotVict,
+            );
+            act(
+                g,
+                "$n rewards you for your efforts with $p.",
+                false,
+                ch,
+                Some(obj),
+                ActArg::Char(victim),
+                To::Vict,
+            );
             g.obj_to_char(obj, victim);
-            let short = g.get_obj(obj).map(|o| o.short_description.clone()).unwrap_or_default();
+            let short = g
+                .get_obj(obj)
+                .map(|o| o.short_description.clone())
+                .unwrap_or_default();
             let vname = name_of(g, victim);
-            mudlog(g, &format!("[WATCHDOG] {} rewards {} with {} ({})", cname, vname, short, obj_vnum), CMP, LVL_IMPL);
+            mudlog(
+                g,
+                &format!(
+                    "[WATCHDOG] {} rewards {} with {} ({})",
+                    cname, vname, short, obj_vnum
+                ),
+                CMP,
+                LVL_IMPL,
+            );
             g.send_to_char(ch, &format!("You reward {} to {}.\r\n", short, vname));
         }
         return;
@@ -5013,11 +6131,30 @@ pub fn do_reward(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 continue;
             }
             if let Some(obj) = g.load_object(obj_vnum) {
-                act(g, "$n rewards you for your efforts with $p.", false, ch, Some(obj), ActArg::Char(victim), To::Vict);
+                act(
+                    g,
+                    "$n rewards you for your efforts with $p.",
+                    false,
+                    ch,
+                    Some(obj),
+                    ActArg::Char(victim),
+                    To::Vict,
+                );
                 g.obj_to_char(obj, victim);
-                let short = g.get_obj(obj).map(|o| o.short_description.clone()).unwrap_or_default();
+                let short = g
+                    .get_obj(obj)
+                    .map(|o| o.short_description.clone())
+                    .unwrap_or_default();
                 let vname = name_of(g, victim);
-                mudlog(g, &format!("[WATCHDOG] {} rewards {} (room) with {} ({})", cname, vname, short, obj_vnum), CMP, LVL_IMPL);
+                mudlog(
+                    g,
+                    &format!(
+                        "[WATCHDOG] {} rewards {} (room) with {} ({})",
+                        cname, vname, short, obj_vnum
+                    ),
+                    CMP,
+                    LVL_IMPL,
+                );
                 if rewardcount == 0 {
                     rewardbuf.push_str(&format!(" {} to:\r\n{}, ", short, vname));
                 } else {
@@ -5043,12 +6180,39 @@ pub fn do_reward(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 continue;
             }
             if let Some(obj) = g.load_object(obj_vnum) {
-                act(g, "$N rewards $n with $p.", false, victim, Some(obj), ActArg::Char(ch), To::Room);
-                act(g, "$n rewards you for your efforts with $p.", false, ch, Some(obj), ActArg::Char(victim), To::Vict);
+                act(
+                    g,
+                    "$N rewards $n with $p.",
+                    false,
+                    victim,
+                    Some(obj),
+                    ActArg::Char(ch),
+                    To::Room,
+                );
+                act(
+                    g,
+                    "$n rewards you for your efforts with $p.",
+                    false,
+                    ch,
+                    Some(obj),
+                    ActArg::Char(victim),
+                    To::Vict,
+                );
                 g.obj_to_char(obj, victim);
-                let short = g.get_obj(obj).map(|o| o.short_description.clone()).unwrap_or_default();
+                let short = g
+                    .get_obj(obj)
+                    .map(|o| o.short_description.clone())
+                    .unwrap_or_default();
                 let vname = name_of(g, victim);
-                mudlog(g, &format!("[WATCHDOG] {} rewards {} (all) with {} ({})", cname, vname, short, obj_vnum), CMP, LVL_IMPL);
+                mudlog(
+                    g,
+                    &format!(
+                        "[WATCHDOG] {} rewards {} (all) with {} ({})",
+                        cname, vname, short, obj_vnum
+                    ),
+                    CMP,
+                    LVL_IMPL,
+                );
                 if rewardcount == 0 {
                     rewardbuf.push_str(&format!(" {} to:\r\n{}, ", short, vname));
                 } else {
@@ -5114,8 +6278,7 @@ pub fn do_copyover(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
 
     // Open the copyover state file (C: COPYOVER_FILE "copyover.dat", run from one
     // dir above lib). We keep it under the lib path so cwd is irrelevant.
-    let copyover_path =
-        std::path::Path::new(&g.config.lib_path).join("copyover.dat");
+    let copyover_path = std::path::Path::new(&g.config.lib_path).join("copyover.dat");
     let mut fp = match std::fs::File::create(&copyover_path) {
         Ok(f) => f,
         Err(_) => {
@@ -5144,8 +6307,7 @@ pub fn do_copyover(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     // `copyover_chars.dat`; main.rs re-seeds them into the DB after exec ONLY if
     // the player isn't already present (so the real-DB path is untouched). This
     // is the disk-persistence analogue of C's pfile, scoped to what reload needs.
-    let chars_path =
-        std::path::Path::new(&g.config.lib_path).join("copyover_chars.dat");
+    let chars_path = std::path::Path::new(&g.config.lib_path).join("copyover_chars.dat");
     let mut cfp = std::fs::File::create(&chars_path).ok();
 
     // First line of the state file: the inherited listener fd (C writes
@@ -5331,5 +6493,45 @@ fn clear_cloexec(fd: std::os::unix::io::RawFd) {
         if flags >= 0 {
             libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::Descriptor;
+    use crate::room::Room;
+
+    fn connected_player(g: &mut GameState, conn: ConnId, name: &str, level: Level) -> CharId {
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        ch.desc = Some(conn);
+        ch.player.level = level;
+        let id = g.create_char(ch);
+        g.players_by_name.insert(name.to_lowercase(), id);
+        id
+    }
+
+    #[test]
+    fn do_advance_sets_xp_floor_and_confirms_to_immortal() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        let vict = connected_player(&mut g, ConnId(2), "Mort", 2);
+        g.char_to_room(imm, room);
+        g.char_to_room(vict, room);
+
+        do_advance(&mut g, imm, "Mort 10", 0);
+
+        let victim = g.get_char(vict).unwrap();
+        assert_eq!(victim.player.level, 10);
+        assert_eq!(victim.points.exp, exp_to_level(9));
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("Okay.\r\n"));
+        assert!(out.contains("(GC) Imm has advanced Mort to level 10."));
     }
 }
