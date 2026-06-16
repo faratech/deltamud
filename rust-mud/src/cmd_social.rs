@@ -202,6 +202,19 @@ pub fn find_social(arg: &str) -> Option<&'static str> {
         .map(|s| s.command.as_str())
 }
 
+/// Commands visible in the `socials` listing for a character level.
+pub fn social_commands_for_level(level: Level) -> Vec<String> {
+    let Some(table) = SOCIALS.get() else {
+        return Vec::new();
+    };
+    table
+        .list
+        .iter()
+        .filter(|s| level as i32 >= s.min_level_char)
+        .map(|s| s.command.clone())
+        .collect()
+}
+
 /// Look up a social by its exact command name (post-resolution).
 fn lookup<'a>(table: &'a SocialTable, command: &str) -> Option<&'a SocialMessg> {
     table.by_command.get(command).map(|&i| &table.list[i])

@@ -2540,12 +2540,39 @@ pub fn do_users(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     );
 }
 
-/// do_gen_ps — page various static text blocks. Most text bodies are not in the
-/// contract; the ones with no source render an empty/placeholder line, while
-/// clear/whoami/version are fully reproduced.
+fn page_or_send_text(g: &mut GameState, ch: CharId, body: &str) {
+    let desc = g.get_char(ch).and_then(|c| c.desc);
+    if let Some(conn) = desc {
+        crate::modify::page_string(g, conn, body);
+    } else {
+        g.send_to_char(ch, body);
+    }
+}
+
+/// do_gen_ps — page various static text blocks.
 pub fn do_gen_ps(g: &mut GameState, ch: CharId, _arg: &str, subcmd: i32) {
     // SCMD_* (do_gen_ps): see command_table.rs.
     match subcmd {
+        0 => {
+            let body = g.info.clone();
+            page_or_send_text(g, ch, &body);
+        }
+        1 => {
+            let body = g.handbook.clone();
+            page_or_send_text(g, ch, &body);
+        }
+        2 => {
+            let body = g.credits.clone();
+            page_or_send_text(g, ch, &body);
+        }
+        3 => {
+            let body = g.news.clone();
+            page_or_send_text(g, ch, &body);
+        }
+        5 => {
+            let body = g.policies.clone();
+            page_or_send_text(g, ch, &body);
+        }
         10 => g.send_to_char(ch, "\x1b[H\x1b[J"), // SCMD_CLEAR
         11 => {
             // SCMD_WHOAMI
@@ -2560,9 +2587,12 @@ pub fn do_gen_ps(g: &mut GameState, ch: CharId, _arg: &str, subcmd: i32) {
             g.send_to_char(ch, constants::CIRCLEMUD_VERSION);
         }
         8 => {
-            // SCMD_MOTD — the only text body the contract exposes (GameState::motd).
-            let motd = g.motd.clone();
-            g.send_to_char(ch, &motd);
+            let body = g.motd.clone();
+            page_or_send_text(g, ch, &body);
+        }
+        9 => {
+            let body = g.imotd.clone();
+            page_or_send_text(g, ch, &body);
         }
         4 => {
             // SCMD_WIZLIST — C send_to_char(wizlist, ch). wizlist is the global
@@ -2581,8 +2611,10 @@ pub fn do_gen_ps(g: &mut GameState, ch: CharId, _arg: &str, subcmd: i32) {
                 None => g.send_to_char(ch, "The immlist is not available.\r\n"),
             }
         }
-        // The remaining bodies (credits/news/info/imotd/handbook/policies/
-        // circlemud) are not loaded in the contract.
+        12 => {
+            let body = g.circlemud.clone();
+            page_or_send_text(g, ch, &body);
+        }
         _ => {}
     }
 }
@@ -3060,6 +3092,23 @@ pub fn do_commands(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
         if vict == ch { "you".to_string() } else { vname }
     );
 
+    if want_socials {
+        let mut no = 1;
+        for name in crate::cmd_social::social_commands_for_level(vict_level) {
+            if vict_npc {
+                continue;
+            }
+            buf.push_str(&format!("&g{:<11}&n", name));
+            if no % 7 == 0 {
+                buf.push_str("\r\n");
+            }
+            no += 1;
+        }
+        buf.push_str("\r\n");
+        g.send_to_char(ch, &buf);
+        return;
+    }
+
     // Build a sorted command-name list from CMD_INFO (skipping RESERVED + "\n").
     let mut entries: Vec<(&'static str, u8, bool)> = Vec::new(); // (name, min_level, is_wizcmd)
     for e in CMD_INFO {
@@ -3073,11 +3122,6 @@ pub fn do_commands(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
 
     let mut no = 1;
     for (name, min_level, is_wiz) in entries {
-        // Socials aren't a distinct type in the Rust table; the socials list is
-        // therefore empty (matching "no socials defined" behaviour).
-        if want_socials {
-            continue;
-        }
         let want_type_ok = if want_wiz { is_wiz } else { !is_wiz };
         if !want_type_ok {
             continue;
@@ -3506,5 +3550,56 @@ mod tests {
         let out = &g.descriptors.get(&conn).unwrap().outbuf;
         assert!(out.contains("Target"));
         assert!(out.contains("nearby to the north"));
+    }
+
+    fn connected_player(g: &mut GameState, conn: ConnId, name: &str, level: Level) -> CharId {
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        ch.desc = Some(conn);
+        ch.player.level = level;
+        let id = g.create_char(ch);
+        g.players_by_name.insert(name.to_lowercase(), id);
+        id
+    }
+
+    #[test]
+    fn do_gen_ps_outputs_loaded_text_bodies() {
+        let mut g = GameState::new(Config::default());
+        let ch = connected_player(&mut g, ConnId(1), "Reader", 1);
+        g.credits = "Credits body\r\n".to_string();
+        g.news = "News body\r\n".to_string();
+        g.info = "Info body\r\n".to_string();
+        g.handbook = "Handbook body\r\n".to_string();
+        g.policies = "Policies body\r\n".to_string();
+        g.imotd = "Immortal MOTD body\r\n".to_string();
+        g.circlemud = "CircleMUD body\r\n".to_string();
+
+        for subcmd in [2, 3, 0, 1, 5, 9, 12] {
+            do_gen_ps(&mut g, ch, "", subcmd);
+        }
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("Credits body"));
+        assert!(out.contains("News body"));
+        assert!(out.contains("Info body"));
+        assert!(out.contains("Handbook body"));
+        assert!(out.contains("Policies body"));
+        assert!(out.contains("Immortal MOTD body"));
+        assert!(out.contains("CircleMUD body"));
+    }
+
+    #[test]
+    fn do_commands_lists_loaded_socials() {
+        crate::cmd_social::boot_socials(Some("../lib/misc/socials"));
+        let mut g = GameState::new(Config::default());
+        let ch = connected_player(&mut g, ConnId(1), "Reader", 1);
+
+        do_commands(&mut g, ch, "", 1);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("The following socials are available to you:"));
+        assert!(out.contains("accuse"));
+        assert!(out.contains("applaud"));
     }
 }

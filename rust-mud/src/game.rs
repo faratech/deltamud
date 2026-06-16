@@ -183,11 +183,24 @@ impl Game {
 
     pub async fn load_text_files(&mut self, lib_path: &str) {
         self.lib_path = lib_path.to_string();
-        let motd_path = std::path::Path::new(lib_path).join("text").join("motd");
-        match tokio::fs::read_to_string(&motd_path).await {
-            Ok(s) => self.state.motd = s,
-            Err(_) => self.state.motd = "\r\nWelcome to DeltaMUD!\r\n".to_string(),
-        }
+        let text_dir = std::path::Path::new(lib_path).join("text");
+        self.state.credits =
+            tokio::fs::read_to_string(text_dir.join("credits")).await.unwrap_or_default();
+        self.state.news =
+            tokio::fs::read_to_string(text_dir.join("news")).await.unwrap_or_default();
+        self.state.info =
+            tokio::fs::read_to_string(text_dir.join("info")).await.unwrap_or_default();
+        self.state.handbook =
+            tokio::fs::read_to_string(text_dir.join("handbook")).await.unwrap_or_default();
+        self.state.policies =
+            tokio::fs::read_to_string(text_dir.join("policies")).await.unwrap_or_default();
+        self.state.motd = tokio::fs::read_to_string(text_dir.join("motd"))
+            .await
+            .unwrap_or_else(|_| "\r\nWelcome to DeltaMUD!\r\n".to_string());
+        self.state.imotd =
+            tokio::fs::read_to_string(text_dir.join("imotd")).await.unwrap_or_default();
+        self.state.circlemud =
+            tokio::fs::read_to_string(text_dir.join("circlemud")).await.unwrap_or_default();
     }
 
     pub fn prime_zones(&mut self) {
