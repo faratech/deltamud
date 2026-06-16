@@ -836,6 +836,13 @@ fn keeper_tell_named(g: &mut GameState, keeper: CharId, target: CharId, body: &s
     act(g, &line, false, keeper, None, ActArg::Char(target), To::Vict);
 }
 
+fn page_string_to_char(g: &mut GameState, ch: CharId, body: &str) {
+    match g.get_char(ch).and_then(|c| c.desc) {
+        Some(conn) => crate::modify::page_string(g, conn, body),
+        None => g.send_to_char(ch, body),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // is_ok_char / is_open / is_ok (shop.c).
 // ---------------------------------------------------------------------------
@@ -1826,7 +1833,7 @@ fn shopping_list(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_
         }
     }
 
-    g.send_to_char(ch, &buf);
+    page_string_to_char(g, ch, &buf);
     let _ = &mut shop;
 }
 
@@ -2112,7 +2119,7 @@ fn list_all_shops(g: &mut GameState, ch: CharId) {
             customer_string(shop, false)
         ));
     }
-    g.send_to_char(ch, &buf);
+    page_string_to_char(g, ch, &buf);
 }
 
 fn list_detailed_shop(g: &mut GameState, ch: CharId, shop: &ShopData, shop_idx: usize) {
@@ -2223,9 +2230,19 @@ mod tests {
     use super::*;
     use crate::character::Character;
     use crate::config::Config;
+    use crate::connection::Descriptor;
 
     fn add_player(g: &mut GameState, name: &str, level: Level) -> CharId {
         let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        ch.player.level = level;
+        g.create_char(ch)
+    }
+
+    fn connected_player(g: &mut GameState, conn: ConnId, name: &str, level: Level) -> CharId {
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        ch.desc = Some(conn);
         ch.player.level = level;
         g.create_char(ch)
     }
@@ -2243,5 +2260,33 @@ mod tests {
         assert!(!is_god(&g, high_level_without_cmds));
         assert!(is_god(&g, command_granted_mortal));
         assert!(!is_god(&g, npc));
+    }
+
+    #[test]
+    fn list_all_shops_uses_pager_for_long_output() {
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(64);
+        let ch = connected_player(&mut g, conn, "Imm", LVL_IMPL);
+
+        {
+            let mut guard = shops().lock().unwrap();
+            guard.clear();
+            for i in 0..40 {
+                let mut shop = ShopData::new(10_000 + i);
+                shop.in_room.push(20_000 + i);
+                shop.keeper = 30_000 + i;
+                guard.push(shop);
+            }
+        }
+
+        list_all_shops(&mut g, ch);
+
+        assert!(crate::modify::page_active(conn));
+        let out = &g.descriptors.get(&conn).unwrap().outbuf;
+        assert!(out.contains("Virtual"));
+        assert!(!out.contains("10039"));
+
+        shops().lock().unwrap().clear();
+        let _ = crate::modify::page_input(&mut g, conn, "q");
     }
 }
