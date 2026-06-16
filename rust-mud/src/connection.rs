@@ -7,9 +7,122 @@ use crate::types::{CharId, ConnId};
 use anyhow::Result;
 use std::net::SocketAddr;
 use std::os::unix::io::{AsRawFd, RawFd};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+
+// --- Telnet protocol constants (RFC 854 / 1073 / 1091) ---
+const IAC: u8 = 255; // Interpret As Command
+const DONT: u8 = 254;
+const DO: u8 = 253;
+const WONT: u8 = 252;
+const WILL: u8 = 251;
+const SB: u8 = 250; // Subnegotiation begin
+const SE: u8 = 240; // Subnegotiation end
+
+/// Byte-level telnet input filter. Strips IAC command sequences from a raw byte
+/// stream so negotiation a client sends on connect (Mudlet's NAWS/TTYPE/GMCP
+/// hello, plain `IAC DO/WILL` bursts) never corrupts the input line — notably
+/// the first one (the name prompt). The C server does this in comm.c
+/// (process_input's telnet scanner); we mirror it as a small state machine.
+///
+/// `feed()` consumes a byte slice, emits any completed input lines via the
+/// `on_line` callback, and pushes refusal bytes (`IAC WONT/DONT <opt>`) into
+/// `refuse` for options we don't support so clients don't block waiting for a
+/// reply.
+struct TelnetFilter {
+    state: TelnetState,
+    /// Accumulated printable bytes of the line in progress.
+    line: Vec<u8>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TelnetState {
+    /// Normal data.
+    Data,
+    /// Saw IAC; next byte is a command.
+    Iac,
+    /// Saw IAC <WILL|WONT|DO|DONT>; next byte is the option.
+    Negotiate(u8),
+    /// Inside IAC SB ...; consuming subnegotiation data until IAC SE.
+    Subneg,
+    /// Inside subnegotiation and saw an IAC; next byte is SE (end) or escaped.
+    SubnegIac,
+}
+
+impl TelnetFilter {
+    fn new() -> Self {
+        TelnetFilter {
+            state: TelnetState::Data,
+            line: Vec::with_capacity(256),
+        }
+    }
+
+    /// Feed raw bytes. Completed lines (terminated by `\n`, with a trailing
+    /// `\r` stripped) are passed to `on_line` as owned Strings (lossy UTF-8).
+    /// Refusal bytes to send back to the client are appended to `refuse`.
+    fn feed<F: FnMut(String)>(&mut self, data: &[u8], refuse: &mut Vec<u8>, mut on_line: F) {
+        for &b in data {
+            match self.state {
+                TelnetState::Data => match b {
+                    IAC => self.state = TelnetState::Iac,
+                    b'\n' => {
+                        // Strip a single trailing '\r' if present.
+                        if self.line.last() == Some(&b'\r') {
+                            self.line.pop();
+                        }
+                        let s = String::from_utf8_lossy(&self.line).into_owned();
+                        self.line.clear();
+                        on_line(s);
+                    }
+                    // Drop bare CR and NUL (telnet sends "\r\0" for a bare CR);
+                    // they are not line content. '\r' before '\n' is handled
+                    // above by the trailing-CR strip.
+                    b'\0' => {}
+                    _ => self.line.push(b),
+                },
+                TelnetState::Iac => match b {
+                    IAC => {
+                        // Escaped 0xFF -> literal data byte.
+                        self.line.push(IAC);
+                        self.state = TelnetState::Data;
+                    }
+                    WILL | WONT | DO | DONT => self.state = TelnetState::Negotiate(b),
+                    SB => self.state = TelnetState::Subneg,
+                    // Any other 2-byte IAC command (NOP, GA, AYT, etc.): consume.
+                    _ => self.state = TelnetState::Data,
+                },
+                TelnetState::Negotiate(verb) => {
+                    // We support no telnet options. Refuse so the client doesn't
+                    // wait: answer DO/WILL with WONT/DONT respectively. We do not
+                    // reply to WONT/DONT (no further response is required).
+                    match verb {
+                        DO => refuse.extend_from_slice(&[IAC, WONT, b]),
+                        WILL => refuse.extend_from_slice(&[IAC, DONT, b]),
+                        _ => {} // WONT / DONT: nothing to send.
+                    }
+                    self.state = TelnetState::Data;
+                }
+                TelnetState::Subneg => {
+                    if b == IAC {
+                        self.state = TelnetState::SubnegIac;
+                    }
+                    // else: still inside subneg payload, consume the byte.
+                }
+                TelnetState::SubnegIac => {
+                    if b == SE {
+                        // End of subnegotiation.
+                        self.state = TelnetState::Data;
+                    } else {
+                        // IAC IAC inside SB is an escaped 0xFF (still payload),
+                        // or a stray IAC <other>; either way stay in subneg.
+                        self.state = TelnetState::Subneg;
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// Connection / login state machine. Editor/OLC states will extend this via
 /// the nested-input stack (Batch 1 Pillar D groundwork: `editor`).
@@ -112,19 +225,60 @@ pub const COLOR_CODES: &[(&str, &str)] = &[
     ("&W", "\x1b[1;37m"),
 ];
 
-pub fn render_color(text: &str) -> String {
-    let mut result = text.to_string();
+/// Map a color-code char (the byte after `&`) to its ANSI escape, or None if
+/// it is not a recognized code. Derived from COLOR_CODES (every entry is a
+/// two-byte `&x` sequence, so the code char is the second byte of `.0`).
+fn color_ansi(c: char) -> Option<&'static str> {
     for (code, ansi) in COLOR_CODES {
-        result = result.replace(code, ansi);
+        // code is "&x"; match on the second char.
+        if code.as_bytes().len() == 2 && code.as_bytes()[1] == c as u8 {
+            return Some(ansi);
+        }
+    }
+    None
+}
+
+/// Render DeltaMUD `&x` color codes to ANSI in a single pass. A `&` followed by
+/// a known code char emits the escape; a `&` followed by anything else (or a
+/// trailing `&`) passes through unchanged.
+pub fn render_color(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '&' {
+            if let Some(&next) = chars.peek() {
+                if let Some(ansi) = color_ansi(next) {
+                    result.push_str(ansi);
+                    chars.next(); // consume the code char
+                    continue;
+                }
+            }
+            // Lone '&' or unknown code char: pass the '&' through unchanged.
+            result.push('&');
+        } else {
+            result.push(c);
+        }
     }
     result
 }
 
-/// Strip color codes (for players with color off / for logs).
+/// Strip color codes (for players with color off / for logs) in a single pass.
+/// A `&` followed by a known code char is removed; any other `&` passes through.
 pub fn strip_color(text: &str) -> String {
-    let mut result = text.to_string();
-    for (code, _) in COLOR_CODES {
-        result = result.replace(code, "");
+    let mut result = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '&' {
+            if let Some(&next) = chars.peek() {
+                if color_ansi(next).is_some() {
+                    chars.next(); // drop the code char, emit nothing
+                    continue;
+                }
+            }
+            result.push('&');
+        } else {
+            result.push(c);
+        }
     }
     result
 }
@@ -170,8 +324,7 @@ pub async fn handle_client(
     let fd = stream.as_raw_fd();
     let host = addr.ip().to_string();
 
-    let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
+    let (mut reader, mut writer) = stream.into_split();
 
     let (output_tx, mut output_rx) = mpsc::channel::<String>(256);
 
@@ -195,24 +348,55 @@ pub async fn handle_client(
         }
     });
 
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) => break, // EOF
-            Ok(_) => {
-                let input = line.trim_end_matches(['\r', '\n']).to_string();
-                game_tx
-                    .send(GameMessage::Input { conn_id, input })
-                    .await?;
-            }
-            Err(_) => break,
-        }
-    }
+    run_input_loop(&mut reader, conn_id, &game_tx, &output_tx).await;
 
     let _ = game_tx.send(GameMessage::Disconnect { conn_id }).await;
     write_handle.abort();
     Ok(())
+}
+
+/// Pump raw bytes through the telnet filter, forwarding completed lines to the
+/// Game and pushing any negotiation refusals back through the output channel.
+/// Returns on EOF or read error. Shared by fresh and recovered connections.
+async fn run_input_loop<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+    conn_id: ConnId,
+    game_tx: &mpsc::Sender<GameMessage>,
+    output_tx: &mpsc::Sender<String>,
+) {
+    let mut filter = TelnetFilter::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match reader.read(&mut buf).await {
+            Ok(0) => break, // EOF
+            Ok(n) => n,
+            Err(_) => break,
+        };
+
+        let mut lines: Vec<String> = Vec::new();
+        let mut refuse: Vec<u8> = Vec::new();
+        filter.feed(&buf[..n], &mut refuse, |line| lines.push(line));
+
+        // Send negotiation refusals (IAC WONT/DONT <opt>) back to the client so
+        // it doesn't block waiting for a reply. The writer only ever calls
+        // `.as_bytes()`, so wrapping the raw bytes in a String is lossless.
+        if !refuse.is_empty() {
+            let msg = unsafe { String::from_utf8_unchecked(refuse) };
+            if output_tx.send(msg).await.is_err() {
+                break;
+            }
+        }
+
+        for input in lines {
+            if game_tx
+                .send(GameMessage::Input { conn_id, input })
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
 }
 
 /// Copyover recovery task (comm.c copyover_recover). The socket fd was inherited
@@ -229,8 +413,7 @@ pub async fn handle_recovered(
     host: String,
     game_tx: mpsc::Sender<GameMessage>,
 ) -> Result<()> {
-    let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
+    let (mut reader, mut writer) = stream.into_split();
 
     let (output_tx, mut output_rx) = mpsc::channel::<String>(256);
 
@@ -255,20 +438,7 @@ pub async fn handle_recovered(
         }
     });
 
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) => break, // EOF
-            Ok(_) => {
-                let input = line.trim_end_matches(['\r', '\n']).to_string();
-                game_tx
-                    .send(GameMessage::Input { conn_id, input })
-                    .await?;
-            }
-            Err(_) => break,
-        }
-    }
+    run_input_loop(&mut reader, conn_id, &game_tx, &output_tx).await;
 
     let _ = game_tx.send(GameMessage::Disconnect { conn_id }).await;
     write_handle.abort();

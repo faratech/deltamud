@@ -10,12 +10,81 @@ use crate::state::GameState;
 use crate::types::*;
 use crate::DatabaseInterface;
 use anyhow::Result;
-use log::{info, warn};
+use log::{error, info, warn};
 use std::collections::HashMap;
 use std::os::unix::io::RawFd;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
+
+// Telnet ECHO negotiation (RFC 857). The server WILL-ECHO before a password
+// prompt so the client suppresses its own local echo (cleartext password no
+// longer appears on the user's screen), and WONT-ECHO when leaving the password
+// state so normal local echo resumes. These three-byte control sequences must
+// reach the socket verbatim; they are NOT routed through the outbuf/render_color
+// String path (render_color iterates `.chars()`, which would mangle the lone
+// 0xFF IAC byte). Instead they go straight down the per-conn output channel,
+// exactly like connection.rs's negotiation-refusal path, which wraps raw telnet
+// bytes via String::from_utf8_unchecked and relies on the writer only ever
+// calling `.as_bytes()`.
+const IAC_WILL_ECHO: [u8; 3] = [0xFF, 0xFB, 0x01]; // IAC WILL ECHO
+const IAC_WONT_ECHO: [u8; 3] = [0xFF, 0xFC, 0x01]; // IAC WONT ECHO
+
+/// True if `s` is one of the password-entry connection states (the only states
+/// whose prompts must suppress client-side echo).
+fn is_password_state(s: ConState) -> bool {
+    matches!(
+        s,
+        ConState::GetOldPassword | ConState::GetNewPassword | ConState::ConfirmPassword
+    )
+}
+
+/// Run a player command through the interpreter inside catch_unwind so a panic
+/// in any single command (bad index, arithmetic overflow in debug, a stray
+/// unwrap deep in the world) is contained to that command instead of killing
+/// the whole single-threaded Game task (which would disconnect every player).
+///
+/// AssertUnwindSafe is required because `&mut GameState` is not UnwindSafe; we
+/// accept the bounded risk that a panic caught mid-mutation leaves minor state
+/// inconsistency — vastly preferable to the server dying. The recovered payload
+/// is logged with the offending player + input, which is the key diagnostic.
+fn dispatch_command_isolated(
+    state: &mut GameState,
+    ch: CharId,
+    input: &str,
+    context: &str,
+) -> bool {
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        command_interpreter(state, ch, input);
+    }));
+    match res {
+        Ok(()) => true,
+        Err(payload) => {
+            let msg = panic_payload_str(&payload);
+            let pname = state
+                .get_char(ch)
+                .map(|c| c.get_name().to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            error!(
+                "PANIC contained in command [{}] from player '{}' input {:?}: {}",
+                context, pname, input, msg
+            );
+            state.send_to_char(ch, "An error occurred processing that command.\r\n");
+            false
+        }
+    }
+}
+
+/// Extract a human-readable message from a catch_unwind payload.
+fn panic_payload_str(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
 
 pub struct Game {
     state: GameState,
@@ -64,10 +133,45 @@ impl Game {
     pub async fn run(&mut self, mut game_rx: mpsc::Receiver<GameMessage>) -> Result<()> {
         info!("Game loop starting...");
         let mut tick = interval(Duration::from_millis(100)); // 10 pulses/sec
+
+        // SIGTERM stream (systemd stop / kill -TERM). Ctrl-C (SIGINT) is handled
+        // by tokio::signal::ctrl_c. On either, we run a clean shutdown: crash-save
+        // every player + their objects, flush descriptors, and return.
+        let mut sigterm = match tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        ) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                warn!("Could not install SIGTERM handler: {} (Ctrl-C only)", e);
+                None
+            }
+        };
+
         loop {
+            // When the SIGTERM stream failed to install, fall back to a future
+            // that is pending forever so the select arm is inert.
+            let sigterm_fut = async {
+                match sigterm.as_mut() {
+                    Some(s) => {
+                        s.recv().await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
+
             tokio::select! {
                 Some(msg) = game_rx.recv() => self.handle_message(msg).await,
                 _ = tick.tick() => self.heartbeat(),
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received Ctrl-C (SIGINT); beginning graceful shutdown.");
+                    self.shutdown().await;
+                    return Ok(());
+                }
+                _ = sigterm_fut => {
+                    info!("Received SIGTERM; beginning graceful shutdown.");
+                    self.shutdown().await;
+                    return Ok(());
+                }
             }
             // Async bridge for OFFLINE immortal commands (set/stat/show on a
             // logged-off player): cmd_wizard queues an OfflineOp; here — between
@@ -76,6 +180,50 @@ impl Game {
             self.drain_offline_ops().await;
             self.flush_all().await;
         }
+    }
+
+    /// Graceful-shutdown sequence (CircleMUD's SIGTERM/hupsig + Crash_save_all):
+    /// crash-save every in-world player and their objects to disk, push the
+    /// final "shutting down" notice + any buffered output to every descriptor,
+    /// log the count, and return so `run` exits cleanly instead of being killed
+    /// with unsaved state.
+    async fn shutdown(&mut self) {
+        // Count online players (those with a character attached) before saving.
+        let n_players = self
+            .state
+            .descriptors
+            .values()
+            .filter(|d| d.character.is_some())
+            .count();
+
+        // Notify everyone still connected.
+        let conn_ids: Vec<ConnId> = self.state.descriptors.keys().copied().collect();
+        for cid in &conn_ids {
+            self.out(*cid, "\r\nThe server is shutting down. Saving and disconnecting...\r\n");
+        }
+
+        // Crash-save all rent/inventory + persist every online player file.
+        crate::objsave::crash_save_all(&mut self.state);
+        for cid in &conn_ids {
+            if let Some(ch) = self.state.descriptors.get(cid).and_then(|d| d.character) {
+                if let Some(c) = self.state.get_char(ch) {
+                    if !c.is_npc {
+                        let snapshot = c.clone();
+                        if let Err(e) = self.db.save_player(&snapshot).await {
+                            warn!("shutdown save_player({}) failed: {}", snapshot.get_name(), e);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Flush all buffered output (the shutdown notice) to the writer tasks.
+        self.flush_all().await;
+        // Give the per-connection writer tasks a moment to drain to the socket
+        // before the process exits and their channels are dropped.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        info!("Shutting down, saved {} player(s).", n_players);
     }
 
     async fn handle_message(&mut self, msg: GameMessage) {
@@ -164,7 +312,7 @@ impl Game {
                 None => continue,
             };
             if let Some(ch) = self.state.descriptors.get(&cid).and_then(|d| d.character) {
-                command_interpreter(&mut self.state, ch, &input);
+                dispatch_command_isolated(&mut self.state, ch, &input, "input-queue");
             }
             let st = self.state.descriptors.get(&cid).map(|d| d.state);
             if st.is_some() && st != Some(ConState::Close) {
@@ -299,6 +447,19 @@ impl Game {
                 }
             }
             _ => {}
+        }
+
+        // If this input was a password entry and we have now transitioned OUT of
+        // the password flow (login success -> Playing, login fail -> Close, or
+        // new-password confirmed -> GetSex), tell the client the server WONT echo
+        // so normal local echo resumes. Staying within the password flow
+        // (GetNewPassword -> ConfirmPassword, or a retry) keeps echo suppressed.
+        if is_password_state(state) {
+            let new_state = self.state.descriptors.get(&conn_id).map(|d| d.state);
+            let still_password = new_state.map(is_password_state).unwrap_or(false);
+            if !still_password {
+                self.send_raw_bytes(conn_id, &IAC_WONT_ECHO);
+            }
         }
     }
 
@@ -575,7 +736,12 @@ impl Game {
             // just replay against the live char — no load/extract needed.
             let key = op.target.to_lowercase();
             if self.state.players_by_name.contains_key(&key) {
-                command_interpreter(&mut self.state, op.requester, &op.command);
+                dispatch_command_isolated(
+                    &mut self.state,
+                    op.requester,
+                    &op.command,
+                    "offline-op-live",
+                );
                 continue;
             }
 
@@ -609,7 +775,12 @@ impl Game {
             // present, the handler's normal online branch applies the change (and
             // the immortal sees the standard output); the offline branch can't
             // re-trigger (the name resolves), so there's no re-deferral.
-            command_interpreter(&mut self.state, op.requester, &op.command);
+            dispatch_command_isolated(
+                &mut self.state,
+                op.requester,
+                &op.command,
+                "offline-op-replay",
+            );
 
             // Snapshot the (possibly edited) record, drop it from the world, and
             // persist — mirroring C's save_char(ch, NOWHERE) after the edit.
@@ -633,6 +804,24 @@ impl Game {
 
     // ---- Heartbeat ------------------------------------------------------
     fn heartbeat(&mut self) {
+        // Crash-isolate the whole pulse: a panic in any handler (a mob script,
+        // combat, weather, ...) must NOT kill the single Game task and freeze the
+        // server. Catch it, log it (the panic hook also records a backtrace), and
+        // continue on the next pulse. (Does not protect against a stack overflow /
+        // abort — those are not unwinding panics.)
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.heartbeat_inner();
+        }));
+        if let Err(e) = r {
+            log::error!(
+                "PANIC in heartbeat (pulse {}): {} — skipping rest of pulse",
+                self.state.pulse,
+                panic_payload_str(&e)
+            );
+        }
+    }
+
+    fn heartbeat_inner(&mut self) {
         self.state.pulse = self.state.pulse.wrapping_add(1);
         let pulse = self.state.pulse;
 
@@ -764,6 +953,13 @@ impl Game {
             }
             _ => String::new(),
         };
+        // Before a password prompt, tell the client the server WILL echo so it
+        // suppresses local echo (cleartext password no longer shows). The IAC
+        // bytes go straight down the output channel; the prompt text follows in
+        // the next outbuf flush, so the client sees WILL-ECHO first.
+        if is_password_state(state) {
+            self.send_raw_bytes(conn_id, &IAC_WILL_ECHO);
+        }
         if !prompt.is_empty() {
             if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                 d.write(&prompt);
@@ -775,6 +971,24 @@ impl Game {
     fn out(&mut self, conn_id: ConnId, msg: &str) {
         if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
             d.write(msg);
+        }
+    }
+
+    /// Send raw bytes straight down a connection's output channel, bypassing the
+    /// outbuf/render_color String pipeline (used for telnet IAC control
+    /// sequences whose lone 0xFF byte must not pass through `.chars()`). Mirrors
+    /// connection.rs's negotiation-refusal path: the writer only ever calls
+    /// `.as_bytes()`, so wrapping arbitrary bytes in a String is lossless.
+    fn send_raw_bytes(&self, conn_id: ConnId, bytes: &[u8]) {
+        if let Some(tx) = self.outputs.get(&conn_id) {
+            // SAFETY: the downstream writer only calls `.as_bytes()` on this
+            // String and never treats it as UTF-8 text; the bytes round-trip
+            // unchanged (same contract as connection.rs run_input_loop refusals).
+            let s = unsafe { String::from_utf8_unchecked(bytes.to_vec()) };
+            // try_send avoids making this async; the bounded(256) channel is
+            // effectively never full for a 3-byte control sequence, and dropping
+            // an echo-negotiation byte under extreme backpressure is harmless.
+            let _ = tx.try_send(s);
         }
     }
     fn descriptor_name(&self, conn_id: ConnId) -> String {

@@ -90,12 +90,31 @@ mod world;
 use anyhow::Result;
 use config::Config;
 use log::{info, warn};
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio::sync::Semaphore;
+use tokio::time::Instant;
 use types::ConnId;
+
+/// Maximum number of simultaneous connections (descriptors). Overridable via the
+/// `MUD_MAX_CONN` env var. The accept loop holds a Semaphore of this many
+/// permits; each accepted connection takes one permit (passed into the task and
+/// dropped on disconnect), so a flood can never spawn unbounded tasks/sockets.
+const DEFAULT_MAX_CONN: usize = 256;
+
+/// Per-IP new-connection rate limit: at most `CONN_BURST` connections from one
+/// ip within any `CONN_WINDOW_MS` window. This permits legitimate bursts (many
+/// users behind one NAT/proxy share an ip, and a single user may open a couple
+/// of sockets) while still cutting off a true flood. Overridable via
+/// `MUD_CONN_BURST` / `MUD_CONN_WINDOW_MS`.
+const DEFAULT_CONN_BURST: u32 = 10;
+const DEFAULT_CONN_WINDOW_MS: u64 = 1000;
 
 /// One recovered playing connection inherited across a copyover exec
 /// (comm.c copyover_recover, per-line `fd name host`).
@@ -259,6 +278,25 @@ async fn main() -> Result<()> {
         .filter_level(log::LevelFilter::Info)
         .init();
 
+    // Log every panic with a captured backtrace (the default hook only prints a
+    // terse line). catch_unwind around command dispatch + the heartbeat keeps the
+    // server alive; this hook makes the cause diagnosable when it does fire.
+    std::panic::set_hook(Box::new(|info| {
+        let bt = std::backtrace::Backtrace::force_capture();
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "?".into());
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic>".into());
+        log::error!("PANIC at {}: {}\nbacktrace:\n{}", loc, payload, bt);
+        eprintln!("PANIC at {}: {}\nbacktrace:\n{}", loc, payload, bt);
+    }));
+
     info!("DeltaMUD (Rust) starting...");
     let mut config = Config::from_env();
 
@@ -379,13 +417,14 @@ async fn main() -> Result<()> {
     // task uses, so re-seeds land in the live MockDatabase before recovery).
     let db_for_recovery = db.clone();
 
-    let _game = tokio::spawn(async move {
+    let game_handle = tokio::spawn(async move {
         let mut game = game::Game::new(state, db);
         game.load_text_files(&lib_path).await;
         game.prime_zones();
         if let Err(e) = game.run(game_rx).await {
             eprintln!("Game loop error: {}", e);
         }
+        // game.run() returns only on graceful shutdown (SIGTERM/Ctrl-C).
     });
 
     // Copyover detection (comm.c init_game: `if (!fCopyOver) init_socket(port)`).
@@ -449,15 +488,138 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Connection caps + rate limiting (DoS / runaway-client protection).
+    let max_conn = std::env::var("MUD_MAX_CONN")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_CONN);
+    let conn_burst = std::env::var("MUD_CONN_BURST")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_CONN_BURST);
+    let conn_window = Duration::from_millis(
+        std::env::var("MUD_CONN_WINDOW_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_CONN_WINDOW_MS),
+    );
+    info!(
+        "Connection limits: max_conn={}, per-IP burst={}/{}ms",
+        max_conn,
+        conn_burst,
+        conn_window.as_millis()
+    );
+    let conn_sem = Arc::new(Semaphore::new(max_conn));
+    // Per-IP recent-connection timestamps for the sliding-window rate limit.
+    // Pruned lazily so the map can't grow without bound.
+    let mut recent_connects: HashMap<IpAddr, Vec<Instant>> = HashMap::new();
+
+    // SIGTERM stream for the accept loop (the Game task installs its own; both
+    // need to know so the process exits, not just the game loop). On either
+    // signal — or when the game task itself returns (it returns only on its own
+    // graceful shutdown) — break the accept loop and exit the process cleanly.
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+
     loop {
-        let (stream, peer) = listener.accept().await?;
+        let sigterm_fut = async {
+            match sigterm.as_mut() {
+                Some(s) => {
+                    s.recv().await;
+                }
+                None => std::future::pending::<()>().await,
+            }
+        };
+
+        let (stream, peer) = tokio::select! {
+            res = listener.accept() => match res {
+                Ok(pair) => pair,
+                Err(e) => {
+                    warn!("accept() error: {}", e);
+                    continue;
+                }
+            },
+            _ = tokio::signal::ctrl_c() => {
+                info!("main: received Ctrl-C; waiting for game task to finish saving.");
+                let _ = game_handle.await;
+                break;
+            }
+            _ = sigterm_fut => {
+                info!("main: received SIGTERM; waiting for game task to finish saving.");
+                let _ = game_handle.await;
+                break;
+            }
+        };
+
+        let ip = peer.ip();
+
+        // Task 3: reject banned hosts at accept, before spawning a handler.
+        // BanType::All means "no connection at all"; we also reject BanType::New
+        // here only insofar as the login nanny still gives BAN_NEW/BAN_SELECT
+        // sites their chance to log in an existing PLR_SITEOK char — so at the
+        // socket level we only hard-drop BAN_ALL. (New/Select are enforced in
+        // the login path where the char's flags are known.)
+        if ban::isbanned(&ip.to_string()) == ban::BanType::All {
+            warn!("Rejected banned host {}", ip);
+            let mut s = stream;
+            let _ = s.write_all(b"You are banned from this server.\r\n").await;
+            let _ = s.shutdown().await;
+            continue;
+        }
+
+        // Task 5b: per-IP sliding-window new-connection rate limit. Keep only the
+        // timestamps within the window, then reject if the burst cap is reached.
+        let now = Instant::now();
+        let times = recent_connects.entry(ip).or_default();
+        times.retain(|t| now.duration_since(*t) < conn_window);
+        if times.len() as u32 >= conn_burst {
+            warn!("Rate-limiting connection flood from {}", ip);
+            let mut s = stream;
+            let _ = s
+                .write_all(b"You are connecting too rapidly. Please wait a moment.\r\n")
+                .await;
+            let _ = s.shutdown().await;
+            continue;
+        }
+        times.push(now);
+        // Lazily prune ips with no recent connections so the map can't grow
+        // without bound under a wide source-ip spread.
+        if recent_connects.len() > max_conn * 4 {
+            recent_connects.retain(|_, ts| {
+                ts.retain(|t| now.duration_since(*t) < conn_window);
+                !ts.is_empty()
+            });
+        }
+
+        // Task 5a: cap concurrent connections. try_acquire so a flood is
+        // rejected immediately instead of queuing unbounded accepted sockets.
+        let permit = match Arc::clone(&conn_sem).try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                warn!("Connection limit ({}) reached; rejecting {}", max_conn, ip);
+                let mut s = stream;
+                let _ = s
+                    .write_all(b"The server is full. Please try again later.\r\n")
+                    .await;
+                let _ = s.shutdown().await;
+                continue;
+            }
+        };
+
         let id = ConnId(next_conn);
         next_conn += 1;
         let tx = game_tx.clone();
         tokio::spawn(async move {
+            // Hold the permit for the lifetime of the connection; dropping it on
+            // task exit frees a slot for the next client.
+            let _permit = permit;
             if let Err(e) = connection::handle_client(stream, peer, id, tx).await {
                 warn!("client {} error: {}", peer, e);
             }
         });
     }
+
+    info!("Server exiting.");
+    Ok(())
 }

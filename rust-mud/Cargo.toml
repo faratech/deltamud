@@ -25,3 +25,12 @@ libc = "0.2.172"
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+# MUST stay "unwind": game.rs's catch_unwind crash-isolation (a panic in one
+# command must not kill the whole server) depends on stack unwinding. Do NOT
+# set panic = "abort".
+panic = "unwind"
