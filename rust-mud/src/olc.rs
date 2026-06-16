@@ -106,6 +106,29 @@ pub fn clear_active(conn: ConnId) {
     active().lock().unwrap().remove(&conn);
 }
 
+/// Abort whatever OLC editor `conn` is in WITHOUT saving, then clear active.
+/// Called when a descriptor goes away mid-edit (Game::disconnect): the C MUD's
+/// `free_olc` / connection teardown drops the editor's working copy so the
+/// edited vnum's lock is released and the per-conn state doesn't leak until the
+/// next reboot. Dispatches to the owning editor's `abort(conn)`, which removes
+/// the conn's working copy (and any text buffer) from that editor's per-conn
+/// map. No-op if the conn isn't editing.
+pub fn abort_editor(conn: ConnId) {
+    if let Some(kind) = active_editor(conn) {
+        match kind {
+            EditorKind::Redit => crate::redit::abort(conn),
+            EditorKind::Oedit => crate::oedit::abort(conn),
+            EditorKind::Medit => crate::medit::abort(conn),
+            EditorKind::Zedit => crate::zedit::abort(conn),
+            EditorKind::Sedit => crate::sedit::abort(conn),
+            EditorKind::Aedit => crate::aedit::abort(conn),
+            EditorKind::Hedit => crate::hedit::abort(conn),
+            EditorKind::Trigedit => crate::trigedit::abort(conn),
+        }
+    }
+    clear_active(conn);
+}
+
 /// True if `conn` is currently inside any OLC editor. game.rs consults this to
 /// route raw input into `olc_input` instead of the command interpreter.
 pub fn in_olc(conn: ConnId) -> bool {

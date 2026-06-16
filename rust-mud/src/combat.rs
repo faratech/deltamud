@@ -35,6 +35,10 @@ const SKILL_AVOID: u16 = 534;
 const SKILL_RIPOSTE: u16 = 535;
 const AVOID_FACTOR: i32 = 20; // spells.h
 
+// PRF2_* flags (structs.h) used by the intangible/ghost combat guards.
+const PRF2_MBUILDING: i64 = 1 << 6;
+const PRF2_INTANGIBLE: i64 = 1 << 9;
+
 // config.c — PvP gating (pk_allowed is false on this MUD).
 const PK_ALLOWED: bool = false;
 // Position multiplier hack (fight.c) keys off POS_FIGHTING's ordinal (8).
@@ -216,13 +220,30 @@ pub fn get_attacktype(g: &GameState, ch: CharId) -> i32 {
     TYPE_HIT
 }
 
-/// Resolve one attack (fight.c hit()). DeltaMUD: `number(0,100) > chance()`
-/// decides hit vs miss; on a hit, weapon/bare/mob dice + a position multiplier
-/// build the raw damage, which `damage()` then scales by `dam_multi()`.
+/// Resolve one attack (fight.c hit()). Back-compat 2-arg entry: the attack type
+/// is derived from the wielded weapon / bare-hand attack via get_attacktype(),
+/// exactly as the in-line callers (perform_violence, mob/spec/spell hits) want.
 pub fn hit(g: &mut GameState, ch: CharId, victim: CharId) {
+    hit_type(g, ch, victim, TYPE_UNDEFINED);
+}
+
+/// Resolve one attack with an explicit attack type (fight.c hit(ch,vict,type)).
+/// DeltaMUD: `number(0,100) > chance()` decides hit vs miss; on a hit,
+/// weapon/bare/mob dice + a position multiplier build the raw damage, which
+/// `damage()` then scales by `dam_multi()`.
+///
+/// `ty` mirrors C's `type`: TYPE_UNDEFINED means "derive the verb from the
+/// wielded weapon" (the normal melee round), SKILL_BACKSTAB applies the
+/// level-scaled backstab multiplier and is passed through to `damage()`.
+pub fn hit_type(g: &mut GameState, ch: CharId, victim: CharId, ty: i32) {
     // peaceful-room / same-room sanity is handled by callers and damage(); here
     // we just resolve the swing as fight.c hit() does.
-    let attacktype = get_attacktype(g, ch);
+    //
+    // C `hit(ch,victim,type)` forwards `type` to `damage()`; for an untyped
+    // melee swing that resolves to the weapon verb (GET_ATTACKTYPE), and
+    // SKILL_BACKSTAB stays SKILL_BACKSTAB. Match that here.
+    let attacktype = if ty == TYPE_UNDEFINED { get_attacktype(g, ch) } else { ty };
+    let is_backstab = ty == SKILL_BACKSTAB as i32;
 
     let diceroll = g.rng.number(0, 100);
     let awake = g.get_char(victim).map(|c| c.position > Position::Sleeping).unwrap_or(false);
@@ -264,17 +285,59 @@ pub fn hit(g: &mut GameState, ch: CharId, victim: CharId) {
     // At least 1 hp damage per hit.
     dam = dam.max(1);
 
-    // Victim defensive skills (fight.c do_actual_damage, before HP is deducted):
-    // riposte / avoid / parry / dodge. A successful defense consumes the swing.
-    if try_defensive_skills(g, ch, victim, attacktype) {
-        return;
+    // Backstab: multiply the rolled damage by the level-scaled backstab table
+    // (fight.c hit(): `dam *= backstab_mult(GET_LEVEL(ch))`) before damage().
+    if is_backstab {
+        let level = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
+        dam *= backstab_mult(level);
     }
 
+    // NOTE: the riposte/avoid/parry/dodge defensive block does NOT run here.
+    // It lives inside damage_type() (= C do_actual_damage), which engages both
+    // combatants first; running it in hit() would consume the opening swing
+    // before set_fighting and combat would never start (BUG 4).
     damage_type(g, ch, victim, dam, attacktype);
 }
 
+/// backstab_mult(level) (class.c): the level-banded damage multiplier applied
+/// to the backstab weapon roll. Transcribed term-for-term.
+fn backstab_mult(level: Level) -> i32 {
+    let level = level as i32;
+    if level <= 0 {
+        1
+    } else if level <= 7 {
+        2
+    } else if level <= 13 {
+        3
+    } else if level <= 20 {
+        4
+    } else if level <= 28 {
+        5
+    } else if level <= 36 {
+        6
+    } else if level <= 44 {
+        7
+    } else if level <= 52 {
+        8
+    } else if level <= 60 {
+        9
+    } else if level <= 68 {
+        10
+    } else if level <= 76 {
+        11
+    } else if level <= 84 {
+        12
+    } else if (level as u8) < LVL_IMMORT {
+        13
+    } else {
+        // Immortals: C returns a much larger multiplier; keep parity with the
+        // mortal cap so an immortal backstab is at least as strong.
+        20
+    }
+}
+
 /// Victim defensive-skill checks (fight.c do_actual_damage, ~lines 903-979),
-/// run after a melee hit has landed but before any HP is deducted. Returns
+/// run after engagement (set_fighting) but before any HP is deducted. Returns
 /// `true` if the swing was consumed (the caller must not apply its damage):
 ///   * RIPOSTE — victim strikes `ch` back (weapon dice or 2 bare-hand).
 ///   * AVOID   — victim trips `ch` to POS_SITTING + a violence wait-state.
@@ -378,11 +441,72 @@ pub fn damage(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32) {
     damage_type(g, ch, victim, dmg, TYPE_UNDEFINED);
 }
 
-/// do_actual_damage (fight.c): scale the raw damage by dam_multi(), apply it,
+/// do_actual_damage (fight.c): apply the combat guards + engagement, scale the
+/// raw damage by dam_multi(), run the victim's defensive skills, apply HP,
 /// emit the weapon/skill damage message, update position, drive retaliation
 /// and death. `attacktype` selects the verb table and the dam_multi flavour.
 pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, attacktype: i32) {
-    // PK flagging on a non-PK MUD (fight.c do_actual_damage).
+    // Attempt to damage a corpse -> resolve its death and bail (fight.c ~806).
+    if g.get_char(victim).map(|c| c.position <= Position::Dead).unwrap_or(true) {
+        die(g, ch, victim);
+        return;
+    }
+
+    // Peaceful room: ch != victim and ch's room is PEACEFUL (imps excepted).
+    if ch != victim {
+        let ch_lvl = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
+        let peaceful = g
+            .get_char(ch)
+            .and_then(|c| c.in_room)
+            .map(|r| g.room(r).room_flags.contains(RoomFlags::PEACEFUL))
+            .unwrap_or(false);
+        if peaceful && ch_lvl < LVL_IMPL {
+            g.send_to_char(ch, "This room just has such a peaceful, easy feeling...\r\n");
+            return;
+        }
+    }
+
+    // You can't damage an immortal victim, or (as a mortal/NPC) an intangible
+    // victim -> the blow lands for 0 damage (fight.c ~854).
+    let v_imm = g.get_char(victim).map(|c| !c.is_npc && c.player.level >= LVL_IMMORT).unwrap_or(false);
+    let ch_mortal_or_npc = g.get_char(ch).map(|c| c.is_npc || c.player.level < LVL_IMMORT).unwrap_or(true);
+    let v_intangible = g.get_char(victim).map(|c| c.prf2_flags & PRF2_INTANGIBLE != 0).unwrap_or(false);
+    let mut dmg = if v_imm || (ch_mortal_or_npc && v_intangible) { 0 } else { dmg };
+
+    // Intangibles (ghosts) can't fight: stop both and bail (fight.c ~857).
+    let ch_ghost = g.get_char(ch).map(|c| c.prf2_flags & PRF2_INTANGIBLE != 0 && c.prf2_flags & PRF2_MBUILDING == 0).unwrap_or(false);
+    let v_ghost = g.get_char(victim).map(|c| c.prf2_flags & PRF2_INTANGIBLE != 0 && c.prf2_flags & PRF2_MBUILDING == 0).unwrap_or(false);
+    let ch_lvl = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
+    let v_lvl = g.get_char(victim).map(|c| c.player.level).unwrap_or(0);
+    if (ch_ghost && v_lvl < LVL_IMMORT) || (v_ghost && ch_lvl < LVL_IMMORT) {
+        stop_fighting(g, ch);
+        stop_fighting(g, victim);
+        return;
+    }
+
+    // Engagement: start both combatants fighting BEFORE the swing is resolved
+    // (fight.c ~864-877). This is what makes the opening blow actually start a
+    // fight even when the victim parries/dodges it.
+    if victim != ch {
+        let ch_can = g.get_char(ch).map(|c| c.position > Position::Stunned).unwrap_or(false)
+            && g.get_char(ch).and_then(|c| c.fighting).is_none();
+        if ch_can {
+            set_fighting(g, ch, victim);
+        }
+        let v_can = g.get_char(victim).map(|c| c.position > Position::Stunned).unwrap_or(false)
+            && g.get_char(victim).and_then(|c| c.fighting).is_none();
+        if v_can {
+            set_fighting(g, victim, ch);
+            // A mob with MEMORY remembers a PC attacker (fight.c).
+            let ch_is_pc = g.get_char(ch).map(|c| !c.is_npc).unwrap_or(false);
+            let vic_is_npc = g.get_char(victim).map(|c| c.is_npc).unwrap_or(false);
+            if ch_is_pc && vic_is_npc {
+                crate::mobact::remember(g, victim, ch);
+            }
+        }
+    }
+
+    // PK flagging on a non-PK MUD (fight.c do_actual_damage ~892).
     if !PK_ALLOWED {
         check_killer(g, ch, victim);
     }
@@ -390,19 +514,18 @@ pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, atta
     // Damage multiplier. Spells (1..=MAX_SPELLS) use the magical flavour;
     // everything else (weapons / skills / undefined) uses the physical one.
     let mt = if attacktype > 0 && attacktype <= MAX_SPELLS { 1 } else { 0 };
-    let mut dmg = (dmg as f32 * dam_multi(g, ch, victim, mt)) as i32;
+    dmg = (dmg as f32 * dam_multi(g, ch, victim, mt)) as i32;
+
+    // Victim defensive skills (fight.c do_actual_damage ~904): riposte / avoid /
+    // parry / dodge. A successful defense consumes the swing AFTER engagement.
+    if try_defensive_skills(g, ch, victim, attacktype) {
+        return;
+    }
 
     // Clamp to the per-round window and subtract hp.
     dmg = dmg.clamp(0, 1000);
     if let Some(v) = g.get_char_mut(victim) {
         v.points.hit -= dmg;
-    }
-
-    // A mob remembers a PC who strikes it (mobact memory; fight.c).
-    let ch_is_pc = g.get_char(ch).map(|c| !c.is_npc).unwrap_or(false);
-    let vic_is_npc = g.get_char(victim).map(|c| c.is_npc).unwrap_or(false);
-    if ch_is_pc && vic_is_npc {
-        crate::mobact::remember(g, victim, ch);
     }
 
     update_position(g, victim);
@@ -416,13 +539,6 @@ pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, atta
         dam_message(g, dmg, ch, victim, TYPE_HIT);
     }
     // (Spell/skill messages are emitted by the magic subsystem, as in C.)
-
-    // Victim retaliates if not already fighting.
-    if g.get_char(victim).and_then(|c| c.fighting).is_none()
-        && g.get_char(victim).map(|c| c.position > Position::Stunned).unwrap_or(false)
-    {
-        set_fighting(g, victim, ch);
-    }
 
     if g.get_char(victim).map(|c| c.position == Position::Dead).unwrap_or(false) {
         die(g, ch, victim);
@@ -569,6 +685,23 @@ fn die(g: &mut GameState, killer: CharId, victim: CharId) {
                 g.obj_to_obj(oid, corpse);
             }
         }
+
+        // Transfer the victim's gold into the corpse as a money object
+        // (make_corpse, fight.c ~332). The C anti-dupe guard only mints the
+        // coins for an NPC or a still-connected PC; either way the gold is
+        // zeroed so it can't be looted twice.
+        let gold = g.get_char(victim).map(|c| c.points.gold).unwrap_or(0);
+        if gold > 0 {
+            let has_desc = g.get_char(victim).map(|c| c.is_npc || c.desc.is_some()).unwrap_or(false);
+            if has_desc {
+                let money = create_money(g, gold);
+                g.obj_to_obj(money, corpse);
+            }
+            if let Some(c) = g.get_char_mut(victim) {
+                c.points.gold = 0;
+            }
+        }
+
         g.obj_to_room(corpse, rnum);
     }
 
@@ -589,6 +722,71 @@ fn make_corpse(g: &mut GameState, who: &str) -> ObjId {
     obj.timer = 60;
     // values[3]=1 marks this as a corpse so limits::point_update decays it.
     obj.values = [0, 0, 0, 1];
+    obj.loc = ObjLoc::Nowhere;
+    g.create_obj(obj)
+}
+
+/// money_desc(amount) (handler.c): the short-description bucket for a pile of
+/// gold coins, by amount. Transcribed term-for-term.
+fn money_desc(amount: i32) -> &'static str {
+    if amount == 1 {
+        "a gold coin"
+    } else if amount <= 10 {
+        "a tiny pile of gold coins"
+    } else if amount <= 20 {
+        "a handful of gold coins"
+    } else if amount <= 75 {
+        "a little pile of gold coins"
+    } else if amount <= 200 {
+        "a small pile of gold coins"
+    } else if amount <= 1000 {
+        "a pile of gold coins"
+    } else if amount <= 5000 {
+        "a big pile of gold coins"
+    } else if amount <= 10000 {
+        "a large heap of gold coins"
+    } else if amount <= 20000 {
+        "a huge mound of gold coins"
+    } else if amount <= 75000 {
+        "an enormous mound of gold coins"
+    } else if amount <= 150000 {
+        "a small mountain of gold coins"
+    } else if amount <= 250000 {
+        "a mountain of gold coins"
+    } else if amount <= 500000 {
+        "a huge mountain of gold coins"
+    } else if amount <= 1000000 {
+        "an enormous mountain of gold coins"
+    } else {
+        "an absolutely colossal mountain of gold coins"
+    }
+}
+
+/// create_money(amount) (handler.c): mint an ITEM_MONEY object worth `amount`
+/// gold coins, with value[0] = amount and matching name/short/long descriptions.
+fn create_money(g: &mut GameState, amount: i32) -> ObjId {
+    let amount = amount.max(1);
+    let (name, short_desc, long_desc) = if amount == 1 {
+        (
+            "coin gold".to_string(),
+            "a gold coin".to_string(),
+            "One miserable gold coin is lying here.".to_string(),
+        )
+    } else {
+        let md = money_desc(amount);
+        // CAP() the long description's first character.
+        let mut long = format!("{} is lying here.", md);
+        if let Some(first) = long.get(0..1) {
+            long = format!("{}{}", first.to_uppercase(), &long[1..]);
+        }
+        ("coins gold".to_string(), md.to_string(), long)
+    };
+    let mut obj = Object::new(NOTHING, name, short_desc);
+    obj.description = long_desc;
+    obj.obj_type = ObjectType::Money;
+    // Object::new() already sets WearFlags::TAKE (ITEM_WEAR_TAKE).
+    obj.values = [amount, 0, 0, 0];
+    obj.cost = amount;
     obj.loc = ObjLoc::Nowhere;
     g.create_obj(obj)
 }

@@ -86,6 +86,26 @@ fn dispatch_with_alias(g: &mut GameState, ch: CharId, input: &str, depth: u32) {
     run_command(g, ch, input);
 }
 
+/// The position-refusal text C emits when `GET_POS(ch) < minimum_position`
+/// (interpreter.c:828-853). An empty string means "no message" (positions that
+/// are never below any command minimum, e.g. Standing). Shared so socials —
+/// which C gates through the same interpreter minimum_position path — refuse
+/// identically.
+pub fn position_refusal_msg(pos: Position) -> &'static str {
+    match pos {
+        Position::Dead => "Lie still; you are DEAD!!! :-(\r\n",
+        Position::Incapacitated | Position::MortallyWounded => {
+            "You are in a pretty bad shape, unable to do anything!\r\n"
+        }
+        Position::Stunned => "All you can do right now is think about the stars!\r\n",
+        Position::Sleeping => "In your dreams, or what?\r\n",
+        Position::Resting => "Nah... You feel too relaxed to do that..\r\n",
+        Position::Sitting => "Maybe you should get on your feet first?\r\n",
+        Position::Fighting => "No way!  You're fighting for your life!\r\n",
+        Position::Meditating | Position::Standing => "",
+    }
+}
+
 /// The central dispatcher body (CircleMUD command_interpreter proper), run on
 /// input that has already passed alias expansion.
 fn run_command(g: &mut GameState, ch: CharId, input: &str) {
@@ -114,7 +134,9 @@ fn run_command(g: &mut GameState, ch: CharId, input: &str) {
 
     // DG command triggers (room/mob/obj) get first refusal on ANY typed word
     // (dg_triggers command_*trigger). A consuming trigger ends the command.
-    if !is_npc
+    // C (interpreter.c:772) gates on `GET_LEVEL(ch) < LVL_IMMORT`, NOT on PC-ness:
+    // mortal NPCs DO fire command triggers, and immortals do NOT — match that.
+    if level < LVL_IMMORT
         && (crate::dg_triggers::command_wtrigger(g, ch, &arg, line)
             || crate::dg_triggers::command_mtrigger(g, ch, &arg, line)
             || crate::dg_triggers::command_otrigger(g, ch, &arg, line))
@@ -182,18 +204,7 @@ fn run_command(g: &mut GameState, ch: CharId, input: &str) {
     }
 
     if pos < entry.min_position {
-        let msg = match pos {
-            Position::Dead => "Lie still; you are DEAD!!! :-(\r\n",
-            Position::Incapacitated | Position::MortallyWounded => {
-                "You are in a pretty bad shape, unable to do anything!\r\n"
-            }
-            Position::Stunned => "All you can do right now is think about the stars!\r\n",
-            Position::Sleeping => "In your dreams, or what?\r\n",
-            Position::Resting => "Nah... You feel too relaxed to do that..\r\n",
-            Position::Sitting => "Maybe you should get on your feet first?\r\n",
-            Position::Fighting => "No way!  You're fighting for your life!\r\n",
-            Position::Meditating | Position::Standing => "",
-        };
+        let msg = position_refusal_msg(pos);
         if !msg.is_empty() {
             g.send_to_char(ch, msg);
         }

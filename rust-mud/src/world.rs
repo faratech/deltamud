@@ -223,9 +223,24 @@ impl GameState {
         let mut mob_counts = self.count_mobs_by_vnum();
         let mut obj_counts = self.count_objs_by_vnum();
 
+        // Mirror db.c reset_zone's persistent state. `last_mob`/`last_obj`
+        // are the C `mob`/`obj` pointers — they persist across iterations and
+        // are only cleared by the 'R' command (obj=NULL); they are NOT reset on
+        // a non-conditional command. The separate `mob_load`/`obj_load` booleans
+        // ARE reset on a non-conditional command and gate `if_flag` chaining.
         let mut last_cmd = false;
         let mut last_mob: Option<CharId> = None;
         let mut last_obj: Option<ObjId> = None;
+        let mut mob_load = false;
+        let mut obj_load = false;
+        // DeltaMUD: objects loaded by a reset of a non-savable ("default") zone
+        // get ITEM_NORENT set (db.c ~2132: `if (!zone_table[zone].status_mode && obj)`).
+        let no_rent_zone = self
+            .zones
+            .iter()
+            .find(|z| z.number == zone_number)
+            .map(|z| z.status_mode == 0)
+            .unwrap_or(false);
         let mut summary = ResetSummary::default();
 
         for cmd in &commands {
@@ -238,12 +253,14 @@ impl GameState {
                 | ResetCmd::RemoveObj { if_flag, .. }
                 | ResetCmd::Door { if_flag, .. } => *if_flag,
             };
-            if if_flag && !last_cmd {
+            // C: `if (ZCMD.if_flag && !last_cmd && !mob_load && !obj_load) continue;`
+            if if_flag && !last_cmd && !mob_load && !obj_load {
                 continue;
             }
+            // C: `if (!ZCMD.if_flag) { mob_load = FALSE; obj_load = FALSE; }`
             if !if_flag {
-                last_mob = None;
-                last_obj = None;
+                mob_load = false;
+                obj_load = false;
             }
 
             match cmd {
@@ -265,6 +282,7 @@ impl GameState {
                         summary.mobs_spawned += 1;
                         last_mob = Some(mob);
                         last_cmd = true;
+                        mob_load = true;
                     } else {
                         last_cmd = false;
                     }
@@ -287,13 +305,16 @@ impl GameState {
                         summary.objs_spawned += 1;
                         last_obj = Some(obj);
                         last_cmd = true;
+                        obj_load = true;
                     } else {
                         last_cmd = false;
                     }
                 }
                 ResetCmd::GiveObjToMob { obj_vnum, max_count, load_chance, .. } => {
+                    // C 'G': gated on mob_load (not just a live mob pointer).
                     if obj_counts.get(obj_vnum).copied().unwrap_or(0) >= *max_count
                         || last_mob.is_none()
+                        || !mob_load
                         || self.rng.number(1, 100) < *load_chance
                     {
                         last_cmd = false;
@@ -311,8 +332,10 @@ impl GameState {
                     }
                 }
                 ResetCmd::EquipMob { obj_vnum, max_count, wear_pos, load_chance, .. } => {
+                    // C 'E': gated on mob_load (not just a live mob pointer).
                     if obj_counts.get(obj_vnum).copied().unwrap_or(0) >= *max_count
                         || last_mob.is_none()
+                        || !mob_load
                         || self.rng.number(1, 100) < *load_chance
                         || *wear_pos >= NUM_WEARS
                     {
@@ -331,7 +354,9 @@ impl GameState {
                     }
                 }
                 ResetCmd::PutObjInObj { obj_vnum, max_count, container_vnum, load_chance, .. } => {
+                    // C 'P': gated on obj_load (a prior 'O' must have loaded).
                     if obj_counts.get(obj_vnum).copied().unwrap_or(0) >= *max_count
+                        || !obj_load
                         || self.rng.number(1, 100) < *load_chance
                     {
                         last_cmd = false;
@@ -358,17 +383,21 @@ impl GameState {
                     }
                 }
                 ResetCmd::RemoveObj { room_vnum, obj_vnum, .. } => {
+                    // C 'R' (db.c ~2084): get_obj_in_list_num returns only the
+                    // FIRST matching object in the room; extract it once. Always
+                    // sets last_cmd=1 (even if no match). On a match, C sets obj=NULL,
+                    // so the trailing NO_RENT bit does NOT fire this iteration.
                     if let Some(rnum) = self.real_room(*room_vnum) {
-                        let to_remove: Vec<ObjId> = self.rooms[rnum]
+                        let found = self.rooms[rnum]
                             .contents
                             .iter()
                             .copied()
-                            .filter(|&o| self.objs.get(&o).map(|x| x.item_number) == Some(*obj_vnum))
-                            .collect();
-                        for o in to_remove {
+                            .find(|&o| self.objs.get(&o).map(|x| x.item_number) == Some(*obj_vnum));
+                        if let Some(o) = found {
                             self.obj_from_anywhere(o);
                             self.extract_obj(o);
                             summary.objs_removed += 1;
+                            last_obj = None;
                         }
                         last_cmd = true;
                     } else {
@@ -376,16 +405,30 @@ impl GameState {
                     }
                 }
                 ResetCmd::Door { room_vnum, direction, state, .. } => {
+                    // C 'D' (db.c ~2095): manipulate ONLY the EX_CLOSED/EX_LOCKED
+                    // bits via REMOVE_BIT/SET_BIT, preserving EX_ISDOOR/EX_PICKPROOF/
+                    // EX_HIDDEN. state 0 = open (clear CLOSED+LOCKED), 1 = closed
+                    // (set CLOSED, clear LOCKED), 2 = closed+locked (set both). Any
+                    // other state leaves the bits unchanged.
                     if let Some(rnum) = self.real_room(*room_vnum) {
                         if let Some(exit) =
                             self.rooms[rnum].exits.get_mut(*direction).and_then(|e| e.as_mut())
                         {
-                            exit.exit_info = match *state {
-                                0 => 0,
-                                1 => EX_CLOSED,
-                                2 => EX_CLOSED | crate::room::EX_LOCKED,
-                                _ => exit.exit_info,
-                            };
+                            match *state {
+                                0 => {
+                                    exit.exit_info &= !crate::room::EX_LOCKED;
+                                    exit.exit_info &= !EX_CLOSED;
+                                }
+                                1 => {
+                                    exit.exit_info |= EX_CLOSED;
+                                    exit.exit_info &= !crate::room::EX_LOCKED;
+                                }
+                                2 => {
+                                    exit.exit_info |= crate::room::EX_LOCKED;
+                                    exit.exit_info |= EX_CLOSED;
+                                }
+                                _ => {}
+                            }
                             summary.doors_set += 1;
                             last_cmd = true;
                         } else {
@@ -396,12 +439,24 @@ impl GameState {
                     }
                 }
             }
+
+            // C (db.c ~2132, after the switch, every iteration):
+            //   if (!zone_table[zone].status_mode && obj)
+            //     SET_BIT(obj->obj_flags.extra_flags, ITEM_NORENT);
+            // `obj`/`last_obj` is the most-recently-loaded object pointer, which
+            // persists across iterations and is cleared only by the 'R' command.
+            if no_rent_zone {
+                if let Some(oid) = last_obj {
+                    if let Some(o) = self.objs.get_mut(&oid) {
+                        o.extra_flags |= crate::object::ExtraFlags::NO_RENT;
+                    }
+                }
+            }
         }
 
         if let Some(z) = self.zones.iter_mut().find(|z| z.number == zone_number) {
             z.age = 0;
         }
-        let _ = last_obj;
         summary
     }
 }

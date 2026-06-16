@@ -229,6 +229,12 @@ fn take_state(conn: ConnId) -> Option<AeditState> {
     guard.remove(&conn)
 }
 
+/// abort: drop this conn's editor state without saving (player disconnected
+/// mid-edit). `olc::abort_editor` calls `olc::clear_active`.
+pub fn abort(conn: ConnId) {
+    take_state(conn);
+}
+
 fn set_state(conn: ConnId, st: AeditState) {
     let mut guard = match states().lock() {
         Ok(g) => g,

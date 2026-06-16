@@ -234,6 +234,21 @@ pub fn do_action_named(g: &mut GameState, ch: CharId, command: &str, argument: &
         }
     };
 
+    // Actor min-position gate. In C the social's min_char_position is copied into
+    // complete_cmd_info[].minimum_position (act.social.c:361/376), so the command
+    // interpreter's `GET_POS(ch) < minimum_position` check (interpreter.c:828)
+    // refuses a sleeping/resting/fighting actor BEFORE do_action runs. The Rust
+    // port dispatches socials past that gate, so enforce it here with the same
+    // refusal text.
+    let ch_pos = g.get_char(ch).map(|c| c.position).unwrap_or(Position::Standing);
+    if (ch_pos as i32) < action.min_char_position {
+        let msg = crate::interpreter::position_refusal_msg(ch_pos);
+        if !msg.is_empty() {
+            g.send_to_char(ch, msg);
+        }
+        return;
+    }
+
     // two_arguments(argument, buf, buf2): first arg => target, second => body.
     let (mut buf, buf2) = two_arguments(argument);
 

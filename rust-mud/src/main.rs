@@ -193,6 +193,18 @@ async fn reseed_copyover_chars(db: &Arc<dyn DatabaseInterface>, lib_path: &str) 
         if !title.is_empty() {
             ch.player.title = Some(title);
         }
+        // BUG #15: restore the room stamp written by do_copyover (fields 28..30)
+        // so enter_game drops the player where they stood, not at the temple.
+        // Absent on older snapshots -> default (NOWHERE/-1), harmless.
+        if let Some(t) = f.get(28).and_then(|s| s.parse::<i64>().ok()) {
+            ch.tloadroom = t;
+        }
+        if let Some(mx) = f.get(29).and_then(|s| s.parse::<i64>().ok()) {
+            ch.mapx = mx;
+        }
+        if let Some(my) = f.get(30).and_then(|s| s.parse::<i64>().ok()) {
+            ch.mapy = my;
+        }
         ch.aff_abils = ch.real_abils;
         // create_player assigns a fresh idnum; immediately save_player to persist
         // the reconstructed stats under that row so load_player returns them.

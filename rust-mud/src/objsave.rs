@@ -64,7 +64,11 @@ const MIN_RENT_COST: i32 = 250; // min_rent_cost = 250
 const ITEM_NORENT: u64 = 1 << 2;
 
 // PLR_* (structs.h) — PC act_flags hold the PLR_ bitset.
-const PLR_CRASH: i64 = 1 << 6;
+// Public so the object movers (handler::obj_to_char / equip_char / unequip_char
+// and state::obj_from_anywhere) can SET it whenever objects move on/off a PC —
+// mirroring C handler.c:542/563 — so crash_save_all (which only saves PCs with
+// PLR_CRASH set) is no longer a no-op (BUG 14).
+pub const PLR_CRASH: i64 = 1 << 6;
 const PLR_CRYO: i64 = 1 << 15;
 // PRF2_LOCKOUT (structs.h) — cleared on rent (cmd_informative defines its mirror).
 const PRF2_LOCKOUT: i64 = 1 << 1;
@@ -316,26 +320,41 @@ fn obj_from_store(g: &mut GameState, line: &str) -> Option<(ObjId, i32)> {
 // auto_equip() — place a loaded item at its wear slot or fall back to inventory
 // ===========================================================================
 
-/// CAN_WEAR(obj, bit) check for a given wear slot. Returns the WearFlags bit a
-/// slot requires, or None for slots with no wear requirement (LIGHT).
-fn slot_wear_flag(slot: usize) -> Option<WearFlags> {
+/// Per-slot fit requirement for auto_equip's switch (objsave.c auto_equip).
+enum SlotFit {
+    /// Always fits (WEAR_LIGHT — no CAN_WEAR check).
+    Always,
+    /// Requires the object to carry this WearFlags bit.
+    Requires(WearFlags),
+    /// Unenumerated slot — C's `default: locate = 0` drops it to inventory.
+    NeverFit,
+}
+
+/// CAN_WEAR(obj, bit) requirement for a given wear slot, mirroring the C
+/// auto_equip() switch exactly: WEAR_LIGHT has no check; each armor/jewelry slot
+/// requires its matching ITEM_WEAR_* bit; and any slot NOT in the switch hits
+/// C's `default: locate = 0` (BUG 25 — slots 18-21 = shoulders/ankles/face must
+/// fall to inventory, not be forced to require HOLD). WEAR_HOLD is handled
+/// specially (warrior weapon allowance) by the caller and so is NeverFit here.
+fn slot_wear_flag(slot: usize) -> SlotFit {
     match slot {
-        WEAR_LIGHT => None,
-        WEAR_FINGER_R | WEAR_FINGER_L => Some(WearFlags::FINGER),
-        WEAR_NECK_1 | WEAR_NECK_2 => Some(WearFlags::NECK),
-        WEAR_BODY => Some(WearFlags::BODY),
-        WEAR_HEAD => Some(WearFlags::HEAD),
-        WEAR_LEGS => Some(WearFlags::LEGS),
-        WEAR_FEET => Some(WearFlags::FEET),
-        WEAR_HANDS => Some(WearFlags::HANDS),
-        WEAR_ARMS => Some(WearFlags::ARMS),
-        WEAR_SHIELD => Some(WearFlags::SHIELD),
-        WEAR_ABOUT => Some(WearFlags::ABOUT),
-        WEAR_WAIST => Some(WearFlags::WAIST),
-        WEAR_WRIST_R | WEAR_WRIST_L => Some(WearFlags::WRIST),
-        WEAR_WIELD => Some(WearFlags::WIELD),
-        // HOLD handled specially (warrior weapon allowance) by caller.
-        _ => Some(WearFlags::HOLD),
+        WEAR_LIGHT => SlotFit::Always,
+        WEAR_FINGER_R | WEAR_FINGER_L => SlotFit::Requires(WearFlags::FINGER),
+        WEAR_NECK_1 | WEAR_NECK_2 => SlotFit::Requires(WearFlags::NECK),
+        WEAR_BODY => SlotFit::Requires(WearFlags::BODY),
+        WEAR_HEAD => SlotFit::Requires(WearFlags::HEAD),
+        WEAR_LEGS => SlotFit::Requires(WearFlags::LEGS),
+        WEAR_FEET => SlotFit::Requires(WearFlags::FEET),
+        WEAR_HANDS => SlotFit::Requires(WearFlags::HANDS),
+        WEAR_ARMS => SlotFit::Requires(WearFlags::ARMS),
+        WEAR_SHIELD => SlotFit::Requires(WearFlags::SHIELD),
+        WEAR_ABOUT => SlotFit::Requires(WearFlags::ABOUT),
+        WEAR_WAIST => SlotFit::Requires(WearFlags::WAIST),
+        WEAR_WRIST_R | WEAR_WRIST_L => SlotFit::Requires(WearFlags::WRIST),
+        WEAR_WIELD => SlotFit::Requires(WearFlags::WIELD),
+        // WEAR_HOLD handled specially by the caller; everything else (incl.
+        // shoulders/ankles/face) is C's `default: locate = 0`.
+        _ => SlotFit::NeverFit,
     }
 }
 
@@ -363,8 +382,9 @@ fn auto_equip(g: &mut GameState, ch: CharId, oid: ObjId, mut locate: i32) {
             can_hold || (is_warrior(g, ch) && can_wield && is_weapon)
         } else {
             match slot_wear_flag(slot) {
-                None => true, // WEAR_LIGHT
-                Some(bit) => g.get_obj(oid).map(|o| o.can_wear(bit)).unwrap_or(false),
+                SlotFit::Always => true, // WEAR_LIGHT
+                SlotFit::Requires(bit) => g.get_obj(oid).map(|o| o.can_wear(bit)).unwrap_or(false),
+                SlotFit::NeverFit => false, // C default: locate = 0 -> inventory
             }
         };
 

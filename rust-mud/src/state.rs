@@ -429,6 +429,18 @@ impl GameState {
         Some(self.rooms[rnum].number)
     }
 
+    /// Set PLR_CRASH on a non-NPC (C handler.c SET_BIT(PLR_FLAGS, PLR_CRASH)
+    /// in obj_to_char / obj_from_char / (un)equip_char). Flags the player for the
+    /// next crash_save_all so carried/worn objects survive a crash/restart
+    /// (BUG 14). No-op for NPCs / missing chars.
+    pub fn mark_crash(&mut self, cid: CharId) {
+        if let Some(c) = self.chars.get_mut(&cid) {
+            if !c.is_npc {
+                c.act_flags |= crate::objsave::PLR_CRASH;
+            }
+        }
+    }
+
     /// Detach an object from wherever it currently sits (room/char/container).
     /// Leaves the object in the arena with loc = Nowhere.
     pub fn obj_from_anywhere(&mut self, oid: ObjId) {
@@ -443,16 +455,29 @@ impl GameState {
                 }
             }
             ObjLoc::Carried(cid) => {
+                // Mirror C obj_from_char (handler.c:551): drop from the carry
+                // list AND decrement the carrier's encumbrance (BUG 7 — the
+                // weight/count were leaking, so get->drop netted a positive
+                // weight every round). Symmetric with obj_to_char, which adds
+                // both. Then flag PLR_CRASH (BUG 14).
+                let weight = self.objs.get(&oid).map(|o| o.weight).unwrap_or(0);
                 if let Some(c) = self.chars.get_mut(&cid) {
                     c.carrying.retain(|&o| o != oid);
+                    c.carry_weight -= weight;
+                    c.carry_items = c.carry_items.saturating_sub(1);
                 }
+                self.mark_crash(cid);
             }
             ObjLoc::Worn(cid, pos) => {
+                // Worn items are NOT counted in carry_weight/carry_items (C
+                // equip_char never adds them), so removing one only clears the
+                // slot — no encumbrance adjustment. Flag PLR_CRASH (BUG 14).
                 if let Some(c) = self.chars.get_mut(&cid) {
                     if pos < NUM_WEARS && c.equipment[pos] == Some(oid) {
                         c.equipment[pos] = None;
                     }
                 }
+                self.mark_crash(cid);
             }
             ObjLoc::Contained(container) => {
                 if let Some(c) = self.objs.get_mut(&container) {

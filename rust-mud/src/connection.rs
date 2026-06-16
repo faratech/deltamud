@@ -46,6 +46,14 @@ struct TelnetFilter {
     /// it lets us recognize an incoming GMCP `IAC SB GMCP ... IAC SE` (e.g. the
     /// client's Core.Hello / Core.Supports.Set) without choking on it.
     subneg_opt: u8,
+    /// True while we are inside a contiguous run of line-terminator bytes
+    /// (`\r`/`\n`). C `process_input` collapses ANY such run into ONE line break
+    /// via `while (ISNEWL(*nl_pos)) nl_pos++;` (both CR and LF are ISNEWL), so
+    /// `\r\n`, `\r\r`, `\n\n`, and `\r\n\r\n` (a double-Enter) each yield a
+    /// single line, not one per char (BUG #27). We emit the line on the FIRST
+    /// terminator and swallow the rest of the run; the flag persists across
+    /// feed() calls so a run split across TCP reads still collapses.
+    in_newline_run: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -81,11 +89,14 @@ impl TelnetFilter {
             state: TelnetState::Data,
             line: Vec::with_capacity(256),
             subneg_opt: 0,
+            in_newline_run: false,
         }
     }
 
-    /// Feed raw bytes. Completed lines (terminated by `\n`, with a trailing
-    /// `\r` stripped) are passed to `on_line` as owned Strings (lossy UTF-8).
+    /// Feed raw bytes. Completed lines (terminated by CR or LF, with a CRLF /
+    /// LFCR pair collapsed to one break — comm.c ISNEWL semantics) are passed to
+    /// `on_line` as owned Strings (lossy UTF-8). Control bytes are dropped and
+    /// backspace/DEL erase the last char, matching comm.c process_input.
     /// Reply bytes to send back to the client (option refusals, plus the
     /// `IAC WILL <opt>` accepts for GMCP/MSSP) are appended to `reply`. Any
     /// capabilities the client just enabled are pushed into `caps` so the input
@@ -100,21 +111,48 @@ impl TelnetFilter {
         for &b in data {
             match self.state {
                 TelnetState::Data => match b {
-                    IAC => self.state = TelnetState::Iac,
-                    b'\n' => {
-                        // Strip a single trailing '\r' if present.
-                        if self.line.last() == Some(&b'\r') {
-                            self.line.pop();
+                    IAC => {
+                        // IAC (0xFF) is not a newline, so it ends any newline run.
+                        self.in_newline_run = false;
+                        self.state = TelnetState::Iac;
+                    }
+                    // ISNEWL: BOTH CR and LF terminate a line (comm.c
+                    // process_input, BUG #27). C then skips the ENTIRE contiguous
+                    // run of newline bytes (`while (ISNEWL(*nl_pos)) nl_pos++;`),
+                    // so any run of \r/\n — `\r\n`, `\r\r`, `\n\n`, `\r\n\r\n` —
+                    // collapses to ONE line break. Emit the line on the first
+                    // terminator and swallow the rest of the run.
+                    b'\r' | b'\n' => {
+                        if self.in_newline_run {
+                            // Mid-run: swallow this terminator, emit nothing.
+                            continue;
                         }
                         let s = String::from_utf8_lossy(&self.line).into_owned();
                         self.line.clear();
+                        self.in_newline_run = true;
                         on_line(s);
                     }
-                    // Drop bare CR and NUL (telnet sends "\r\0" for a bare CR);
-                    // they are not line content. '\r' before '\n' is handled
-                    // above by the trailing-CR strip.
-                    b'\0' => {}
-                    _ => self.line.push(b),
+                    // Backspace (0x08) and DEL (0x7f): erase the last buffered
+                    // char (comm.c process_input `if (*ptr == '\b')`). DEL is
+                    // folded in here because raw terminals send it for the
+                    // Backspace key.
+                    0x08 | 0x7f => {
+                        self.in_newline_run = false;
+                        self.line.pop();
+                    }
+                    // Keep only printable ASCII (C: `isascii(*ptr) && isprint`).
+                    // 0x20..=0x7e is the printable range; everything else (NUL,
+                    // other control bytes, high-bit/8-bit bytes) is dropped — this
+                    // also covers the old bare-CR `\r\0` and stray control noise.
+                    0x20..=0x7e => {
+                        self.in_newline_run = false;
+                        self.line.push(b);
+                    }
+                    _ => {
+                        // Non-printable control / high-bit byte: drop it. A
+                        // non-newline byte ends any newline run.
+                        self.in_newline_run = false;
+                    }
                 },
                 TelnetState::Iac => match b {
                     IAC => {
@@ -536,4 +574,74 @@ pub async fn handle_recovered(
     let _ = game_tx.send(GameMessage::Disconnect { conn_id }).await;
     write_handle.abort();
     Ok(())
+}
+
+#[cfg(test)]
+mod telnet_tests {
+    use super::*;
+
+    /// Drive the filter over `chunks` (each chunk simulates one TCP read) and
+    /// return the completed input lines.
+    fn lines_of(chunks: &[&[u8]]) -> Vec<String> {
+        let mut f = TelnetFilter::new();
+        let mut out = Vec::new();
+        let mut reply = Vec::new();
+        let mut caps = Vec::new();
+        for c in chunks {
+            f.feed(c, &mut reply, &mut caps, |l| out.push(l));
+        }
+        out
+    }
+
+    #[test]
+    fn crlf_collapses_to_one_line() {
+        assert_eq!(lines_of(&[b"hello\r\nworld\r\n"]), vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn newline_run_collapses_like_isnewl_skip() {
+        // C process_input's `while (ISNEWL(*nl_pos)) nl_pos++;` collapses ANY
+        // contiguous \r/\n run into ONE break — a double-Enter is one blank line.
+        assert_eq!(lines_of(&[b"\r\n\r\n"]), vec![""]);
+        assert_eq!(lines_of(&[b"\n\n"]), vec![""]);
+        assert_eq!(lines_of(&[b"\r\r"]), vec![""]);
+        // The blank "line" between `a` and `b` is part of the single contiguous
+        // \r\n\r\n run, so C's `while (ISNEWL)` skip collapses it away entirely:
+        // `a\r\n\r\nb` yields ["a", "b"], NOT ["a", "", "b"].
+        assert_eq!(lines_of(&[b"a\r\n\r\nb\r\n"]), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn newline_run_collapses_across_split_reads() {
+        // A \r\n split across two TCP reads must still be one line break.
+        assert_eq!(lines_of(&[b"hi\r", b"\nthere\r\n"]), vec!["hi", "there"]);
+    }
+
+    #[test]
+    fn bare_cr_terminates_line() {
+        assert_eq!(lines_of(&[b"foo\rbar\r\n"]), vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn backspace_and_del_erase_last_char() {
+        assert_eq!(lines_of(&[b"abc\x08\r\n"]), vec!["ab"]);
+        assert_eq!(lines_of(&[b"abc\x7f\r\n"]), vec!["ab"]);
+    }
+
+    #[test]
+    fn control_and_high_bytes_are_dropped() {
+        // NUL, a stray control byte, and a non-IAC high-bit byte are stripped
+        // (C isascii && isprint), leaving only the printable text. (0xFF is not
+        // used here — it is IAC, handled by the telnet state machine, not data.)
+        assert_eq!(lines_of(&[b"a\x00b\x01c\x80d\r\n"]), vec!["abcd"]);
+    }
+
+    #[test]
+    fn iac_ends_newline_run() {
+        // An IAC sequence between newline runs is not a line terminator, so the
+        // following \r\n starts a fresh (empty) line — matching C treating 0xFF
+        // as a non-ISNEWL byte.
+        let seq: &[u8] = &[b'x', b'\r', b'\n', IAC, WILL, TELOPT_GMCP, b'\r', b'\n'];
+        assert_eq!(lines_of(&[seq]), vec!["x", ""]);
+    }
 }

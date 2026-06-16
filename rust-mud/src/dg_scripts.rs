@@ -1287,8 +1287,14 @@ fn process_remote(g: &GameState, go: GoRef, trig: TrigId, cmd: &str) {
         return;
     };
     let uid = atoi(&uid_s);
-    if uid <= 0 || uid < ROOM_ID_BASE {
-        log_cmd_err(trig, "remote", "illegal/pc uid");
+    // C (dg_scripts.c:2125) only rejects uid<=0 as illegal. Its second branch
+    // (`uid < ROOM_ID_BASE` => "is a PC?") relied on C's id scheme where mob/obj
+    // ids sat in MOBOBJ_ID_BASE..ROOM_ID_BASE; in THIS port mob UID = raw CharId
+    // and obj UID = raw ObjId (small positive ints below ROOM_ID_BASE), so that
+    // range gate would reject every valid mob/obj target. Drop it: remote may set
+    // a global on any valid target (mob/obj/room).
+    if uid <= 0 {
+        log_cmd_err(trig, "remote", "illegal uid");
         return;
     }
     let target = if let Some(r) = find_room_by_uid(g, uid) {
@@ -1305,9 +1311,14 @@ fn process_remote(g: &GameState, go: GoRef, trig: TrigId, cmd: &str) {
 
 fn extract_value(go: GoRef, trig: TrigId, cmd: &str) {
     // "extract <to> <num> <space-separated source...>"
-    let rest = one_arg_rest(cmd); // drop "extract"
-    let (to, rest2) = two_arg(&rest);
-    let (num_s, source) = two_arg(&rest2);
+    // C (dg_scripts.c:2217) parses with half_chop, NOT two_arguments — so the
+    // source argument keeps the whole line remainder. The previous `two_arg`
+    // calls truncated the source to a single token, breaking any "extract var N
+    // word1 word2 word3" that picks a token past the second word. half_chop ==
+    // split_word here (first word + rest-of-line).
+    let rest = one_arg_rest(cmd); // drop "extract"; rest = "<to> <num> <source...>"
+    let (to, after_to) = split_word(&rest); // to = dest var, remainder = "<num> <source...>"
+    let (num_s, source) = split_word(after_to); // num token + full source remainder
     let num = atoi(&num_s);
     if num < 1 {
         script_log("extract number < 1!");

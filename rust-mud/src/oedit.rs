@@ -1118,6 +1118,14 @@ fn save_internally(g: &mut GameState, conn: ConnId) {
     olc::olc_add_to_save_list(zone_number, olc::OLC_SAVE_OBJ);
 }
 
+/// abort: drop this conn's editor state without saving (player disconnected
+/// mid-edit). Releases the per-conn working copy and text buffer so nothing
+/// lingers until reboot. `olc::abort_editor` calls `olc::clear_active`.
+pub fn abort(conn: ConnId) {
+    states().lock().unwrap().remove(&conn);
+    text_bufs().lock().unwrap().remove(&conn);
+}
+
 fn finish(g: &mut GameState, conn: ConnId) {
     states().lock().unwrap().remove(&conn);
     text_bufs().lock().unwrap().remove(&conn);
@@ -1139,13 +1147,11 @@ fn finish(g: &mut GameState, conn: ConnId) {
 // oedit_save_to_disk — rewrite a zone's .obj file (inverse of
 // file_loader::load_object_file), with DeltaMUD's extension lines.
 //
-// NOTE: the in-memory ObjectProto only carries name/descs/type/flags/weight/
-// cost/rent/values, so re-saving a zone writes those faithfully; the extended
-// per-object fields (action desc, durability, level, perm affects, extra
-// descs, affects) are only present for the object *currently being edited* and
-// for that one we use the live edit state. Other objects in the zone are
-// written from their proto subset (extension lines emitted only where the proto
-// carries data). This matches what the in-memory model can represent.
+// Mirrors C oedit_save_to_disk (oedit.c). ObjectProto carries every field the
+// loader round-trips: name/descs/type/flags/weight/cost/rent, values[0..3],
+// curr_slots/total_slots (value[4]/[5]), obj_class, min_level, bitvector,
+// the perm-affect (`A`) blocks, and the extra-description (`E`) blocks — so the
+// full object is written back, not a lossy subset.
 // ===========================================================================
 pub fn oedit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
     let (zone_number, top) = match g.zones.get(zone_rnum) {
@@ -1177,16 +1183,49 @@ pub fn oedit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
             proto.extra_flags.bits(),
             proto.wear_flags.bits()
         ));
-        // values (DeltaMUD writes 6 ints; values[4]/[5] = durability cslots/tslots,
-        // not held by the proto, written as 0).
+        // values (DeltaMUD writes 6 ints; values[4]/[5] = durability cslots/tslots).
         out.push_str(&format!(
             "{} {} {} {} {} {}\n",
-            proto.values[0], proto.values[1], proto.values[2], proto.values[3], 0, 0
+            proto.values[0],
+            proto.values[1],
+            proto.values[2],
+            proto.values[3],
+            proto.curr_slots,
+            proto.total_slots
         ));
         // weight cost rent
         out.push_str(&format!("{} {} {}\n", proto.weight, proto.cost, proto.rent));
-        // DeltaMUD class line (default Generic -> obj_class+1 == 0).
-        out.push_str("c 0\n");
+        // DeltaMUD class line: loader reads obj_class = atoi(line+2) - 1.
+        out.push_str(&format!("c {}\n", proto.obj_class + 1));
+
+        // Min-level / perm-affect bitvector: emit only when non-default
+        // (matching C oedit_save_to_disk's conditionals).
+        if proto.min_level != 0 {
+            out.push_str(&format!("L {}\n", proto.min_level));
+        }
+        if proto.bitvector != 0 {
+            out.push_str(&format!("BV {}\n", proto.bitvector));
+        }
+
+        // Extra descriptions (`E` blocks): keyword~ then description~ (CR-stripped).
+        for (kw, desc) in &proto.ex_descriptions {
+            if kw.is_empty() || desc.is_empty() {
+                continue;
+            }
+            out.push_str("E\n");
+            out.push_str(kw);
+            out.push_str("~\n");
+            out.push_str(&olc::strip_cr(desc));
+            out.push_str("~\n");
+        }
+
+        // Stat applies (`A` blocks): one per affect with a non-zero modifier.
+        for aff in &proto.affects {
+            if aff.modifier != 0 {
+                out.push_str("A\n");
+                out.push_str(&format!("{} {}\n", aff.location, aff.modifier));
+            }
+        }
     }
     out.push_str("$~\n");
 

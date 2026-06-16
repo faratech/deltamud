@@ -93,6 +93,12 @@ fn states() -> &'static Mutex<HashMap<ConnId, TrigEditState>> {
     EDIT_STATES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// abort: drop this conn's editor state without saving (player disconnected
+/// mid-edit). `olc::abort_editor` calls `olc::clear_active`.
+pub fn abort(conn: ConnId) {
+    states().lock().unwrap().remove(&conn);
+}
+
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------

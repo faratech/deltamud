@@ -832,6 +832,15 @@ fn save_internally(g: &mut GameState, conn: ConnId) {
     olc::olc_add_to_save_list(zone_number, olc::OLC_SAVE_ROOM);
 }
 
+/// abort: drop this conn's editor state without saving (used when a player
+/// disconnects mid-edit, so the edited vnum's lock is released). Mirrors the
+/// state-removal half of `finish`/`cleanup_olc` minus the save and the room
+/// announce. `olc::abort_editor` calls `olc::clear_active` for us.
+pub fn abort(conn: ConnId) {
+    states().lock().unwrap().remove(&conn);
+    text_bufs().lock().unwrap().remove(&conn);
+}
+
 fn finish(g: &mut GameState, conn: ConnId) {
     states().lock().unwrap().remove(&conn);
     text_bufs().lock().unwrap().remove(&conn);
@@ -905,6 +914,47 @@ pub fn redit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
                 out.push_str("~\n");
                 out.push_str(&format!("{} {} {}\n", temp, e.key, e.to_room));
             }
+        }
+
+        // Special exit (`O` block) — must precede the extra descriptions,
+        // mirroring C redit_save_to_disk. Four tilde-strings (general desc,
+        // keyword, ex_name, leave msg) then a door-flag/key/to_room line.
+        if let Some(se) = &room.special_exit {
+            let gen_desc = se
+                .general_description
+                .as_deref()
+                .map(olc::strip_cr)
+                .unwrap_or_default();
+            let kw = se.keyword.clone().unwrap_or_default();
+            let ex_name = se
+                .ex_name
+                .as_deref()
+                .map(olc::strip_cr)
+                .unwrap_or_default();
+            let leave_msg = se
+                .leave_msg
+                .as_deref()
+                .map(olc::strip_cr)
+                .unwrap_or_default();
+            // Door flag: 0 none, 1 door, 2 pickproof; +3 if hidden.
+            let mut temp = if se.exit_info & EX_ISDOOR != 0 {
+                if se.exit_info & EX_PICKPROOF != 0 { 2 } else { 1 }
+            } else {
+                0
+            };
+            if se.exit_info & EX_HIDDEN != 0 {
+                temp += 3;
+            }
+            out.push_str("O\n");
+            out.push_str(&gen_desc);
+            out.push_str("~\n");
+            out.push_str(&kw);
+            out.push_str("~\n");
+            out.push_str(&ex_name);
+            out.push_str("~\n");
+            out.push_str(&leave_msg);
+            out.push_str("~\n");
+            out.push_str(&format!("{} {} {}\n", temp, se.key, se.to_room));
         }
 
         // Extra descriptions.

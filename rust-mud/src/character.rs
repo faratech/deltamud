@@ -107,6 +107,24 @@ pub struct Character {
     pub aff_abils: Abilities,
     pub points: CharPoints,
 
+    // Bare (un-equipped, un-affected) base for the affect_total apply targets
+    // — the value of points.{max_hit,max_mana,max_move,defense,mdefense,power,
+    // mpower,technique} BEFORE any equipment/spell APPLY_* modifier is layered
+    // on. CircleMUD's affect_total keeps `points` net-stable by subtracting
+    // every eq/affect modifier before re-applying (handler.c affect_modify FALSE
+    // pass); the C save path likewise strips eq/affects so the DB row carries
+    // the bare base. This port instead recomputes `points = real_points + mods`
+    // from this stored base on every affect_total, so repeated equip/unequip and
+    // repeated logins no longer balloon the maxima. `last_applied` records the
+    // apply-target modifiers layered on by the most recent affect_total run so
+    // an EXTERNAL change to `points` (e.g. limits::advance_level adding hp) is
+    // absorbed into the base on the next call (base = points - last_applied),
+    // matching C where advance_level bumps the live GET_MAX_HIT and the bump
+    // survives the strip/re-apply cycle. Both fields persist with the Character
+    // (mock DB clone), so a logout->login round-trip reproduces the same maxima.
+    pub real_points: CharPoints,
+    pub last_applied: CharPoints,
+
     // NPC display strings (None for PCs).
     pub short_desc: Option<String>,
     pub long_desc: Option<String>,
@@ -235,6 +253,8 @@ impl Character {
             real_abils: Abilities::default(),
             aff_abils: Abilities::default(),
             points: CharPoints::default(),
+            real_points: CharPoints::default(),
+            last_applied: CharPoints::default(),
             short_desc: None,
             long_desc: None,
             npc_description: None,
@@ -326,6 +346,9 @@ impl Character {
             armor: 100,
             ..Default::default()
         };
+        // Seed the bare apply-target base from the freshly-set points (no eq /
+        // affects yet, so points == base); affect_total recomputes from here.
+        ch.real_points = ch.points.clone();
         // New PCs start hungry/thirsty clocks at 24 (CircleMUD do_start).
         ch.conditions = [0, 24, 24];
         // New characters are flagged newbie (DeltaMUD do_start / newbie zone).

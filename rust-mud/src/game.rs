@@ -674,16 +674,149 @@ impl Game {
             .unwrap_or((-1, 1));
         self.state.update_player_index(pidnum, &name, plevel, now, &host);
 
-        // Place in start room: CircleMUD mortal_start_room (Itrius vnum 100),
-        // then the player's hometown, then any loaded room (config.c).
+        // Room selection — interpreter.c enter_player_game (BUG #15). The C
+        // precedence: GET_LOADROOM (saved.load_room) is honored first; a valid
+        // saved.tloadroom (temporary, higher-priority — this is what do_copyover
+        // stamps with the player's CURRENT room) overrides it and is then
+        // cleared; valid surface-map coordinates (mapx/mapy) override both and
+        // are cleared; finally, if nothing resolved, fall back to the normal
+        // start room. Without this a copyover dumped everyone at the temple.
+        //
+        // PLR_* bits use the C structs.h values (the runtime act_flags column is
+        // the raw C bitfield); defined locally to match enter_player_game.
+        const PLR_FROZEN_C: i64 = 1 << 2;
+        const PLR_KILLER_C: i64 = 1 << 0;
+        const NEWBIE_ROOM: crate::types::RoomVnum = 2200; // config.c newbie_room
+        const JAIL_NUM: crate::types::RoomVnum = 400; // config.c jail_num
+
+        // Snapshot the saved room fields + flags (clone scalars before any
+        // mutation; house style).
+        let (saved_load, saved_tload, saved_mapx, saved_mapy, newbie, level, act_flags, prf2_flags) =
+            self.state
+                .get_char(id)
+                .map(|c| {
+                    (
+                        c.load_room,
+                        c.tloadroom,
+                        c.mapx,
+                        c.mapy,
+                        c.newbie,
+                        c.player.level,
+                        c.act_flags,
+                        c.prf2_flags,
+                    )
+                })
+                .unwrap_or((crate::types::NOWHERE, 0, -1, -1, 0, 1, 0, 0));
+
+        // GET_LOADROOM: real_room(saved.load_room) if it's a real vnum.
+        let mut load_rnum: Option<RoomRnum> = if saved_load != crate::types::NOWHERE {
+            self.state.real_room(saved_load)
+        } else {
+            None
+        };
+
+        // tloadroom (temporary copyover loadroom): if it resolves to a real
+        // room, it WINS over load_room, and C clears it (set to -1) so it is
+        // one-shot. C only clears tloadroom when it WAS valid (the assignment is
+        // inside the `if (real_room(tloadroom) != NOWHERE)` block).
+        //
+        // C's saved.tloadroom sentinel is -1 (NOWHERE), but this port defaults
+        // the field to 0 and may persist 0, and room vnum 0 ("The Void") IS a
+        // real loadable room — so without a >=1 guard a normal (non-copyover)
+        // login with tloadroom==0 would teleport into the Void. do_copyover only
+        // ever stamps a real, positive room vnum, so treat anything < 1 as unset.
+        let tload_vnum = saved_tload as crate::types::RoomVnum;
+        if saved_tload >= 1 {
+            if let Some(rnum) = self.state.real_room(tload_vnum) {
+                load_rnum = Some(rnum);
+                if let Some(c) = self.state.get_char_mut(id) {
+                    c.tloadroom = -1; // C: saved.tloadroom = -1; (one-shot)
+                }
+            }
+        }
+
+        // If the resolved load_room is an IMPL-only room (ROOM_IMPROOM) and the
+        // player is below LVL_GRGOD, discard it so they fall through to the start
+        // room (C interpreter.c enter_player_game 1579-1581).
+        const ROOM_IMPROOM_C: u32 = 1 << 16;
+        if let Some(rnum) = load_rnum {
+            if level < crate::types::LVL_GRGOD
+                && self.state.room(rnum).room_flags.bits() & ROOM_IMPROOM_C != 0
+            {
+                load_rnum = None;
+            }
+        }
+
+        // newbie loadroom (C: newbie == 1 && level < 5 -> newbie_room).
+        if newbie == 1 && level < 5 {
+            if let Some(rnum) = self.state.real_room(NEWBIE_ROOM) {
+                load_rnum = Some(rnum);
+            }
+        }
+
+        // Surface-map coordinates override (C: find_room_by_coords of mapx/mapy
+        // when 1 <= mapx <= max_map_x && 1 <= mapy <= max_map_y), then C clears
+        // mapx/mapy back to -1 unconditionally.
+        if saved_mapx >= 1
+            && saved_mapx <= self.state.max_map_x as i64
+            && saved_mapy >= 1
+            && saved_mapy <= self.state.max_map_y as i64
+        {
+            if let Some(rnum) =
+                self.state.map_coords_to_rnum(saved_mapx as i32, saved_mapy as i32)
+            {
+                load_rnum = Some(rnum);
+            }
+        }
+        if let Some(c) = self.state.get_char_mut(id) {
+            c.mapx = -1;
+            c.mapy = -1;
+        }
+
+        // Fall back to the normal start room when nothing above resolved (C: if
+        // load_room == NOWHERE -> immort/mortal start room). Preserve the
+        // existing Rust fallback chain (vnum 100 / hometown / 3001 / first room).
         let home = self.state.get_char(id).map(|c| c.player.hometown).unwrap_or(100);
-        let start = self
-            .state
-            .real_room(100)
-            .or_else(|| self.state.real_room(home))
-            .or_else(|| self.state.real_room(3001))
-            .or_else(|| (!self.state.rooms.is_empty()).then_some(0));
-        if let Some(rnum) = start {
+        if load_rnum.is_none() {
+            let start_vnum = if level >= crate::types::LVL_IMMORT {
+                crate::config::IMMORT_START_ROOM
+            } else {
+                100
+            };
+            load_rnum = self
+                .state
+                .real_room(start_vnum)
+                .or_else(|| self.state.real_room(home))
+                .or_else(|| self.state.real_room(3001))
+                .or_else(|| (!self.state.rooms.is_empty()).then_some(0));
+        }
+
+        // Frozen, then killer (C applies them in this order AFTER the fallback,
+        // so killer wins if a player is somehow both). Each only overrides when
+        // the override room actually exists, else the prior choice stands.
+        if act_flags & PLR_FROZEN_C != 0 {
+            if let Some(r) = self.state.real_room(crate::config::FROZEN_START_ROOM) {
+                load_rnum = Some(r);
+            }
+        }
+        if act_flags & PLR_KILLER_C != 0 {
+            if let Some(r) = self.state.real_room(JAIL_NUM) {
+                load_rnum = Some(r);
+            }
+        }
+
+        // A ghost (PRF2_INTANGIBLE) who is not actively map-building
+        // (PRF2_MBUILDING) always enters at room 99. This is the LAST override in
+        // enter_player_game, so it wins over frozen/killer (C 1616-1618).
+        const PRF2_INTANGIBLE_C: i64 = 1 << 9;
+        const PRF2_MBUILDING_C: i64 = 1 << 6;
+        if prf2_flags & PRF2_INTANGIBLE_C != 0 && prf2_flags & PRF2_MBUILDING_C == 0 {
+            if let Some(r) = self.state.real_room(99) {
+                load_rnum = Some(r);
+            }
+        }
+
+        if let Some(rnum) = load_rnum {
             self.state.char_to_room(id, rnum);
         }
         // Restore the player's rented/crash-saved objects (objsave.c).
@@ -759,6 +892,11 @@ impl Game {
     }
 
     async fn disconnect(&mut self, conn_id: ConnId) {
+        // If the player was mid-OLC, drop the editor's working copy and release
+        // the lock on the edited vnum (C frees the editor on connection
+        // teardown; without this the per-conn state + vnum lock leak until the
+        // next reboot — BUG #21). No-op if not editing.
+        crate::olc::abort_editor(conn_id);
         let ch = self.state.descriptors.get(&conn_id).and_then(|d| d.character);
         if let Some(cid) = ch {
             // Persist then remove the character from the world.
@@ -1252,5 +1390,7 @@ fn normalize_name(s: &str) -> String {
 }
 
 fn valid_name(name: &str) -> bool {
-    name.len() >= 2 && name.len() <= 16 && name.chars().all(|c| c.is_ascii_alphabetic())
+    // C: MAX_NAME_LENGTH == 20 (structs.h) — the player-name field is 20+1, and
+    // the nanny name-entry path caps names at MAX_NAME_LENGTH, not 16 (BUG #16).
+    name.len() >= 2 && name.len() <= 20 && name.chars().all(|c| c.is_ascii_alphabetic())
 }

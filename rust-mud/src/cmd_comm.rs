@@ -610,9 +610,11 @@ pub fn do_say(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         };
         act(g, &line, false, vict, None, ActArg::None, To::Char);
     }
-    // DG speech triggers (mobs/rooms react to what was said).
-    crate::dg_triggers::speech_mtrigger(g, ch, arg);
-    crate::dg_triggers::speech_wtrigger(g, ch, arg);
+    // DG speech triggers (mobs/rooms react to what was said). C (act.comm.c:339)
+    // passes the drunk-slurred/processed `argument` — the same text the room
+    // saw — NOT the raw input. Pass the slurred local so triggers match speech.
+    crate::dg_triggers::speech_mtrigger(g, ch, &argument);
+    crate::dg_triggers::speech_wtrigger(g, ch, &argument);
 }
 
 // ---------------------------------------------------------------------------

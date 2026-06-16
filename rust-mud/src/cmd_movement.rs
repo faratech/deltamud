@@ -366,6 +366,20 @@ fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check
         act(g, &msg, true, ch, None, ActArg::None, To::Room);
     }
 
+    // Pre-move entry/enter triggers: an entry_mtrigger or enter_wtrigger that
+    // returns 0 disallows the move (act.movement.c:333-337). The char has NOT
+    // been relocated yet, so a block simply aborts with the char in the origin.
+    if !crate::dg_triggers::entry_mtrigger(g, ch) {
+        return false;
+    }
+    if !crate::dg_triggers::enter_wtrigger(g, to_rnum, ch, dir as i32) {
+        return false;
+    }
+
+    // was_in = origin room (act.movement.c:339). The char is still there until
+    // the char_from_room below, so the origin rnum captured at fn entry serves.
+    let was_in = rnum;
+
     // Relocate.
     g.char_from_room(ch);
     g.char_to_room(ch, to_rnum);
@@ -382,10 +396,6 @@ fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check
             g.char_to_room(rider, to_rnum);
         }
     }
-
-    // DG greet triggers: mobs/room react to the arriving actor.
-    crate::dg_triggers::greet_mtrigger(g, ch, dir as i32);
-    crate::dg_triggers::entry_mtrigger(g, ch);
 
     // Arrival broadcast (suppressed under sneak), with mount/rider phrasing.
     if aff & AFF_SNEAK == 0 {
@@ -407,6 +417,20 @@ fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check
     // Show the destination to the mover.
     if g.get_char(ch).and_then(|c| c.desc).is_some() {
         crate::commands::look_at_room(g, ch, false);
+    }
+
+    // Greet triggers (act.movement.c:460-465). entry_memory first; then if a
+    // greet_mtrigger returns 0 the arrival is bounced back to was_in (char is
+    // relocated to origin and re-shown the room). Otherwise greet_memory fires.
+    crate::dg_triggers::entry_memory_mtrigger(g, ch);
+    if !crate::dg_triggers::greet_mtrigger(g, ch, dir as i32) {
+        g.char_from_room(ch);
+        g.char_to_room(ch, was_in);
+        if g.get_char(ch).and_then(|c| c.desc).is_some() {
+            crate::commands::look_at_room(g, ch, false);
+        }
+    } else {
+        crate::dg_triggers::greet_memory_mtrigger(g, ch);
     }
 
     true

@@ -170,6 +170,13 @@ fn states() -> &'static Mutex<HashMap<ConnId, MeditState>> {
     S.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// abort: drop this conn's editor state without saving (player disconnected
+/// mid-edit). The MeditState (including its in-progress description buffer) is
+/// removed so nothing lingers until reboot. `olc::abort_editor` clears active.
+pub fn abort(conn: ConnId) {
+    states().lock().unwrap().remove(&conn);
+}
+
 // ---------------------------------------------------------------------------
 // Small output helper: append text to the editing connection's buffer.
 // ---------------------------------------------------------------------------

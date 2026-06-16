@@ -2,7 +2,7 @@
 // (CircleMUD handler.c), ported to the id-indexed GameState. Adds them as
 // inherent `impl GameState` methods so commands call one canonical version.
 
-use crate::character::Character;
+use crate::character::{CharPoints, Character};
 use crate::flags::*;
 use crate::object::ObjLoc;
 use crate::state::GameState;
@@ -81,6 +81,8 @@ impl GameState {
         if let Some(o) = self.objs.get_mut(&oid) {
             o.loc = ObjLoc::Carried(cid);
         }
+        // C handler.c:542 — flag the PC for crash-save (BUG 14).
+        self.mark_crash(cid);
     }
 
     pub fn obj_to_obj(&mut self, oid: ObjId, container: ObjId) {
@@ -106,6 +108,8 @@ impl GameState {
         if let Some(o) = self.objs.get_mut(&oid) {
             o.loc = ObjLoc::Worn(cid, pos);
         }
+        // C equip path flags the PC for crash-save (BUG 14).
+        self.mark_crash(cid);
         self.affect_total(cid);
     }
 
@@ -117,13 +121,54 @@ impl GameState {
         if let Some(o) = self.objs.get_mut(&oid) {
             o.loc = ObjLoc::Nowhere;
         }
+        // C unequip path flags the PC for crash-save (BUG 14).
+        self.mark_crash(cid);
         self.affect_total(cid);
         Some(oid)
+    }
+
+    /// die_follower (utils.c): a character that follows / is followed is being
+    /// removed — detach it from its master's follower list and stop every one of
+    /// its own followers, clearing BOTH sides of each link so no dangling
+    /// master/followers id survives the extract (BUG 22). Mirrors C
+    /// handler.c:1080-1081 (`if (ch->followers || ch->master) die_follower(ch)`).
+    /// Link-breaking only — the cosmetic "stops following" act() messages are
+    /// skipped (the char is leaving the world; its room view is gone).
+    fn die_follower(&mut self, cid: CharId) {
+        // If we follow someone, remove us from their follower list + drop AFF_*.
+        if let Some(master) = self.chars.get(&cid).and_then(|c| c.master) {
+            if let Some(m) = self.chars.get_mut(&master) {
+                m.followers.retain(|&f| f != cid);
+            }
+            if let Some(c) = self.chars.get_mut(&cid) {
+                c.master = None;
+                c.affect_flags &= !(AFF_CHARM | AFF_GROUP);
+            }
+        }
+        // Stop everyone who follows us (clear their master + group/charm flags).
+        let followers = self
+            .chars
+            .get(&cid)
+            .map(|c| c.followers.clone())
+            .unwrap_or_default();
+        for f in followers {
+            if let Some(fc) = self.chars.get_mut(&f) {
+                fc.master = None;
+                fc.affect_flags &= !(AFF_CHARM | AFF_GROUP);
+            }
+        }
+        if let Some(c) = self.chars.get_mut(&cid) {
+            c.followers.clear();
+        }
     }
 
     /// Remove a character from the world. Detaches from room, drops fighters,
     /// and extracts inventory/equipment. PCs are normally respawned instead.
     pub fn extract_char(&mut self, cid: CharId) {
+        // C handler.c:1080 — detach from the follow graph before anything else,
+        // so no master/follower id is left dangling (BUG 22).
+        self.die_follower(cid);
+
         // Stop anyone targeting this character.
         let attackers: Vec<CharId> = self
             .chars
@@ -283,7 +328,7 @@ impl GameState {
     /// stats + equipment affects + active spell affects (CircleMUD
     /// affect_total, Tier-0 scope: abilities + flags).
     pub fn affect_total(&mut self, cid: CharId) {
-        // Collect equipment object affects.
+        // Collect equipment object affects + active spell affects.
         let mut mods: Vec<(i32, i32)> = Vec::new();
         let mut flagbits: i64 = 0;
         if let Some(ch) = self.chars.get(&cid) {
@@ -299,11 +344,32 @@ impl GameState {
                 flagbits |= a.bitvector;
             }
         }
+
+        // Sum the modifiers that target the `points` apply fields (max_hit,
+        // max_mana, max_move, defense/mdefense/power/mpower/technique). These are
+        // the only point-fields apply_location writes; ability mods are handled
+        // separately via aff_abils = real_abils (full reset, like C).
+        let new_applied = applied_points_from_mods(&mods);
+
         if let Some(ch) = self.chars.get_mut(&cid) {
+            // Recover the bare base for each apply-target field by subtracting the
+            // modifiers the PREVIOUS affect_total run layered on (ch.last_applied).
+            // This absorbs any external change to `points` since then (e.g.
+            // advance_level adding hp) into the base, exactly as C's strip /
+            // re-apply keeps such bumps. real_points stores the bare base so it
+            // persists with the character (logout->login reproduces the maxima).
+            let base = points_sub(&ch.points, &ch.last_applied);
+            ch.real_points = base.clone();
+            // Re-inflate: points (apply targets) = base + current modifiers.
+            points_assign_apply(&mut ch.points, &points_add(&base, &new_applied));
+            ch.last_applied = new_applied;
+
+            // Abilities + AFF_ flags: full reset from real_abils, then re-apply
+            // the ability portion of the modifier list (unchanged C semantics).
             ch.aff_abils = ch.real_abils;
             ch.affect_flags = flagbits;
-            for (loc, m) in mods {
-                apply_location(ch, loc, m);
+            for (loc, m) in &mods {
+                apply_ability(ch, *loc, *m);
             }
         }
     }
@@ -325,8 +391,29 @@ pub fn check_perm_duration(g: &GameState, ch: CharId, bitvector: i64) -> bool {
         .unwrap_or(false)
 }
 
-/// Apply one affect modifier to a character's affected fields (Tier-0:
-/// abilities; the DeltaMUD combat mods are recomputed in Batch 5).
+/// Apply one ability-only affect modifier (APPLY_STR..APPLY_CON) to aff_abils.
+/// The point-target applies (APPLY_HIT/MANA/MOVE/DEFENSE/...) are NOT handled
+/// here — affect_total recomputes those from real_points so they can't balloon
+/// across repeated equip/unequip/login (see apply_location for the full table).
+pub fn apply_ability(ch: &mut Character, location: i32, modifier: i32) {
+    let m = modifier as i8;
+    match location {
+        APPLY_STR => ch.aff_abils.str += m,
+        APPLY_DEX => ch.aff_abils.dex += m,
+        APPLY_INT => ch.aff_abils.intel += m,
+        APPLY_WIS => ch.aff_abils.wis += m,
+        APPLY_CON => ch.aff_abils.con += m,
+        _ => {}
+    }
+}
+
+/// Apply one affect modifier to a character's affected fields. Kept for callers
+/// that want the full CircleMUD apply table in one call (it writes both the
+/// ability *and* the point-target fields by ADDING the modifier). affect_total
+/// does NOT use this for the point fields — it recomputes them from real_points
+/// via apply_ability + the CharPoints accumulator helpers below — but the
+/// function remains the faithful 1:1 transcription of apply_location for any
+/// one-shot caller.
 pub fn apply_location(ch: &mut Character, location: i32, modifier: i32) {
     let m = modifier as i8;
     match location {
@@ -347,6 +434,72 @@ pub fn apply_location(ch: &mut Character, location: i32, modifier: i32) {
     }
 }
 
+// --- CharPoints apply-target accumulator helpers (BUG 2) --------------------
+// Only the apply-target fields (max_hit/max_mana/max_move/defense/mdefense/
+// power/mpower/technique) are populated/used; all other CharPoints fields stay
+// at their default and are ignored by points_assign_apply.
+
+/// Sum a (location, modifier) list into a CharPoints holding ONLY the
+/// apply-target deltas (every non-apply field stays zero).
+fn applied_points_from_mods(mods: &[(i32, i32)]) -> CharPoints {
+    let mut p = CharPoints::default();
+    for &(loc, m) in mods {
+        match loc {
+            APPLY_HIT => p.max_hit += m,
+            APPLY_MANA => p.max_mana += m,
+            APPLY_MOVE => p.max_move += m,
+            APPLY_DEFENSE => p.defense += m as i16,
+            APPLY_MDEFENSE => p.mdefense += m as i16,
+            APPLY_POWER => p.power += m as i16,
+            APPLY_MPOWER => p.mpower += m as i16,
+            APPLY_TECHNIQUE => p.technique += m as i16,
+            _ => {}
+        }
+    }
+    p
+}
+
+/// Field-wise a - b over the apply-target fields (other fields copied from `a`).
+fn points_sub(a: &CharPoints, b: &CharPoints) -> CharPoints {
+    let mut r = a.clone();
+    r.max_hit = a.max_hit - b.max_hit;
+    r.max_mana = a.max_mana - b.max_mana;
+    r.max_move = a.max_move - b.max_move;
+    r.defense = a.defense - b.defense;
+    r.mdefense = a.mdefense - b.mdefense;
+    r.power = a.power - b.power;
+    r.mpower = a.mpower - b.mpower;
+    r.technique = a.technique - b.technique;
+    r
+}
+
+/// Field-wise a + b over the apply-target fields (other fields copied from `a`).
+fn points_add(a: &CharPoints, b: &CharPoints) -> CharPoints {
+    let mut r = a.clone();
+    r.max_hit = a.max_hit + b.max_hit;
+    r.max_mana = a.max_mana + b.max_mana;
+    r.max_move = a.max_move + b.max_move;
+    r.defense = a.defense + b.defense;
+    r.mdefense = a.mdefense + b.mdefense;
+    r.power = a.power + b.power;
+    r.mpower = a.mpower + b.mpower;
+    r.technique = a.technique + b.technique;
+    r
+}
+
+/// Copy ONLY the apply-target fields from `src` into `dst`, leaving the live
+/// current-value fields (hit/mana/move_points/gold/exp/...) untouched.
+fn points_assign_apply(dst: &mut CharPoints, src: &CharPoints) {
+    dst.max_hit = src.max_hit;
+    dst.max_mana = src.max_mana;
+    dst.max_move = src.max_move;
+    dst.defense = src.defense;
+    dst.mdefense = src.mdefense;
+    dst.power = src.power;
+    dst.mpower = src.mpower;
+    dst.technique = src.technique;
+}
+
 /// Helper used by Object containment weight (recursive total weight).
 pub fn obj_total_weight(state: &GameState, oid: ObjId) -> i32 {
     let obj = match state.objs.get(&oid) {
@@ -358,4 +511,179 @@ pub fn obj_total_weight(state: &GameState, oid: ObjId) -> i32 {
         total += obj_total_weight(state, c);
     }
     total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::object::{Object, ObjectAffect};
+    use crate::types::{Class, Race};
+
+    fn fresh_game() -> GameState {
+        GameState::new(Config::default())
+    }
+
+    /// An item granting +50 max_hit / +10 defense via APPLY affects.
+    fn make_hit_item(g: &mut GameState) -> ObjId {
+        let mut o = Object::new(1, "wings magic".into(), "a pair of wings".into());
+        o.weight = 5;
+        o.affects = vec![
+            ObjectAffect { location: APPLY_HIT, modifier: 50 },
+            ObjectAffect { location: APPLY_DEFENSE, modifier: 10 },
+        ];
+        g.create_obj(o)
+    }
+
+    /// BUG 2: repeated equip/unequip must NOT balloon max_hit / defense, and the
+    /// inflated value must be exactly base+mods while worn.
+    #[test]
+    fn affect_total_stable_across_equip_cycles() {
+        let mut g = fresh_game();
+        let ch = Character::new_player("Tester".into(), Class::Warrior, Race::Human);
+        let cid = g.create_char(ch);
+        g.affect_total(cid);
+
+        let base_hit = g.get_char(cid).unwrap().points.max_hit; // 20
+        let base_def = g.get_char(cid).unwrap().points.defense; // 0
+        assert_eq!(base_hit, 20);
+
+        for _ in 0..5 {
+            let oid = make_hit_item(&mut g);
+            g.equip_char(cid, oid, WEAR_BODY);
+            assert_eq!(g.get_char(cid).unwrap().points.max_hit, base_hit + 50);
+            assert_eq!(g.get_char(cid).unwrap().points.defense, base_def + 10);
+            g.unequip_char(cid, WEAR_BODY);
+            assert_eq!(g.get_char(cid).unwrap().points.max_hit, base_hit);
+            assert_eq!(g.get_char(cid).unwrap().points.defense, base_def);
+            // tidy: drop the loose object back out of the world
+            g.obj_from_anywhere(oid);
+            g.extract_obj(oid);
+        }
+        // Repeated bare affect_total calls (mirrors per-login recompute) stay put.
+        for _ in 0..10 {
+            g.affect_total(cid);
+        }
+        assert_eq!(g.get_char(cid).unwrap().points.max_hit, base_hit);
+    }
+
+    /// BUG 2: an external base change (advance_level-style points bump) survives
+    /// the affect_total strip/re-apply and combines correctly with equipment.
+    #[test]
+    fn affect_total_absorbs_external_base_change() {
+        let mut g = fresh_game();
+        let ch = Character::new_player("Grower".into(), Class::Warrior, Race::Human);
+        let cid = g.create_char(ch);
+        g.affect_total(cid);
+        assert_eq!(g.get_char(cid).unwrap().points.max_hit, 20);
+
+        // Simulate advance_level: bump live max_hit by 30 (no real_points edit).
+        g.get_char_mut(cid).unwrap().points.max_hit += 30;
+        g.affect_total(cid);
+        assert_eq!(g.get_char(cid).unwrap().points.max_hit, 50); // bump preserved
+
+        let oid = make_hit_item(&mut g);
+        g.equip_char(cid, oid, WEAR_BODY);
+        assert_eq!(g.get_char(cid).unwrap().points.max_hit, 100); // 50 base + 50
+        g.unequip_char(cid, WEAR_BODY);
+        assert_eq!(g.get_char(cid).unwrap().points.max_hit, 50);
+    }
+
+    /// BUG 2 (persistence): a logout->login round-trip (clone the Character, as
+    /// the mock DB does, then re-run affect_total with eq cleared) yields the
+    /// SAME max_hit, not a doubled one — even if logged out while wearing eq.
+    #[test]
+    fn affect_total_round_trip_no_doubling() {
+        let mut g = fresh_game();
+        let ch = Character::new_player("Saver".into(), Class::Warrior, Race::Human);
+        let cid = g.create_char(ch);
+        g.affect_total(cid);
+        let oid = make_hit_item(&mut g);
+        g.equip_char(cid, oid, WEAR_BODY);
+        assert_eq!(g.get_char(cid).unwrap().points.max_hit, 70); // worn
+
+        // "Save": clone the inflated character (mock DB stores the clone).
+        let saved = g.get_char(cid).unwrap().clone();
+
+        // "Load" into a fresh world: restore the clone, clear eq (enter_game
+        // line 647-648), then affect_total (line 650).
+        let mut g2 = fresh_game();
+        let mut loaded = saved;
+        loaded.id = CharId(0);
+        loaded.carrying.clear();
+        loaded.equipment = [None; NUM_WEARS];
+        loaded.aff_abils = loaded.real_abils;
+        let cid2 = g2.create_char(loaded);
+        g2.affect_total(cid2);
+        // Eq is gone, so max_hit must be the bare base (20), NOT 70 or 120.
+        assert_eq!(g2.get_char(cid2).unwrap().points.max_hit, 20);
+    }
+
+    /// BUG 7: a get -> drop round-trip nets zero carry weight / items.
+    #[test]
+    fn carry_weight_round_trips_to_zero() {
+        let mut g = fresh_game();
+        let ch = Character::new_player("Hauler".into(), Class::Warrior, Race::Human);
+        let cid = g.create_char(ch);
+        assert_eq!(g.get_char(cid).unwrap().carry_weight, 0);
+        assert_eq!(g.get_char(cid).unwrap().carry_items, 0);
+
+        for _ in 0..5 {
+            let mut o = Object::new(2, "rock".into(), "a rock".into());
+            o.weight = 17;
+            let oid = g.create_obj(o);
+            g.obj_to_char(oid, cid); // get
+            assert_eq!(g.get_char(cid).unwrap().carry_weight, 17);
+            assert_eq!(g.get_char(cid).unwrap().carry_items, 1);
+            g.obj_from_anywhere(oid); // drop
+            assert_eq!(g.get_char(cid).unwrap().carry_weight, 0);
+            assert_eq!(g.get_char(cid).unwrap().carry_items, 0);
+            g.extract_obj(oid);
+        }
+    }
+
+    /// BUG 14: moving objects on/off a PC sets PLR_CRASH (so crash_save_all is
+    /// no longer a no-op). NPCs are never flagged.
+    #[test]
+    fn plr_crash_set_on_object_movement() {
+        let mut g = fresh_game();
+        let pc = g.create_char(Character::new_player("Crashy".into(), Class::Warrior, Race::Human));
+        let mob = g.create_char(Character::new_npc(0));
+        let oid = {
+            let o = Object::new(3, "coin".into(), "a coin".into());
+            g.create_obj(o)
+        };
+        g.obj_to_char(oid, pc);
+        assert_ne!(g.get_char(pc).unwrap().act_flags & crate::objsave::PLR_CRASH, 0);
+
+        // NPC stays unflagged.
+        let oid2 = g.create_obj(Object::new(4, "stick".into(), "a stick".into()));
+        g.obj_to_char(oid2, mob);
+        assert_eq!(g.get_char(mob).unwrap().act_flags & crate::objsave::PLR_CRASH, 0);
+    }
+
+    /// BUG 22: extract_char clears master/followers links on both sides.
+    #[test]
+    fn extract_char_breaks_follow_links() {
+        let mut g = fresh_game();
+        let leader = g.create_char(Character::new_player("Leader".into(), Class::Warrior, Race::Human));
+        let follower = g.create_char(Character::new_player("Pet".into(), Class::Warrior, Race::Human));
+        // Wire a follow link by hand (add_follower normally does this).
+        g.get_char_mut(follower).unwrap().master = Some(leader);
+        g.get_char_mut(leader).unwrap().followers.push(follower);
+        // Place both in a room so extract_char's char_from_room is well-defined.
+        let rn = g.add_room(crate::room::Room::new(1, 0, "Void".into(), "An empty void.".into()));
+        g.char_to_room(leader, rn);
+        g.char_to_room(follower, rn);
+
+        g.extract_char(follower);
+        // Leader must no longer list the extracted follower.
+        assert!(!g.get_char(leader).unwrap().followers.contains(&follower));
+
+        // Now extract the leader; its (already-empty) follower set is fine and the
+        // leader had no master — just confirm it doesn't panic and removes cleanly.
+        g.extract_char(leader);
+        assert!(g.get_char(leader).is_none());
+    }
 }

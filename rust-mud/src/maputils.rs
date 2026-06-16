@@ -1685,6 +1685,9 @@ fn unit_activity(g: &mut GameState, room: RoomRnum, wtype: usize) {
         Some(r) => r.people.clone(),
         None => return,
     };
+    // C (maputils.c:1577): `struck` is per-room — at most ONE PC is fried by
+    // lightning per tick. Without it every eligible PC in the room got struck.
+    let mut struck = false;
     for ch in people {
         let (is_npc, level) = match g.get_char(ch) {
             Some(c) => (c.is_npc, c.player.level),
@@ -1715,8 +1718,9 @@ fn unit_activity(g: &mut GameState, room: RoomRnum, wtype: usize) {
             }
         }
 
-        // --- thunderstorm: lightning strike (1 in 4) ---
-        if wtype == WEATHER_THUNDERSTORM && g.rng.number(1, 4) == 1 {
+        // --- thunderstorm: lightning strike (1 in 4), at most one PC per room ---
+        if wtype == WEATHER_THUNDERSTORM && !struck && g.rng.number(1, 4) == 1 {
+            struck = true;
             act(
                 g,
                 "You see a holy bolt of lightning discharge from the sky!\r\nThe SHOCKING moment fries $n to a crisp!",

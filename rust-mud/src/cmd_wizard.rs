@@ -5178,6 +5178,40 @@ pub fn do_copyover(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         };
         let pname = name_of(g, cid);
 
+        // BUG #15: stamp the player's CURRENT room so enter_game (recovery)
+        // drops them where they were standing, not at the temple. C do_copyover
+        // (act.wizard.c): for a surface-map room it saves mapx/mapy; otherwise it
+        // sets `saved.tloadroom = GET_ROOM_VNUM(och->in_room)` — a temporary,
+        // higher-priority loadroom that enter_player_game honors then clears.
+        let stamp_vnum = g.char_room_vnum(cid);
+        let on_map = g
+            .get_char(cid)
+            .and_then(|c| c.in_room)
+            .and_then(|rnum| g.rooms.get(rnum))
+            .map(|r| r.map_x.is_some() && r.map_y.is_some())
+            .unwrap_or(false);
+        if on_map {
+            // Map room: C stamps the coordinates (find_room_by_coords path).
+            // Resolve them up front (immutable room borrow), then mutate — house
+            // style: never hold a borrow across a mutation.
+            let coords = g
+                .get_char(cid)
+                .and_then(|c| c.in_room)
+                .and_then(|rnum| g.rooms.get(rnum))
+                .and_then(|r| match (r.map_x, r.map_y) {
+                    (Some(x), Some(y)) => Some((x, y)),
+                    _ => None,
+                });
+            if let (Some((x, y)), Some(c)) = (coords, g.get_char_mut(cid)) {
+                c.mapx = x as i64;
+                c.mapy = y as i64;
+            }
+        } else if let Some(vnum) = stamp_vnum {
+            if let Some(c) = g.get_char_mut(cid) {
+                c.tloadroom = vnum as i64;
+            }
+        }
+
         // Persist the player record itself (C save_char). The async DB save in
         // disconnect won't run, so write it synchronously here via the runtime
         // handle if a real DB is in use; the mock DB clones on load so the
@@ -5190,9 +5224,13 @@ pub fn do_copyover(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
             let title = c.player.title.clone().unwrap_or_default();
             let _ = writeln!(
                 cfp,
+                // Fields 28..30 (tloadroom|mapx|mapy) carry the BUG #15 room
+                // stamp through the exec so the reseeded mock record honors it.
+                // title (field 27) is pipe-free by convention, so the room
+                // fields stay at fixed indices after it.
                 "{idnum}|{name}|{level}|{class}|{race}|{sex}|{align}|{home}|{gold}|{bank}|{exp}|\
                  {hit}|{maxhit}|{mana}|{maxmana}|{mv}|{maxmv}|{ac}|{hr}|{dr}|\
-                 {st}|{sa}|{intel}|{wis}|{dex}|{con}|{cha}|{title}",
+                 {st}|{sa}|{intel}|{wis}|{dex}|{con}|{cha}|{title}|{tload}|{mapx}|{mapy}",
                 idnum = c.idnum,
                 name = c.player.name,
                 level = c.player.level,
@@ -5221,6 +5259,9 @@ pub fn do_copyover(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
                 con = c.real_abils.con,
                 cha = c.real_abils.cha,
                 title = title,
+                tload = c.tloadroom,
+                mapx = c.mapx,
+                mapy = c.mapy,
             );
         }
 

@@ -127,6 +127,13 @@ fn states() -> &'static Mutex<HashMap<ConnId, ZeditState>> {
     S.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// abort: drop this conn's editor state without saving (player disconnected
+/// mid-edit), releasing the per-conn working copy. `olc::abort_editor` clears
+/// active.
+pub fn abort(conn: ConnId) {
+    states().lock().unwrap().remove(&conn);
+}
+
 // ---------------------------------------------------------------------------
 // Output helper.
 // ---------------------------------------------------------------------------

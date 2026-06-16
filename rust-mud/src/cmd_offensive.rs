@@ -25,7 +25,7 @@
 
 use crate::act::{act, ActArg, To};
 use crate::character::Affect;
-use crate::combat::{chance, check_killer, damage, hit, set_fighting};
+use crate::combat::{chance, check_killer, damage, damage_type, hit, hit_type, set_fighting};
 use crate::flags::*;
 use crate::object::ObjectType;
 use crate::room::RoomFlags;
@@ -191,19 +191,6 @@ fn raw_kill(g: &mut GameState, victim: CharId, killer: CharId) {
 /// combat::damage so the corpse/respawn path runs identically.
 fn deathblow(g: &mut GameState, ch: CharId, victim: CharId, dam: i32) {
     damage(g, ch, victim, dam);
-}
-
-/// gain_exp(ch, gain) (limits.c): adjust experience. Players only here.
-fn gain_exp(g: &mut GameState, ch: CharId, gain: i64) {
-    if is_npc(g, ch) {
-        return;
-    }
-    if let Some(c) = g.get_char_mut(ch) {
-        c.points.exp += gain;
-        if c.points.exp < 0 {
-            c.points.exp = 0;
-        }
-    }
 }
 
 // ===========================================================================
@@ -473,9 +460,11 @@ pub fn do_backstab(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) 
     let prob = if is_npc(g, ch) { 90 } else { get_skill(g, ch, SKILL_BACKSTAB) };
 
     if awake(g, vict) && percent > prob {
-        damage(g, ch, vict, 0);
+        // Missed backstab: a 0-damage SKILL_BACKSTAB hit (act.offensive.c).
+        damage_type(g, ch, vict, 0, SKILL_BACKSTAB as i32);
     } else {
-        hit(g, ch, vict);
+        // Landed backstab: hit() with SKILL_BACKSTAB applies backstab_mult().
+        hit_type(g, ch, vict, SKILL_BACKSTAB as i32);
     }
     g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 2);
 }
@@ -587,7 +576,7 @@ pub fn do_flee(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
                     if !crate::arena::arena_flee_start(g, ch, wf) {
                         let loss =
                             (get_max_hit(g, wf) - get_hit(g, wf)) as i64 * get_level(g, wf) as i64;
-                        gain_exp(g, ch, -loss);
+                        crate::limits::gain_exp(g, ch, -loss);
                         let msg = format!(
                             "&RYou lost {} experience points for fleeing!&n\r\n",
                             numdisplay(loss)
@@ -771,13 +760,16 @@ pub fn do_bash(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         percent = 401;
     }
 
+    // SKILL_BASH attack type (act.offensive.c). The skill_message table
+    // (lib/misc/messages) is not yet ported, so the type renders no flavour
+    // text for now — a separate documented gap — but the type is correct.
     if percent > prob {
-        damage(g, ch, vict, 0);
+        damage_type(g, ch, vict, 0, SKILL_BASH as i32);
         if let Some(c) = g.get_char_mut(ch) {
             c.position = Position::Sitting;
         }
     } else {
-        damage(g, ch, vict, 1);
+        damage_type(g, ch, vict, 1, SKILL_BASH as i32);
         if let Some(c) = g.get_char_mut(vict) {
             c.position = Position::Sitting;
         }
@@ -884,11 +876,12 @@ pub fn do_kick(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     let mut prob = if is_npc(g, ch) { 90 } else { get_skill(g, ch, SKILL_KICK) };
     prob += chance(g, ch, vict, 0) * 3;
 
+    // SKILL_KICK attack type (act.offensive.c); skill_message gap as above.
     if percent > prob {
-        damage(g, ch, vict, 0);
+        damage_type(g, ch, vict, 0, SKILL_KICK as i32);
     } else {
         let dmg = (get_level(g, ch) as i32) >> 1;
-        damage(g, ch, vict, dmg);
+        damage_type(g, ch, vict, dmg, SKILL_KICK as i32);
     }
     g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 3);
 }
@@ -959,11 +952,12 @@ pub fn do_berserk(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         dmg = 250;
     }
 
+    // SKILL_BERSERK attack type (act.offensive.c); skill_message gap as above.
     if percent > prob {
-        damage(g, ch, vict, 0);
+        damage_type(g, ch, vict, 0, SKILL_BERSERK as i32);
         g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 4);
     } else {
-        damage(g, ch, vict, dmg);
+        damage_type(g, ch, vict, dmg, SKILL_BERSERK as i32);
         g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 2);
     }
 }
@@ -1088,10 +1082,11 @@ pub fn do_trip(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     let mut prob = if is_npc(g, ch) { 90 } else { get_skill(g, ch, SKILL_TRIP) };
     prob += chance(g, ch, vict, 0) * 3;
 
+    // SKILL_TRIP attack type (act.offensive.c); skill_message gap as above.
     if percent > prob {
-        damage(g, ch, vict, 0);
+        damage_type(g, ch, vict, 0, SKILL_TRIP as i32);
     } else {
-        damage(g, ch, vict, 2);
+        damage_type(g, ch, vict, 2, SKILL_TRIP as i32);
         g.set_wait_state(vict, PULSE_VIOLENCE as i32 * 2);
         g.set_wait_state(ch, PULSE_VIOLENCE as i32);
         return;
