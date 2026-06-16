@@ -65,6 +65,9 @@ const WEATHER_HURRICANE: usize = 6;
 const WEATHER_TORNADO: usize = 7;
 const WEATHER_BLIZZARD: usize = 8;
 
+const PLR_KILLER: i64 = 1 << 0;
+const PLR_THIEF: i64 = 1 << 1;
+
 // MAX_WEATHER (maputils.h): how many storms the map keeps spawned.
 const MAX_WEATHER: i32 = 4;
 
@@ -1868,6 +1871,8 @@ const WEATHER_CORPSE_NAMES: [&str; WEATHER_TOTAL] = [
 /// observable result of extract_char unlinking the descriptor (menu re-entry),
 /// matching C's extract_char(ch) call here.
 fn weather_die(g: &mut GameState, ch: CharId, wtype: usize) {
+    cleanup_weather_death_player_state(g, ch);
+
     // FIGHTING(ch) -> stop_fighting; strip all affects (C: while(ch->affected)
     // affect_remove).
     if let Some(c) = g.get_char_mut(ch) {
@@ -1887,6 +1892,11 @@ fn weather_die(g: &mut GameState, ch: CharId, wtype: usize) {
         increase_blood(g, rnum);
         let name = g.get_char(ch).map(|c| c.display_for_others()).unwrap_or_default();
         let corpse = make_weather_corpse(g, &name, wtype);
+        let gold = g.get_char(ch).map(|c| c.points.gold).unwrap_or(0);
+        let create_gold = g
+            .get_char(ch)
+            .map(|c| c.is_npc || (!c.is_npc && c.desc.is_some()))
+            .unwrap_or(false);
         let carried = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
         for oid in carried {
             g.obj_from_anywhere(oid);
@@ -1900,11 +1910,31 @@ fn weather_die(g: &mut GameState, ch: CharId, wtype: usize) {
                 g.obj_to_obj(oid, corpse);
             }
         }
+        if gold > 0 {
+            if create_gold {
+                let money = crate::combat::create_money(g, gold);
+                g.obj_to_obj(money, corpse);
+            }
+            if let Some(c) = g.get_char_mut(ch) {
+                c.points.gold = 0;
+            }
+        }
         g.obj_to_room(corpse, rnum);
     }
 
     // C: extract_char(ch) — for a PC this unlinks the descriptor (respawn/menu).
     g.extract_char(ch);
+}
+
+fn cleanup_weather_death_player_state(g: &mut GameState, ch: CharId) {
+    if let Some(c) = g.get_char_mut(ch) {
+        if !c.is_npc {
+            c.act_flags &= !(PLR_KILLER | PLR_THIEF);
+            c.conditions[FULL] = 0;
+            c.conditions[THIRST] = 0;
+            c.conditions[DRUNK] = 0;
+        }
+    }
 }
 
 /// make_weather_corpse (maputils.c): a corpse container holding the victim's
@@ -2004,6 +2034,8 @@ mod tests {
     use super::*;
     use crate::character::Character;
     use crate::config::Config;
+    use crate::connection::Descriptor;
+    use crate::object::ObjectType;
 
     fn player_in_room(g: &mut GameState, name: &str, room: RoomRnum) -> CharId {
         let ch = g.create_char(Character::new_player(
@@ -2046,5 +2078,66 @@ mod tests {
 
         assert_eq!(short, "the corpse of Stormvictim");
         assert_eq!(desc, "The corpse of Stormvictim is lying here.");
+    }
+
+    #[test]
+    fn weather_death_cleanup_clears_pc_criminal_flags_and_conditions() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Outside".to_string(),
+            "A weather test room.".to_string(),
+        ));
+        let ch = player_in_room(&mut g, "Flagged", room);
+        {
+            let c = g.get_char_mut(ch).unwrap();
+            c.act_flags |= PLR_KILLER | PLR_THIEF;
+            c.conditions[FULL] = 10;
+            c.conditions[THIRST] = 11;
+            c.conditions[DRUNK] = 12;
+        }
+
+        cleanup_weather_death_player_state(&mut g, ch);
+
+        let c = g.get_char(ch).unwrap();
+        assert_eq!(c.act_flags & (PLR_KILLER | PLR_THIEF), 0);
+        assert_eq!(c.conditions[FULL], 0);
+        assert_eq!(c.conditions[THIRST], 0);
+        assert_eq!(c.conditions[DRUNK], 0);
+    }
+
+    #[test]
+    fn weather_die_transfers_connected_pc_gold_to_corpse() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Outside".to_string(),
+            "A weather test room.".to_string(),
+        ));
+        let conn = ConnId(1);
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let ch = player_in_room(&mut g, "Richvictim", room);
+        {
+            let c = g.get_char_mut(ch).unwrap();
+            c.desc = Some(conn);
+            c.points.gold = 1234;
+        }
+
+        weather_die(&mut g, ch, WEATHER_FIRESTORM);
+
+        assert!(!g.char_exists(ch));
+        let corpse = *g.rooms[room].contents.first().expect("weather corpse");
+        let money = g
+            .get_obj(corpse)
+            .unwrap()
+            .contains
+            .iter()
+            .copied()
+            .find(|&oid| g.get_obj(oid).map(|o| o.obj_type == ObjectType::Money).unwrap_or(false))
+            .expect("corpse money");
+        assert_eq!(g.get_obj(money).unwrap().values[0], 1234);
     }
 }
