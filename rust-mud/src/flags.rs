@@ -29,6 +29,11 @@ pub const PRF_HOLYLIGHT: i64 = 1 << 12;
 pub const PRF_COLOR_1: i64 = 1 << 13;
 pub const PRF_COLOR_2: i64 = 1 << 14;
 
+// PRF2_* — second player preference bitvector.
+pub const PRF2_LOCKOUT: i64 = 1 << 1;
+pub const PRF2_MBUILDING: i64 = 1 << 6;
+pub const PRF2_INTANGIBLE: i64 = 1 << 9;
+
 // PLR_* — player flags (subset). Values MUST match C structs.h (act_flags is the
 // raw C bitfield, persisted as-is): PLR_FROZEN is (1<<2), PLR_INVSTART (1<<14).
 pub const PLR_FROZEN: i64 = 1 << 2;

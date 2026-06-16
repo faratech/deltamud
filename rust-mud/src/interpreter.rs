@@ -3,8 +3,22 @@
 // 343-entry CMD_INFO table, gates on level/position, and dispatches.
 
 use crate::command_table::{HandlerId, CMD_INFO};
+use crate::flags::{AFF_HIDE, PLR_FROZEN, PRF2_INTANGIBLE, PRF2_LOCKOUT, PRF2_MBUILDING};
 use crate::state::GameState;
 use crate::types::*;
+
+const CMD_LOCKOUT_MSG: &str =
+    "Your terminal is currently locked!\r\nTo unlock please type 'unlock <yourpassword>'\r\n";
+const CMD_FROZEN_MSG: &str = "You try, but the mind-numbing cold prevents you...\r\n";
+const CMD_MBUILDING_BLOCK_MSG: &str = "You may not use that command in build mode.\r\n";
+const CMD_INTANGIBLE_BLOCK_MSG: &str = "The intangible have no need for such abilities.\r\n";
+
+const CMDS_MORTAL_BUILDERS_CANT_USE: &str =
+    "sacrifice trigedit tlist tstat auction brew buy carve cast deposit \
+donate drink drop eat fill fillet forge give group mount quaff recite sacrafice scribe school \
+sell sip steal take tan taste train use withdraw nosummon chain";
+
+const CMDS_DEAD_CAN_USE: &str = "qui quit look who say north south east west up down ' emote";
 
 /// Fill words skipped by one_argument (CircleMUD fill[]).
 const FILL_WORDS: &[&str] = &["in", "from", "with", "the", "on", "at", "to", "of"];
@@ -20,6 +34,21 @@ pub fn any_one_arg(argument: &str) -> (String, &str) {
     match s.find(char::is_whitespace) {
         Some(pos) => (s[..pos].to_lowercase(), s[pos..].trim_start()),
         None => (s.to_lowercase(), ""),
+    }
+}
+
+/// Command word split with CircleMUD's one-character non-alphanumeric special
+/// case. This keeps shorthand commands like `'hello` as command `'` plus
+/// argument `hello` instead of the literal word `'hello`.
+fn command_arg_line(argument: &str) -> (String, &str) {
+    let s = argument.trim_start();
+    match s.chars().next() {
+        Some(ch) if !ch.is_ascii_alphabetic() => {
+            let len = ch.len_utf8();
+            (ch.to_string(), s[len..].trim_start())
+        }
+        Some(_) => any_one_arg(s),
+        None => (String::new(), ""),
     }
 }
 
@@ -109,7 +138,13 @@ pub fn position_refusal_msg(pos: Position) -> &'static str {
 /// The central dispatcher body (CircleMUD command_interpreter proper), run on
 /// input that has already passed alias expansion.
 fn run_command(g: &mut GameState, ch: CharId, input: &str) {
-    let (level, is_npc, pos, gcmds) = match g.get_char(ch) {
+    if !crate::handler::check_perm_duration(g, ch, AFF_HIDE) {
+        if let Some(c) = g.get_char_mut(ch) {
+            c.affect_flags &= !AFF_HIDE;
+        }
+    }
+
+    let (level, is_npc, pos, gcmds, act_flags, prf2_flags) = match g.get_char(ch) {
         Some(c) => (
             c.player.level,
             c.is_npc,
@@ -117,6 +152,8 @@ fn run_command(g: &mut GameState, ch: CharId, input: &str) {
             // The four god-command bitvectors (godcmds1..4), indexed by
             // godcmd_set-1 in the gate below. NPCs have all-zero godcmds.
             [c.godcmds1, c.godcmds2, c.godcmds3, c.godcmds4],
+            c.act_flags,
+            c.prf2_flags,
         ),
         None => return,
     };
@@ -127,8 +164,17 @@ fn run_command(g: &mut GameState, ch: CharId, input: &str) {
     }
 
     // First token = command word (lowercased); remainder keeps original case.
-    let (arg, line) = any_one_arg(input);
+    let (arg, line) = command_arg_line(input);
     if arg.is_empty() {
+        return;
+    }
+
+    if !is_npc && prf2_flags & PRF2_LOCKOUT != 0 {
+        if arg != "unlock" {
+            g.send_to_char(ch, CMD_LOCKOUT_MSG);
+        } else {
+            crate::cmd_other::do_lockout(g, ch, line, 0);
+        }
         return;
     }
 
@@ -183,6 +229,11 @@ fn run_command(g: &mut GameState, ch: CharId, input: &str) {
         break;
     }
 
+    if act_flags & PLR_FROZEN != 0 && level < LVL_IMPL {
+        g.send_to_char(ch, CMD_FROZEN_MSG);
+        return;
+    }
+
     let entry = match found {
         Some(e) => e,
         None => {
@@ -197,6 +248,21 @@ fn run_command(g: &mut GameState, ch: CharId, input: &str) {
             return;
         }
     };
+
+    if prf2_flags & PRF2_MBUILDING != 0
+        && crate::handler::isname(entry.name, CMDS_MORTAL_BUILDERS_CANT_USE)
+    {
+        g.send_to_char(ch, CMD_MBUILDING_BLOCK_MSG);
+        return;
+    }
+
+    if prf2_flags & PRF2_INTANGIBLE != 0
+        && prf2_flags & PRF2_MBUILDING == 0
+        && !crate::handler::isname(entry.name, CMDS_DEAD_CAN_USE)
+    {
+        g.send_to_char(ch, CMD_INTANGIBLE_BLOCK_MSG);
+        return;
+    }
 
     if is_npc && entry.min_level >= LVL_IMMORT {
         g.send_to_char(ch, "You can't use immortal commands while switched.\r\n");
@@ -226,9 +292,11 @@ fn run_command(g: &mut GameState, ch: CharId, input: &str) {
 /// core; unported handlers report the CircleMUD "not implemented" message.
 /// Later batches fill in arms here as their modules land.
 fn dispatch(g: &mut GameState, ch: CharId, handler: HandlerId, arg: &str, subcmd: i32) {
-    use crate::{alias, arena, auction, ban, clan, cmd_comm, cmd_create, cmd_informative,
-        cmd_item, cmd_movement, cmd_offensive, cmd_other, cmd_social, cmd_wizard,
-        graph, house, mail, maputils, misc, olc, quest, shop, spell_parser};
+    use crate::{
+        alias, arena, auction, ban, clan, cmd_comm, cmd_create, cmd_informative, cmd_item,
+        cmd_movement, cmd_offensive, cmd_other, cmd_social, cmd_wizard, graph, house, mail,
+        maputils, misc, olc, quest, shop, spell_parser,
+    };
     use HandlerId::*;
     match handler {
         // --- alias (interpreter.c) ---
@@ -457,32 +525,188 @@ fn dispatch(g: &mut GameState, ch: CharId, handler: HandlerId, arg: &str, subcmd
         DoTlist => misc::do_tlist(g, ch, arg, subcmd),
         DoTstat => misc::do_tstat(g, ch, arg, subcmd),
         DoRebalance => misc::do_rebalance(g, ch, arg, subcmd),
-        DoMasound => { crate::dg_mobcmd::dispatch_mob_command(g, ch, "masound", arg); }
-        DoMat => { crate::dg_mobcmd::dispatch_mob_command(g, ch, "mat", arg); }
-        DoMecho => { crate::dg_mobcmd::dispatch_mob_command(g, ch, "mecho", arg); }
-        DoMechoaround => { crate::dg_mobcmd::dispatch_mob_command(g, ch, "mechoaround", arg); }
-        DoMexp => { crate::dg_mobcmd::dispatch_mob_command(g, ch, "mexp", arg); }
-        DoMforce => { crate::dg_mobcmd::dispatch_mob_command(g, ch, "mforce", arg); }
-        DoMforget => { crate::dg_mobcmd::dispatch_mob_command(g, ch, "mforget", arg); }
-        DoMgold => { crate::dg_mobcmd::dispatch_mob_command(g, ch, "mgold", arg); }
-        DoMgoto => { crate::dg_mobcmd::dispatch_mob_command(g, ch, "mgoto", arg); }
-        DoMhunt => { crate::dg_mobcmd::dispatch_mob_command(g, ch, "mhunt", arg); }
-        DoMjunk => { crate::dg_mobcmd::dispatch_mob_command(g, ch, "mjunk", arg); }
-        DoMkill => { crate::dg_mobcmd::dispatch_mob_command(g, ch, "mkill", arg); }
-        DoMload => { crate::dg_mobcmd::dispatch_mob_command(g, ch, "mload", arg); }
-        DoMpurge => { crate::dg_mobcmd::dispatch_mob_command(g, ch, "mpurge", arg); }
-        DoMremember => { crate::dg_mobcmd::dispatch_mob_command(g, ch, "mremember", arg); }
-        DoMsend => { crate::dg_mobcmd::dispatch_mob_command(g, ch, "msend", arg); }
-        DoMteleport => { crate::dg_mobcmd::dispatch_mob_command(g, ch, "mteleport", arg); }
-        DoMtransform => { crate::dg_mobcmd::dispatch_mob_command(g, ch, "mtransform", arg); }
+        DoMasound => {
+            crate::dg_mobcmd::dispatch_mob_command(g, ch, "masound", arg);
+        }
+        DoMat => {
+            crate::dg_mobcmd::dispatch_mob_command(g, ch, "mat", arg);
+        }
+        DoMecho => {
+            crate::dg_mobcmd::dispatch_mob_command(g, ch, "mecho", arg);
+        }
+        DoMechoaround => {
+            crate::dg_mobcmd::dispatch_mob_command(g, ch, "mechoaround", arg);
+        }
+        DoMexp => {
+            crate::dg_mobcmd::dispatch_mob_command(g, ch, "mexp", arg);
+        }
+        DoMforce => {
+            crate::dg_mobcmd::dispatch_mob_command(g, ch, "mforce", arg);
+        }
+        DoMforget => {
+            crate::dg_mobcmd::dispatch_mob_command(g, ch, "mforget", arg);
+        }
+        DoMgold => {
+            crate::dg_mobcmd::dispatch_mob_command(g, ch, "mgold", arg);
+        }
+        DoMgoto => {
+            crate::dg_mobcmd::dispatch_mob_command(g, ch, "mgoto", arg);
+        }
+        DoMhunt => {
+            crate::dg_mobcmd::dispatch_mob_command(g, ch, "mhunt", arg);
+        }
+        DoMjunk => {
+            crate::dg_mobcmd::dispatch_mob_command(g, ch, "mjunk", arg);
+        }
+        DoMkill => {
+            crate::dg_mobcmd::dispatch_mob_command(g, ch, "mkill", arg);
+        }
+        DoMload => {
+            crate::dg_mobcmd::dispatch_mob_command(g, ch, "mload", arg);
+        }
+        DoMpurge => {
+            crate::dg_mobcmd::dispatch_mob_command(g, ch, "mpurge", arg);
+        }
+        DoMremember => {
+            crate::dg_mobcmd::dispatch_mob_command(g, ch, "mremember", arg);
+        }
+        DoMsend => {
+            crate::dg_mobcmd::dispatch_mob_command(g, ch, "msend", arg);
+        }
+        DoMteleport => {
+            crate::dg_mobcmd::dispatch_mob_command(g, ch, "mteleport", arg);
+        }
+        DoMtransform => {
+            crate::dg_mobcmd::dispatch_mob_command(g, ch, "mtransform", arg);
+        }
 
         // --- maputils (maputils.c) — surface world map ---
         DoMap => maputils::do_map(g, ch, arg, subcmd),
         Pweather => maputils::pweather(g, ch, arg, subcmd),
         Lweather => maputils::lweather(g, ch, arg, subcmd),
         _ => {
-            g.send_to_char(ch, "Sorry, that command hasn't been implemented yet.
-");
+            g.send_to_char(
+                ch,
+                "Sorry, that command hasn't been implemented yet.
+",
+            );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::{Affect, Character};
+    use crate::config::Config;
+    use crate::connection::{ConState, Descriptor};
+    use crate::flags::{AFF_HIDE, PLR_FROZEN, PRF2_INTANGIBLE, PRF2_LOCKOUT, PRF2_MBUILDING};
+    use crate::types::{Class, ConnId, Race};
+
+    fn test_game_with_player() -> (GameState, CharId, ConnId) {
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(1);
+        let mut ch = Character::new_player("Tester".to_string(), Class::Warrior, Race::Human);
+        ch.desc = Some(conn);
+        let ch_id = g.create_char(ch);
+        let mut d = Descriptor::new(conn, "test".to_string());
+        d.state = ConState::Playing;
+        d.character = Some(ch_id);
+        g.descriptors.insert(conn, d);
+        (g, ch_id, conn)
+    }
+
+    fn outbuf(g: &GameState, conn: ConnId) -> &str {
+        &g.descriptors.get(&conn).unwrap().outbuf
+    }
+
+    #[test]
+    fn run_command_strips_temporary_hide_before_empty_input() {
+        let (mut g, ch, _conn) = test_game_with_player();
+        g.get_char_mut(ch).unwrap().affect_flags |= AFF_HIDE;
+
+        command_interpreter(&mut g, ch, "");
+
+        assert_eq!(g.get_char(ch).unwrap().affect_flags & AFF_HIDE, 0);
+    }
+
+    #[test]
+    fn run_command_preserves_permanent_hide() {
+        let (mut g, ch, _conn) = test_game_with_player();
+        let c = g.get_char_mut(ch).unwrap();
+        c.affect_flags |= AFF_HIDE;
+        c.affected.push(Affect {
+            spell_type: -1,
+            duration: -1,
+            modifier: 0,
+            location: 0,
+            bitvector: AFF_HIDE,
+            caster: None,
+        });
+
+        command_interpreter(&mut g, ch, "");
+
+        assert_ne!(g.get_char(ch).unwrap().affect_flags & AFF_HIDE, 0);
+    }
+
+    #[test]
+    fn lockout_blocks_everything_except_unlock() {
+        let (mut g, ch, conn) = test_game_with_player();
+        g.get_char_mut(ch).unwrap().prf2_flags |= PRF2_LOCKOUT;
+
+        command_interpreter(&mut g, ch, "say hello");
+
+        assert_eq!(outbuf(&g, conn), CMD_LOCKOUT_MSG);
+        assert_ne!(g.get_char(ch).unwrap().prf2_flags & PRF2_LOCKOUT, 0);
+    }
+
+    #[test]
+    fn lockout_unlock_routes_to_lockout_handler() {
+        let (mut g, ch, conn) = test_game_with_player();
+        g.get_char_mut(ch).unwrap().prf2_flags |= PRF2_LOCKOUT;
+
+        command_interpreter(&mut g, ch, "unlock secret");
+
+        assert!(outbuf(&g, conn).contains("OK. Your terminal is now unlocked."));
+        assert_eq!(g.get_char(ch).unwrap().prf2_flags & PRF2_LOCKOUT, 0);
+    }
+
+    #[test]
+    fn frozen_blocks_resolved_and_unknown_commands() {
+        let (mut g, ch, conn) = test_game_with_player();
+        g.get_char_mut(ch).unwrap().act_flags |= PLR_FROZEN;
+
+        command_interpreter(&mut g, ch, "bogus");
+
+        assert_eq!(outbuf(&g, conn), CMD_FROZEN_MSG);
+    }
+
+    #[test]
+    fn build_mode_blocks_disallowed_builder_commands() {
+        let (mut g, ch, conn) = test_game_with_player();
+        g.get_char_mut(ch).unwrap().prf2_flags |= PRF2_MBUILDING;
+
+        command_interpreter(&mut g, ch, "buy bread");
+
+        assert_eq!(outbuf(&g, conn), CMD_MBUILDING_BLOCK_MSG);
+    }
+
+    #[test]
+    fn intangible_blocks_non_dead_commands() {
+        let (mut g, ch, conn) = test_game_with_player();
+        g.get_char_mut(ch).unwrap().prf2_flags |= PRF2_INTANGIBLE;
+
+        command_interpreter(&mut g, ch, "cast armor");
+
+        assert_eq!(outbuf(&g, conn), CMD_INTANGIBLE_BLOCK_MSG);
+    }
+
+    #[test]
+    fn apostrophe_command_uses_one_character_command_split() {
+        let (mut g, ch, conn) = test_game_with_player();
+
+        command_interpreter(&mut g, ch, "'hello");
+
+        assert!(!outbuf(&g, conn).contains("Huh?!?"));
     }
 }

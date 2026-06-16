@@ -250,8 +250,8 @@ impl GameState {
     }
 
     // ---- Visibility -----------------------------------------------------
-    /// Simplified can_see: handles self, immortal holylight, invis-level and
-    /// AFF_INVISIBLE+detect. Light/dark gating is handled at the look site.
+    /// CAN_SEE (utils.h): self is always visible; otherwise invis-level gates
+    /// first, then ordinary mortal visibility or holylight decides the rest.
     pub fn can_see(&self, viewer: CharId, target: CharId) -> bool {
         if viewer == target {
             return true;
@@ -264,14 +264,36 @@ impl GameState {
             Some(t) => t,
             None => return false,
         };
-        if v.is_immortal() && v.prf_flags & PRF_HOLYLIGHT != 0 {
-            return true;
-        }
         // Higher-invis-level immortals are hidden from lower-level viewers.
         if t.invis_level > v.player.level as i32 {
             return false;
         }
+        if v.prf_flags & PRF_HOLYLIGHT != 0 {
+            return true;
+        }
+        if v.affect_flags & AFF_BLIND != 0 {
+            return false;
+        }
+        let light_ok = match v.in_room {
+            Some(rnum) => {
+                !self.room_opt(rnum).map(|r| r.is_dark()).unwrap_or(false)
+                    || v.affect_flags & AFF_INFRAVISION != 0
+            }
+            None => true,
+        };
+        if !light_ok {
+            return false;
+        }
         if t.affect_flags & AFF_INVISIBLE != 0 && v.affect_flags & AFF_DETECT_INVIS == 0 {
+            return false;
+        }
+        if t.affect_flags & AFF_HIDE != 0 && v.affect_flags & AFF_SENSE_LIFE == 0 {
+            return false;
+        }
+        if t.prf2_flags & PRF2_INTANGIBLE != 0
+            && v.prf2_flags & PRF2_INTANGIBLE == 0
+            && t.prf2_flags & PRF2_MBUILDING == 0
+        {
             return false;
         }
         true
@@ -534,6 +556,78 @@ mod tests {
             ObjectAffect { location: APPLY_DEFENSE, modifier: 10 },
         ];
         g.create_obj(o)
+    }
+
+    fn visible_pair() -> (GameState, CharId, CharId) {
+        let mut g = fresh_game();
+        let viewer = g.create_char(Character::new_player("Viewer".into(), Class::Warrior, Race::Human));
+        let target = g.create_char(Character::new_player("Target".into(), Class::Warrior, Race::Human));
+        let rn = g.add_room(crate::room::Room::new(10, 0, "Test".into(), "A room.".into()));
+        g.char_to_room(viewer, rn);
+        g.char_to_room(target, rn);
+        (g, viewer, target)
+    }
+
+    #[test]
+    fn can_see_rejects_blind_viewers() {
+        let (mut g, viewer, target) = visible_pair();
+        g.get_char_mut(viewer).unwrap().affect_flags |= AFF_BLIND;
+
+        assert!(!g.can_see(viewer, target));
+    }
+
+    #[test]
+    fn can_see_uses_darkness_and_infravision() {
+        let (mut g, viewer, target) = visible_pair();
+        let rn = g.get_char(viewer).unwrap().in_room.unwrap();
+        g.room_mut(rn).room_flags.insert(crate::room::RoomFlags::DARK);
+
+        assert!(!g.can_see(viewer, target));
+
+        g.get_char_mut(viewer).unwrap().affect_flags |= AFF_INFRAVISION;
+        assert!(g.can_see(viewer, target));
+    }
+
+    #[test]
+    fn can_see_requires_sense_life_for_hidden_targets() {
+        let (mut g, viewer, target) = visible_pair();
+        g.get_char_mut(target).unwrap().affect_flags |= AFF_HIDE;
+
+        assert!(!g.can_see(viewer, target));
+
+        g.get_char_mut(viewer).unwrap().affect_flags |= AFF_SENSE_LIFE;
+        assert!(g.can_see(viewer, target));
+    }
+
+    #[test]
+    fn can_see_respects_intangible_visibility_rules() {
+        let (mut g, viewer, target) = visible_pair();
+        g.get_char_mut(target).unwrap().prf2_flags |= PRF2_INTANGIBLE;
+
+        assert!(!g.can_see(viewer, target));
+
+        g.get_char_mut(viewer).unwrap().prf2_flags |= PRF2_INTANGIBLE;
+        assert!(g.can_see(viewer, target));
+
+        g.get_char_mut(viewer).unwrap().prf2_flags &= !PRF2_INTANGIBLE;
+        g.get_char_mut(target).unwrap().prf2_flags |= PRF2_MBUILDING;
+        assert!(g.can_see(viewer, target));
+    }
+
+    #[test]
+    fn can_see_holylight_bypasses_mortal_visibility_but_not_invis_level() {
+        let (mut g, viewer, target) = visible_pair();
+        {
+            let v = g.get_char_mut(viewer).unwrap();
+            v.affect_flags |= AFF_BLIND;
+            v.prf_flags |= PRF_HOLYLIGHT;
+        }
+        g.get_char_mut(target).unwrap().affect_flags |= AFF_HIDE | AFF_INVISIBLE;
+
+        assert!(g.can_see(viewer, target));
+
+        g.get_char_mut(target).unwrap().invis_level = 2;
+        assert!(!g.can_see(viewer, target));
     }
 
     /// BUG 2: repeated equip/unequip must NOT balloon max_hit / defense, and the
