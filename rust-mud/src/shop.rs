@@ -625,11 +625,14 @@ fn is_npc(g: &GameState, ch: CharId) -> bool {
     g.get_char(ch).map(|c| c.is_npc).unwrap_or(false)
 }
 
-/// IS_GOD(ch): in this DeltaMUD it's keyed on godcmd flags which the Rust port
-/// has no field for, so we use the clean degrade shop.h itself offers in its
-/// commented-out macro: level >= LVL_GOD.
+/// IS_GOD(ch): DeltaMUD keys shop god-mode on any granted god-command bit.
 fn is_god(g: &GameState, ch: CharId) -> bool {
-    g.get_char(ch).map(|c| !c.is_npc && c.player.level >= LVL_GOD).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| {
+            !c.is_npc
+                && (c.godcmds1 != 0 || c.godcmds2 != 0 || c.godcmds3 != 0 || c.godcmds4 != 0)
+        })
+        .unwrap_or(false)
 }
 
 fn is_good(g: &GameState, ch: CharId) -> bool {
@@ -2213,4 +2216,32 @@ fn list_detailed_shop(g: &mut GameState, ch: CharId, shop: &ShopData, shop_idx: 
         }
     }
     g.send_to_char(ch, &format!("Bits:       {}\r\n", bits));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+
+    fn add_player(g: &mut GameState, name: &str, level: Level) -> CharId {
+        let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        ch.player.level = level;
+        g.create_char(ch)
+    }
+
+    #[test]
+    fn is_god_uses_godcmd_bitvectors_instead_of_level() {
+        let mut g = GameState::new(Config::default());
+        let high_level_without_cmds = add_player(&mut g, "High", LVL_GOD);
+        let command_granted_mortal = add_player(&mut g, "Granted", 1);
+        g.get_char_mut(command_granted_mortal).unwrap().godcmds4 = 1;
+
+        let npc = g.create_char(Character::new_npc(1));
+        g.get_char_mut(npc).unwrap().godcmds1 = 1;
+
+        assert!(!is_god(&g, high_level_without_cmds));
+        assert!(is_god(&g, command_granted_mortal));
+        assert!(!is_god(&g, npc));
+    }
 }
