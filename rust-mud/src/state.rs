@@ -500,9 +500,11 @@ impl GameState {
                 self.mark_crash(cid);
             }
             ObjLoc::Contained(container) => {
+                let weight = self.objs.get(&oid).map(|o| o.weight).unwrap_or(0);
                 if let Some(c) = self.objs.get_mut(&container) {
                     c.contains.retain(|&o| o != oid);
                 }
+                self.adjust_container_chain_weight(container, -weight);
             }
             ObjLoc::Nowhere => {}
         }

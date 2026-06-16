@@ -89,11 +89,43 @@ impl GameState {
         if oid == container {
             return;
         }
+        let weight = self.objs.get(&oid).map(|o| o.weight).unwrap_or(0);
         if let Some(c) = self.objs.get_mut(&container) {
             c.contains.insert(0, oid);
         }
         if let Some(o) = self.objs.get_mut(&oid) {
             o.loc = ObjLoc::Contained(container);
+        }
+        self.adjust_container_chain_weight(container, weight);
+    }
+
+    pub(crate) fn adjust_container_chain_weight(&mut self, container: ObjId, delta: i32) {
+        let mut current = container;
+        let mut seen = 0;
+        loop {
+            let loc = match self.objs.get_mut(&current) {
+                Some(obj) => {
+                    obj.weight += delta;
+                    obj.loc
+                }
+                None => return,
+            };
+            match loc {
+                ObjLoc::Contained(parent) => {
+                    current = parent;
+                    seen += 1;
+                    if seen > self.objs.len() {
+                        return;
+                    }
+                }
+                ObjLoc::Carried(cid) => {
+                    if let Some(ch) = self.chars.get_mut(&cid) {
+                        ch.carry_weight += delta;
+                    }
+                    return;
+                }
+                _ => return,
+            }
         }
     }
 
@@ -766,6 +798,42 @@ mod tests {
             assert_eq!(g.get_char(cid).unwrap().carry_items, 0);
             g.extract_obj(oid);
         }
+    }
+
+    #[test]
+    fn obj_to_obj_propagates_weight_up_container_chain() {
+        let mut g = fresh_game();
+        let cid = g.create_char(Character::new_player(
+            "Carrier".into(),
+            Class::Warrior,
+            Race::Human,
+        ));
+        let mut outer = Object::new(10, "outer".into(), "outer container".into());
+        outer.weight = 10;
+        let outer = g.create_obj(outer);
+        let mut inner = Object::new(11, "inner".into(), "inner container".into());
+        inner.weight = 5;
+        let inner = g.create_obj(inner);
+        let mut gem = Object::new(12, "gem".into(), "a gem".into());
+        gem.weight = 2;
+        let gem = g.create_obj(gem);
+
+        g.obj_to_char(outer, cid);
+        assert_eq!(g.get_char(cid).unwrap().carry_weight, 10);
+
+        g.obj_to_obj(inner, outer);
+        assert_eq!(g.get_obj(outer).unwrap().weight, 15);
+        assert_eq!(g.get_char(cid).unwrap().carry_weight, 15);
+
+        g.obj_to_obj(gem, inner);
+        assert_eq!(g.get_obj(inner).unwrap().weight, 7);
+        assert_eq!(g.get_obj(outer).unwrap().weight, 17);
+        assert_eq!(g.get_char(cid).unwrap().carry_weight, 17);
+
+        g.obj_from_anywhere(gem);
+        assert_eq!(g.get_obj(inner).unwrap().weight, 5);
+        assert_eq!(g.get_obj(outer).unwrap().weight, 15);
+        assert_eq!(g.get_char(cid).unwrap().carry_weight, 15);
     }
 
     /// BUG 14: moving objects on/off a PC sets PLR_CRASH (so crash_save_all is
