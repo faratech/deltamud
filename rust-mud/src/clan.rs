@@ -395,6 +395,29 @@ fn with_clan<R>(idx: i32, f: impl FnOnce(&ClanInfo) -> R) -> Option<R> {
     t.clans.get(i).map(f)
 }
 
+pub fn clan_display_name_and_rank(idx: i32, rank: i32) -> Option<(String, String)> {
+    with_clan(idx, |c| (c.name.clone(), c.rank_label(rank).to_string()))
+}
+
+#[cfg(test)]
+pub fn set_test_clans(clans: Vec<(String, Vec<String>)>) {
+    let mut table = table().lock().unwrap();
+    table.clans = clans
+        .into_iter()
+        .enumerate()
+        .map(|(i, (name, ranks))| {
+            let mut c = ClanInfo::default();
+            c.number = i as i32;
+            c.name = name;
+            c.ranks = ranks.len() as i32;
+            for (slot, rank) in ranks.into_iter().take(MAX_RANKS - 1).enumerate() {
+                c.rank_name[slot] = rank;
+            }
+            c
+        })
+        .collect();
+}
+
 fn num_of_clans() -> i32 {
     table().lock().unwrap().clans.len() as i32
 }

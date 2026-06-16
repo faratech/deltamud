@@ -2341,8 +2341,13 @@ pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
             }
         }
         if c.clan > -1 && c.clan_rank > 0 {
-            // Clan name table not in the contract; render rank/clan ids.
-            line.push_str(&format!(" &B[&nrank {} of clan {}&B]", c.clan_rank, c.clan));
+            if let Some((clan_name, rank_name)) =
+                crate::clan::clan_display_name_and_rank(c.clan, c.clan_rank)
+            {
+                line.push_str(&format!(" &B[&n{} of {}&B]", rank_name, clan_name));
+            } else {
+                line.push_str(&format!(" &B[&nrank {} of clan {}&B]", c.clan_rank, c.clan));
+            }
         }
         line.push_str("&n\r\n");
 
@@ -3601,5 +3606,27 @@ mod tests {
         assert!(out.contains("The following socials are available to you:"));
         assert!(out.contains("accuse"));
         assert!(out.contains("applaud"));
+    }
+
+    #[test]
+    fn do_who_displays_clan_rank_and_clan_names() {
+        crate::clan::set_test_clans(vec![(
+            "Rustaceans".to_string(),
+            vec!["Initiate".to_string(), "Captain".to_string()],
+        )]);
+        let mut g = GameState::new(Config::default());
+        let viewer = connected_player(&mut g, ConnId(1), "Viewer", 1);
+        let target = connected_player(&mut g, ConnId(2), "Member", 1);
+        {
+            let c = g.get_char_mut(target).unwrap();
+            c.clan = 0;
+            c.clan_rank = 2;
+        }
+
+        do_who(&mut g, viewer, "", 0);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("Captain of Rustaceans"));
+        assert!(!out.contains("rank 2 of clan 0"));
     }
 }
