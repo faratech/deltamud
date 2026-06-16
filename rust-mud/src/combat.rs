@@ -10,10 +10,10 @@
 
 use crate::act::{act, ActArg, To};
 use crate::constants::ATTACK_HIT_TEXT;
-use crate::flags::AFF_SANCTUARY;
+use crate::flags::{AFF_SANCTUARY, AFF_SLEEP};
 use crate::object::{Object, ObjectType, ObjLoc};
 use crate::room::{RoomFlags, SectorType, EX_CLOSED};
-use crate::spell_parser::{MAX_SPELLS, TYPE_UNDEFINED};
+use crate::spell_parser::{MAX_SPELLS, SPELL_SLEEP, TYPE_UNDEFINED};
 use crate::state::GameState;
 use crate::types::*;
 
@@ -73,6 +73,13 @@ pub fn set_fighting(g: &mut GameState, ch: CharId, victim: CharId) {
     if g.get_char(ch).and_then(|c| c.fighting).is_some() {
         return;
     }
+    if g
+        .get_char(ch)
+        .map(|c| c.affect_flags & AFF_SLEEP != 0)
+        .unwrap_or(false)
+    {
+        affect_from_char(g, ch, SPELL_SLEEP);
+    }
     if let Some(c) = g.get_char_mut(ch) {
         c.fighting = Some(victim);
         c.position = Position::Fighting;
@@ -82,6 +89,13 @@ pub fn set_fighting(g: &mut GameState, ch: CharId, victim: CharId) {
     if !PK_ALLOWED {
         check_killer(g, ch, victim);
     }
+}
+
+fn affect_from_char(g: &mut GameState, ch: CharId, spell: i32) {
+    if let Some(c) = g.get_char_mut(ch) {
+        c.affected.retain(|a| a.spell_type != spell);
+    }
+    g.affect_total(ch);
 }
 
 fn stop_fighting(g: &mut GameState, ch: CharId) {
@@ -1046,7 +1060,7 @@ pub fn do_flee(g: &mut GameState, ch: CharId) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::character::Character;
+    use crate::character::{Affect, Character};
     use crate::config::Config;
 
     fn player(g: &mut GameState, name: &str) -> CharId {
@@ -1067,6 +1081,34 @@ mod tests {
         damage_type(&mut g, attacker, victim, 10, TYPE_UNDEFINED);
 
         assert_eq!(g.get_char(victim).unwrap().points.hit, 15);
+    }
+
+    #[test]
+    fn set_fighting_removes_sleep_affect() {
+        let mut g = GameState::new(Config::default());
+        let ch = player(&mut g, "Sleeper");
+        let victim = player(&mut g, "Victim");
+        {
+            let c = g.get_char_mut(ch).unwrap();
+            c.position = Position::Sleeping;
+            c.affect_flags |= AFF_SLEEP;
+            c.affected.push(Affect {
+                spell_type: SPELL_SLEEP,
+                duration: 5,
+                modifier: 0,
+                location: 0,
+                bitvector: AFF_SLEEP,
+                caster: None,
+            });
+        }
+
+        set_fighting(&mut g, ch, victim);
+
+        let c = g.get_char(ch).unwrap();
+        assert_eq!(c.fighting, Some(victim));
+        assert_eq!(c.position, Position::Fighting);
+        assert_eq!(c.affect_flags & AFF_SLEEP, 0);
+        assert!(c.affected.iter().all(|a| a.spell_type != SPELL_SLEEP));
     }
 
     #[test]
