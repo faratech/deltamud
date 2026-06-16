@@ -1,234 +1,87 @@
-# DeltaMUD Rust Edition
+# DeltaMUD — Rust Edition
 
-A complete Rust reimplementation of DeltaMUD, modernizing the classic CircleMUD codebase with memory safety, async networking, and improved performance.
+A complete, behavior-faithful **1:1 reimplementation of DeltaMUD** (a CircleMUD 3.0 derivative) in Rust, plus a layer of modern improvements. The C source at `/web/deltamud/src` is the authoritative reference; this port matches its output strings, world-file formats, numeric formulas, and database schema, while replacing the C pointer-graph with an idiomatic single-owner design.
 
-## Features
+~83 modules / ~75k lines. Builds clean and boots against the original `lib/` world files.
 
-### Core Systems Implemented
-- **Async Networking**: Built on Tokio for high-performance TCP handling
-- **Thread-Safe Architecture**: Uses `Arc<RwLock<>>` for safe concurrent access
-- **MySQL Integration**: Full database support for persistent player storage
-- **Combat System**: Complete melee combat with THAC0, damage rolls, and death handling
-- **Magic System**: Spell casting with affects, durations, and mana costs
-- **Command System**: Comprehensive command interpreter with 30+ commands
-- **World Loading**: Reads original CircleMUD world files
-- **Character Management**: Full player creation, saving, and loading
-- **Room Navigation**: Movement with directional commands and exit handling
-- **Object System**: Items with wear positions, containers, and properties
-- **Regeneration**: HP/Mana/Move regeneration based on position
-- **Affects**: Buff/debuff system with timed durations
+> For development guidance (architecture deep-dive, conventions, gotchas), see **`CLAUDE.md`** in this directory.
 
-### Architecture Improvements over C Version
-- **Memory Safety**: No manual memory management or pointer arithmetic
-- **Type Safety**: Strong typing prevents many runtime errors
-- **Concurrency**: Lock-free designs where possible, fine-grained locking elsewhere
-- **Error Handling**: Comprehensive error handling with `Result<>` types
-- **Modern Async**: Event-driven architecture instead of polling
+## What's implemented
 
-## Building
+The full DeltaMUD feature set is ported and live — **all 232 commands**, every subsystem:
 
-### Prerequisites
-- Rust 1.70+ (install from https://rustup.rs/)
-- MySQL 8.0+ or MariaDB
-- Original DeltaMUD `lib/` directory for world files
+- **World**: rooms/objects/mobiles/zones/shops loaders (incl. `E` extra-descriptions, `A` applies, room `O` special exits, mob `X`-stats + espec, DG `T` triggers), zone resets with load-chance gating.
+- **Gameplay**: combat (DeltaMUD `chance()`/`dam_multi()` from `utils.c` — not stock THAC0 — plus avoid/parry/dodge/riposte), magic/skills (spell_parser/magic/spells), classes/races/deities/languages, regen, affects, conditions, `WAIT_STATE` command lag.
+- **Content & economy**: shops, clans, boards, mail, houses, quests, auction, arena, the castle/special procedures.
+- **DG Scripts**: full VM (`script_driver` with depth + loop guards), mob/obj/wld trigger command sets, and fire-hooks (greet/command/speech/death/load/timer/random).
+- **OLC**: redit / oedit / medit / zedit / sedit / aedit / hedit / trigedit, with byte-faithful save-to-disk.
+- **Persistence**: 83-column `player_main` + `player_affects` + `player_skills` (MySQL), object rent/crash files, crypt-compatible passwords; offline-player immortal ops via an async bridge.
+- **Immortal tooling**: the full `act.wizard` command set, god-command (GCMD) permission bits, `can_edit_zone`, autowiz, on-disk syslog, the player-index table.
 
-### Setup
+### Modern improvements over the C version
+- **Idiomatic Rust core**: a single-owner `GameState` (id-indexed `IndexMap`/`Vec` arenas, `Copy` ids instead of locked pointers) — deadlock-free, with async (Tokio) only at the socket edge. No `Arc<RwLock>` entity graph.
+- **Seamless copyover**: hot-reboots the binary (`execv` + inherited socket fds) while keeping every connection attached — same as the C MUD.
+- **Crash isolation**: a panic in any command or heartbeat handler is contained (`catch_unwind`) and logged with a backtrace, instead of killing the server.
+- **Modern client protocols**: telnet IAC negotiation, password echo suppression, **GMCP** (`Char.Vitals`/`Room.Info` — Mudlet gauges + auto-map) and **MSSP** (server status for MUD listings).
+- **Observability**: optional Prometheus `/metrics` + `/health` endpoint (heartbeat tick-timing, player/mob/obj gauges, command/connection counters), syslog rotation.
+- **Hardening**: IP ban at accept, connection rate-limit + max-connections, graceful SIGTERM/Ctrl-C shutdown with save-all.
 
-1. Clone and enter the rust-mud directory:
+## Building & running
+
+Requires a recent stable Rust toolchain. No MySQL needed for development (an in-memory mock DB round-trips full player state within a run).
+
 ```bash
 cd /web/deltamud/rust-mud
-```
-
-2. Create MySQL database:
-```sql
-CREATE DATABASE deltamud;
-```
-
-3. Set environment variables:
-```bash
-export DATABASE_URL="mysql://username:password@localhost/deltamud"
-export MUD_LIB_PATH="/web/deltamud/lib"  # Path to world files
-export MUD_PORT="4000"  # Optional, defaults to 4000
-```
-
-4. Build the project:
-```bash
 cargo build --release
-```
 
-## Running
+# Development (mock DB, no MySQL):
+MUD_MOCK_DB=true MUD_PORT=4000 MUD_LIB_PATH=/web/deltamud/lib ./target/release/deltamud
 
-### Development Mode
-```bash
-cargo run
-```
-
-### Production Mode
-```bash
-cargo run --release
-```
-
-Or run the binary directly:
-```bash
+# With the metrics/health endpoint and production MySQL:
+DATABASE_URL="mysql://root:<pw>@127.0.0.1/deltamud" \
+MUD_LIB_PATH=/web/deltamud/lib \
+MUD_METRICS_PORT=19595 \
 ./target/release/deltamud
 ```
 
-### With Environment Variables
+Connect with any telnet/MUD client: `telnet <host> 4000` (or `nc` for scripts). The **first character created becomes the Implementor** (idnum 1, level 105).
+
+### Configuration (environment variables)
+| Var | Default | Notes |
+|---|---|---|
+| `MUD_PORT` | `4000` | Game listen port. |
+| `MUD_LIB_PATH` | `./lib` | World/data dir — use `/web/deltamud/lib`. |
+| `MUD_MOCK_DB` | `false` | `true` = in-memory DB (dev). Unset/`false` → real MySQL. |
+| `DATABASE_URL` | `mysql://root:password@localhost/deltamud` | Used when not mocking. Tables auto-create. |
+| `MUD_METRICS_PORT` | *(off)* | Enables `/metrics` + `/health`. **Avoid 9200/9201** — Elasticsearch on this host owns them; use e.g. `19595`. |
+| `MUD_RNG_SEED` | *(clock)* | Pins the Lehmer PRNG for reproducible/golden runs. |
+| `MUD_NO_SPECIALS` / `-s` / `-q` | off | Skip special-procedure assignment (C's `-s` flag). |
+| `MUD_MAX_CONN` | `256` | Concurrent-connection cap; `MUD_CONN_BURST`/`MUD_CONN_WINDOW_MS` add per-IP rate limiting. |
+| `RUST_LOG` | `info` | Log level. |
+
+### Control / ops
+- **Copyover** (`copyover` command, immortal): re-execs the binary keeping players connected.
+- **Graceful shutdown**: `SIGTERM` / `Ctrl-C` saves all players and exits cleanly.
+- **CI**: `.github/workflows/ci.yml` runs `cargo build --release`, `cargo test`, `cargo clippy` on push.
+
+## Testing
+
 ```bash
-# Standard mode with MySQL:
-DATABASE_URL="mysql://root:pass@localhost/deltamud" \
-MUD_LIB_PATH="../lib" \
-RUST_LOG=info \
-cargo run --release
-
-# For compatibility with existing DeltaMUD database:
-DATABASE_URL="mysql://root:pass@localhost/deltamud" \
-MUD_LIB_PATH="/web/deltamud/lib" \
-MUD_COMPAT_MODE=true \
-RUST_LOG=info \
-cargo run --release
-
-# Testing mode (no database required):
-MUD_PORT=4001 \
-MUD_MOCK_DB=true \
-RUST_LOG=info \
-cargo run --release
+cargo test                 # unit tests (DG-script parsing, password vectors, ...)
+cargo test <substring>     # a single test
 ```
+A 3-player concurrent soak script lives at `/tmp/soak.py <port>` (expects 0 panics). World files are 100% compatible with the C MUD, so the C build (`/web/deltamud/bin/circle`) can be run side-by-side as a comparison oracle.
 
-## Configuration
+## Architecture (in brief)
 
-### Environment Variables
-- `DATABASE_URL`: MySQL connection string (required unless using mock mode)
-- `MUD_LIB_PATH`: Path to world data files (defaults to `./lib`)
-- `MUD_PORT`: Server port (defaults to 4000)
-- `RUST_LOG`: Log level (error, warn, info, debug, trace)
-- `MUD_COMPAT_MODE`: Set to "true" to use existing DeltaMUD database (defaults to false)
-- `MUD_MOCK_DB`: Set to "true" to use in-memory database for testing (defaults to false)
+- `state.rs` — `GameState`, the single owner of the world (id-indexed `chars`/`objs` `IndexMap`s, `rooms` `Vec`, prototype tables, descriptors).
+- `game.rs` — the one async Game task: drains player input, runs the 10 Hz heartbeat, flushes output. Commands run synchronously here against `&mut GameState`.
+- `interpreter.rs` + `command_table.rs` — the `CMD_INFO` table (1:1 with C `cmd_info[]`, order is load-bearing) dispatched by `HandlerId`.
+- `connection.rs` — per-socket async I/O + the telnet/IAC/GMCP layer; commands never touch sockets (they append to `Descriptor.outbuf`).
+- `act.rs` — the `$n/$N/...` message engine. `dg_*.rs` — the script engine. `*edit.rs`/`olc.rs` — the builder suite. `database*.rs`/`objsave.rs`/`password.rs` — persistence.
 
-### Database
-The database tables are automatically created on first run:
-- `player_main`: Core player data
-- `player_affects`: Active spell effects
-- `player_skills`: Learned skills/spells
-- `player_objects`: Saved equipment and inventory
+See `CLAUDE.md` for the full picture (output flow, heartbeat cadence, the surface-map room splice, copyover internals, the borrow-discipline "house style").
 
-## Commands
+## License & credits
 
-### Movement
-- `north/n`, `south/s`, `east/e`, `west/w`, `up/u`, `down/d`
-- `look/l` - Examine room or objects
-
-### Communication
-- `say <message>` - Talk to the room
-- `tell <player> <message>` - Private message
-- `shout <message>` - Global message
-- `who` - List online players
-
-### Character Info
-- `score/sc` - View character stats
-- `inventory/inv/i` - List carried items
-- `equipment/eq` - Show worn equipment
-
-### Objects
-- `get/take <item>` - Pick up an item
-- `drop <item>` - Drop an item
-- `wear <item>` - Equip an item
-- `remove <item>` - Unequip an item
-
-### Combat
-- `kill/k/hit <target>` - Attack someone
-- `flee` - Escape from combat
-- `cast <spell> [target]` - Cast a spell
-
-### System
-- `quit` - Exit the game
-
-## Development
-
-### Project Structure
-```
-src/
-├── main.rs          # Entry point and server initialization
-├── types.rs         # Core type definitions and constants
-├── character.rs     # Character/player structures
-├── room.rs          # Room and exit structures
-├── object.rs        # Item/object structures
-├── world.rs         # World container and management
-├── connection.rs    # Network connection handling
-├── game.rs          # Main game loop and state
-├── database.rs      # MySQL integration
-├── combat.rs        # Combat system
-├── magic.rs         # Spell system
-├── commands.rs      # Command implementations
-└── file_loader.rs   # World file parsing
-```
-
-### Adding New Commands
-1. Add the command match in `game.rs::handle_command()`
-2. Implement the command in `commands.rs`
-3. Add any necessary permissions or checks
-
-### Adding New Spells
-1. Define spell constant in `magic.rs`
-2. Add spell info to `SPELL_INFO` HashMap
-3. Implement spell function
-4. Add to character spell list
-
-## Performance
-
-The Rust implementation offers significant improvements:
-- **Memory Usage**: ~10% of the C version due to better data structures
-- **CPU Usage**: Async I/O reduces CPU overhead
-- **Concurrency**: Can handle 1000+ simultaneous connections
-- **Safety**: Zero segfaults or memory leaks
-
-## Migration from C Version
-
-### For Players
-- Characters are not automatically migrated
-- Use the same name to recreate your character
-- Stats and equipment will need to be restored by admins
-
-### For Builders
-- World files are 100% compatible
-- No changes needed to zones, rooms, mobs, or objects
-- OLC system not yet implemented (use text files)
-
-### For Developers
-- Code is ~20% the size of C version (15k vs 71k lines)
-- Modern error handling replaces manual checks
-- Async/await replaces select() loops
-- Smart pointers replace manual memory management
-
-## Known Limitations
-
-Current features not yet implemented:
-- OLC (Online Creation)
-- DG Scripts trigger system
-- Clans
-- Arena
-- Auction system
-- Board system
-- Mail system
-- Some immortal commands
-
-These can be added incrementally as needed.
-
-## Contributing
-
-The codebase is designed for easy extension:
-1. Fork the repository
-2. Create a feature branch
-3. Implement your feature with tests
-4. Submit a pull request
-
-## License
-
-This is a derivative work of CircleMUD 3.0.
-Original CircleMUD license applies.
-
-## Credits
-
-- Original DeltaMUD team
-- CircleMUD creators
-- Rust community for excellent libraries
+A derivative work of CircleMUD 3.0; the original CircleMUD license applies. Thanks to the original DeltaMUD team, the CircleMUD creators, and the Rust ecosystem.
