@@ -821,7 +821,7 @@ impl FileLoader {
             let keywords = Self::read_tilde_buf(&mut reader)?;
             let short_desc = Self::read_tilde_buf(&mut reader)?;
             let long_desc = Self::read_tilde_buf(&mut reader)?;
-            let _action_desc = Self::read_tilde_buf(&mut reader)?;
+            let action_desc = Self::read_tilde_buf(&mut reader)?;
 
             // type, extra flags, wear flags (flags may be ascii letters).
             line.clear();
@@ -937,6 +937,7 @@ impl FileLoader {
                     obj_class,
                     min_level,
                     bitvector,
+                    action_description: action_desc,
                     affects,
                     ex_descriptions,
                 },

@@ -992,6 +992,15 @@ fn save_to_disk(g: &mut GameState, conn: ConnId) {
         out.push_str(&format!("#{}\n", v));
         if v == st.vnum {
             out.push_str(&render_mob_block(&st.mob));
+            // Re-emit the mob's DG trigger attachments after its `E` line
+            // (C medit.c:557 script_save_to_disk(mob_file, mob, MOB_TRIGGER)).
+            // The bindings live in the dg proto-script map; the editor scratch
+            // state carries no trigger field, so without this the edited mob's
+            // `T` lines are dropped on save while every unedited mob keeps its
+            // (preserved verbatim from disk below).
+            for tv in crate::dg_db_scripts::proto_trigger_vnums(0, st.vnum) {
+                out.push_str(&format!("T {}\n", tv));
+            }
         } else if let Some(block) = disk_blocks.get(&v) {
             out.push_str(block);
         }

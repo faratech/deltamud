@@ -91,8 +91,18 @@ bitflags::bitflags! {
         const NO_SUMMON = 1 << 13;
         const NO_CLAN = 1 << 14;
         const ARENA = 1 << 15;
+        // structs.h ROOM_IMPROOM (LVL_IMPL-only). MUST be defined or
+        // RoomFlags::from_bits_truncate at load silently drops it, which both
+        // strips it on any redit save AND makes the enter_game / goto IMPROOM
+        // guards dead (the bit is never present in memory).
+        const IMPROOM = 1 << 16;
         // structs.h ROOM_BAD_REGEN / ROOM_GOOD_REGEN (limits.c regen logic).
         const BAD_REGEN = 1 << 17;
+        // structs.h ROOM_WALL (can't enter if on the surface map) /
+        // ROOM_CLAN_ROOM (owned by a clan) — builder-settable, so they must
+        // round-trip rather than be truncated at load.
+        const WALL = 1 << 18;
+        const CLAN_ROOM = 1 << 19;
         const GOOD_REGEN = 1 << 20;
     }
 }

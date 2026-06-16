@@ -331,6 +331,19 @@ pub fn parse_trigger_line(kind: i32, entity_vnum: i32, line: &str) -> bool {
     }
 }
 
+/// Read back the trigger vnums bound to a mob/obj/room prototype, in load order.
+/// Used by the OLC save paths (medit/oedit) to re-emit the `T <vnum>` lines —
+/// the analogue of C's `script_save_to_disk(fp, ent, *_TRIGGER)` walking
+/// ent->proto_script. `kind` is MOB_TRIGGER(0) / OBJ_TRIGGER(1) / WLD_TRIGGER(2).
+pub fn proto_trigger_vnums(kind: i32, entity_vnum: i32) -> Vec<i32> {
+    proto_scripts()
+        .lock()
+        .unwrap()
+        .get(&(kind, entity_vnum))
+        .cloned()
+        .unwrap_or_default()
+}
+
 /// assign_triggers(entity, type): instantiate every recorded prototype trigger
 /// onto a freshly-loaded live entity. Called from load_mobile/load_object and
 /// at room boot. `entity_vnum` is the mob/obj/room vnum; `key` is the live id.

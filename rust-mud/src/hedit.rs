@@ -205,11 +205,15 @@ fn find_help_rnum(keyword: &str) -> Option<usize> {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
-    // C find_help_rnum loops `i < top_of_helpt` (i.e. excludes the last entry,
-    // which in stock data is the UNDEFINED sentinel). We match that bound.
-    let bound = guard.len().saturating_sub(1);
-    for i in 0..bound {
-        if crate::handler::isname(keyword, &guard[i].keywords) {
+    // C find_help_rnum loops `i < top_of_helpt`, excluding the last slot because
+    // C's table always carries a trailing calloc-zeroed UNDEFINED sentinel. This
+    // port's loader does NOT synthesize that sentinel and its save writes only
+    // real entries, so a `len()-1` bound would make the genuinely-last help entry
+    // unfindable (hence non-editable) after any hedit save+reload. Iterate ALL
+    // entries instead: a stock file's UNDEFINED sentinel has keywords no real
+    // lookup matches, so including it is harmless while no real entry is dropped.
+    for (i, e) in guard.iter().enumerate() {
+        if crate::handler::isname(keyword, &e.keywords) {
             return Some(i);
         }
     }

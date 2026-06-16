@@ -96,6 +96,10 @@ pub struct ObjectProto {
     pub obj_class: i32,
     pub min_level: i32,
     pub bitvector: i64,
+    /// The 4th tilde-string (action_description). The loader reads it and
+    /// oedit_save_to_disk writes it back, so it must be carried on the proto or
+    /// it is silently stripped from disk on any zone save.
+    pub action_description: String,
     /// Stat applies (`A` blocks): location/modifier pairs, up to MAX_OBJ_AFFECT.
     pub affects: Vec<crate::object::ObjectAffect>,
     /// Extra descriptions (`E` blocks): (keyword, description).

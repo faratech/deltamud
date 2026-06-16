@@ -1074,6 +1074,7 @@ fn save_internally(g: &mut GameState, conn: ConnId) {
         obj_class: edit.obj_class,
         min_level: edit.level,
         bitvector: edit.bitvector,
+        action_description: edit.action_description.clone().unwrap_or_default(),
         affects: edit.affects.iter()
             .filter(|(loc, _)| *loc != crate::flags::APPLY_NONE)
             .map(|&(location, modifier)| crate::object::ObjectAffect { location, modifier })
@@ -1173,7 +1174,8 @@ pub fn oedit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
         out.push_str("~\n");
         out.push_str(if proto.description.is_empty() { "undefined" } else { &proto.description });
         out.push_str("~\n");
-        // action description (proto has none) -> empty line + tilde.
+        // action description (4th tilde string; C strip_string'd, empty if none).
+        out.push_str(&olc::strip_cr(&proto.action_description));
         out.push_str("~\n");
 
         // type extra wear
@@ -1205,6 +1207,14 @@ pub fn oedit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
         }
         if proto.bitvector != 0 {
             out.push_str(&format!("BV {}\n", proto.bitvector));
+        }
+
+        // DG object trigger attachments (C oedit.c:403
+        // script_save_to_disk(fp, obj, OBJ_TRIGGER), after BV). The bindings
+        // live in the dg proto-script map keyed (OBJ_TRIGGER, vnum); without
+        // re-emitting them, any zone save strips every object's triggers.
+        for tv in crate::dg_db_scripts::proto_trigger_vnums(1, vnum) {
+            out.push_str(&format!("T {}\n", tv));
         }
 
         // Extra descriptions (`E` blocks): keyword~ then description~ (CR-stripped).
