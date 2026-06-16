@@ -113,6 +113,11 @@ pub struct GameState {
     pub motd: String,
     pub config: Config,
     pub pulse: u64,
+    /// Set by `do_shutdown` (C `circle_shutdown = 1`). The Game run loop checks
+    /// it after each command/pulse and exits via the graceful-shutdown path, so
+    /// the `shutdown` immortal command actually halts the server (it previously
+    /// only broadcast a message and logged — the process never stopped).
+    pub shutdown_requested: bool,
 
     // Surface ("outside") world-map splice (maputils.c read_map). The 99x99
     // grid of map cells is appended to `rooms` *after* the real-room block, so
@@ -142,6 +147,7 @@ impl GameState {
             next_char_id: 1,
             next_obj_id: 1,
             rng: Rng::default(),
+            shutdown_requested: false,
             motd: String::new(),
             config,
             pulse: 0,

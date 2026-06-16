@@ -1432,7 +1432,7 @@ fn mag_objectmagic(g: &mut GameState, ch: CharId, obj: ObjId, argument: &str) {
                     if tgt == ch {
                         continue;
                     }
-                    call_magic(g, ch, Some(tgt), None, spellnum, lvl);
+                    crate::magic::call_magic(g, ch, Some(tgt), None, spellnum, lvl);
                 }
             }
         }
@@ -1472,7 +1472,7 @@ fn mag_objectmagic(g: &mut GameState, ch: CharId, obj: ObjId, argument: &str) {
             wait_state(g, ch, PULSE_VIOLENCE as i32);
             let (level, spellnum) = g.get_obj(obj).map(|o| (o.values[0], o.values[3])).unwrap_or((0, 0));
             let lvl = if level != 0 { level } else { DEFAULT_WAND_LVL };
-            call_magic(g, ch, tch, tobj, spellnum, lvl);
+            crate::magic::call_magic(g, ch, tch, tobj, spellnum, lvl);
         }
         Some(ObjectType::Scroll) => {
             let mut target = tch;
@@ -1494,7 +1494,7 @@ fn mag_objectmagic(g: &mut GameState, ch: CharId, obj: ObjId, argument: &str) {
             wait_state(g, ch, PULSE_VIOLENCE as i32);
             let (v0, v1, v2, v3) = g.get_obj(obj).map(|o| (o.values[0], o.values[1], o.values[2], o.values[3])).unwrap_or((0, 0, 0, 0));
             for spellnum in [v1, v2, v3] {
-                if call_magic(g, ch, target, tobj, spellnum, v0) == 0 {
+                if crate::magic::call_magic(g, ch, target, tobj, spellnum, v0) == 0 {
                     break;
                 }
             }
@@ -1511,7 +1511,7 @@ fn mag_objectmagic(g: &mut GameState, ch: CharId, obj: ObjId, argument: &str) {
             wait_state(g, ch, PULSE_VIOLENCE as i32);
             let (v0, v1, v2, v3) = g.get_obj(obj).map(|o| (o.values[0], o.values[1], o.values[2], o.values[3])).unwrap_or((0, 0, 0, 0));
             for spellnum in [v1, v2, v3] {
-                if call_magic(g, ch, Some(ch), None, spellnum, v0) == 0 {
+                if crate::magic::call_magic(g, ch, Some(ch), None, spellnum, v0) == 0 {
                     break;
                 }
             }
@@ -1560,50 +1560,6 @@ fn generic_find_target(g: &GameState, ch: CharId, arg: &str) -> (Option<CharId>,
         return (None, Some(o), FIND_OBJ_EQUIP);
     }
     (None, None, 0)
-}
-
-/// call_magic (spell_parser.c): resolve & apply a spell. The full spell_info
-/// table + mag_* routines arrive in Batch 6; here we faithfully implement the
-/// gating (spell-number range, ROOM_NOMAGIC / ROOM_PEACEFUL fizzle) and return
-/// 0 for any spell the (not-yet-loaded) table can't resolve — the exact value C
-/// returns for an out-of-range / undefined spell, so callers degrade correctly.
-fn call_magic(
-    g: &mut GameState,
-    caster: CharId,
-    _cvict: Option<CharId>,
-    _ovict: Option<ObjId>,
-    spellnum: i32,
-    _level: i32,
-) -> i32 {
-    if spellnum < 1 || spellnum > TOP_SPELL_DEFINE {
-        return 0;
-    }
-
-    let (rnum, lvl) = match g.get_char(caster) {
-        Some(c) => (c.in_room, c.player.level),
-        None => return 0,
-    };
-
-    if let Some(r) = rnum {
-        let flags = g.room(r).room_flags.bits();
-        if flags & ROOM_NOMAGIC != 0 && lvl < LVL_IMPL {
-            g.send_to_char(caster, "Your magic fizzles out and dies.\r\n");
-            act(g, "$n's magic fizzles out and dies.", false, caster, None, ActArg::None, To::Room);
-            return 0;
-        }
-        // SINFO.violent is unknown without the table; the C code only blocks in
-        // a PEACEFUL room when the spell is violent/MAG_DAMAGE. With no table
-        // the spell can't be resolved (returns 0 below), so the peaceful gate
-        // is naturally subsumed. We keep the room-peaceful constant referenced
-        // for when the table lands.
-        let _ = ROOM_PEACEFUL;
-    }
-
-    // No spell_info table loaded yet: the spell is unresolved, so no routine
-    // runs and call_magic yields 0 (CircleMUD returns 1 only after running at
-    // least one routine; an unresolvable spell short-circuits the scroll/potion
-    // loop exactly like a 0 return).
-    0
 }
 
 /// WAIT_STATE(ch, cycles): impose a command delay (utils.h sets d->wait, which

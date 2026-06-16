@@ -248,6 +248,14 @@ impl Game {
             // the player, replay the command, save, and extract.
             self.drain_offline_ops().await;
             self.flush_all().await;
+
+            // The `shutdown` immortal command sets this (C circle_shutdown=1);
+            // halt via the same graceful path as a SIGTERM so the server stops.
+            if self.state.shutdown_requested {
+                info!("shutdown requested by command; beginning graceful shutdown.");
+                self.shutdown().await;
+                return Ok(());
+            }
         }
     }
 

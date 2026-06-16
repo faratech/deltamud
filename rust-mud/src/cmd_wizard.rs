@@ -1746,9 +1746,11 @@ pub fn do_shutdown(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
     }
     let (option, _rest) = one_argument(arg);
     let cname = name_of(g, ch);
-    // circle_shutdown/circle_reboot globals + FASTBOOT/KILLSCRIPT/PAUSE touch
-    // files are owned by the boot loop, not the contract; reproduce the
-    // broadcast + log, and the documented side-effect degrades to a no-op.
+    // Every shutdown variant sets C's circle_shutdown=1 (the run loop then halts
+    // the server). The .fastboot/.killscript/pause touch-files that the autorun
+    // wrapper reads to decide reboot-vs-stop remain a boot-loop detail; the core
+    // behaviour — the server actually stops — is wired via shutdown_requested.
+    g.shutdown_requested = true;
     if option.is_empty() {
         log_line(g, &format!("(GC) Shutdown by {}.", cname));
         send_to_all(g, "&m[&YINFO&m]&n Shutting down.\r\n");
@@ -1765,6 +1767,7 @@ pub fn do_shutdown(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
         log_line(g, &format!("(GC) Shutdown by {}.", cname));
         send_to_all(g, "&m[&YINFO&m]&n Shutting down for maintenance.\r\n");
     } else {
+        g.shutdown_requested = false; // unknown option: do not halt
         g.send_to_char(ch, "Unknown shutdown option.\r\n");
     }
 }
