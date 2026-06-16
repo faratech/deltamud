@@ -43,6 +43,7 @@
 use crate::act::{act, ActArg, To};
 use crate::flags::AFF_SANCTUARY;
 use crate::room::{Room, SectorType};
+use crate::spell_parser::SPELL_REDIRECT_CHARGE;
 use crate::state::GameState;
 use crate::types::*;
 use log::info;
@@ -67,6 +68,9 @@ const WEATHER_BLIZZARD: usize = 8;
 
 const PLR_KILLER: i64 = 1 << 0;
 const PLR_THIEF: i64 = 1 << 1;
+const AFF_REDIRECT_CHARGE: i64 = 1 << 25;
+const AFF_R_CHARGED: i64 = 1 << 26;
+const APPLY_DAMAGE: i32 = 22;
 
 // MAX_WEATHER (maputils.h): how many storms the map keeps spawned.
 const MAX_WEATHER: i32 = 4;
@@ -1733,19 +1737,10 @@ fn unit_activity(g: &mut GameState, room: RoomRnum, wtype: usize) {
                 ch,
                 "You see a holy bolt of lightning discharge from the sky in your direction!\r\n&CZZZZZZZZZZZZT&n!!\r\n",
             );
-            // AFF_REDIRECT_CHARGE is not surfaced in this port, so every PC takes
-            // the plain bolt (the C `else` branch): number(400,900), halved under
-            // sanctuary.
-            let sanct = g.get_char(ch).map(|c| c.affect_flags & AFF_SANCTUARY != 0).unwrap_or(false);
-            let bolt = g.rng.number(400, 900) / if sanct { 2 } else { 1 };
-            if let Some(c) = g.get_char_mut(ch) {
-                c.points.hit -= bolt;
-            }
-            weather_update_pos(g, ch);
-            if weather_show_pos(g, ch, wtype) {
+            let bolt = g.rng.number(400, 900);
+            if apply_thunderstorm_bolt(g, ch, wtype, bolt) {
                 continue; // PC died (extracted/respawned).
             }
-            g.send_to_char(ch, "You feel a little bit crispier.\r\n");
         }
 
         // --- flat storm damage (fire/hurricane/tornado/blizzard/death) ---
@@ -1856,6 +1851,68 @@ fn weather_update_pos(g: &mut GameState, ch: CharId) {
             Position::Stunned
         };
     }
+}
+
+fn apply_thunderstorm_bolt(g: &mut GameState, ch: CharId, wtype: usize, bolt: i32) -> bool {
+    let sanct_divisor = if g
+        .get_char(ch)
+        .map(|c| c.affect_flags & AFF_SANCTUARY != 0)
+        .unwrap_or(false)
+    {
+        2
+    } else {
+        1
+    };
+    let redirected = g
+        .get_char(ch)
+        .map(|c| c.affect_flags & AFF_REDIRECT_CHARGE != 0)
+        .unwrap_or(false);
+
+    if redirected {
+        let mut converted = false;
+        if let Some(c) = g.get_char_mut(ch) {
+            c.affect_flags &= !AFF_REDIRECT_CHARGE;
+            if let Some(af) = c
+                .affected
+                .iter_mut()
+                .find(|af| af.spell_type == SPELL_REDIRECT_CHARGE)
+            {
+                c.affect_flags |= AFF_R_CHARGED;
+                af.bitvector = AFF_R_CHARGED;
+                af.modifier = (bolt * 15) / 16;
+                af.location = APPLY_DAMAGE;
+                af.duration = 100;
+                c.points.hit -= (bolt / 16) / sanct_divisor;
+                converted = true;
+            }
+        }
+        if converted {
+            act(
+                g,
+                "$n amazingly absorbs the bolt of energy!",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            g.send_to_char(
+                ch,
+                "You feel the godly charge run through your body and your magic contains it!\r\n",
+            );
+        }
+    } else if let Some(c) = g.get_char_mut(ch) {
+        c.points.hit -= bolt / sanct_divisor;
+    }
+
+    weather_update_pos(g, ch);
+    if weather_show_pos(g, ch, wtype) {
+        return true;
+    }
+    if !redirected {
+        g.send_to_char(ch, "You feel a little bit crispier.\r\n");
+    }
+    false
 }
 
 /// weather_corpse_names (maputils.c): the adjective prepended to a weather
@@ -2032,7 +2089,7 @@ fn mudlog(g: &mut GameState, line: &str, min_level: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::character::Character;
+    use crate::character::{Affect, Character};
     use crate::config::Config;
     use crate::connection::Descriptor;
     use crate::object::ObjectType;
@@ -2139,5 +2196,46 @@ mod tests {
             .find(|&oid| g.get_obj(oid).map(|o| o.obj_type == ObjectType::Money).unwrap_or(false))
             .expect("corpse money");
         assert_eq!(g.get_obj(money).unwrap().values[0], 1234);
+    }
+
+    #[test]
+    fn thunderstorm_bolt_converts_redirect_charge() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Outside".to_string(),
+            "A weather test room.".to_string(),
+        ));
+        let ch = player_in_room(&mut g, "Charged", room);
+        {
+            let c = g.get_char_mut(ch).unwrap();
+            c.points.hit = 1000;
+            c.affect_flags |= AFF_REDIRECT_CHARGE;
+            c.affected.push(Affect {
+                spell_type: SPELL_REDIRECT_CHARGE,
+                duration: 24,
+                modifier: 0,
+                location: 0,
+                bitvector: AFF_REDIRECT_CHARGE,
+                caster: None,
+            });
+        }
+
+        assert!(!apply_thunderstorm_bolt(&mut g, ch, WEATHER_THUNDERSTORM, 800));
+
+        let c = g.get_char(ch).unwrap();
+        assert_eq!(c.points.hit, 950);
+        assert_eq!(c.affect_flags & AFF_REDIRECT_CHARGE, 0);
+        assert_ne!(c.affect_flags & AFF_R_CHARGED, 0);
+        let af = c
+            .affected
+            .iter()
+            .find(|af| af.spell_type == SPELL_REDIRECT_CHARGE)
+            .unwrap();
+        assert_eq!(af.bitvector, AFF_R_CHARGED);
+        assert_eq!(af.modifier, 750);
+        assert_eq!(af.location, APPLY_DAMAGE);
+        assert_eq!(af.duration, 100);
     }
 }
