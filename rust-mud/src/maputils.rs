@@ -1880,9 +1880,9 @@ fn weather_die(g: &mut GameState, ch: CharId) {
     }
     g.affect_total(ch);
 
-    // death_cry: scream into the room (neighbouring-room cries degrade, as the
-    // other Rust death paths do).
-    act(g, "Your blood freezes as you hear $n's death cry.", false, ch, None, ActArg::None, To::Room);
+    // death_cry: wail into this room + a generic cry into every open-exit
+    // neighbour (fight.c death_cry), shared with the combat death path.
+    crate::combat::death_cry(g, ch);
 
     // make_weather_corpse(ch, type) is approximated by a plain corpse holding the
     // PC's carried + worn items (the corpse-name adjective table is preserved

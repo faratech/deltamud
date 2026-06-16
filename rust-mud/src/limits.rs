@@ -984,9 +984,9 @@ fn env_die(g: &mut GameState, ch: CharId) {
     }
     g.affect_total(ch);
 
-    // death_cry: scream into the current room (the neighbouring-room cries are
-    // skipped — a soundproof-quality degrade; see manifest gaps).
-    act(g, "Your blood freezes as you hear $n's death cry.", false, ch, None, ActArg::None, To::Room);
+    // death_cry: wail into this room + a generic cry into every open-exit
+    // neighbour (fight.c death_cry), shared with the combat death path.
+    crate::combat::death_cry(g, ch);
 
     // make_corpse(ch): corpse holding carried + worn items.
     let rnum = g.get_char(ch).and_then(|c| c.in_room);

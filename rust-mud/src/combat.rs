@@ -11,7 +11,7 @@
 use crate::act::{act, ActArg, To};
 use crate::constants::ATTACK_HIT_TEXT;
 use crate::object::{Object, ObjectType, ObjLoc};
-use crate::room::{RoomFlags, SectorType};
+use crate::room::{RoomFlags, SectorType, EX_CLOSED};
 use crate::spell_parser::{MAX_SPELLS, TYPE_UNDEFINED};
 use crate::state::GameState;
 use crate::types::*;
@@ -667,6 +667,42 @@ fn update_position(g: &mut GameState, ch: CharId) {
     }
 }
 
+/// death_cry (fight.c): wail into the dying char's room, then a generic cry into
+/// every adjacent room reachable through an open exit. C targets each neighbour
+/// by temporarily pointing the char's `in_room` at it — act()'s TO_ROOM audience
+/// is the char's room, and because only the field (not the room people lists) is
+/// moved, the dying char is not among the neighbour's occupants and hears nothing
+/// extra there. Shared by every death path (combat, environment, weather, purge)
+/// so the neighbouring-room cries are no longer dropped.
+pub(crate) fn death_cry(g: &mut GameState, ch: CharId) {
+    act(g, "Your blood freezes as you hear $n's death cry.", false, ch, None, ActArg::None, To::Room);
+    let was_in = match g.get_char(ch).and_then(|c| c.in_room) {
+        Some(r) => r,
+        None => return,
+    };
+    for door in 0..NUM_OF_DIRS {
+        // CAN_GO: an exit exists, resolves to a real room, and is not closed.
+        let to_vnum = g
+            .room(was_in)
+            .exits[door]
+            .as_ref()
+            .filter(|e| e.exit_info & EX_CLOSED == 0)
+            .map(|e| e.to_room);
+        let neighbor = to_vnum.and_then(|v| g.real_room(v));
+        if let Some(to_rnum) = neighbor {
+            // Temporarily relocate the char (C: ch->in_room = neighbour) so
+            // act()'s TO_ROOM lands in the adjacent room, then restore.
+            if let Some(c) = g.get_char_mut(ch) {
+                c.in_room = Some(to_rnum);
+            }
+            act(g, "Your blood freezes as you hear someone's death cry.", false, ch, None, ActArg::None, To::Room);
+            if let Some(c) = g.get_char_mut(ch) {
+                c.in_room = Some(was_in);
+            }
+        }
+    }
+}
+
 /// Handle a death: messages, loot to a corpse, extract NPC / respawn PC.
 fn die(g: &mut GameState, killer: CharId, victim: CharId) {
     stop_fighting(g, killer);
@@ -678,11 +714,17 @@ fn die(g: &mut GameState, killer: CharId, victim: CharId) {
         return;
     }
 
-    // DG death trigger fires before the corpse/extract (death_mtrigger).
-    crate::dg_triggers::death_mtrigger(g, victim, Some(killer));
+    // DG death trigger fires before the corpse/extract (death_mtrigger). C
+    // raw_kill suppresses the death cry when the trigger returns false.
+    let cry = crate::dg_triggers::death_mtrigger(g, victim, Some(killer));
 
     act(g, "$n is dead! R.I.P.", false, victim, None, ActArg::None, To::Room);
     g.send_to_char(victim, "You are dead!  Sorry...\r\n");
+
+    // death_cry (raw_kill): wail into this room + every open-exit neighbour.
+    if cry {
+        death_cry(g, victim);
+    }
 
     // Award the killer experience for the kill (CircleMUD group_gain/gain_exp).
     let is_npc = g.get_char(victim).map(|c| c.is_npc).unwrap_or(false);

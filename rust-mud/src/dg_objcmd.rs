@@ -929,7 +929,8 @@ fn script_die(g: &mut GameState, ch: CharId) {
     }
     g.affect_total(ch);
 
-    act(g, "Your blood freezes as you hear $n's death cry.", false, ch, None, ActArg::None, To::Room);
+    // death_cry: this room + a generic cry into every open-exit neighbour.
+    crate::combat::death_cry(g, ch);
 
     let rnum = g.get_char(ch).and_then(|c| c.in_room);
     if let Some(rnum) = rnum {
