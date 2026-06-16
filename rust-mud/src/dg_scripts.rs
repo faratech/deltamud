@@ -1707,7 +1707,10 @@ pub fn script_trigger_check(g: &mut GameState) {
             crate::dg_triggers::random_otrigger(g, o);
         }
     }
-    let nrooms = g.rooms.len();
+    // Only real rooms can carry triggers. The ~9,800 synthetic surface-map cells
+    // (rnum >= map_start_rnum) never have a WTRIG, so stop the per-pulse scan at
+    // the real-room boundary instead of walking all ~10,400 rooms each time.
+    let nrooms = g.map_start_rnum.unwrap_or_else(|| g.rooms.len());
     for r in 0..nrooms {
         let ty = dg_handler::script_types(ScriptKey::Room(r));
         if ty & WTRIG_RANDOM != 0 && ((ty & WTRIG_GLOBAL != 0) || !zone_empty_for_room(g, r)) {
