@@ -488,6 +488,20 @@ fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check
         crate::commands::look_at_room(g, ch, false);
     }
 
+    if death_trap_effect(g, ch) {
+        return false;
+    }
+    if let Some(mount) = riding {
+        if same_room && death_trap_effect(g, mount) {
+            return false;
+        }
+    }
+    if let Some(rider) = ridden_by {
+        if same_room && death_trap_effect(g, rider) {
+            return false;
+        }
+    }
+
     // Greet triggers (act.movement.c:460-465). entry_memory first; then if a
     // greet_mtrigger returns 0 the arrival is bounced back to was_in (char is
     // relocated to origin and re-shown the room). Otherwise greet_memory fires.
@@ -502,6 +516,34 @@ fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check
         crate::dg_triggers::greet_memory_mtrigger(g, ch);
     }
 
+    true
+}
+
+fn death_trap_effect(g: &mut GameState, ch: CharId) -> bool {
+    const PLR_KILLER: i64 = 1 << 0;
+    const PLR_THIEF: i64 = 1 << 1;
+
+    let (in_death_room, mortal, tangible) = match g.get_char(ch) {
+        Some(c) => (
+            c.in_room
+                .and_then(|r| g.room_opt(r))
+                .map(|r| r.room_flags.contains(RoomFlags::DEATH))
+                .unwrap_or(false),
+            c.player.level < LVL_IMMORT,
+            c.prf2_flags & PRF2_INTANGIBLE == 0,
+        ),
+        None => return false,
+    };
+    if !in_death_room || !mortal || !tangible {
+        return false;
+    }
+
+    g.send_to_char(ch, "\r\n&RYou have hit a death trap. Sorry!&n\r\n");
+    crate::combat::death_cry(g, ch);
+    if let Some(c) = g.get_char_mut(ch) {
+        c.act_flags &= !(PLR_KILLER | PLR_THIEF);
+    }
+    g.extract_char(ch);
     true
 }
 
@@ -2512,6 +2554,7 @@ mod tests {
     use super::*;
     use crate::character::Character;
     use crate::config::Config;
+    use crate::connection::Descriptor;
     use crate::object::Object;
     use crate::room::{Exit, Room};
 
@@ -2554,5 +2597,43 @@ mod tests {
 
         assert!(!perform_move(&mut g, ch, NORTH as i32, false));
         assert_eq!(g.get_char(ch).unwrap().in_room, Some(from));
+    }
+
+    #[test]
+    fn mortal_entering_death_room_is_extracted() {
+        let mut g = GameState::new(Config::default());
+        let from = g.add_room(Room::new(
+            100,
+            0,
+            "Start".to_string(),
+            "A room.".to_string(),
+        ));
+        let mut death = Room::new(101, 0, "Trap".to_string(), "A trap.".to_string());
+        death.room_flags |= RoomFlags::DEATH;
+        g.add_room(death);
+        g.rooms[from].exits[NORTH] = Some(Exit {
+            description: None,
+            keyword: None,
+            exit_info: 0,
+            key: NOTHING,
+            to_room: 101,
+        });
+
+        let conn = ConnId(1);
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut ch = Character::new_player("Doomed".to_string(), Class::Warrior, Race::Human);
+        ch.desc = Some(conn);
+        let ch = g.create_char(ch);
+        g.char_to_room(ch, from);
+
+        assert!(!perform_move(&mut g, ch, NORTH as i32, false));
+        assert!(!g.char_exists(ch));
+        assert!(g
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("You have hit a death trap. Sorry!"));
     }
 }
