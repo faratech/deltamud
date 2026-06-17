@@ -48,6 +48,7 @@ pub const MOB_ISNPC: i64 = 1 << 3;
 pub const MOB_AGGRESSIVE: i64 = 1 << 5;
 pub const MOB_WIMPY: i64 = 1 << 8;
 pub const MOB_CASTER: i64 = 1 << 21;
+pub const MOB_DBLATTACK: i64 = 1 << 22;
 
 // APPLY_* — affect location codes (DeltaMUD set; structs.h).
 pub const APPLY_NONE: i32 = 0;

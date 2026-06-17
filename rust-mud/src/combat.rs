@@ -11,7 +11,9 @@
 use crate::act::{act, ActArg, To};
 use crate::character::Affect;
 use crate::constants::ATTACK_HIT_TEXT;
-use crate::flags::{AFF_HIDE, AFF_INVISIBLE, AFF_SANCTUARY, AFF_SLEEP, APPLY_POWER, MOB_WIMPY};
+use crate::flags::{
+    AFF_HIDE, AFF_INVISIBLE, AFF_SANCTUARY, AFF_SLEEP, APPLY_POWER, MOB_DBLATTACK, MOB_WIMPY,
+};
 use crate::object::{Object, ObjectType, ObjLoc};
 use crate::room::{RoomFlags, SectorType, EX_CLOSED};
 use crate::spell_parser::{
@@ -28,6 +30,8 @@ pub const TYPE_STAB: i32 = 1114;
 const SELF_DAMAGE: i32 = 1197; // spells.h
 const NUM_ATTACK_TYPES: i32 = 15; // olc.h
 const SKILL_BACKSTAB: u16 = 501;
+const SKILL_SECOND_ATTACK: u16 = 524;
+const SKILL_THIRD_ATTACK: u16 = 525;
 
 // PLR_* act-flag bits for PCs (structs.h).
 const PLR_KILLER: i64 = 1 << 0;
@@ -175,12 +179,65 @@ pub fn perform_violence(g: &mut GameState) {
         if show_diag {
             crate::cmd_informative::diag_char_to_char(g, victim, ch);
         }
-        hit(g, ch, victim);
-        damage_worn_equipment_after_hit(g, ch);
+        let apr = additional_attack_rounds(g, ch);
+        if apr >= 0 {
+            for _ in 0..=apr {
+                let Some(target) = g.get_char(ch).and_then(|c| c.fighting) else {
+                    break;
+                };
+                hit(g, ch, target);
+                if g.get_char(ch).and_then(|c| c.fighting).is_some() {
+                    damage_worn_equipment_after_hit(g, ch);
+                }
+            }
+        }
         if g.get_char(ch).map(|c| c.is_npc).unwrap_or(false) {
             crate::mobact::combat_mob_spec_pulse(g, ch);
         }
     }
+}
+
+fn additional_attack_rounds(g: &mut GameState, ch: CharId) -> i32 {
+    let (class, level, is_npc, act_flags, second_skill, third_skill) = match g.get_char(ch) {
+        Some(c) => (
+            c.player.class,
+            c.player.level as i32,
+            c.is_npc,
+            c.act_flags,
+            c.skill(SKILL_SECOND_ATTACK) as i32,
+            c.skill(SKILL_THIRD_ATTACK) as i32,
+        ),
+        None => return -1,
+    };
+    let mut apr = 0;
+
+    if matches!(class, Class::Warrior | Class::Thief) {
+        let mut percent = g.rng.number(((second_skill as f32) * 0.85) as i32, 101)
+            - (level / g.rng.number(10, 20));
+        if percent <= 0 {
+            percent = 1;
+        }
+        if second_skill > percent {
+            apr += 1;
+            let percent = g.rng.number(((third_skill as f32) * 0.9) as i32, 151)
+                - (level / g.rng.number(10, 30));
+            if third_skill > percent && class == Class::Warrior {
+                apr += 1;
+            }
+        }
+    }
+
+    if is_npc && act_flags & MOB_DBLATTACK != 0 {
+        let mut percent = g.rng.number(50, 101) - (level / g.rng.number(10, 20));
+        if percent <= 0 {
+            percent = 1;
+        }
+        if g.rng.number(1, 100) > percent {
+            apr += 1;
+        }
+    }
+
+    apr.clamp(-1, 4)
 }
 
 fn damage_worn_equipment_after_hit(g: &mut GameState, ch: CharId) {
@@ -1393,7 +1450,7 @@ mod tests {
     use crate::character::{Affect, Character};
     use crate::config::Config;
     use crate::connection::Descriptor;
-    use crate::flags::{AFF_CHARM, AFF_GROUP, MOB_SPEC};
+    use crate::flags::{AFF_CHARM, AFF_GROUP, MOB_DBLATTACK, MOB_SPEC};
     use crate::room::{Exit, Room};
 
     const TEST_W_BODY: usize = 5;
@@ -1794,6 +1851,66 @@ mod tests {
         perform_violence(&mut g);
 
         assert!(g.get_char(victim).unwrap().points.hit < 100);
+    }
+
+    #[test]
+    fn warrior_second_and_third_attack_add_melee_hits() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        let attacker = player(&mut g, "Attacker");
+        let victim = connected_player(&mut g, "Victim", ConnId(1));
+        {
+            let a = g.get_char_mut(attacker).unwrap();
+            a.player.class = Class::Warrior;
+            a.player.level = 100;
+            a.points.power = 1000;
+            a.points.technique = 1000;
+            a.position = Position::Fighting;
+            a.fighting = Some(victim);
+            a.set_skill(SKILL_SECOND_ATTACK, 255);
+            a.set_skill(SKILL_THIRD_ATTACK, 255);
+        }
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.points.hit = 10_000;
+            v.points.max_hit = 10_000;
+        }
+        g.char_to_room(attacker, room);
+        g.char_to_room(victim, room);
+
+        perform_violence(&mut g);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.matches("\r\n").count() >= 3, "{out:?}");
+    }
+
+    #[test]
+    fn mob_dblattack_adds_extra_melee_hit() {
+        let mut g = GameState::new(Config::default());
+        g.rng.srandom(5);
+        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        let mut mob = Character::new_npc(99);
+        mob.player.name = "Raider".to_string();
+        mob.player.level = 100;
+        mob.position = Position::Fighting;
+        mob.points.power = 1000;
+        mob.points.technique = 1000;
+        mob.act_flags |= MOB_DBLATTACK;
+        let mob = g.create_char(mob);
+        let victim = connected_player(&mut g, "Victim", ConnId(1));
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.points.hit = 10_000;
+            v.points.max_hit = 10_000;
+        }
+        g.char_to_room(mob, room);
+        g.char_to_room(victim, room);
+        g.get_char_mut(mob).unwrap().fighting = Some(victim);
+
+        perform_violence(&mut g);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.matches("\r\n").count() >= 2, "{out:?}");
     }
 
     #[test]
