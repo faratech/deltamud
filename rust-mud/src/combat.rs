@@ -148,6 +148,9 @@ pub fn perform_violence(g: &mut GameState) {
         }
         hit(g, ch, victim);
         damage_worn_equipment_after_hit(g, ch);
+        if g.get_char(ch).map(|c| c.is_npc).unwrap_or(false) {
+            crate::mobact::combat_mob_spec_pulse(g, ch);
+        }
     }
 }
 
@@ -1361,7 +1364,7 @@ mod tests {
     use crate::character::{Affect, Character};
     use crate::config::Config;
     use crate::connection::Descriptor;
-    use crate::flags::{AFF_CHARM, AFF_GROUP};
+    use crate::flags::{AFF_CHARM, AFF_GROUP, MOB_SPEC};
     use crate::room::{Exit, Room};
 
     const TEST_W_BODY: usize = 5;
@@ -1689,6 +1692,39 @@ mod tests {
 
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
         assert!(!out.contains("Victim has some small wounds and bruises.\r\n"));
+    }
+
+    #[test]
+    fn perform_violence_calls_registered_mob_combat_spec() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        let mut snake = Character::new_npc(3618);
+        snake.player.name = "Snake".to_string();
+        snake.player.level = 42;
+        snake.points.hit = 100;
+        snake.points.max_hit = 100;
+        snake.position = Position::Fighting;
+        snake.act_flags |= MOB_SPEC;
+        let snake = g.create_char(snake);
+        let victim = connected_player(&mut g, "Victim", ConnId(1));
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.points.hit = 100;
+            v.points.max_hit = 100;
+            v.fighting = Some(snake);
+        }
+        g.char_to_room(snake, room);
+        g.char_to_room(victim, room);
+        g.get_char_mut(snake).unwrap().fighting = Some(victim);
+
+        perform_violence(&mut g);
+
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("Snake bites you!\r\n"));
     }
 
     #[test]

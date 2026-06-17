@@ -703,6 +703,26 @@ fn call_mob_spec(g: &mut GameState, ch: CharId) -> bool {
     false
 }
 
+/// Combat pulse spec dispatch (fight.c perform_violence): if a fighting mob has
+/// MOB_SPEC or MOB_CASTER and a registered proc, call it with cmd=0/arg="".
+/// The return value is intentionally ignored by the combat loop.
+pub fn combat_mob_spec_pulse(g: &mut GameState, ch: CharId) {
+    if g.config.no_specials {
+        return;
+    }
+    let Some(c) = g.get_char(ch) else {
+        return;
+    };
+    if !c.is_npc || c.act_flags & (MOB_SPEC | MOB_CASTER) == 0 {
+        return;
+    }
+    let vnum = c.nr;
+    if crate::spec_assign::get_mob_spec(vnum).is_some() || crate::shop::is_shop_keeper_vnum(vnum)
+    {
+        let _ = call_mob_spec(g, ch);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Mob memory routines (mobact.c remember / forget / clearMemory).
 // ---------------------------------------------------------------------------
