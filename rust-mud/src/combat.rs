@@ -134,6 +134,49 @@ pub fn perform_violence(g: &mut GameState) {
             continue;
         }
         hit(g, ch, victim);
+        damage_worn_equipment_after_hit(g, ch);
+    }
+}
+
+fn damage_worn_equipment_after_hit(g: &mut GameState, ch: CharId) {
+    let victim = match g.get_char(ch).and_then(|c| c.fighting) {
+        Some(v) => v,
+        None => return,
+    };
+    let (is_npc, dex, equipment) = match g.get_char(victim) {
+        Some(v) => (v.is_npc, v.aff_abils.dex as i32, v.equipment),
+        None => return,
+    };
+    if is_npc {
+        return;
+    }
+
+    // C computes this and then calls MAX(MIN(condition,30),10) without
+    // assigning the result, so the unclamped value is the effective threshold.
+    let condition = 20 - (((dex - 12) * 5) / 3);
+    for oid in equipment.into_iter().flatten() {
+        let total_slots = g.get_obj(oid).map(|o| o.total_slots).unwrap_or(0);
+        if total_slots != 0 && g.rng.number(1, 100) <= condition {
+            let damaged = if let Some(o) = g.get_obj_mut(oid) {
+                o.curr_slots -= 1;
+                Some(o.short_description.clone())
+            } else {
+                None
+            };
+            if let Some(short) = damaged {
+                g.send_to_char(victim, &format!("{} just got DAMAGED during the combat!\r\n", short));
+                g.mark_crash(victim);
+            }
+        }
+        let crumble = g
+            .get_obj(oid)
+            .filter(|o| o.total_slots != 0 && o.curr_slots == 0)
+            .map(|o| o.short_description.clone());
+        if let Some(short) = crumble {
+            g.send_to_char(victim, &format!("{} crumbles to dust as it wears out!\r\n", short));
+            g.obj_from_anywhere(oid);
+            g.extract_obj(oid);
+        }
     }
 }
 
@@ -1118,6 +1161,9 @@ mod tests {
     use super::*;
     use crate::character::{Affect, Character};
     use crate::config::Config;
+    use crate::connection::Descriptor;
+
+    const TEST_W_BODY: usize = 5;
 
     fn player(g: &mut GameState, name: &str) -> CharId {
         g.create_char(Character::new_player(
@@ -1125,6 +1171,23 @@ mod tests {
             Class::Warrior,
             Race::Human,
         ))
+    }
+
+    fn connected_player(g: &mut GameState, name: &str, conn: ConnId) -> CharId {
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        ch.desc = Some(conn);
+        g.create_char(ch)
+    }
+
+    fn durable_item(g: &mut GameState, wearer: CharId, curr_slots: i32, total_slots: i32) -> ObjId {
+        let mut obj = Object::new(100, "armor".to_string(), "A test breastplate".to_string());
+        obj.curr_slots = curr_slots;
+        obj.total_slots = total_slots;
+        let oid = g.create_obj(obj);
+        g.equip_char(wearer, oid, TEST_W_BODY);
+        oid
     }
 
     #[test]
@@ -1212,6 +1275,67 @@ mod tests {
         damage_type(&mut g, attacker, victim, 1, TYPE_UNDEFINED);
 
         assert_eq!(g.get_char(victim).unwrap().points.hit, 19);
+    }
+
+    #[test]
+    fn combat_durability_decrements_worn_pc_equipment() {
+        let mut g = GameState::new(Config::default());
+        let attacker = player(&mut g, "Attacker");
+        let victim = connected_player(&mut g, "Victim", ConnId(1));
+        let armor = durable_item(&mut g, victim, 3, 3);
+        g.get_char_mut(attacker).unwrap().fighting = Some(victim);
+        g.get_char_mut(victim).unwrap().aff_abils.dex = -100;
+
+        damage_worn_equipment_after_hit(&mut g, attacker);
+
+        assert_eq!(g.get_obj(armor).unwrap().curr_slots, 2);
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("A test breastplate just got DAMAGED during the combat!\r\n"));
+        assert_ne!(
+            g.get_char(victim).unwrap().act_flags & crate::objsave::PLR_CRASH,
+            0
+        );
+    }
+
+    #[test]
+    fn combat_durability_extracts_worn_equipment_at_zero_slots() {
+        let mut g = GameState::new(Config::default());
+        let attacker = player(&mut g, "Attacker");
+        let victim = connected_player(&mut g, "Victim", ConnId(1));
+        let armor = durable_item(&mut g, victim, 1, 3);
+        g.get_char_mut(attacker).unwrap().fighting = Some(victim);
+        g.get_char_mut(victim).unwrap().aff_abils.dex = -100;
+
+        damage_worn_equipment_after_hit(&mut g, attacker);
+
+        assert!(g.get_obj(armor).is_none());
+        assert_eq!(g.get_char(victim).unwrap().equipment[TEST_W_BODY], None);
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("A test breastplate just got DAMAGED during the combat!\r\n"));
+        assert!(out.contains("A test breastplate crumbles to dust as it wears out!\r\n"));
+    }
+
+    #[test]
+    fn combat_durability_skips_npc_victims_and_indestructible_items() {
+        let mut g = GameState::new(Config::default());
+        let attacker = player(&mut g, "Attacker");
+        let npc = g.create_char(Character::new_npc(1));
+        let indestructible_pc = player(&mut g, "Victim");
+        let npc_armor = durable_item(&mut g, npc, 3, 3);
+        let pc_armor = durable_item(&mut g, indestructible_pc, 3, 0);
+
+        g.get_char_mut(attacker).unwrap().fighting = Some(npc);
+        damage_worn_equipment_after_hit(&mut g, attacker);
+        assert_eq!(g.get_obj(npc_armor).unwrap().curr_slots, 3);
+
+        g.get_char_mut(attacker).unwrap().fighting = Some(indestructible_pc);
+        g.get_char_mut(indestructible_pc).unwrap().aff_abils.dex = -100;
+        damage_worn_equipment_after_hit(&mut g, attacker);
+        assert_eq!(g.get_obj(pc_armor).unwrap().curr_slots, 3);
     }
 
     #[test]
