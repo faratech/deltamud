@@ -22,10 +22,9 @@
 //     and level OFFLINE (g.get_id_by_name / g.get_name_by_id), so member-name
 //     *display* (e.g. the roster's offline members) and existence checks no
 //     longer degrade to "no such player". What the index does NOT carry is a
-//     player's clan / clan_rank columns: those live only in player_main, so the
-//     clan-MEMBERSHIP *mutations* (enlist/expel/promote/demote of an offline
-//     player) still need an async on-demand player_main load, and keep the
-//     "no such player" degrade with a precise note at each such site.
+//     player's clan / clan_rank columns: those live only in player_main, so
+//     offline clan-MEMBERSHIP mutations are queued through GameState.offline_ops
+//     and replayed after the async game loop loads the target row.
 //
 // House style follows cmd_comm.rs / cmd_item.rs: copy needed values into
 // locals before mutating or broadcasting; re-look-up entities by id every
@@ -379,14 +378,32 @@ fn connected_players(g: &GameState) -> Vec<CharId> {
     v
 }
 
-/// is_playing(name): the online PC with this exact (case-insensitive) name, if
-/// any. Mirrors clan.c's is_playing(); the player table / pfile branch is
-/// unavailable synchronously (see header), so offline players read as absent.
+/// is_playing(name): a PC currently present in GameState with this exact
+/// (case-insensitive) name. Normally this is a connected player; during
+/// GameState.offline_ops replay it is a descriptorless offline row temporarily
+/// loaded by game.rs.
 fn is_playing(g: &GameState, name: &str) -> Option<CharId> {
     if name.is_empty() {
         return None;
     }
-    g.find_player_by_name(name).filter(|&id| has_desc(g, id))
+    g.find_player_by_name(name)
+        .filter(|&id| g.get_char(id).map(|c| !c.is_npc).unwrap_or(false))
+}
+
+fn defer_offline_clan_op(g: &mut GameState, ch: CharId, target: &str, command: &str) -> bool {
+    let first = target.split_whitespace().next().unwrap_or("");
+    if first.is_empty() || g.find_player_by_name(first).is_some() {
+        return false;
+    }
+    if g.get_id_by_name(first).is_some() {
+        g.send_to_char(
+            ch,
+            &format!("[ Loading {} from the player file... ]\r\n", first),
+        );
+        g.queue_offline_op(ch, first, command);
+        return true;
+    }
+    false
 }
 
 /// get_char_vis-equivalent for clan create / newowner: an online, visible PC
@@ -966,8 +983,9 @@ fn clan_enlist(g: &mut GameState, ch: CharId, arg: &str) {
     let victim = match is_playing(g, &arg1) {
         Some(v) => v,
         None => {
-            // NOTE: enlisting an OFFLINE applicant mutates their player_main
-            // clan_rank (not in the index) — needs an async on-demand load.
+            if defer_offline_clan_op(g, ch, &arg1, &format!("clan enlist {}", arg1)) {
+                return;
+            }
             g.send_to_char(ch, "There is no such player.\r\n");
             return;
         }
@@ -1023,8 +1041,9 @@ fn clan_expel(g: &mut GameState, ch: CharId, arg: &str) {
     let victim = match is_playing(g, &arg1) {
         Some(v) => v,
         None => {
-            // NOTE: expelling an OFFLINE member mutates their player_main
-            // clan/clan_rank (not in the index) — needs an async on-demand load.
+            if defer_offline_clan_op(g, ch, &arg1, &format!("clan expel {}", arg1)) {
+                return;
+            }
             g.send_to_char(ch, "There are no players by that name.\r\n");
             return;
         }
@@ -1101,8 +1120,9 @@ fn clan_promote(g: &mut GameState, ch: CharId, arg: &str) {
     let victim = match is_playing(g, &arg1) {
         Some(v) => v,
         None => {
-            // NOTE: promoting an OFFLINE member mutates their player_main
-            // clan_rank (not in the index) — needs an async on-demand load.
+            if defer_offline_clan_op(g, ch, &arg1, &format!("clan promote {}", arg1)) {
+                return;
+            }
             g.send_to_char(ch, "There is no such player.\r\n");
             return;
         }
@@ -1162,8 +1182,9 @@ fn clan_demote(g: &mut GameState, ch: CharId, arg: &str) {
     let victim = match is_playing(g, &arg1) {
         Some(v) => v,
         None => {
-            // NOTE: demoting an OFFLINE member mutates their player_main
-            // clan_rank (not in the index) — needs an async on-demand load.
+            if defer_offline_clan_op(g, ch, &arg1, &format!("clan demote {}", arg1)) {
+                return;
+            }
             g.send_to_char(ch, "There is no player by that name.\r\n");
             return;
         }
@@ -1747,6 +1768,10 @@ fn pers(g: &GameState, viewer: CharId, target: CharId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::Descriptor;
+    use crate::state::PlayerIndex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_lib(name: &str) -> String {
@@ -1757,6 +1782,40 @@ mod tests {
         let path = std::env::temp_dir().join(format!("deltamud-clan-{}-{}", name, stamp));
         std::fs::create_dir_all(path.join("etc")).unwrap();
         path.to_string_lossy().to_string()
+    }
+
+    fn connected_player(g: &mut GameState, conn: ConnId, name: &str, level: Level) -> CharId {
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        ch.desc = Some(conn);
+        ch.player.level = level;
+        let id = g.create_char(ch);
+        g.players_by_name.insert(name.to_lowercase(), id);
+        id
+    }
+
+    fn indexed_player(g: &mut GameState, name: &str, idnum: i64, level: Level) {
+        g.player_table.push(PlayerIndex {
+            idnum,
+            name: name.to_string(),
+            level,
+            last_logon: 0,
+            host: String::new(),
+        });
+    }
+
+    fn install_test_clan(lib: &str) {
+        let mut c = ClanInfo::default();
+        c.name = "First".to_string();
+        c.number = 0;
+        c.members = 1;
+        c.ranks = 3;
+        c.rank_name[0] = "Member".to_string();
+        c.rank_name[1] = "Officer".to_string();
+        c.rank_name[2] = "Leader".to_string();
+        std::fs::write(clan_file_path(lib), encode_clans(&[c])).unwrap();
+        boot_clans(lib);
     }
 
     #[test]
@@ -1784,6 +1843,80 @@ mod tests {
         let decoded = decode_clans(&saved).unwrap();
         assert_eq!(decoded[0].members, 2);
         assert_eq!(decoded[1].members, 0);
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
+    #[test]
+    fn clan_promote_queues_indexed_offline_target() {
+        let _guard = test_clan_guard();
+        let lib = temp_lib("offline-queue");
+        install_test_clan(&lib);
+        let mut g = GameState::new(Config::default());
+        let actor = connected_player(&mut g, ConnId(1), "Leader", 50);
+        {
+            let c = g.get_char_mut(actor).unwrap();
+            c.clan = 0;
+            c.clan_rank = 3;
+        }
+        indexed_player(&mut g, "Offline", 42, 20);
+
+        clan_promote(&mut g, actor, "Offline");
+
+        assert_eq!(g.offline_ops.len(), 1);
+        assert_eq!(g.offline_ops[0].target, "offline");
+        assert_eq!(g.offline_ops[0].command, "clan promote offline");
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("[ Loading offline from the player file... ]\r\n"));
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
+    #[test]
+    fn clan_membership_commands_queue_indexed_offline_targets() {
+        let _guard = test_clan_guard();
+        let lib = temp_lib("offline-all-queue");
+        install_test_clan(&lib);
+        for command in ["enlist", "expel", "promote", "demote"] {
+            let mut g = GameState::new(Config::default());
+            let actor = connected_player(&mut g, ConnId(1), "Leader", 50);
+            {
+                let c = g.get_char_mut(actor).unwrap();
+                c.clan = 0;
+                c.clan_rank = 3;
+            }
+            indexed_player(&mut g, "Offline", 42, 20);
+            do_clan(&mut g, actor, &format!("{} Offline", command), 0);
+
+            assert_eq!(g.offline_ops.len(), 1, "{command}");
+            assert_eq!(g.offline_ops[0].target, "offline");
+            assert_eq!(g.offline_ops[0].command, format!("clan {} offline", command));
+        }
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
+    #[test]
+    fn clan_promote_replay_accepts_descriptorless_loaded_target() {
+        let _guard = test_clan_guard();
+        let lib = temp_lib("offline-replay");
+        install_test_clan(&lib);
+        let mut g = GameState::new(Config::default());
+        let actor = connected_player(&mut g, ConnId(1), "Leader", 50);
+        {
+            let c = g.get_char_mut(actor).unwrap();
+            c.clan = 0;
+            c.clan_rank = 3;
+        }
+        let mut target = Character::new_player("Offline".to_string(), Class::Warrior, Race::Human);
+        target.clan = 0;
+        target.clan_rank = 1;
+        target.idnum = 42;
+        let target = g.create_char(target);
+        g.players_by_name.insert("offline".to_string(), target);
+
+        clan_promote(&mut g, actor, "Offline");
+
+        assert_eq!(g.get_char(target).unwrap().clan_rank, 2);
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("You promote Offline to Officer.\r\n"));
         let _ = std::fs::remove_dir_all(lib);
     }
 }
