@@ -320,6 +320,13 @@ fn shop_func(keeper_vnum: MobVnum) -> Option<ShopFn> {
         .copied()
 }
 
+pub fn is_shop_keeper_vnum(keeper_vnum: MobVnum) -> bool {
+    shops()
+        .lock()
+        .map(|guard| guard.iter().any(|s| s.keeper == keeper_vnum))
+        .unwrap_or(false)
+}
+
 // ---------------------------------------------------------------------------
 // Boot: load the shop index + files.
 // ---------------------------------------------------------------------------
@@ -2320,6 +2327,22 @@ mod tests {
 
         shops().lock().unwrap().clear();
         let _ = crate::modify::page_input(&mut g, conn, "q");
+    }
+
+    #[test]
+    fn is_shop_keeper_vnum_matches_loaded_shop_table() {
+        {
+            let mut guard = shops().lock().unwrap();
+            guard.clear();
+            let mut shop = ShopData::new(1);
+            shop.keeper = 4242;
+            guard.push(shop);
+        }
+
+        assert!(is_shop_keeper_vnum(4242));
+        assert!(!is_shop_keeper_vnum(4243));
+
+        shops().lock().unwrap().clear();
     }
 
     #[test]

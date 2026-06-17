@@ -265,11 +265,10 @@ pub fn mobile_activity(g: &mut GameState) {
 
         // ---- 1. MOB_SPEC special procedure (pulse call) ----------------
         // C looks up mob_index[rnum].func and calls it with cmd 0; a true
-        // return ends the mob's turn. A genuinely-missing func is a SYSERR in
-        // C that clears MOB_SPEC, but in the port an "unported" proc is simply
-        // a func that does nothing and returns 0 — the mob then falls through
-        // to default AI, which is exactly how C behaves on a 0 return. So we
-        // never strip the bit; we just dispatch the procs that exist.
+        // return ends the mob's turn. A genuinely missing func is a SYSERR in C
+        // that clears MOB_SPEC. Shop keepers are resolved dynamically in this
+        // port, so call_mob_spec preserves their flag separately from static
+        // mob-spec misses.
         // `no_specials` (comm.c, set by the C `-s` flag) gates this exactly as
         // C does: mobact.c:51 `if (MOB_FLAGGED(ch, MOB_SPEC) && !no_specials)`.
         if !g.config.no_specials && mob_flagged(g, ch, MOB_SPEC) && call_mob_spec(g, ch) {
@@ -675,13 +674,11 @@ fn pchelper_evil(g: &mut GameState, ch: CharId) {
 // ---------------------------------------------------------------------------
 
 /// Run the mob's spec proc for this pulse (cmd=""). Returns true if it consumed
-/// the mob's turn. The statically-assigned proc (spec_assign table: postmaster,
-/// the king's-castle procs, …) is tried first with ch == me, exactly as C's
-/// mobile_activity calls `mob_index[rnum].func(mob, mob, 0, "")`. Procs that are
-/// reactive-only (postmaster) return false on a bare pulse; the castle procs
-/// (guards, king, training master, gamblers, …) do their ambient work here.
-/// Mobs with no table entry fall through to the shop keeper proc, which
-/// self-identifies by vnum and returns false for any non-keeper.
+/// the mob's turn. Statically assigned specs are tried first, exactly as C's
+/// mobile_activity calls `mob_index[rnum].func(mob, mob, 0, "")`. Shop keepers
+/// are resolved dynamically by vnum. A MOB_SPEC mob with neither registration is
+/// an invalid prototype flag: log the C SYSERR and strip the bit so later pulses
+/// do not keep retrying it.
 fn call_mob_spec(g: &mut GameState, ch: CharId) -> bool {
     let vnum = g.get_char(ch).map(|c| c.nr).unwrap_or(NOBODY);
     if let Some(func) = crate::spec_assign::get_mob_spec(vnum) {
@@ -690,8 +687,20 @@ fn call_mob_spec(g: &mut GameState, ch: CharId) -> bool {
         }
         return false;
     }
-    // Shop keepers self-identify by vnum inside shop_keeper().
-    crate::shop::shop_keeper(g, ch, ch, "", "")
+    if crate::shop::is_shop_keeper_vnum(vnum) {
+        return crate::shop::shop_keeper(g, ch, ch, "", "");
+    }
+
+    let name = get_name(g, ch);
+    log::warn!(
+        "SYSERR: {} (#{}): Attempting to call non-existing mob func",
+        name,
+        vnum
+    );
+    if let Some(c) = g.get_char_mut(ch) {
+        c.act_flags &= !MOB_SPEC;
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -778,3 +787,54 @@ pub fn clear_memory(ch: CharId) {
 // also in graph.rs; mobile_activity drives a mob's hunt by calling
 // `crate::graph::hunt_victim(g, ch)` for any mob whose `hunting` field is set.
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::room::Room;
+
+    fn npc_with_spec(g: &mut GameState, vnum: MobVnum, room: RoomRnum) -> CharId {
+        let mut mob = Character::new_npc(vnum);
+        mob.act_flags |= MOB_SPEC;
+        let id = g.create_char(mob);
+        g.char_to_room(id, room);
+        id
+    }
+
+    #[test]
+    fn mobile_activity_strips_unregistered_mob_spec_flag() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let mob = npc_with_spec(&mut g, 987_654, room);
+
+        mobile_activity(&mut g);
+
+        assert_eq!(g.get_char(mob).unwrap().act_flags & MOB_SPEC, 0);
+    }
+
+    #[test]
+    fn mobile_activity_preserves_mob_spec_when_specials_disabled() {
+        let mut cfg = Config::default();
+        cfg.no_specials = true;
+        let mut g = GameState::new(cfg);
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let mob = npc_with_spec(&mut g, 987_655, room);
+
+        mobile_activity(&mut g);
+
+        assert_ne!(g.get_char(mob).unwrap().act_flags & MOB_SPEC, 0);
+    }
+
+    #[test]
+    fn mobile_activity_preserves_registered_mob_spec_flag() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let mob = npc_with_spec(&mut g, 1, room);
+
+        mobile_activity(&mut g);
+
+        assert_ne!(g.get_char(mob).unwrap().act_flags & MOB_SPEC, 0);
+    }
+}
