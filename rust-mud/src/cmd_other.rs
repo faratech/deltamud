@@ -3520,64 +3520,134 @@ pub fn do_email(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     let (farg, _) = one_argument(argument);
 
     if farg.is_empty() {
-        // No target: register/clear the caller's own email. The EDATA flat file
-        // is owned outside the command layer; we store on the Character::email
-        // slot and acknowledge (the C path writes extra_data).
+        // No target: register/clear the caller's own email and persist the C
+        // extra-data sidecar (plredata/<bucket>/<name>.data).
+        let mut name = None;
         if let Some(c) = g.get_char_mut(ch) {
             c.email = if argument.is_empty() {
                 None
             } else {
                 Some(argument.to_string())
             };
+            name = Some(c.get_name().to_string());
+        }
+        if let Some(name) = name {
+            let email = g.get_char(ch).and_then(|c| c.email.as_deref());
+            write_extra_email(&g.config.lib_path, &name, email);
         }
         g.send_to_char(ch, "Ok.\r\n");
         return;
     }
 
-    // Targeting another player: look up their stored email. The extra-data file
-    // store isn't ported; if the player is online we can read their in-memory
-    // slot, respecting the '*'-private convention via immortal level.
+    // Targeting another player: prefer their live slot if online, otherwise
+    // read the C-compatible extra-data file. C treats no leading '*' as private
+    // to mortals and leading '*' as publicly visible.
     let viewer_level = g.get_char(ch).map(|c| c.player.level).unwrap_or(1);
+    let mut email = None;
+    let mut known_player = false;
     if let Some(target) = g.find_player_by_name(&farg) {
-        let email = g.get_char(target).and_then(|c| c.email.clone());
-        match email {
-            Some(addr) if !addr.is_empty() => {
-                // Private addresses (prefixed '*') only visible to immortals.
-                if let Some(rest) = addr.strip_prefix('*') {
-                    if viewer_level < LVL_IMMORT {
-                        g.send_to_char(ch, "Their email address is private.\r\n");
-                        return;
-                    }
-                    g.send_to_char(ch, &format!("{}\r\n", rest));
-                } else {
-                    g.send_to_char(ch, &format!("{}\r\n", addr));
-                }
-            }
-            _ => g.send_to_char(ch, "They have not registered an email address.\r\n"),
+        known_player = true;
+        if let Some(c) = g.get_char(target) {
+            email = c.email.clone().or_else(|| read_extra_email(&g.config.lib_path, c.get_name()));
         }
-        return;
+    } else if let Some(id) = g.get_id_by_name(&farg) {
+        known_player = true;
+        let name = g.get_name_by_id(id).unwrap_or_else(|| farg.clone());
+        email = read_extra_email(&g.config.lib_path, &name);
     }
 
-    // Offline-but-existing player (C: get_id_by_name(farg) != -1 once the EDATA
-    // file is absent): their email isn't loaded, so report it unregistered
-    // rather than self-registering. The boot-loaded player_table index resolves
-    // the name offline. (Reading an offline player's stored EDATA email still
-    // needs the async extra-data file load — out of scope for the name index.)
-    if g.get_id_by_name(&farg).is_some() {
-        g.send_to_char(ch, "They have not registered an email address.\r\n");
+    if known_player {
+        send_email_result(g, ch, viewer_level, email.as_deref());
         return;
     }
 
     // Unknown name: register the caller's own email to `argument` (C falls
     // through to the self-registration branch when the file is absent).
+    let mut name = None;
     if let Some(c) = g.get_char_mut(ch) {
         c.email = if argument.is_empty() {
             None
         } else {
             Some(argument.to_string())
         };
+        name = Some(c.get_name().to_string());
+    }
+    if let Some(name) = name {
+        let email = g.get_char(ch).and_then(|c| c.email.as_deref());
+        write_extra_email(&g.config.lib_path, &name, email);
     }
     g.send_to_char(ch, "Ok.\r\n");
+}
+
+fn send_email_result(g: &mut GameState, ch: CharId, viewer_level: Level, email: Option<&str>) {
+    let Some(addr) = email.filter(|addr| !addr.is_empty()) else {
+        g.send_to_char(ch, "They have not registered an email address.\r\n");
+        return;
+    };
+    if let Some(public) = addr.strip_prefix('*') {
+        if public.is_empty() {
+            g.send_to_char(ch, "They have not registered an email address.\r\n");
+        } else {
+            g.send_to_char(ch, &format!("{}\r\n", public));
+        }
+    } else if viewer_level < LVL_IMMORT {
+        g.send_to_char(ch, "Their email address is private.\r\n");
+    } else {
+        g.send_to_char(ch, &format!("{}\r\n", addr));
+    }
+}
+
+fn extra_data_filename(lib: &str, name: &str) -> Option<std::path::PathBuf> {
+    if name.is_empty() {
+        return None;
+    }
+    let lname = name.to_lowercase();
+    let first = lname.chars().next().unwrap_or('z');
+    let middle = match first {
+        'a'..='e' => "A-E",
+        'f'..='j' => "F-J",
+        'k'..='o' => "K-O",
+        'p'..='t' => "P-T",
+        'u'..='z' => "U-Z",
+        _ => "ZZZ",
+    };
+    Some(
+        std::path::Path::new(lib)
+            .join("plredata")
+            .join(middle)
+            .join(format!("{}.data", lname)),
+    )
+}
+
+fn read_extra_email(lib: &str, name: &str) -> Option<String> {
+    let path = extra_data_filename(lib, name)?;
+    let data = std::fs::read_to_string(path).ok()?;
+    data.lines()
+        .find_map(|line| line.strip_prefix("EMAIL ").map(|s| s.trim_end_matches('\r').to_string()))
+}
+
+fn write_extra_email(lib: &str, name: &str, email: Option<&str>) {
+    let Some(path) = extra_data_filename(lib, name) else {
+        return;
+    };
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut kept: Vec<String> = existing
+        .lines()
+        .filter(|line| !line.starts_with("EMAIL "))
+        .map(|line| line.trim_end_matches('\r').to_string())
+        .collect();
+    if let Some(addr) = email.filter(|addr| !addr.is_empty()) {
+        kept.insert(0, format!("EMAIL {}", addr));
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if kept.is_empty() {
+        let _ = std::fs::remove_file(path);
+    } else {
+        let body = format!("{}\n", kept.join("\n"));
+        let _ = std::fs::write(path, body);
+    }
 }
 
 // ===========================================================================
@@ -3752,6 +3822,33 @@ mod tests {
     use crate::character::Character;
     use crate::config::Config;
     use crate::connection::Descriptor;
+    use crate::state::PlayerIndex;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_lib(name: &str) -> String {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("deltamud-{}-{}", name, stamp));
+        std::fs::create_dir_all(&path).unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    fn connected_player(g: &mut GameState, conn: ConnId, name: &str, level: Level) -> CharId {
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        ch.desc = Some(conn);
+        ch.player.level = level;
+        let id = g.create_char(ch);
+        g.players_by_name.insert(name.to_lowercase(), id);
+        id
+    }
+
+    fn output(g: &GameState, conn: ConnId) -> &str {
+        &g.descriptors.get(&conn).unwrap().outbuf
+    }
 
     #[test]
     fn do_train_displays_training_counter() {
@@ -3816,5 +3913,92 @@ mod tests {
         assert_eq!(g.get_char(ch).unwrap().retreat_level, 17);
         do_retreat(&mut g, ch, "0", 0);
         assert_eq!(g.get_char(ch).unwrap().retreat_level, 0);
+    }
+
+    #[test]
+    fn do_email_self_set_writes_extra_data_file() {
+        let lib = temp_lib("email-write");
+        let mut cfg = Config::default();
+        cfg.lib_path = lib.clone();
+        let mut g = GameState::new(cfg);
+        let ch = connected_player(&mut g, ConnId(1), "Alice", 1);
+
+        do_email(&mut g, ch, "*alice@example.test", 0);
+
+        assert_eq!(output(&g, ConnId(1)), "Ok.\r\n");
+        let path = extra_data_filename(&lib, "Alice").unwrap();
+        let data = std::fs::read_to_string(path).unwrap();
+        assert!(data.contains("EMAIL *alice@example.test\n"));
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
+    #[test]
+    fn do_email_offline_player_reads_extra_data() {
+        let lib = temp_lib("email-offline");
+        let mut cfg = Config::default();
+        cfg.lib_path = lib.clone();
+        let mut g = GameState::new(cfg);
+        let ch = connected_player(&mut g, ConnId(1), "Viewer", 1);
+        g.player_table.push(PlayerIndex {
+            idnum: 42,
+            name: "Target".to_string(),
+            level: 1,
+            last_logon: 0,
+            host: String::new(),
+        });
+        write_extra_email(&lib, "Target", Some("*target@example.test"));
+
+        do_email(&mut g, ch, "Target", 0);
+
+        assert_eq!(output(&g, ConnId(1)), "target@example.test\r\n");
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
+    #[test]
+    fn do_email_offline_missing_email_reports_unregistered() {
+        let lib = temp_lib("email-missing");
+        let mut cfg = Config::default();
+        cfg.lib_path = lib.clone();
+        let mut g = GameState::new(cfg);
+        let ch = connected_player(&mut g, ConnId(1), "Viewer", 1);
+        g.player_table.push(PlayerIndex {
+            idnum: 43,
+            name: "Silent".to_string(),
+            level: 1,
+            last_logon: 0,
+            host: String::new(),
+        });
+
+        do_email(&mut g, ch, "Silent", 0);
+
+        assert_eq!(
+            output(&g, ConnId(1)),
+            "They have not registered an email address.\r\n"
+        );
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
+    #[test]
+    fn do_email_privacy_matches_c_star_rule() {
+        let lib = temp_lib("email-privacy");
+        let mut cfg = Config::default();
+        cfg.lib_path = lib.clone();
+        let mut g = GameState::new(cfg);
+        let mortal = connected_player(&mut g, ConnId(1), "Mort", 1);
+        let imm = connected_player(&mut g, ConnId(2), "Imm", LVL_IMMORT);
+        let target = connected_player(&mut g, ConnId(3), "Target", 1);
+
+        g.get_char_mut(target).unwrap().email = Some("private@example.test".to_string());
+        do_email(&mut g, mortal, "Target", 0);
+        assert_eq!(output(&g, ConnId(1)), "Their email address is private.\r\n");
+
+        do_email(&mut g, imm, "Target", 0);
+        assert_eq!(output(&g, ConnId(2)), "private@example.test\r\n");
+
+        g.descriptors.get_mut(&ConnId(1)).unwrap().outbuf.clear();
+        g.get_char_mut(target).unwrap().email = Some("*public@example.test".to_string());
+        do_email(&mut g, mortal, "Target", 0);
+        assert_eq!(output(&g, ConnId(1)), "public@example.test\r\n");
+        let _ = std::fs::remove_dir_all(lib);
     }
 }
