@@ -4756,16 +4756,14 @@ fn perform_set(
             }
         }
         45 => {
-            // passwd — C stores CRYPT(val_arg, GET_NAME) into GET_PASSWD(vict).
-            // The Rust hash lives in the player_main row, not on Character, and
-            // the write is an async DB op (database.rs::save_player) unreachable
-            // from this sync path — so the guard + echo run, but persisting the
-            // new hash needs a Character password field + DB save (one note).
             if vict_level >= LVL_GRGOD {
                 if let Some(cch) = ch {
                     g.send_to_char(cch, "You cannot change that.\r\n");
                 }
                 return false;
+            }
+            if let Some(v) = g.get_char_mut(vict) {
+                v.pending_password_hash = Some(crate::password::hash_password(val_arg));
             }
             output = format!("Password changed to '{}'.", val_arg);
         }
@@ -6803,6 +6801,38 @@ mod tests {
         assert!(!out.contains("Started: Unknown"));
         assert!(!out.contains("Last: Unknown"));
         assert!(out.contains("Played:   3h 12m"));
+    }
+
+    #[test]
+    fn set_passwd_sets_pending_hash_and_echoes() {
+        let mut g = GameState::new(Config::default());
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        let target = connected_player(&mut g, ConnId(2), "Mort", 20);
+
+        do_set(&mut g, imm, "Mort passwd newpass", 0);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("Password changed to 'newpass'.\r\n"));
+        let hash = g
+            .get_char(target)
+            .unwrap()
+            .pending_password_hash
+            .as_ref()
+            .expect("pending password hash");
+        assert!(crate::password::check_password(hash, "newpass"));
+    }
+
+    #[test]
+    fn set_passwd_rejects_grgod_target() {
+        let mut g = GameState::new(Config::default());
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        let target = connected_player(&mut g, ConnId(2), "Greater", LVL_GRGOD);
+
+        do_set(&mut g, imm, "Greater passwd newpass", 0);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("You cannot change that.\r\n"));
+        assert!(g.get_char(target).unwrap().pending_password_hash.is_none());
     }
 
     #[test]

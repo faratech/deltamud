@@ -48,7 +48,10 @@ impl crate::DatabaseInterface for MockDatabase {
         ch.idnum = id;
         players.insert(
             character.get_name().to_lowercase(),
-            Stored { character: ch, password: password.to_string() },
+            Stored {
+                character: ch,
+                password: crate::password::hash_password(password),
+            },
         );
         Ok(id)
     }
@@ -65,6 +68,9 @@ impl crate::DatabaseInterface for MockDatabase {
         let mut players = self.players.lock().unwrap();
         if let Some(s) = players.get_mut(&character.get_name().to_lowercase()) {
             s.character = character.clone();
+            if let Some(hash) = &character.pending_password_hash {
+                s.password = hash.clone();
+            }
         }
         Ok(())
     }
@@ -72,7 +78,7 @@ impl crate::DatabaseInterface for MockDatabase {
     async fn verify_password(&self, name: &str, password: &str) -> Result<bool> {
         let players = self.players.lock().unwrap();
         match players.get(&name.to_lowercase()) {
-            Some(s) => Ok(s.password == password),
+            Some(s) => Ok(crate::password::check_password(&s.password, password)),
             None => Ok(false),
         }
     }
@@ -93,5 +99,30 @@ impl crate::DatabaseInterface for MockDatabase {
             })
             .collect();
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::DatabaseInterface;
+
+    #[tokio::test]
+    async fn save_player_persists_pending_password_hash() {
+        let db = MockDatabase::new();
+        let ch = Character::new_player(
+            "Mort".to_string(),
+            crate::types::Class::Warrior,
+            crate::types::Race::Human,
+        );
+        db.create_player(&ch, "oldpass").await.unwrap();
+        assert!(db.verify_password("Mort", "oldpass").await.unwrap());
+
+        let mut loaded = db.load_player("Mort").await.unwrap();
+        loaded.pending_password_hash = Some(crate::password::hash_password("newpass"));
+        db.save_player(&loaded).await.unwrap();
+
+        assert!(!db.verify_password("Mort", "oldpass").await.unwrap());
+        assert!(db.verify_password("Mort", "newpass").await.unwrap());
     }
 }

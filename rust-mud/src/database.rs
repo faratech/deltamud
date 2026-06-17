@@ -10,16 +10,9 @@ use crate::character::Character;
 use crate::database_compat as compat;
 use anyhow::Result;
 use mysql_async::{params, prelude::*, Pool, Row, Value};
-use sha2::{Digest, Sha256};
 
 pub struct Database {
     pool: Pool,
-}
-
-fn hash_password(pw: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(pw.as_bytes());
-    format!("{:x}", h.finalize())
 }
 
 impl Database {
@@ -100,7 +93,7 @@ impl Database {
         let stored: Option<String> = conn
             .exec_first("SELECT pwd FROM player_main WHERE name = ?", (name,))
             .await?;
-        Ok(matches!(stored, Some(h) if h == hash_password(password)))
+        Ok(matches!(stored, Some(h) if crate::password::check_password(&h, password)))
     }
 
     /// Allocate the next idnum (C uses a top_idnum counter). With an empty
@@ -118,7 +111,7 @@ impl Database {
         let idnum = self.next_idnum().await?;
         let mut stored = ch.clone();
         stored.idnum = idnum;
-        self.write_player_main(&stored, &hash_password(password)).await?;
+        self.write_player_main(&stored, &crate::password::hash_password(password)).await?;
         self.write_skills(&stored).await?;
         self.write_affects(&stored).await?;
         Ok(idnum)
@@ -180,10 +173,15 @@ impl Database {
         // The password is never rewritten on a normal save; preserve the
         // stored hash (C re-supplies ch->player.passwd, which is unchanged).
         let mut conn = self.pool.get_conn().await?;
-        let pwd: Option<String> = conn
-            .exec_first("SELECT pwd FROM player_main WHERE idnum = ?", (ch.idnum,))
-            .await?;
-        let pwd = pwd.unwrap_or_default();
+        let pwd = match &ch.pending_password_hash {
+            Some(hash) => hash.clone(),
+            None => {
+                let pwd: Option<String> = conn
+                    .exec_first("SELECT pwd FROM player_main WHERE idnum = ?", (ch.idnum,))
+                    .await?;
+                pwd.unwrap_or_default()
+            }
+        };
         drop(conn);
         self.write_player_main(ch, &pwd).await?;
         self.write_skills(ch).await?;

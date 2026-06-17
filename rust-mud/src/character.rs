@@ -210,6 +210,7 @@ pub struct Character {
     pub poofout: Option<String>,
     pub email: Option<String>,
     pub last_tell: Option<CharId>,
+    pub pending_password_hash: Option<String>,
 
     // Ignore list (C `ch->ignore_list`, a linked list of
     // `struct ignore_index_element`). Purely in-memory in the C MUD — it is
@@ -320,6 +321,7 @@ impl Character {
             poofout: None,
             email: None,
             last_tell: None,
+            pending_password_hash: None,
             ignore_list: Vec::new(),
             created_at: now,
             last_logon: now,
