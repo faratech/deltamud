@@ -263,8 +263,29 @@ fn zone_for_vnum(g: &GameState, vnum: RoomVnum) -> Option<i32> {
         .map(|z| z.number)
 }
 
-fn can_edit_zone(g: &GameState, ch: CharId, _zone_number: i32) -> bool {
-    g.get_char(ch).map(|c| c.player.level >= LVL_IMMORT).unwrap_or(false)
+fn can_edit_zone(g: &GameState, ch: CharId, zone_number: i32) -> bool {
+    g.zones
+        .iter()
+        .position(|z| z.number == zone_number)
+        .map(|zr| olc::can_edit_zone(g, ch, zr))
+        .unwrap_or(false)
+}
+
+fn can_edit_vnum_zone(g: &GameState, ch: CharId, vnum: i32) -> bool {
+    olc::real_zone(g, vnum)
+        .map(|zr| olc::can_edit_zone(g, ch, zr))
+        .unwrap_or(false)
+}
+
+fn char_for_conn(g: &GameState, conn: ConnId) -> Option<CharId> {
+    g.descriptors
+        .get(&conn)
+        .and_then(|d| d.character)
+        .or_else(|| {
+            g.chars
+                .iter()
+                .find_map(|(&id, c)| (c.desc == Some(conn)).then_some(id))
+        })
 }
 
 fn zon_file_path(g: &GameState, zone_number: i32) -> std::path::PathBuf {
@@ -861,9 +882,14 @@ fn parse_arg1(g: &mut GameState, conn: ConnId, line: &str) {
     }
     let vnum: i32 = atoi(t);
     let cmd = cur_cmd_letter(conn);
+    let ch = char_for_conn(g, conn);
     match cmd {
         'M' => {
             if g.mob_protos.contains_key(&vnum) {
+                if !ch.map(|id| can_edit_vnum_zone(g, id, vnum)).unwrap_or(false) {
+                    send(g, conn, "You do not have permission to edit this zone.\r\n");
+                    return;
+                }
                 with_cur(conn, |c| c.arg1 = vnum);
                 disp_arg2(g, conn);
             } else {
@@ -872,6 +898,10 @@ fn parse_arg1(g: &mut GameState, conn: ConnId, line: &str) {
         }
         'O' | 'P' | 'E' | 'G' => {
             if g.obj_protos.contains_key(&vnum) {
+                if !ch.map(|id| can_edit_vnum_zone(g, id, vnum)).unwrap_or(false) {
+                    send(g, conn, "You do not have permission to edit this zone.\r\n");
+                    return;
+                }
                 with_cur(conn, |c| c.arg1 = vnum);
                 disp_arg2(g, conn);
             } else {
@@ -1543,4 +1573,49 @@ fn atoi(s: &str) -> i32 {
         end += 1;
     }
     t[..end].parse().unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::world::Zone;
+
+    fn zone(number: i32, builders: &str) -> Zone {
+        Zone {
+            number,
+            name: format!("Zone {}", number),
+            builders: builders.to_string(),
+            lifespan: 30,
+            age: 0,
+            top: number * 100 + 99,
+            reset_mode: 2,
+            min_level: 0,
+            max_level: 60,
+            status_mode: 0,
+            map_x: None,
+            map_y: None,
+            reset_commands: Vec::new(),
+        }
+    }
+
+    fn player(g: &mut GameState, name: &str, level: Level) -> CharId {
+        let mut ch = Character::new_player(name.into(), Class::Cleric, Race::Human);
+        ch.player.level = level;
+        g.create_char(ch)
+    }
+
+    #[test]
+    fn reset_command_vnums_must_belong_to_builders_zone() {
+        let mut g = GameState::new(Config::default());
+        g.zones.push(zone(1, "Builder"));
+        g.zones.push(zone(2, "Other"));
+        let builder = player(&mut g, "Builder", LVL_IMMORT);
+        let imp = player(&mut g, "Root", LVL_IMPL);
+
+        assert!(can_edit_vnum_zone(&g, builder, 150));
+        assert!(!can_edit_vnum_zone(&g, builder, 250));
+        assert!(can_edit_vnum_zone(&g, imp, 250));
+    }
 }

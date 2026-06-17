@@ -228,6 +228,20 @@ pub fn real_zone(g: &GameState, vnum: i32) -> Option<usize> {
         .position(|z| vnum >= z.number * 100 && vnum <= z.top)
 }
 
+/// True when `ch` may edit the loaded zone at `zone_rnum`.
+pub fn can_edit_zone(g: &GameState, ch: CharId, zone_rnum: usize) -> bool {
+    let Some(c) = g.get_char(ch) else {
+        return false;
+    };
+    if c.player.level >= LVL_IMPL {
+        return true;
+    }
+    let Some(zone) = g.zones.get(zone_rnum) else {
+        return false;
+    };
+    crate::handler::isname(&c.player.name, &zone.builders)
+}
+
 // ===========================================================================
 // olc_save_to_disk: the per-component save dispatcher (olc.c do_olc save arm).
 // Writes a single zone's component to its CircleMUD world file and removes it
@@ -388,6 +402,15 @@ pub fn do_olc(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
         None
     };
 
+    if level < LVL_IMPL {
+        if let Some(zr) = znum_rnum {
+            if !can_edit_zone(g, ch, zr) && subcmd != SCMD_OLC_HEDIT {
+                g.send_to_char(ch, "You do not have permission to edit this zone.\r\n");
+                return;
+            }
+        }
+    }
+
     if save {
         match subcmd {
             SCMD_OLC_TRIGEDIT => {
@@ -460,5 +483,50 @@ fn olc_type_word(subcmd: i32) -> &'static str {
         SCMD_OLC_HEDIT => "help",
         SCMD_OLC_AEDIT => "action",
         _ => "thing",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::world::Zone;
+
+    fn zone(number: i32, builders: &str) -> Zone {
+        Zone {
+            number,
+            name: format!("Zone {}", number),
+            builders: builders.to_string(),
+            lifespan: 30,
+            age: 0,
+            top: number * 100 + 99,
+            reset_mode: 2,
+            min_level: 0,
+            max_level: 60,
+            status_mode: 0,
+            map_x: None,
+            map_y: None,
+            reset_commands: Vec::new(),
+        }
+    }
+
+    fn player(g: &mut GameState, name: &str, level: Level) -> CharId {
+        let mut ch = Character::new_player(name.into(), Class::Cleric, Race::Human);
+        ch.player.level = level;
+        g.create_char(ch)
+    }
+
+    #[test]
+    fn can_edit_zone_uses_builder_list_below_impl() {
+        let mut g = GameState::new(Config::default());
+        g.zones.push(zone(1, "Alice Bob"));
+        let alice = player(&mut g, "Alice", LVL_IMMORT);
+        let charlie = player(&mut g, "Charlie", LVL_IMMORT);
+        let imp = player(&mut g, "Root", LVL_IMPL);
+
+        assert!(can_edit_zone(&g, alice, 0));
+        assert!(!can_edit_zone(&g, charlie, 0));
+        assert!(can_edit_zone(&g, imp, 0));
     }
 }

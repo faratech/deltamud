@@ -385,12 +385,13 @@ fn zone_for_vnum(g: &GameState, vnum: MobVnum) -> Option<i32> {
         .map(|z| z.number)
 }
 
-/// CircleMUD `can_edit_zone`: a builder may edit a zone if they are an
-/// Implementor, or (in vanilla DeltaMUD) any immortal — the C build keys this
-/// off the zone builder list, which the Rust `Zone` does not carry. We grant
-/// edit rights to all immortals (LVL_IMMORT+), matching the command-table gate.
-fn can_edit_zone(g: &GameState, ch: CharId, _zone_number: i32) -> bool {
-    g.get_char(ch).map(|c| c.player.level >= LVL_IMMORT).unwrap_or(false)
+/// Builder authorization for the zone owning this mobile vnum.
+fn can_edit_zone(g: &GameState, ch: CharId, zone_number: i32) -> bool {
+    g.zones
+        .iter()
+        .position(|z| z.number == zone_number)
+        .map(|zr| crate::olc::can_edit_zone(g, ch, zr))
+        .unwrap_or(false)
 }
 
 // ===========================================================================
