@@ -24,6 +24,7 @@ use crate::interpreter::{one_argument, search_block};
 use crate::object::{ObjLoc, ObjectType};
 use crate::room::{RoomFlags, SectorType};
 use crate::room::{EX_CLOSED, EX_HIDDEN, EX_ISDOOR, EX_LOCKED, EX_PICKPROOF};
+use crate::spell_parser::{SKILL_PICK_LOCK, SKILL_RAM_DOOR};
 use crate::state::GameState;
 use crate::types::*;
 
@@ -887,11 +888,14 @@ fn toggle_lock_exit(g: &mut GameState, rnum: RoomRnum, door: usize) {
     }
 }
 
-/// ok_pick: gate the pick/ram skill rolls. The skill numbers/damage are owned
-/// by the skills/combat batch; here we model the keyhole and pickproof gates
-/// faithfully and let the (yet-unwired) skill roll succeed.
+/// ok_pick: gate the pick/ram skill rolls. Mirrors act.movement.c ok_pick().
 fn ok_pick(g: &mut GameState, ch: CharId, keynum: ObjVnum, pickproof: bool, scmd: i32) -> bool {
     if scmd == SCMD_PICK {
+        let percent = g.rng.number(1, 101);
+        let skill = g
+            .get_char(ch)
+            .map(|c| c.skill(SKILL_PICK_LOCK as u16) as i32)
+            .unwrap_or(0);
         if keynum < 0 {
             g.send_to_char(ch, "Odd - you can't seem to find a keyhole.\r\n");
             return false;
@@ -900,10 +904,36 @@ fn ok_pick(g: &mut GameState, ch: CharId, keynum: ObjVnum, pickproof: bool, scmd
             g.send_to_char(ch, "It resists your attempts to pick it.\r\n");
             return false;
         }
+        if percent > skill {
+            g.send_to_char(ch, "You failed to pick the lock.\r\n");
+            return false;
+        }
         return true;
     }
     if scmd == SCMD_RAM {
+        crate::combat::damage(g, ch, ch, 10);
+        if !g.char_exists(ch) {
+            return false;
+        }
+        let (skill, str_) = g
+            .get_char(ch)
+            .map(|c| {
+                (
+                    c.skill(SKILL_RAM_DOOR as u16) as i32,
+                    c.aff_abils.str.max(1) as i32,
+                )
+            })
+            .unwrap_or((0, 1));
+        let mut percent = g.rng.number((skill as f32 * 0.5) as i32, 101);
+        percent -= g.rng.number(1, str_);
+        if percent < 0 {
+            percent = 0;
+        }
         if keynum < 0 || pickproof {
+            g.send_to_char(ch, "You ram it but it just won't budge.\r\n");
+            return false;
+        }
+        if percent > skill {
             g.send_to_char(ch, "You ram it but it just won't budge.\r\n");
             return false;
         }
@@ -971,9 +1001,9 @@ pub fn do_gen_door(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
             ActArg::Str(verb),
             To::Char,
         );
-    } else if door_is_open(g, &target, ch, rnum) && (flags & NEED_OPEN) != 0 {
+    } else if !door_is_open(g, &target, ch, rnum) && (flags & NEED_OPEN) != 0 {
         g.send_to_char(ch, "But it's already closed!\r\n");
-    } else if !door_is_open(g, &target, ch, rnum) && (flags & NEED_CLOSED) != 0 {
+    } else if door_is_open(g, &target, ch, rnum) && (flags & NEED_CLOSED) != 0 {
         g.send_to_char(ch, "But it's currently open!\r\n");
     } else if door_is_unlocked(g, &target, ch, rnum) && (flags & NEED_LOCKED) != 0 {
         g.send_to_char(ch, "Oh.. it wasn't locked, after all..\r\n");
@@ -2585,6 +2615,37 @@ mod tests {
         (g, ch, from, to)
     }
 
+    fn locked_door_game() -> (GameState, CharId, RoomRnum, RoomRnum) {
+        let mut g = GameState::new(Config::default());
+        let from = g.add_room(Room::new(100, 0, "Hall".to_string(), "A hall.".to_string()));
+        let to = g.add_room(Room::new(101, 0, "Vault".to_string(), "A vault.".to_string()));
+        g.rooms[from].exits[EAST] = Some(Exit {
+            description: None,
+            keyword: Some("gate".to_string()),
+            exit_info: EX_ISDOOR | EX_CLOSED | EX_LOCKED,
+            key: 1234,
+            to_room: 101,
+        });
+        g.rooms[to].exits[WEST] = Some(Exit {
+            description: None,
+            keyword: Some("gate".to_string()),
+            exit_info: EX_ISDOOR | EX_CLOSED | EX_LOCKED,
+            key: 1234,
+            to_room: 100,
+        });
+        let conn = ConnId(1);
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut ch = Character::new_player("Opener".to_string(), Class::Warrior, Race::Human);
+        ch.desc = Some(conn);
+        ch.points.hit = 100;
+        ch.points.max_hit = 100;
+        ch.aff_abils.str = 18;
+        let ch = g.create_char(ch);
+        g.char_to_room(ch, from);
+        (g, ch, from, to)
+    }
+
     #[test]
     fn boat_object_allows_no_swim_water_movement() {
         let (mut g, ch, _from, to) = movement_game();
@@ -2684,5 +2745,64 @@ mod tests {
             .unwrap()
             .outbuf
             .contains("You have hit a death trap. Sorry!"));
+    }
+
+    #[test]
+    fn pick_lock_with_zero_skill_fails_and_reports_failure() {
+        let (mut g, ch, _from, _to) = locked_door_game();
+
+        assert!(!ok_pick(&mut g, ch, 1234, false, SCMD_PICK));
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("You failed to pick the lock.\r\n"));
+    }
+
+    #[test]
+    fn pick_lock_success_allows_do_gen_door_to_unlock() {
+        let (mut g, ch, from, to) = locked_door_game();
+        g.get_char_mut(ch)
+            .unwrap()
+            .set_skill(SKILL_PICK_LOCK as u16, 100);
+
+        do_gen_door(&mut g, ch, "gate east", SCMD_PICK);
+
+        let out = g.descriptors.get(&ConnId(1)).unwrap().outbuf.clone();
+        assert_eq!(
+            g.rooms[from].exits[EAST].as_ref().unwrap().exit_info & EX_LOCKED,
+            0,
+            "{}",
+            out
+        );
+        assert_eq!(g.rooms[to].exits[WEST].as_ref().unwrap().exit_info & EX_LOCKED, 0);
+    }
+
+    #[test]
+    fn ram_failure_still_self_damages() {
+        let (mut g, ch, _from, _to) = locked_door_game();
+        let before = g.get_char(ch).unwrap().points.hit;
+
+        assert!(!ok_pick(&mut g, ch, 1234, true, SCMD_RAM));
+
+        assert_eq!(g.get_char(ch).unwrap().points.hit, before - 10);
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("You ram it but it just won't budge.\r\n"));
+    }
+
+    #[test]
+    fn ram_success_unlocks_and_opens() {
+        let (mut g, ch, from, to) = locked_door_game();
+        g.get_char_mut(ch)
+            .unwrap()
+            .set_skill(SKILL_RAM_DOOR as u16, 100);
+
+        do_gen_door(&mut g, ch, "gate east", SCMD_RAM);
+
+        let here = g.rooms[from].exits[EAST].as_ref().unwrap().exit_info;
+        let there = g.rooms[to].exits[WEST].as_ref().unwrap().exit_info;
+        let out = g.descriptors.get(&ConnId(1)).unwrap().outbuf.clone();
+        assert_eq!(here & EX_LOCKED, 0, "{}", out);
+        assert_eq!(here & EX_CLOSED, 0);
+        assert_eq!(there & EX_LOCKED, 0);
+        assert_eq!(there & EX_CLOSED, 0);
     }
 }
