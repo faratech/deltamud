@@ -185,6 +185,23 @@ fn town_name(home: RoomVnum) -> &'static str {
     }
 }
 
+fn mud_age_parts(birth: i64) -> (i64, i64, i64, i64) {
+    const SECS_PER_MUD_HOUR: i64 = 75;
+    const SECS_PER_MUD_DAY: i64 = 24 * SECS_PER_MUD_HOUR;
+    const SECS_PER_MUD_MONTH: i64 = 35 * SECS_PER_MUD_DAY;
+    const SECS_PER_MUD_YEAR: i64 = 17 * SECS_PER_MUD_MONTH;
+
+    let mut total = (chrono::Utc::now().timestamp() - birth).max(0);
+    let hours = (total / SECS_PER_MUD_HOUR) % 24;
+    total -= SECS_PER_MUD_HOUR * hours;
+    let days = (total / SECS_PER_MUD_DAY) % 35;
+    total -= SECS_PER_MUD_DAY * days;
+    let months = (total / SECS_PER_MUD_MONTH) % 17;
+    total -= SECS_PER_MUD_MONTH * months;
+    let years = total / SECS_PER_MUD_YEAR + 17;
+    (years, months, days, hours)
+}
+
 fn class_name(class: Class) -> &'static str {
     match class {
         Class::MagicUser => "Mage",
@@ -1713,13 +1730,10 @@ pub fn do_status(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         town_name(c.player.hometown)
     ));
 
-    // Age + playtime: derived from char timestamps; full mud-time calendar is
-    // not in the contract, so age years start at 17 (do_start) and play time
-    // is taken from player.time_played (seconds).
-    let years = 17i64;
+    let (years, months, days, hours) = mud_age_parts(c.player.time_birth);
     buf.push_str(&format!(
         "&GAge       :&n {} years, {} months, {} days, {} hours old.\r\n",
-        years, 0, 0, 0
+        years, months, days, hours
     ));
 
     let played = c.player.time_played.max(0);
@@ -3592,6 +3606,26 @@ mod tests {
         assert!(out.contains("Policies body"));
         assert!(out.contains("Immortal MOTD body"));
         assert!(out.contains("CircleMUD body"));
+    }
+
+    #[test]
+    fn do_status_uses_character_birth_for_full_age() {
+        let mut g = GameState::new(Config::default());
+        let ch = connected_player(&mut g, ConnId(1), "Aged", 10);
+        const SECS_PER_MUD_HOUR: i64 = 75;
+        const SECS_PER_MUD_DAY: i64 = 24 * SECS_PER_MUD_HOUR;
+        const SECS_PER_MUD_MONTH: i64 = 35 * SECS_PER_MUD_DAY;
+        const SECS_PER_MUD_YEAR: i64 = 17 * SECS_PER_MUD_MONTH;
+        g.get_char_mut(ch).unwrap().player.time_birth = chrono::Utc::now().timestamp()
+            - (SECS_PER_MUD_YEAR
+                + 2 * SECS_PER_MUD_MONTH
+                + 3 * SECS_PER_MUD_DAY
+                + 4 * SECS_PER_MUD_HOUR);
+
+        do_status(&mut g, ch, "", 0);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("&GAge       :&n 18 years, 2 months, 3 days, 4 hours old."));
     }
 
     #[test]

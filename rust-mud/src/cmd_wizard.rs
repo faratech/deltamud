@@ -1563,6 +1563,10 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
     let hometown = kc.player.hometown;
     let talks = kc.talks;
     let clan = kc.clan;
+    let time_birth = kc.player.time_birth;
+    let time_played = kc.player.time_played.max(0);
+    let last_logon = kc.last_logon.timestamp();
+    let practices = kc.spells_to_learn;
     let next_quest = kc.next_quest;
     let countdown = kc.quest_countdown;
     let quest_mob = kc.quest_mob;
@@ -1662,20 +1666,34 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
     g.send_to_char(ch, &lvl_line);
 
     if !npc {
-        // asctime-based created/logon lines: the player time table isn't
-        // surfaced; render the played/age block with the values we have.
+        let created = ctime(time_birth);
+        let last = ctime(last_logon);
+        let played_hours = time_played / 3600;
+        let played_minutes = (time_played % 3600) / 60;
+        let (age_years, _, _, _) = mud_age_parts(time_birth);
         g.send_to_char(
             ch,
             &format!(
                 "Created: [{}], Last Logon: [{}], Played [{}h {}m], Age [{}]\r\n",
-                "Unknown", "Unknown", 0, 0, 17
+                created.chars().take(10).collect::<String>(),
+                last.chars().take(10).collect::<String>(),
+                played_hours,
+                played_minutes,
+                age_years
             ),
         );
         g.send_to_char(
             ch,
             &format!(
                 "Hometown: [{}], Speaks: [{}/{}/{}], (STL[{}]/per[{}]/NSTL[{}]) Clan: [{}]\r\n",
-                hometown, talks[0] as i32, talks[1] as i32, talks[2] as i32, 0, 0, 0, clan
+                hometown,
+                talks[0] as i32,
+                talks[1] as i32,
+                talks[2] as i32,
+                practices,
+                0,
+                0,
+                clan
             ),
         );
     }
@@ -3214,6 +3232,23 @@ fn ctime(unix: i64) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+fn mud_age_parts(birth: i64) -> (i64, i64, i64, i64) {
+    const SECS_PER_MUD_HOUR: i64 = 75;
+    const SECS_PER_MUD_DAY: i64 = 24 * SECS_PER_MUD_HOUR;
+    const SECS_PER_MUD_MONTH: i64 = 35 * SECS_PER_MUD_DAY;
+    const SECS_PER_MUD_YEAR: i64 = 17 * SECS_PER_MUD_MONTH;
+
+    let mut total = (chrono::Utc::now().timestamp() - birth).max(0);
+    let hours = (total / SECS_PER_MUD_HOUR) % 24;
+    total -= SECS_PER_MUD_HOUR * hours;
+    let days = (total / SECS_PER_MUD_DAY) % 35;
+    total -= SECS_PER_MUD_DAY * days;
+    let months = (total / SECS_PER_MUD_MONTH) % 17;
+    total -= SECS_PER_MUD_MONTH * months;
+    let years = total / SECS_PER_MUD_YEAR + 17;
+    (years, months, days, hours)
+}
+
 /// class_abbrevs[] (class.c) — 3-letter PC class codes.
 fn class_abbrev(class: Class) -> &'static str {
     match class {
@@ -3907,7 +3942,7 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             }
             match g.find_player_by_name(&value) {
                 Some(p) => {
-                    let (nm, sex, lvl, cls, gold, bank, exp, align) = g
+                    let (nm, sex, lvl, cls, gold, bank, exp, align, lessons, birth, logon, played) = g
                         .get_char(p)
                         .map(|c| {
                             (
@@ -3919,9 +3954,17 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                                 c.points.bank_gold,
                                 c.points.exp,
                                 c.alignment,
+                                c.spells_to_learn,
+                                c.player.time_birth,
+                                c.last_logon.timestamp(),
+                                c.player.time_played.max(0),
                             )
                         })
                         .unwrap();
+                    let started = ctime(birth);
+                    let last = ctime(logon);
+                    let played_hours = played / 3600;
+                    let played_minutes = (played % 3600) / 60;
                     let gname = constants::GENDERS.get(sex).copied().unwrap_or("Neutral");
                     let mut buf = format!(
                         "Player: {:<12} ({}) [{:2} {}]\r\n",
@@ -3932,11 +3975,11 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                     );
                     buf.push_str(&format!(
                         "Au: {:<8}  Bal: {:<8}  Exp: {:<8}  Align: {:<5}  Lessons: {:<3}\r\n",
-                        gold, bank, exp, align, 0
+                        gold, bank, exp, align, lessons
                     ));
                     buf.push_str(&format!(
                         "Started: {:<20.16}  Last: {:<20.16}  Played: {:3}h {:2}m\r\n",
-                        "Unknown", "Unknown", 0, 0
+                        started, last, played_hours, played_minutes
                     ));
                     g.send_to_char(ch, &buf);
                 }
@@ -6542,6 +6585,7 @@ mod tests {
     use crate::object::{ExtraFlags, Object, WearFlags};
     use crate::room::Room;
     use crate::world::{MobileProto, ObjectProto, Zone};
+    use chrono::TimeZone;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     fn lock_olc_save_list() -> MutexGuard<'static, ()> {
@@ -6705,6 +6749,60 @@ mod tests {
         assert!(out.starts_with("Spellcasting mobs:\r\n"));
         assert!(out.contains("[3095] a magic user (Type: ASSIGNED)\r\n"));
         assert!(!out.contains("a flagged non-caster"));
+    }
+
+    #[test]
+    fn do_stat_character_uses_player_time_and_practice_fields() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        let target = connected_player(&mut g, ConnId(2), "Target", 20);
+        g.char_to_room(imm, room);
+        g.char_to_room(target, room);
+        {
+            let c = g.get_char_mut(target).unwrap();
+            c.player.time_birth = chrono::Utc::now().timestamp() - 2 * 17 * 35 * 24 * 75;
+            c.player.time_played = 2 * 3600 + 5 * 60;
+            c.last_logon = chrono::Utc
+                .timestamp_opt(1_700_000_000, 0)
+                .single()
+                .unwrap();
+            c.spells_to_learn = 7;
+        }
+
+        do_stat_character(&mut g, imm, target);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(!out.contains("Created: [Unknown]"));
+        assert!(!out.contains("Last Logon: [Unknown]"));
+        assert!(out.contains("Played [2h 5m]"));
+        assert!(out.contains("Age [19]"));
+        assert!(out.contains("STL[7]"));
+    }
+
+    #[test]
+    fn do_show_player_uses_player_time_and_lessons() {
+        let mut g = GameState::new(Config::default());
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        let target = connected_player(&mut g, ConnId(2), "Target", 20);
+        {
+            let c = g.get_char_mut(target).unwrap();
+            c.player.time_birth = 1_600_000_000;
+            c.player.time_played = 3 * 3600 + 12 * 60;
+            c.last_logon = chrono::Utc
+                .timestamp_opt(1_700_000_000, 0)
+                .single()
+                .unwrap();
+            c.spells_to_learn = 9;
+        }
+
+        do_show(&mut g, imm, "player Target", 0);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("Lessons: 9"));
+        assert!(!out.contains("Started: Unknown"));
+        assert!(!out.contains("Last: Unknown"));
+        assert!(out.contains("Played:   3h 12m"));
     }
 
     #[test]
