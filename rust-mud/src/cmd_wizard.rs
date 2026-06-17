@@ -5513,6 +5513,11 @@ pub fn do_dig(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             return;
         }
     };
+    let zr = real_zone(g, iroom);
+    if !can_edit_zone(g, ch, zr) {
+        g.send_to_char(ch, "You don't have permissions to that zone.\r\n");
+        return;
+    }
     let dir = match dir_s.chars().next().map(|c| c.to_ascii_lowercase()) {
         Some('n') => NORTH,
         Some('e') => EAST,
@@ -5544,6 +5549,9 @@ pub fn do_dig(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         key: NOTHING,
         to_room: there_vnum,
     });
+    if let Some(znum) = g.zones.get(zr as usize).map(|z| z.number) {
+        crate::olc::olc_add_to_save_list(znum, crate::olc::OLC_SAVE_ROOM);
+    }
     g.send_to_char(
         ch,
         &format!("You make an exit {} to room {}.\r\n", dir_s, iroom),
@@ -6533,7 +6541,16 @@ mod tests {
     use crate::connection::Descriptor;
     use crate::object::{ExtraFlags, Object, WearFlags};
     use crate::room::Room;
-    use crate::world::{MobileProto, ObjectProto};
+    use crate::world::{MobileProto, ObjectProto, Zone};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn lock_olc_save_list() -> MutexGuard<'static, ()> {
+        static OLC_SAVE_LIST_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        OLC_SAVE_LIST_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap()
+    }
 
     fn connected_player(g: &mut GameState, conn: ConnId, name: &str, level: Level) -> CharId {
         g.descriptors
@@ -6622,6 +6639,24 @@ mod tests {
         }
     }
 
+    fn test_zone(number: i32, top: RoomVnum, builders: &str) -> Zone {
+        Zone {
+            number,
+            name: format!("Zone {}", number),
+            builders: builders.to_string(),
+            lifespan: 30,
+            age: 0,
+            top,
+            reset_mode: 2,
+            min_level: 0,
+            max_level: 60,
+            status_mode: 0,
+            map_x: None,
+            map_y: None,
+            reset_commands: Vec::new(),
+        }
+    }
+
     #[test]
     fn do_stat_object_reports_object_bitvector() {
         let mut g = GameState::new(Config::default());
@@ -6670,5 +6705,74 @@ mod tests {
         assert!(out.starts_with("Spellcasting mobs:\r\n"));
         assert!(out.contains("[3095] a magic user (Type: ASSIGNED)\r\n"));
         assert!(!out.contains("a flagged non-caster"));
+    }
+
+    #[test]
+    fn do_dig_denies_unowned_destination_zone() {
+        let _guard = lock_olc_save_list();
+        let mut g = GameState::new(Config::default());
+        g.zones.push(test_zone(1, 199, "Builder"));
+        g.zones.push(test_zone(2, 299, "Other"));
+        let here = g.add_room(Room::new(
+            100,
+            0,
+            "Here".to_string(),
+            "The starting room.".to_string(),
+        ));
+        let there = g.add_room(Room::new(
+            200,
+            1,
+            "There".to_string(),
+            "The target room.".to_string(),
+        ));
+        let builder = connected_player(&mut g, ConnId(1), "Builder", LVL_GRGOD);
+        g.char_to_room(builder, here);
+
+        do_dig(&mut g, builder, "east 200", 0);
+
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("You don't have permissions to that zone.\r\n"));
+        assert!(g.room(here).exits[EAST].is_none());
+        assert!(g.room(there).exits[WEST].is_none());
+    }
+
+    #[test]
+    fn do_dig_marks_destination_zone_room_save() {
+        let _guard = lock_olc_save_list();
+        crate::olc::olc_remove_from_save_list(2, crate::olc::OLC_SAVE_ROOM);
+        let mut g = GameState::new(Config::default());
+        g.zones.push(test_zone(1, 199, "Builder"));
+        g.zones.push(test_zone(2, 299, "Builder"));
+        let here = g.add_room(Room::new(
+            100,
+            0,
+            "Here".to_string(),
+            "The starting room.".to_string(),
+        ));
+        let there = g.add_room(Room::new(
+            200,
+            1,
+            "There".to_string(),
+            "The target room.".to_string(),
+        ));
+        let builder = connected_player(&mut g, ConnId(1), "Builder", LVL_GRGOD);
+        g.char_to_room(builder, here);
+
+        do_dig(&mut g, builder, "east 200", 0);
+
+        assert_eq!(g.room(here).exits[EAST].as_ref().map(|e| e.to_room), Some(200));
+        assert_eq!(g.room(there).exits[WEST].as_ref().map(|e| e.to_room), Some(100));
+        crate::olc::olc_saveinfo(&mut g, builder);
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("Rooms for zone 2"));
+        crate::olc::olc_remove_from_save_list(2, crate::olc::OLC_SAVE_ROOM);
     }
 }
