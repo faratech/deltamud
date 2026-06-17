@@ -13,7 +13,10 @@ use crate::constants::ATTACK_HIT_TEXT;
 use crate::flags::{AFF_HIDE, AFF_INVISIBLE, AFF_SANCTUARY, AFF_SLEEP, MOB_WIMPY};
 use crate::object::{Object, ObjectType, ObjLoc};
 use crate::room::{RoomFlags, SectorType, EX_CLOSED};
-use crate::spell_parser::{MAX_SPELLS, SPELL_REDIRECT_CHARGE, SPELL_SLEEP, TYPE_UNDEFINED};
+use crate::spell_parser::{
+    MAX_SPELLS, SPELL_REDIRECT_CHARGE, SPELL_SLEEP, SPELL_WORD_OF_RECALL, SPELL_WORD_OF_RETREAT,
+    TYPE_UNDEFINED,
+};
 use crate::state::GameState;
 use crate::types::*;
 
@@ -709,6 +712,7 @@ pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, atta
     }
 
     send_position_feedback(g, ch, victim, dmg);
+    trigger_pc_escape_thresholds(g, ch, victim);
     rescue_linkdead_victim(g, victim);
 
     if g.get_char(victim).map(|c| c.position == Position::Dead).unwrap_or(false) {
@@ -782,6 +786,35 @@ fn send_position_feedback(g: &mut GameState, ch: CharId, victim: CharId, dmg: i3
                 }
             }
         }
+    }
+}
+
+fn trigger_pc_escape_thresholds(g: &mut GameState, ch: CharId, victim: CharId) {
+    let (is_npc, hit, retreat_level, recall_level, wimp_level) = match g.get_char(victim) {
+        Some(v) => (
+            v.is_npc,
+            v.points.hit,
+            v.retreat_level,
+            v.recall_level,
+            v.wimp_level,
+        ),
+        None => return,
+    };
+    if is_npc || victim == ch || hit <= 0 {
+        return;
+    }
+
+    if retreat_level > 0 && hit < retreat_level {
+        g.send_to_char(victim, "You wimp out, and attempt to retreat!\r\n");
+        crate::cmd_other::do_recite(g, victim, "retreat");
+    }
+    if recall_level > 0 && hit < recall_level {
+        g.send_to_char(victim, "You wimp out, and attempt to recall!\r\n");
+        crate::cmd_other::do_recite(g, victim, "recall");
+    }
+    if wimp_level > 0 && hit < wimp_level {
+        g.send_to_char(victim, "You wimp out, and attempt to flee!\r\n");
+        do_flee(g, victim);
     }
 }
 
@@ -1317,6 +1350,15 @@ mod tests {
         oid
     }
 
+    fn scroll(g: &mut GameState, owner: CharId, keyword: &str, spellnum: i32) -> ObjId {
+        let mut obj = Object::new(200, keyword.to_string(), format!("a {keyword} scroll"));
+        obj.obj_type = ObjectType::Scroll;
+        obj.values = [1, spellnum, -1, -1];
+        let oid = g.create_obj(obj);
+        g.obj_to_char(oid, owner);
+        oid
+    }
+
     #[test]
     fn sanctuary_halves_combat_damage_of_two_or_more() {
         let mut g = GameState::new(Config::default());
@@ -1648,6 +1690,117 @@ mod tests {
 
         assert_eq!(g.get_char(victim).unwrap().in_room, Some(safe));
         assert_eq!(g.get_char(victim).unwrap().fighting, None);
+    }
+
+    #[test]
+    fn injured_pc_below_recall_level_without_scroll_attempts_recite() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Arena".to_string(), "Arena.".to_string()));
+        let attacker = player(&mut g, "Attacker");
+        let victim = connected_player(&mut g, "Victim", ConnId(1));
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.points.max_hit = 100;
+            v.points.hit = 30;
+            v.recall_level = 25;
+        }
+        g.char_to_room(attacker, room);
+        g.char_to_room(victim, room);
+
+        damage_type(&mut g, attacker, victim, 10, TYPE_UNDEFINED);
+
+        assert_eq!(g.get_char(victim).unwrap().in_room, Some(room));
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("You wimp out, and attempt to recall!\r\n"));
+        assert!(out.contains("You don't seem to have a recall.\r\n"));
+    }
+
+    #[test]
+    fn injured_pc_below_recall_level_recites_scroll() {
+        let mut g = GameState::new(Config::default());
+        let recall_room = g.add_room(Room::new(100, 0, "Recall".to_string(), "Recall.".to_string()));
+        let combat_room = g.add_room(Room::new(101, 0, "Arena".to_string(), "Arena.".to_string()));
+        let attacker = player(&mut g, "Attacker");
+        let victim = connected_player(&mut g, "Victim", ConnId(1));
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.points.max_hit = 100;
+            v.points.hit = 30;
+            v.recall_level = 25;
+        }
+        let scroll_id = scroll(&mut g, victim, "recall", SPELL_WORD_OF_RECALL);
+        g.char_to_room(attacker, combat_room);
+        g.char_to_room(victim, combat_room);
+
+        damage_type(&mut g, attacker, victim, 10, TYPE_UNDEFINED);
+
+        assert_eq!(g.get_char(victim).unwrap().in_room, Some(recall_room));
+        assert!(g.get_obj(scroll_id).is_none());
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("You wimp out, and attempt to recall!\r\n"));
+        assert!(out.contains("You recite a recall scroll which dissolves.\r\n"));
+    }
+
+    #[test]
+    fn injured_pc_below_retreat_level_recites_scroll() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Arena".to_string(), "Arena.".to_string()));
+        let attacker = player(&mut g, "Attacker");
+        let victim = connected_player(&mut g, "Victim", ConnId(1));
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.points.max_hit = 100;
+            v.points.hit = 30;
+            v.retreat_level = 25;
+        }
+        let scroll_id = scroll(&mut g, victim, "retreat", SPELL_WORD_OF_RETREAT);
+        g.char_to_room(attacker, room);
+        g.char_to_room(victim, room);
+
+        damage_type(&mut g, attacker, victim, 10, TYPE_UNDEFINED);
+
+        assert!(g.get_obj(scroll_id).is_none());
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("You wimp out, and attempt to retreat!\r\n"));
+        assert!(out.contains("You recite a retreat scroll which dissolves.\r\n"));
+        assert!(out.contains("You must rent somewhere before you can retreat!\r\n"));
+    }
+
+    #[test]
+    fn injured_pc_below_wimp_level_attempts_to_flee() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Arena".to_string(), "Arena.".to_string()));
+        let safe = g.add_room(Room::new(101, 0, "Safe".to_string(), "Safe.".to_string()));
+        for dir in 0..NUM_OF_DIRS {
+            g.rooms[room].exits[dir] = Some(Exit {
+                description: None,
+                keyword: None,
+                exit_info: 0,
+                key: NOTHING,
+                to_room: 101,
+            });
+        }
+        let attacker = player(&mut g, "Attacker");
+        let victim = connected_player(&mut g, "Victim", ConnId(1));
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.points.max_hit = 100;
+            v.points.hit = 30;
+            v.wimp_level = 25;
+        }
+        g.char_to_room(attacker, room);
+        g.char_to_room(victim, room);
+
+        damage_type(&mut g, attacker, victim, 10, TYPE_UNDEFINED);
+
+        assert_eq!(g.get_char(victim).unwrap().in_room, Some(safe));
+        assert_eq!(g.get_char(victim).unwrap().fighting, None);
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("You wimp out, and attempt to flee!\r\n"));
     }
 
     #[test]

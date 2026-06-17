@@ -1734,6 +1734,10 @@ pub fn do_use(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
     mag_objectmagic(g, ch, oid, &buf);
 }
 
+pub fn do_recite(g: &mut GameState, ch: CharId, argument: &str) {
+    do_use(g, ch, argument, SCMD_RECITE);
+}
+
 /// mag_objectmagic (spell_parser.c): the magic-item entry point. The spell
 /// effect routines (call_magic -> mag_damage/mag_affects/…) require the
 /// spell_info table (Batch 6). Until that lands, the message flow, charge
