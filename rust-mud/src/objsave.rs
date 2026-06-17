@@ -663,6 +663,8 @@ pub fn crash_rentsave(g: &mut GameState, ch: CharId, cost: i32) {
         return;
     }
     extract_all_player_objects(g, ch);
+    set_load_room_to_current(g, ch);
+    g.request_player_save(ch);
 }
 
 /// Crash_cryosave(): RENT_CRYO save (one-time freeze fee already charged by the
@@ -697,6 +699,8 @@ pub fn crash_cryosave(g: &mut GameState, ch: CharId, cost: i32) {
     if let Some(c) = g.get_char_mut(ch) {
         c.act_flags |= PLR_CRYO;
     }
+    set_load_room_to_current(g, ch);
+    g.request_player_save(ch);
 }
 
 /// Crash_idlesave(): RENT_TIMEDOUT (force-rent) save at 2x cost, dropping the
@@ -808,6 +812,18 @@ fn extract_all_player_objects(g: &mut GameState, ch: CharId) {
     }
     for o in roots {
         g.extract_obj(o);
+    }
+}
+
+fn set_load_room_to_current(g: &mut GameState, ch: CharId) {
+    let load_room = g
+        .get_char(ch)
+        .and_then(|c| c.in_room)
+        .map(|r| g.room(r).number);
+    if let Some(vnum) = load_room {
+        if let Some(c) = g.get_char_mut(ch) {
+            c.load_room = vnum;
+        }
     }
 }
 
@@ -1592,9 +1608,85 @@ pub fn crash_save_all(g: &mut GameState) {
             .unwrap_or(false);
         if needs {
             crash_crashsave(g, cid);
+            g.request_player_save(cid);
             if let Some(c) = g.get_char_mut(cid) {
                 c.act_flags &= !PLR_CRASH;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::{ConState, Descriptor};
+    use crate::room::Room;
+
+    fn temp_lib_path(name: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "deltamud-objsave-{}-{}-{}",
+            std::process::id(),
+            name,
+            nanos
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    fn save_game(name: &str) -> (GameState, CharId, RoomRnum) {
+        let mut config = Config::default();
+        config.lib_path = temp_lib_path(name);
+        let mut g = GameState::new(config);
+        let room = g.add_room(Room::new(
+            3050,
+            0,
+            "Rent Room".to_string(),
+            "A quiet inn room.".to_string(),
+        ));
+        let mut ch = Character::new_player("Saver".to_string(), Class::Warrior, Race::Human);
+        ch.idnum = 42;
+        let ch = g.create_char(ch);
+        g.char_to_room(ch, room);
+        (g, ch, room)
+    }
+
+    #[test]
+    fn crash_save_all_queues_player_row_save_for_flagged_pc() {
+        let (mut g, ch, _room) = save_game("crash-save-all");
+        let conn = ConnId(1);
+        let mut d = Descriptor::new(conn, "test".to_string());
+        d.state = ConState::Playing;
+        d.character = Some(ch);
+        g.descriptors.insert(conn, d);
+        g.get_char_mut(ch).unwrap().act_flags |= PLR_CRASH;
+
+        crash_save_all(&mut g);
+
+        assert_eq!(g.get_char(ch).unwrap().act_flags & PLR_CRASH, 0);
+        assert_eq!(g.player_save_requests, vec![ch]);
+    }
+
+    #[test]
+    fn rent_and_cryo_save_set_load_room_and_queue_player_save() {
+        let (mut g, ch, room) = save_game("rent-save");
+
+        crash_rentsave(&mut g, ch, 0);
+        assert_eq!(g.get_char(ch).unwrap().load_room, g.room(room).number);
+        assert_eq!(g.player_save_requests, vec![ch]);
+
+        g.player_save_requests.clear();
+        if let Some(c) = g.get_char_mut(ch) {
+            c.load_room = NOWHERE;
+        }
+
+        crash_cryosave(&mut g, ch, 0);
+        assert_eq!(g.get_char(ch).unwrap().load_room, g.room(room).number);
+        assert_eq!(g.player_save_requests, vec![ch]);
     }
 }

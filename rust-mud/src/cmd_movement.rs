@@ -2602,6 +2602,8 @@ mod tests {
     use crate::object::Object;
     use crate::room::{Exit, Room, SpecialExit};
 
+    static ARENA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn arena_exit_game() -> (GameState, CharId, CharId, RoomRnum, RoomRnum, RoomRnum) {
         crate::arena::reset_for_tests();
 
@@ -2666,6 +2668,7 @@ mod tests {
 
     #[test]
     fn arena_combatant_exit_runs_prep_room_cleanup() {
+        let _guard = ARENA_TEST_LOCK.lock().unwrap();
         let (mut g, ch, master, entrance, prep, _observer) = arena_exit_game();
 
         assert!(crate::arena::arenaentrancemaster(
@@ -2693,10 +2696,12 @@ mod tests {
 
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
         assert!(out.contains("There's a penalty for leaving the arena"));
+        crate::arena::reset_for_tests();
     }
 
     #[test]
     fn arena_observer_exit_detaches_observer_state() {
+        let _guard = ARENA_TEST_LOCK.lock().unwrap();
         let (mut g, combatant, master, entrance, _prep, observer_room) = arena_exit_game();
         assert!(crate::arena::arenaentrancemaster(
             &mut g,
@@ -2734,6 +2739,7 @@ mod tests {
         assert_eq!(g.get_char(observer).unwrap().in_room, Some(entrance));
         assert_eq!(crate::arena::arena_stat(observer), crate::arena::ARENA_NOT);
         assert_eq!(crate::arena::arena_observing(observer), None);
+        crate::arena::reset_for_tests();
     }
 
     fn movement_game() -> (GameState, CharId, RoomRnum, RoomRnum) {
