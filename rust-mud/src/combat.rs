@@ -37,6 +37,10 @@ const SKILL_THIRD_ATTACK: u16 = 525;
 // PLR_* act-flag bits for PCs (structs.h).
 const PLR_KILLER: i64 = 1 << 0;
 const PLR_THIEF: i64 = 1 << 1;
+const PRF_SUMMONABLE: i64 = 1 << 10;
+const PRF_NOAUCT: i64 = 1 << 18;
+const JAIL_NUM: RoomVnum = 400;
+const BAIL_MULTIPLIER: i32 = 20_000;
 
 // Victim defensive skills (spells.h) and their shared difficulty scalar.
 // fight.c rolls (number(1,100) * AVOID_FACTOR) <= GET_SKILL(victim, X).
@@ -1156,6 +1160,17 @@ fn die(g: &mut GameState, killer: CharId, victim: CharId) {
         return;
     }
 
+    let is_npc = g.get_char(victim).map(|c| c.is_npc).unwrap_or(false);
+    // Award/log combat-kill side effects before die() clears victim flags.
+    if killer != victim {
+        award_kill_experience(g, killer, victim);
+    }
+    if is_npc && killer != victim {
+        // Mark the kill against any active autoquest (fight.c PLR_QUESTOR).
+        crate::quest::quest_on_kill(g, killer, victim);
+    }
+    handle_pc_kill_side_effects(g, killer, victim);
+
     apply_death_penalty(g, victim);
     if !g.char_exists(victim) {
         return;
@@ -1173,15 +1188,6 @@ fn die(g: &mut GameState, killer: CharId, victim: CharId) {
         death_cry(g, victim);
     }
 
-    // Award the killer experience for the kill (fight.c solo_gain/group_gain).
-    let is_npc = g.get_char(victim).map(|c| c.is_npc).unwrap_or(false);
-    if killer != victim {
-        award_kill_experience(g, killer, victim);
-    }
-    if is_npc && killer != victim {
-        // Mark the kill against any active autoquest (fight.c PLR_QUESTOR).
-        crate::quest::quest_on_kill(g, killer, victim);
-    }
     let rnum = g.get_char(victim).and_then(|c| c.in_room);
 
     // Make a corpse holding the victim's inventory + equipment.
@@ -1233,6 +1239,67 @@ fn die(g: &mut GameState, killer: CharId, victim: CharId) {
         } else {
             ghost_pc(g, victim);
         }
+    }
+}
+
+fn handle_pc_kill_side_effects(g: &mut GameState, killer: CharId, victim: CharId) {
+    let Some(v) = g.get_char(victim) else {
+        return;
+    };
+    if v.is_npc {
+        return;
+    }
+    let victim_name = v.get_name().to_string();
+    let victim_level = v.player.level;
+    let victim_killer = v.act_flags & PLR_KILLER != 0;
+    let room_name = v
+        .in_room
+        .map(|r| g.room(r).name.clone())
+        .unwrap_or_else(|| "Nowhere".to_string());
+    let Some(k) = g.get_char(killer) else {
+        return;
+    };
+    let killer_name = k.get_name().to_string();
+    let killer_level = k.player.level;
+    let killer_npc = k.is_npc;
+    let killer_flagged = !k.is_npc && k.act_flags & PLR_KILLER != 0;
+
+    mudlog(
+        g,
+        &format!("{victim_name} killed by {killer_name} at {room_name}"),
+        LVL_IMMORT,
+    );
+
+    if killer == victim {
+        return;
+    }
+
+    if killer_flagged {
+        g.send_to_all_players(&format!(
+            "&m[&YINFO&m]&n {victim_name} was killed by {killer_name} (jailed).\r\n"
+        ));
+        g.send_to_char(killer, "Oh now you've really gone and done it!\r\n");
+        let diff = (killer_level as i32 - victim_level as i32).abs().max(1);
+        if let Some(c) = g.get_char_mut(killer) {
+            c.prf_flags &= !PRF_SUMMONABLE;
+            c.prf_flags |= PRF_NOAUCT;
+            c.alignment = -1000;
+            c.bail_amt = diff * BAIL_MULTIPLIER;
+        }
+        if let Some(jail) = g.real_room(JAIL_NUM) {
+            g.char_from_room(killer);
+            g.char_to_room(killer, jail);
+            act(g, "$n suddenly appears in the room.", true, killer, None, ActArg::None, To::Room);
+            crate::cmd_informative::look_at_room(g, killer, false);
+        }
+    } else if victim_killer && !killer_npc {
+        g.send_to_all_players(&format!(
+            "&m[&YINFO&m]&n {victim_name} was killed by {killer_name} (defending).\r\n"
+        ));
+    } else if !killer_npc {
+        g.send_to_all_players(&format!(
+            "&m[&YINFO&m]&n {victim_name} was killed by {killer_name} (offending).\r\n"
+        ));
     }
 }
 
@@ -2363,6 +2430,84 @@ mod tests {
             .unwrap()
             .outbuf
             .contains("You suddenly find yourself floating in space... you feel nothing.\r\n"));
+    }
+
+    #[test]
+    fn die_logs_pc_kill_and_jails_killer_flagged_attacker() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        let jail = g.add_room(Room::new(JAIL_NUM, 0, "Jail".to_string(), "A jail cell.".to_string()));
+        g.add_room(Room::new(3001, 0, "Home".to_string(), "A hometown.".to_string()));
+        let killer = connected_player(&mut g, "Killer", ConnId(1));
+        let victim = connected_player(&mut g, "Victim", ConnId(2));
+        let imm = connected_player(&mut g, "Imm", ConnId(3));
+        g.players_by_name.insert("killer".to_string(), killer);
+        g.players_by_name.insert("victim".to_string(), victim);
+        g.players_by_name.insert("imm".to_string(), imm);
+        {
+            let k = g.get_char_mut(killer).unwrap();
+            k.player.level = 20;
+            k.act_flags |= PLR_KILLER;
+            k.prf_flags |= PRF_SUMMONABLE;
+        }
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.player.level = 10;
+        }
+        g.get_char_mut(imm).unwrap().player.level = LVL_IMMORT;
+        g.char_to_room(killer, room);
+        g.char_to_room(victim, room);
+        g.char_to_room(imm, room);
+
+        die(&mut g, killer, victim);
+
+        let k = g.get_char(killer).unwrap();
+        assert_eq!(k.in_room, Some(jail));
+        assert_eq!(k.bail_amt, 200_000);
+        assert_eq!(k.prf_flags & PRF_SUMMONABLE, 0);
+        assert_eq!(k.prf_flags & PRF_NOAUCT, PRF_NOAUCT);
+        assert_eq!(k.alignment, -1000);
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("Oh now you've really gone and done it!\r\n"));
+        assert!(g
+            .descriptors
+            .get(&ConnId(2))
+            .unwrap()
+            .outbuf
+            .contains("&m[&YINFO&m]&n Victim was killed by Killer (jailed).\r\n"));
+        assert!(g
+            .descriptors
+            .get(&ConnId(3))
+            .unwrap()
+            .outbuf
+            .contains("[ Victim killed by Killer at Pit ]\r\n"));
+    }
+
+    #[test]
+    fn die_broadcasts_defending_pc_kill() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        g.add_room(Room::new(3001, 0, "Home".to_string(), "A hometown.".to_string()));
+        let killer = connected_player(&mut g, "Defender", ConnId(1));
+        let victim = connected_player(&mut g, "Outlaw", ConnId(2));
+        g.players_by_name.insert("defender".to_string(), killer);
+        g.players_by_name.insert("outlaw".to_string(), victim);
+        g.get_char_mut(victim).unwrap().act_flags |= PLR_KILLER;
+        g.char_to_room(killer, room);
+        g.char_to_room(victim, room);
+
+        die(&mut g, killer, victim);
+
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("&m[&YINFO&m]&n Outlaw was killed by Defender (defending).\r\n"));
     }
 
     #[test]
