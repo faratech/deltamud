@@ -852,6 +852,10 @@ fn aedit_save_internally(g: &mut GameState, conn: ConnId) {
     }
     let lib_path = g.config.lib_path.clone();
     aedit_save_to_disk(&lib_path);
+    let socials_path = format!("{}/{}", lib_path.trim_end_matches('/'), SOCMESS_REL);
+    if let Err(e) = crate::cmd_social::reload_socials(Some(&socials_path)) {
+        log::warn!("SYSERR: can't reload socials file '{}': {}", socials_path, e);
+    }
 }
 
 /// Write the entire social table back to misc/socials (C aedit_save_to_disk).

@@ -15,7 +15,7 @@ use crate::act::{act_sleep, ActArg, To};
 use crate::state::GameState;
 use crate::types::*;
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 // PRF_NOGOSS (structs.h: 1 << 19) — not yet present in flags.rs; defined here
 // privately so the gemote/gossip gate matches C exactly.
@@ -67,7 +67,7 @@ struct SocialTable {
     by_command: HashMap<String, usize>,
 }
 
-static SOCIALS: OnceLock<SocialTable> = OnceLock::new();
+static SOCIALS: OnceLock<RwLock<SocialTable>> = OnceLock::new();
 
 /// CircleMUD SOCMESS_FILE (db.h): "misc/socials" relative to the lib dir.
 const SOCMESS_FILE: &str = "lib/misc/socials";
@@ -92,8 +92,29 @@ pub fn boot_socials(lib_path: Option<&str>) {
             SocialTable { list: Vec::new(), by_command: HashMap::new() }
         }
     };
-    // If already set (double-boot), keep the first; mirrors a single static.
-    let _ = SOCIALS.set(table);
+    install_socials(table);
+}
+
+/// Reload the live social table from disk after OLC writes `misc/socials`.
+pub fn reload_socials(lib_path: Option<&str>) -> std::io::Result<()> {
+    let path = lib_path.unwrap_or(SOCMESS_FILE);
+    let table = load_socials(path)?;
+    install_socials(table);
+    Ok(())
+}
+
+fn install_socials(table: SocialTable) {
+    if let Some(lock) = SOCIALS.get() {
+        match lock.write() {
+            Ok(mut guard) => *guard = table,
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                *guard = table;
+            }
+        }
+    } else {
+        let _ = SOCIALS.set(RwLock::new(table));
+    }
 }
 
 fn load_socials(path: &str) -> std::io::Result<SocialTable> {
@@ -189,22 +210,25 @@ fn finalize(mut list: Vec<SocialMessg>) -> SocialTable {
 /// interpreter walking cmd_info[]: the socials are sorted by `sort_as`, and
 /// the first whose name is prefixed by `arg` wins. Returns the canonical
 /// command name to pass to do_action_named().
-pub fn find_social(arg: &str) -> Option<&'static str> {
+pub fn find_social(arg: &str) -> Option<String> {
     let arg = arg.to_lowercase();
     if arg.is_empty() {
         return None;
     }
-    let table = SOCIALS.get()?;
+    let table = SOCIALS.get()?.read().ok()?;
     table
         .list
         .iter()
         .find(|s| s.command.starts_with(&arg))
-        .map(|s| s.command.as_str())
+        .map(|s| s.command.clone())
 }
 
 /// Commands visible in the `socials` listing for a character level.
 pub fn social_commands_for_level(level: Level) -> Vec<String> {
-    let Some(table) = SOCIALS.get() else {
+    let Some(lock) = SOCIALS.get() else {
+        return Vec::new();
+    };
+    let Ok(table) = lock.read() else {
         return Vec::new();
     };
     table
@@ -239,7 +263,10 @@ pub fn do_action(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
 pub fn do_action_named(g: &mut GameState, ch: CharId, command: &str, argument: &str) {
     // Snapshot the social (clone out of the static so we hold no borrow on the
     // table while mutating GameState).
-    let action = match SOCIALS.get().and_then(|t| lookup(t, command)) {
+    let action = match SOCIALS
+        .get()
+        .and_then(|lock| lock.read().ok().and_then(|table| lookup(&table, command).cloned()))
+    {
         Some(a) => a.clone(),
         None => {
             g.send_to_char(ch, "That action is not supported.\r\n");
@@ -573,7 +600,10 @@ pub fn do_gmote_named(g: &mut GameState, ch: CharId, command: &str, argument: &s
         return;
     }
 
-    let action = match SOCIALS.get().and_then(|t| lookup(t, command)) {
+    let action = match SOCIALS
+        .get()
+        .and_then(|lock| lock.read().ok().and_then(|table| lookup(&table, command).cloned()))
+    {
         Some(a) => a.clone(),
         None => {
             g.send_to_char(ch, "That's not a social!\r\n");
@@ -665,7 +695,7 @@ pub fn do_gmote(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         return;
     }
     let resolved = match find_social(&command) {
-        Some(c) => c.to_string(),
+        Some(c) => c,
         None => {
             g.send_to_char(ch, "That's not a social!\r\n");
             return;

@@ -241,7 +241,7 @@ fn run_command(g: &mut GameState, ch: CharId, input: &str) {
             // table (C splices them in via create_command_list()); try them
             // before giving up.
             if let Some(name) = crate::cmd_social::find_social(&arg) {
-                crate::cmd_social::do_action_named(g, ch, name, line);
+                crate::cmd_social::do_action_named(g, ch, &name, line);
             } else {
                 g.send_to_char(ch, "Huh?!?\r\n");
             }
