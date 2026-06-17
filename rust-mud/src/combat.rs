@@ -9,13 +9,14 @@
 // canonical `pub fn`s; magic.rs and cmd_offensive.rs both call them (no fork).
 
 use crate::act::{act, ActArg, To};
+use crate::character::Affect;
 use crate::constants::ATTACK_HIT_TEXT;
-use crate::flags::{AFF_HIDE, AFF_INVISIBLE, AFF_SANCTUARY, AFF_SLEEP, MOB_WIMPY};
+use crate::flags::{AFF_HIDE, AFF_INVISIBLE, AFF_SANCTUARY, AFF_SLEEP, APPLY_POWER, MOB_WIMPY};
 use crate::object::{Object, ObjectType, ObjLoc};
 use crate::room::{RoomFlags, SectorType, EX_CLOSED};
 use crate::spell_parser::{
-    MAX_SPELLS, SPELL_REDIRECT_CHARGE, SPELL_SLEEP, SPELL_WORD_OF_RECALL, SPELL_WORD_OF_RETREAT,
-    TYPE_UNDEFINED,
+    MAX_SPELLS, SKILL_ADRENALINE, SKILL_BLOODLUST, SKILL_CARNALRAGE, SPELL_REDIRECT_CHARGE,
+    SPELL_SLEEP, SPELL_WORD_OF_RECALL, SPELL_WORD_OF_RETREAT, TYPE_UNDEFINED,
 };
 use crate::state::GameState;
 use crate::types::*;
@@ -24,6 +25,7 @@ use crate::types::*;
 // (attacktype - TYPE_HIT); SKILL_BACKSTAB pierces.
 pub const TYPE_HIT: i32 = 1100;
 pub const TYPE_STAB: i32 = 1114;
+const SELF_DAMAGE: i32 = 1197; // spells.h
 const NUM_ATTACK_TYPES: i32 = 15; // olc.h
 const SKILL_BACKSTAB: u16 = 501;
 
@@ -567,6 +569,61 @@ pub fn damage(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32) {
     damage_type(g, ch, victim, dmg, TYPE_UNDEFINED);
 }
 
+const ADRENALINE_HP_PERCENT: i32 = 5;
+
+fn adrenaline_rush(g: &mut GameState, ch: CharId, damage: i32) {
+    let Some(c) = g.get_char(ch) else {
+        return;
+    };
+    if c.is_npc || c.skill(SKILL_ADRENALINE as u16) < 70 {
+        return;
+    }
+    let max_hit = c.points.max_hit;
+    let threshold = ADRENALINE_HP_PERCENT * max_hit / 100;
+    if threshold <= 0 || damage < threshold {
+        return;
+    }
+
+    let amount = damage / threshold;
+    let (max_dur, max_aff, message) = if c.skill(SKILL_CARNALRAGE as u16) > 70 {
+        (
+            200,
+            200,
+            "You feel the &RCarnal &rRage&n build within you!!!\r\n",
+        )
+    } else if c.skill(SKILL_BLOODLUST as u16) > 70 {
+        (100, 100, "You &rlust&n for more &RBLOOD&n!!\r\n")
+    } else {
+        (50, 50, "You feel a surge of &RADRENALINE&n!\r\n")
+    };
+    g.send_to_char(ch, message);
+
+    let mut af = Affect {
+        spell_type: SKILL_ADRENALINE,
+        duration: amount,
+        modifier: amount,
+        location: APPLY_POWER,
+        bitvector: 0,
+        caster: None,
+    };
+
+    if let Some(c) = g.get_char_mut(ch) {
+        if let Some(existing) = c
+            .affected
+            .iter()
+            .find(|a| a.spell_type == SKILL_ADRENALINE && a.location == APPLY_POWER)
+            .cloned()
+        {
+            af.duration = (af.duration + existing.duration).min(max_dur - 1);
+            af.modifier = (af.modifier + existing.modifier).clamp(-max_aff, max_aff);
+            c.affected
+                .retain(|a| !(a.spell_type == SKILL_ADRENALINE && a.location == APPLY_POWER));
+        }
+        c.affected.push(af);
+    }
+    g.affect_total(ch);
+}
+
 /// do_actual_damage (fight.c): apply the combat guards + engagement, scale the
 /// raw damage by dam_multi(), run the victim's defensive skills, apply HP,
 /// emit the weapon/skill damage message, update position, drive retaliation
@@ -672,6 +729,10 @@ pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, atta
         v.points.hit -= dmg;
     }
 
+    if attacktype < SELF_DAMAGE {
+        adrenaline_rush(g, victim, dmg);
+    }
+
     update_position(g, victim);
 
     // Damage / skill message (fight.c damage ~1011). A non-weapon attack type
@@ -681,7 +742,6 @@ pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, atta
     // exists. Invalid (TYPE_UNDEFINED), out-of-range (>= SELF_DAMAGE) and
     // SKILL_RIPOSTE attack types print nothing here — except TYPE_UNDEFINED,
     // which keeps the port's generic-hit fallback for environment / dg damage.
-    const SELF_DAMAGE: i32 = 1197; // spells.h (== TYPE_STARVING)
     const PRF2_MERCY: i64 = 1 << 7; // structs.h
     if attacktype != TYPE_UNDEFINED && attacktype < SELF_DAMAGE && attacktype != SKILL_RIPOSTE as i32
     {
@@ -1425,6 +1485,104 @@ mod tests {
         damage_type(&mut g, attacker, victim, 1, TYPE_UNDEFINED);
 
         assert_eq!(g.get_char(victim).unwrap().points.hit, 19);
+    }
+
+    #[test]
+    fn damage_triggers_adrenaline_power_affect() {
+        let mut g = GameState::new(Config::default());
+        let attacker = player(&mut g, "Attacker");
+        let victim = connected_player(&mut g, "Victim", ConnId(1));
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.points.max_hit = 100;
+            v.points.hit = 100;
+            v.set_skill(SKILL_ADRENALINE as u16, 70);
+        }
+
+        damage_type(&mut g, attacker, victim, 10, TYPE_HIT);
+
+        let v = g.get_char(victim).unwrap();
+        let af = v
+            .affected
+            .iter()
+            .find(|a| a.spell_type == SKILL_ADRENALINE)
+            .unwrap();
+        assert_eq!(af.location, APPLY_POWER);
+        assert_eq!(af.modifier, 2);
+        assert_eq!(af.duration, 2);
+        assert_eq!(v.points.power, 2);
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("You feel a surge of &RADRENALINE&n!\r\n"));
+    }
+
+    #[test]
+    fn damage_triggers_bloodlust_variant() {
+        let mut g = GameState::new(Config::default());
+        let attacker = player(&mut g, "Attacker");
+        let victim = connected_player(&mut g, "Victim", ConnId(1));
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.points.max_hit = 100;
+            v.points.hit = 100;
+            v.set_skill(SKILL_ADRENALINE as u16, 70);
+            v.set_skill(SKILL_BLOODLUST as u16, 71);
+        }
+
+        damage_type(&mut g, attacker, victim, 10, TYPE_HIT);
+
+        assert_eq!(g.get_char(victim).unwrap().points.power, 2);
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("You &rlust&n for more &RBLOOD&n!!\r\n"));
+    }
+
+    #[test]
+    fn carnal_rage_adrenaline_merge_uses_higher_cap() {
+        let mut g = GameState::new(Config::default());
+        let attacker = player(&mut g, "Attacker");
+        let victim = connected_player(&mut g, "Victim", ConnId(1));
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.points.max_hit = 100;
+            v.points.hit = 100;
+            v.set_skill(SKILL_ADRENALINE as u16, 70);
+            v.set_skill(SKILL_BLOODLUST as u16, 71);
+            v.set_skill(SKILL_CARNALRAGE as u16, 71);
+            v.affected.push(Affect {
+                spell_type: SKILL_ADRENALINE,
+                duration: 198,
+                modifier: 198,
+                location: APPLY_POWER,
+                bitvector: 0,
+                caster: None,
+            });
+        }
+        g.affect_total(victim);
+
+        damage_type(&mut g, attacker, victim, 10, TYPE_HIT);
+
+        let v = g.get_char(victim).unwrap();
+        let af = v
+            .affected
+            .iter()
+            .find(|a| a.spell_type == SKILL_ADRENALINE)
+            .unwrap();
+        assert_eq!(af.duration, 199);
+        assert_eq!(af.modifier, 200);
+        assert_eq!(v.points.power, 200);
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("You feel the &RCarnal &rRage&n build within you!!!\r\n"));
     }
 
     #[test]
