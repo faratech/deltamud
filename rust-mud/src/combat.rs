@@ -12,7 +12,8 @@ use crate::act::{act, ActArg, To};
 use crate::character::Affect;
 use crate::constants::ATTACK_HIT_TEXT;
 use crate::flags::{
-    AFF_HIDE, AFF_INVISIBLE, AFF_SANCTUARY, AFF_SLEEP, APPLY_POWER, MOB_DBLATTACK, MOB_WIMPY,
+    AFF_GROUP, AFF_HIDE, AFF_INVISIBLE, AFF_SANCTUARY, AFF_SLEEP, APPLY_POWER, MOB_DBLATTACK,
+    MOB_WIMPY,
 };
 use crate::object::{Object, ObjectType, ObjLoc};
 use crate::room::{RoomFlags, SectorType, EX_CLOSED};
@@ -1167,11 +1168,12 @@ fn die(g: &mut GameState, killer: CharId, victim: CharId) {
         death_cry(g, victim);
     }
 
-    // Award the killer experience for the kill (CircleMUD group_gain/gain_exp).
+    // Award the killer experience for the kill (fight.c solo_gain/group_gain).
     let is_npc = g.get_char(victim).map(|c| c.is_npc).unwrap_or(false);
+    if killer != victim {
+        award_kill_experience(g, killer, victim);
+    }
     if is_npc && killer != victim {
-        let exp = g.get_char(victim).map(|c| c.points.exp).unwrap_or(0).max(1);
-        crate::limits::gain_exp(g, killer, exp);
         // Mark the kill against any active autoquest (fight.c PLR_QUESTOR).
         crate::quest::quest_on_kill(g, killer, victim);
     }
@@ -1223,6 +1225,127 @@ fn die(g: &mut GameState, killer: CharId, victim: CharId) {
         // Respawn the PC at its hometown (Tier-0 death penalty deferred).
         respawn_pc(g, victim);
     }
+}
+
+fn award_kill_experience(g: &mut GameState, killer: CharId, victim: CharId) {
+    let Some(k) = g.get_char(killer) else {
+        return;
+    };
+    if k.is_npc {
+        return;
+    }
+    if k.affect_flags & AFF_GROUP != 0 {
+        group_gain(g, killer, victim);
+    } else {
+        solo_gain(g, killer, victim);
+    }
+}
+
+fn solo_gain(g: &mut GameState, ch: CharId, victim: CharId) {
+    let exp = kill_exp(g, victim, 1);
+    if exp > 1 {
+        g.send_to_char(ch, &format!("You receive {} experience points.\r\n", numdisplay(exp)));
+    } else {
+        g.send_to_char(ch, "You receive one lousy experience point.\r\n");
+    }
+    crate::limits::gain_exp(g, ch, exp);
+    change_alignment(g, ch, victim);
+}
+
+fn group_gain(g: &mut GameState, ch: CharId, victim: CharId) {
+    let Some(c) = g.get_char(ch) else {
+        return;
+    };
+    if c.is_npc {
+        return;
+    }
+    let leader = c.master.unwrap_or(ch);
+    let ch_room = c.in_room;
+    let mut members = Vec::new();
+    if g.get_char(leader)
+        .map(|k| k.affect_flags & AFF_GROUP != 0 && k.in_room == ch_room)
+        .unwrap_or(false)
+    {
+        members.push(leader);
+    }
+    let followers = g
+        .get_char(leader)
+        .map(|k| k.followers.clone())
+        .unwrap_or_default();
+    for f in followers {
+        if g.get_char(f)
+            .map(|fc| fc.affect_flags & AFF_GROUP != 0 && fc.in_room == ch_room)
+            .unwrap_or(false)
+        {
+            members.push(f);
+        }
+    }
+    let member_count = members.len().max(1);
+    let exp = kill_exp(g, victim, member_count);
+    for member in members {
+        perform_group_gain(g, member, exp, victim);
+    }
+}
+
+fn perform_group_gain(g: &mut GameState, ch: CharId, exp: i64, victim: CharId) {
+    if exp > 1 {
+        g.send_to_char(
+            ch,
+            &format!(
+                "You receive your share of experience -- {} points.\r\n",
+                numdisplay(exp)
+            ),
+        );
+    } else {
+        g.send_to_char(ch, "You receive your share of experience -- one measly little point!\r\n");
+    }
+    crate::limits::gain_exp(g, ch, exp);
+    change_alignment(g, ch, victim);
+}
+
+fn kill_exp(g: &GameState, victim: CharId, member_count: usize) -> i64 {
+    let Some(v) = g.get_char(victim) else {
+        return 1;
+    };
+    if !v.is_npc {
+        return 1;
+    }
+    if member_count <= 1 {
+        ((v.points.exp as f64) * 0.666) as i64
+    } else {
+        v.points.exp / member_count as i64
+    }
+    .max(1)
+}
+
+fn change_alignment(g: &mut GameState, ch: CharId, victim: CharId) {
+    let victim_alignment = g.get_char(victim).map(|v| v.alignment).unwrap_or(0);
+    if let Some(c) = g.get_char_mut(ch) {
+        if c.prf2_flags & PRF2_INTANGIBLE != 0 {
+            return;
+        }
+        c.alignment += (-victim_alignment - c.alignment) >> 4;
+        if c.alignment >= 350 {
+            c.act_flags &= !(PLR_THIEF | PLR_KILLER);
+        }
+    }
+}
+
+fn numdisplay(val: i64) -> String {
+    let negative = val < 0;
+    let digits = val.abs().to_string();
+    let mut out = String::new();
+    for (i, ch) in digits.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    let mut out: String = out.chars().rev().collect();
+    if negative {
+        out.insert(0, '-');
+    }
+    out
 }
 
 fn make_corpse(g: &mut GameState, who: &str) -> ObjId {
@@ -2049,6 +2172,74 @@ mod tests {
             dg_handler::get_global_var(ScriptKey::Mob(victim), "low").as_deref(),
             Some("yes")
         );
+    }
+
+    #[test]
+    fn die_awards_solo_kill_scaled_experience_and_alignment() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        let killer = connected_player(&mut g, "Killer", ConnId(1));
+        let mut mob = Character::new_npc(99);
+        mob.player.name = "Bandit".to_string();
+        mob.points.exp = 300;
+        mob.alignment = -1000;
+        let victim = g.create_char(mob);
+        g.char_to_room(killer, room);
+        g.char_to_room(victim, room);
+
+        die(&mut g, killer, victim);
+
+        let k = g.get_char(killer).unwrap();
+        assert_eq!(k.points.exp, 199);
+        assert_eq!(k.alignment, 62);
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("You receive 199 experience points.\r\n"));
+    }
+
+    #[test]
+    fn die_shares_group_experience_with_same_room_members() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        let leader = connected_player(&mut g, "Leader", ConnId(1));
+        let follower = connected_player(&mut g, "Follower", ConnId(2));
+        {
+            let l = g.get_char_mut(leader).unwrap();
+            l.affect_flags |= AFF_GROUP;
+            l.followers.push(follower);
+        }
+        {
+            let f = g.get_char_mut(follower).unwrap();
+            f.affect_flags |= AFF_GROUP;
+            f.master = Some(leader);
+        }
+        let mut mob = Character::new_npc(99);
+        mob.player.name = "Ogre".to_string();
+        mob.points.exp = 300;
+        let victim = g.create_char(mob);
+        g.char_to_room(leader, room);
+        g.char_to_room(follower, room);
+        g.char_to_room(victim, room);
+
+        die(&mut g, leader, victim);
+
+        assert_eq!(g.get_char(leader).unwrap().points.exp, 150);
+        assert_eq!(g.get_char(follower).unwrap().points.exp, 150);
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("You receive your share of experience -- 150 points.\r\n"));
+        assert!(g
+            .descriptors
+            .get(&ConnId(2))
+            .unwrap()
+            .outbuf
+            .contains("You receive your share of experience -- 150 points.\r\n"));
     }
 
     #[test]
