@@ -1361,17 +1361,7 @@ fn process_wait(g: &mut GameState, go: GoRef, trig: TrigId, cmd: &str, cur_line:
             let v = atoi(rest);
             (v / 100, v % 100)
         };
-        let target_min = min + hr * 60;
-        let pulses_per_hour = 75 * PASSES_PER_SEC as i64; // SECS_PER_MUD_HOUR=75
-        let ntime = target_min * pulses_per_hour / 60;
-        // approximate "now" using the game pulse + current mud hour (0 if no
-        // weather clock available here): time-of-day in pulses.
-        let now = (g.pulse as i64) % (pulses_per_hour * 24);
-        if now >= ntime {
-            pulses_per_hour * 24 - now + ntime
-        } else {
-            ntime - now
-        }
+        wait_until_delay(g, hr, min)
     } else {
         // "<n>" or "<n> t" (mud-hours) or "<n> s" (seconds)
         let mut it = arg.split_whitespace();
@@ -1395,6 +1385,22 @@ fn process_wait(g: &mut GameState, go: GoRef, trig: TrigId, cmd: &str, cur_line:
         t.wait_event = Some(ev);
         t.curr_line = cur_line + 1;
     });
+}
+
+fn wait_until_delay(g: &GameState, hr: i64, min: i64) -> i64 {
+    wait_until_delay_from(g.pulse, crate::weather::mud_minute_of_day(), hr, min)
+}
+
+fn wait_until_delay_from(pulse: u64, current_mud_min: i64, hr: i64, min: i64) -> i64 {
+    let target_min = min + hr * 60;
+    let pulses_per_hour = 75 * PASSES_PER_SEC as i64; // SECS_PER_MUD_HOUR=75
+    let ntime = target_min * pulses_per_hour / 60;
+    let now = (pulse as i64 % pulses_per_hour) + current_mud_min * pulses_per_hour / 60;
+    if now >= ntime {
+        pulses_per_hour * 24 - now + ntime
+    } else {
+        ntime - now
+    }
 }
 
 fn log_cmd_err(trig: TrigId, what: &str, cmd: &str) {
@@ -1827,6 +1833,21 @@ mod eval_tests {
     fn str_str_case_insensitive() {
         assert!(str_str("Hello World", "world"));
         assert!(!str_str("Hello", "xyz"));
+    }
+
+    #[test]
+    fn wait_until_uses_current_mud_hour_plus_hour_pulse_offset() {
+        let pulses_per_hour = 75 * PASSES_PER_SEC as i64;
+        let pulse_offset = pulses_per_hour / 2;
+
+        assert_eq!(
+            wait_until_delay_from(pulse_offset as u64, 12 * 60, 12, 45),
+            pulses_per_hour / 4
+        );
+        assert_eq!(
+            wait_until_delay_from(pulse_offset as u64, 12 * 60, 12, 15),
+            (24 * pulses_per_hour) - pulse_offset + (15 * pulses_per_hour / 60)
+        );
     }
 }
 

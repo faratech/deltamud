@@ -13,10 +13,13 @@
 // each subsequent call. `weather_and_time(g)` is the per-mud-hour entry point;
 // `time_now()` exposes the current clock for `do_time`.
 
+use crate::config::Config;
 use crate::connection::ConState;
 use crate::room::RoomFlags;
 use crate::state::GameState;
 use crate::types::{CharId, Position};
+use log::warn;
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
@@ -64,16 +67,22 @@ fn mud_time_passed(t2: i64, t1: i64) -> TimeWeather {
 
     let year = secs / SECS_PER_MUD_YEAR; // 0..XX years
 
-    TimeWeather { hours, day, month, year, sunlight: SUN_DARK }
+    TimeWeather {
+        hours,
+        day,
+        month,
+        year,
+        sunlight: SUN_DARK,
+    }
 }
 
-/// CircleMUD db.c reset_time(): seed the clock from real time and pick the
-/// initial sun state from the seeded hour. We can't read etc/date_record (the
-/// pfile/date persistence isn't ported yet), so we degrade exactly as C does
-/// when that file is missing — the default mud_time_passed() result stands.
-fn reset_time(now: i64) -> TimeWeather {
+/// CircleMUD db.c reset_time(): seed the clock from real time, overlay the
+/// persisted mud date from etc/date_record when present, and pick the initial
+/// sun state from the seeded hour.
+fn reset_time(now: i64, lib_path: &str) -> TimeWeather {
     let beginning_of_time = now - (SECS_PER_MUD_YEAR * 1000);
     let mut tw = mud_time_passed(now, beginning_of_time);
+    read_mud_date_from_file(lib_path, &mut tw);
 
     tw.sunlight = if tw.hours <= 4 {
         SUN_DARK
@@ -87,6 +96,54 @@ fn reset_time(now: i64) -> TimeWeather {
         SUN_DARK
     };
     tw
+}
+
+fn read_mud_date_from_file(lib_path: &str, tw: &mut TimeWeather) {
+    let path = Path::new(lib_path).join("etc").join("date_record");
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => {
+            warn!("SYSERR: File etc/date_record not found, mud date will be reset to default!");
+            return;
+        }
+    };
+    if bytes.len() < 12 {
+        warn!("SYSERR: File etc/date_record is too short, mud date will be reset to default!");
+        return;
+    }
+    let year = i32::from_ne_bytes(bytes[0..4].try_into().unwrap());
+    let month = i32::from_ne_bytes(bytes[4..8].try_into().unwrap());
+    let day = i32::from_ne_bytes(bytes[8..12].try_into().unwrap());
+    tw.year = year as i64;
+    tw.month = month;
+    tw.day = day;
+}
+
+pub fn write_mud_date_to_file(g: &GameState) {
+    let mtx = CLOCK.get_or_init(|| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        Mutex::new(reset_time(now, &g.config.lib_path))
+    });
+    let tw = match mtx.lock() {
+        Ok(g) => *g,
+        Err(p) => *p.into_inner(),
+    };
+    let mut bytes = Vec::with_capacity(12);
+    bytes.extend_from_slice(&(tw.year as i32).to_ne_bytes());
+    bytes.extend_from_slice(&tw.month.to_ne_bytes());
+    bytes.extend_from_slice(&tw.day.to_ne_bytes());
+    let path = Path::new(&g.config.lib_path)
+        .join("etc")
+        .join("date_record");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&path, bytes) {
+        warn!("SYSERR: Could not write etc/date_record: {}", e);
+    }
 }
 
 /// comm.c send_to_outdoor(): deliver a message to every connected, awake
@@ -191,7 +248,7 @@ pub fn weather_and_time(g: &mut GameState) {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        Mutex::new(reset_time(now))
+        Mutex::new(reset_time(now, &g.config.lib_path))
     });
 
     // Single-threaded heartbeat; the lock can't be poisoned by a concurrent
@@ -217,13 +274,18 @@ pub fn time_now() -> (i32, i32, i32, i64) {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        Mutex::new(reset_time(now))
+        Mutex::new(reset_time(now, &Config::default().lib_path))
     });
     let tw = match mtx.lock() {
         Ok(g) => *g,
         Err(p) => *p.into_inner(),
     };
     (tw.hours, tw.day, tw.month, tw.year)
+}
+
+pub fn mud_minute_of_day() -> i64 {
+    let (hours, _, _, _) = time_now();
+    hours as i64 * 60
 }
 
 /// Current sun state (utils.h weather_info.sunlight), for IS_DARK / look logic.
@@ -233,10 +295,39 @@ pub fn sunlight() -> i32 {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        Mutex::new(reset_time(now))
+        Mutex::new(reset_time(now, &Config::default().lib_path))
     });
     match mtx.lock() {
         Ok(g) => g.sunlight,
         Err(p) => p.into_inner().sunlight,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn date_record_binary_overrides_seeded_calendar() {
+        let mut dir = std::env::temp_dir();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        dir.push(format!("deltamud-date-{}-{}", std::process::id(), unique));
+        let etc = dir.join("etc");
+        std::fs::create_dir_all(&etc).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&32523i32.to_ne_bytes());
+        bytes.extend_from_slice(&3i32.to_ne_bytes());
+        bytes.extend_from_slice(&14i32.to_ne_bytes());
+        std::fs::write(etc.join("date_record"), bytes).unwrap();
+
+        let tw = reset_time(1_000_000, dir.to_str().unwrap());
+
+        assert_eq!(tw.year, 32523);
+        assert_eq!(tw.month, 3);
+        assert_eq!(tw.day, 14);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

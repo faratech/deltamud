@@ -295,6 +295,7 @@ impl Game {
 
         // Crash-save all rent/inventory + persist every online player file.
         crate::objsave::crash_save_all(&mut self.state);
+        crate::weather::write_mud_date_to_file(&self.state);
         for cid in &conn_ids {
             if let Some(ch) = self.state.descriptors.get(cid).and_then(|d| d.character) {
                 if let Some(c) = self.state.get_char(ch) {

@@ -47,7 +47,7 @@ use crate::spell_parser::SPELL_REDIRECT_CHARGE;
 use crate::state::GameState;
 use crate::types::*;
 use log::info;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 // ---- weather constants (maputils.h) ---------------------------------------
@@ -98,21 +98,20 @@ const WEST: i32 = 3;
 // lifetime-in-half-minutes}. Only speed/radius/damage/dir%/lifetime are needed
 // for the render-facing spawn/move/collide/expire logic.
 const WEATHER_DATA: [[i32; 5]; WEATHER_TOTAL] = [
-    [1, 3, 0, 5, 20],      // rain
-    [1, 4, 0, 9, 48],      // snow
-    [2, 4, 0, 13, 14],     // thunder
-    [4, 2, 70, 20, 10],    // fire
-    [0, 5, 0, 0, 16],      // fog
-    [0, 5, 0, 0, 24],      // mfog
-    [2, 5, 20, 15, 14],    // hurricane
-    [3, 3, 10, 25, 12],    // tornado
-    [1, 6, 7, 5, 96],      // blizzard
-    [0, 10, 9999, 0, 96],  // DEATH
+    [1, 3, 0, 5, 20],     // rain
+    [1, 4, 0, 9, 48],     // snow
+    [2, 4, 0, 13, 14],    // thunder
+    [4, 2, 70, 20, 10],   // fire
+    [0, 5, 0, 0, 16],     // fog
+    [0, 5, 0, 0, 24],     // mfog
+    [2, 5, 20, 15, 14],   // hurricane
+    [3, 3, 10, 25, 12],   // tornado
+    [1, 6, 7, 5, 96],     // blizzard
+    [0, 10, 9999, 0, 96], // DEATH
 ];
 
 // Per-weather glyph / colour / name tables (maputils.c top of file).
-const WEATHER_CHARS: [char; WEATHER_TOTAL] =
-    ['R', 'S', 't', 'F', 'f', 'M', 'H', 'T', 'B', 'D'];
+const WEATHER_CHARS: [char; WEATHER_TOTAL] = ['R', 'S', 't', 'F', 'f', 'M', 'H', 'T', 'B', 'D'];
 
 const WEATHER_NAMES: [&str; WEATHER_TOTAL] = [
     "rain storm",
@@ -130,6 +129,19 @@ const WEATHER_NAMES: [&str; WEATHER_TOTAL] = [
 const WEATHER_COLORS: [&str; WEATHER_TOTAL] =
     ["&B", "&W", "&g", "&r", "&c", "&C", "&G", "&R", "&w", "&M"];
 
+const WEATHER_MESSAGES: [&str; WEATHER_TOTAL] = [
+    "A rain storm pours down on you from above.",
+    "You tread heavily in the snow storm.",
+    "You hear the blaring of the thunder storm above you and see lightning in the distance.",
+    "Your already blackened skin is singed in the fire storm!",
+    "You can barely see your hands in the heavy fog.",
+    "You feel very uneasy in the strange fog.",
+    "You attempt to hold your ground in the fierce hurricane!",
+    "You are savagely hurled around by the tornado!",
+    "Your limbs are chilled to the bone as a heavy blizzard looms above you.",
+    "You cough blood and develop lesions as death encoils you.",
+];
+
 // Direction / filler glyphs used by the weather map (maputils.h).
 const DIRECTION_NORTH: char = '^';
 const DIRECTION_SOUTH: char = 'v';
@@ -146,6 +158,9 @@ const MAP_INDENT: &str = " ";
 // printweather vision radii.
 const WEATHER_VISION_RADIUS_X: i32 = 20;
 const WEATHER_VISION_RADIUS_Y: i32 = 8;
+const WEATHER_MSG_FORM: i32 = 0;
+const WEATHER_MSG_ACT: i32 = 1;
+const WEATHER_MSG_STOP: i32 = 2;
 
 // PRF2_* (structs.h). The advanced map overlays weather glyphs onto the terrain
 // in check_noroom when the cell carries an AVOID_WEATHER storm and the viewer has
@@ -183,6 +198,13 @@ struct EntryPoint {
     dir: Option<usize>,
 }
 
+#[derive(Clone)]
+struct ZWeatherPoint {
+    x: i32,
+    y: i32,
+    zone_number: i32,
+}
+
 /// One live storm (C: struct w_index). The C `in_room` is a map rnum; we store
 /// it as the storm centre's 1-based (x,y) instead, since the Rust map has no
 /// world-room block. left/dir/radius mirror the C fields.
@@ -212,6 +234,18 @@ struct RadialHit {
     y: i32,
 }
 
+#[derive(Clone, Copy)]
+enum WeatherEvent {
+    Message {
+        kind: i32,
+        wtype: usize,
+        radius: i32,
+        x: i32,
+        y: i32,
+    },
+    Radial(RadialHit),
+}
+
 struct MapData {
     /// Whether the map is currently "loaded" (C: MAP_ACTIVE). togglemap flips it.
     active: bool,
@@ -225,6 +259,8 @@ struct MapData {
     /// EntryPoint directives, applied by integrate_map_rooms() once the map cells
     /// are spliced into GameState.rooms. C: parsed inline in read_map.
     entry_points: Vec<EntryPoint>,
+    /// ZWeatherPoint directives, mapping real zones to surface control cells.
+    z_weather_points: Vec<ZWeatherPoint>,
 
     // ---- live weather state (W7) ----
     /// The active storms (C: the weather_index linked list).
@@ -239,6 +275,8 @@ struct MapData {
     /// Per-cell room weather type (C: world[i].weather), set by swc(); read by
     /// check_noroom / printmap fog logic. -1 == WEATHER_NONE.
     room_weather: Vec<Vec<i32>>,
+    /// Per-cell zone weather controller (C: world[map_cell].wzonecontrol).
+    cell_wzone_control: Vec<Vec<Option<i32>>>,
 }
 
 impl MapData {
@@ -250,11 +288,13 @@ impl MapData {
             grid: Vec::new(),
             sectors: HashMap::new(),
             entry_points: Vec::new(),
+            z_weather_points: Vec::new(),
             storms: Vec::new(),
             num_weather: 0,
             weather_inited: false,
             weather_map: Vec::new(),
             room_weather: Vec::new(),
+            cell_wzone_control: Vec::new(),
         }
     }
 
@@ -367,7 +407,7 @@ impl MapData {
     /// wrap_method_x / wrap_method_y (maputils.c): apply a WRAP_* x/y offset.
     fn wrap_method_x(&self, x: i32, method: i32) -> i32 {
         match method {
-            1 | 2 | 3 => x,           // NORM_*
+            1 | 2 | 3 => x,              // NORM_*
             4 | 5 | 6 => x + self.max_x, // PLUS_*
             7 | 8 | 9 => x - self.max_x, // LESS_*
             _ => 0,
@@ -375,7 +415,7 @@ impl MapData {
     }
     fn wrap_method_y(&self, y: i32, method: i32) -> i32 {
         match method {
-            1 | 4 | 7 => y,           // *_NORM
+            1 | 4 | 7 => y,              // *_NORM
             3 | 6 | 9 => y + self.max_y, // *_PLUS
             2 | 5 | 8 => y - self.max_y, // *_LESS
             _ => 0,
@@ -430,7 +470,11 @@ impl MapData {
         if wtype >= WEATHER_TOTAL {
             return;
         }
-        let dir = if !(0..=3).contains(&dir) { rng.number(0, 3) } else { dir };
+        let dir = if !(0..=3).contains(&dir) {
+            rng.number(0, 3)
+        } else {
+            dir
+        };
         self.num_weather += 1;
         let storm = Storm {
             wtype,
@@ -537,13 +581,20 @@ impl MapData {
     /// stationary storm). The caller replays them against GameState so the
     /// damage/knockback path (radial_activity -> unit_activity) reaches PCs now
     /// standing in spliced map rooms.
-    fn weather_activity(&mut self, rng: &mut crate::rng::Rng) -> Vec<RadialHit> {
-        let mut hits: Vec<RadialHit> = Vec::new();
+    fn weather_activity(&mut self, rng: &mut crate::rng::Rng) -> Vec<WeatherEvent> {
+        let mut events: Vec<WeatherEvent> = Vec::new();
         let mut i = 0usize;
         while i < self.storms.len() {
             self.storms[i].left -= 1;
             if self.storms[i].left <= 0 {
-                // send_weather_messages(WEATHER_MSG_STOP) — handled by the caller.
+                let w = &self.storms[i];
+                events.push(WeatherEvent::Message {
+                    kind: WEATHER_MSG_STOP,
+                    wtype: w.wtype,
+                    radius: w.radius,
+                    x: w.x,
+                    y: w.y,
+                });
                 self.storms.remove(i);
                 self.reset_num_weather();
                 continue;
@@ -573,20 +624,37 @@ impl MapData {
                     let w = &mut self.storms[i];
                     w.x = nx;
                     w.y = ny;
-                    hits.push(RadialHit { wtype, radius, x: nx, y: ny });
+                    events.push(WeatherEvent::Radial(RadialHit {
+                        wtype,
+                        radius,
+                        x: nx,
+                        y: ny,
+                    }));
                 }
             }
             // Stationary storms (speed 0) run radial_activity once at their cell.
             if speed == 0 {
                 let w = &self.storms[i];
-                hits.push(RadialHit { wtype, radius, x: w.x, y: w.y });
+                events.push(WeatherEvent::Radial(RadialHit {
+                    wtype,
+                    radius,
+                    x: w.x,
+                    y: w.y,
+                }));
             }
 
             // Randomly shift direction.
             if rng.number(1, 100) <= WEATHER_DATA[wtype][3] {
                 self.storms[i].dir = rng.number(0, 3);
             }
-            // send_weather_messages(WEATHER_MSG_ACT) — handled by the caller.
+            let w = &self.storms[i];
+            events.push(WeatherEvent::Message {
+                kind: WEATHER_MSG_ACT,
+                wtype: w.wtype,
+                radius: w.radius,
+                x: w.x,
+                y: w.y,
+            });
             i += 1;
         }
 
@@ -595,10 +663,19 @@ impl MapData {
             let wtype = Self::rand_weather(rng);
             let (x, y) = self.random_cell(rng);
             self.spawn_weather(wtype, -1, x, y, rng);
+            if let Some(w) = self.storms.last() {
+                events.push(WeatherEvent::Message {
+                    kind: WEATHER_MSG_FORM,
+                    wtype: w.wtype,
+                    radius: w.radius,
+                    x: w.x,
+                    y: w.y,
+                });
+            }
         }
         self.check_weather_collisions(rng);
         self.update_weather_map();
-        hits
+        events
     }
 
     /// swc (maputils.c): set a weather_map cell and the per-cell room weather,
@@ -677,7 +754,9 @@ fn map_table() -> &'static Mutex<HashMap<String, MapData>> {
 /// Parse `<lib>/world/worldmap` into a MapData. On any structural problem the
 /// returned data is inactive (empty grid), mirroring "map not loaded".
 fn parse_worldmap(lib_path: &str) -> MapData {
-    let path = std::path::Path::new(lib_path).join("world").join("worldmap");
+    let path = std::path::Path::new(lib_path)
+        .join("world")
+        .join("worldmap");
     let contents = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return MapData::empty(),
@@ -685,6 +764,7 @@ fn parse_worldmap(lib_path: &str) -> MapData {
 
     let mut sectors: HashMap<char, Sector> = HashMap::new();
     let mut entry_points: Vec<EntryPoint> = Vec::new();
+    let mut z_weather_points: Vec<ZWeatherPoint> = Vec::new();
     let mut grid: Vec<Vec<char>> = Vec::new();
     let mut max_x: i32 = 0;
     let mut max_y: i32 = 0;
@@ -817,11 +897,22 @@ fn parse_worldmap(lib_path: &str) -> MapData {
             let y = atoi(&get_arg(line, 3));
             let vnum = atoi(&get_arg(line, 4));
             let dir = parse_dir(&get_arg(line, 5));
-            entry_points.push(EntryPoint { x, y, interior_vnum: vnum, dir });
+            entry_points.push(EntryPoint {
+                x,
+                y,
+                interior_vnum: vnum,
+                dir,
+            });
             continue;
         }
-        // ZWeatherPoint/BuildExit/FlagRoom/SpecRoom: not needed for the render
-        // + splice; ignore them.
+        if compare(&arg1, "ZWeatherPoint:") {
+            let x = atoi(&get_arg(line, 2));
+            let y = atoi(&get_arg(line, 3));
+            let zone_number = atoi(&get_arg(line, 4));
+            z_weather_points.push(ZWeatherPoint { x, y, zone_number });
+            continue;
+        }
+        // BuildExit/FlagRoom/SpecRoom: not needed for the render + splice.
     }
 
     // Flush a trailing sector with no EndSector.
@@ -838,6 +929,12 @@ fn parse_worldmap(lib_path: &str) -> MapData {
     let filler = format!("&n{}", FILLER_CHAR);
     let weather_map = vec![vec![filler.clone(); max_x as usize]; max_y as usize];
     let room_weather = vec![vec![WEATHER_NONE; max_x as usize]; max_y as usize];
+    let mut cell_wzone_control = vec![vec![None; max_x as usize]; max_y as usize];
+    for zwp in &z_weather_points {
+        if zwp.x >= 1 && zwp.x <= max_x && zwp.y >= 1 && zwp.y <= max_y {
+            cell_wzone_control[(zwp.y - 1) as usize][(zwp.x - 1) as usize] = Some(zwp.zone_number);
+        }
+    }
 
     MapData {
         active: true,
@@ -846,11 +943,13 @@ fn parse_worldmap(lib_path: &str) -> MapData {
         grid,
         sectors,
         entry_points,
+        z_weather_points,
         storms: Vec::new(),
         num_weather: 0,
         weather_inited: false,
         weather_map,
         room_weather,
+        cell_wzone_control,
     }
 }
 
@@ -883,7 +982,12 @@ fn with_map_mut<R>(g: &GameState, f: impl FnOnce(&mut MapData) -> R) -> R {
 /// get_arg(string, argnum): the argnum-th (1-based) space-delimited token.
 /// Leading spaces are skipped; multiple spaces collapse like the C version.
 fn get_arg(string: &str, argnum: usize) -> String {
-    string.split(' ').filter(|t| !t.is_empty()).nth(argnum.saturating_sub(1)).unwrap_or("").to_string()
+    string
+        .split(' ')
+        .filter(|t| !t.is_empty())
+        .nth(argnum.saturating_sub(1))
+        .unwrap_or("")
+        .to_string()
 }
 
 /// compare(a,b): exact, case-insensitive equality of two whole strings.
@@ -983,7 +1087,11 @@ pub fn do_map(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
     // Args: map [world | weather] [[x1] [y1] [x2] [y2]]
     let a1 = get_arg(arg, 1);
-    let mode = if a1.eq_ignore_ascii_case("weather") { 2 } else { 1 };
+    let mode = if a1.eq_ignore_ascii_case("weather") {
+        2
+    } else {
+        1
+    };
 
     // C: MIN(MAX(atoi(buf), 1), max) — i.e. clamp into 1..=max.
     let xm = atoi(&get_arg(arg, 2)).clamp(1, max_x);
@@ -1120,7 +1228,10 @@ pub fn printmap(g: &mut GameState, ch: CharId) {
         return; // C: map_start_room==-1 || !sect_index
     }
 
-    let advancedmap = g.get_char(ch).map(|c| c.prf2_flags & PRF2_ADVANCEDMAP != 0).unwrap_or(false);
+    let advancedmap = g
+        .get_char(ch)
+        .map(|c| c.prf2_flags & PRF2_ADVANCEDMAP != 0)
+        .unwrap_or(false);
 
     let mut sightradmult: i32 = 2;
     if level >= LVL_IMMORT {
@@ -1231,12 +1342,20 @@ fn check_noroom(
     // Overlay or terrain glyph for the target cell.
     let tmp = noroom_glyph(m, x, y, weather_active, advancedmap);
     // C: modifier==0 looks at rm2x(i)-1, modifier==1 at rm2x(i)+1.
-    let (lx, lf) = if modifier == 0 { (x - 1, -1) } else { (x + 1, 1) };
+    let (lx, lf) = if modifier == 0 {
+        (x - 1, -1)
+    } else {
+        (x + 1, 1)
+    };
     let left = noroom_glyph(m, lx, y, weather_active, advancedmap);
     let tmp_b = tmp.as_bytes();
 
     // j = rm2x(ch->in_room) +/- radius, wrapped: the x of the window's edge column.
-    let mut j = if modifier == 0 { px - radius } else { px + radius };
+    let mut j = if modifier == 0 {
+        px - radius
+    } else {
+        px + radius
+    };
     if modifier == 0 {
         if j < 1 {
             j += m.max_x;
@@ -1284,11 +1403,24 @@ pub fn pweather(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     // impossible; otherwise draw the weather map.
     let level = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
     let mortal = level < LVL_IMMORT;
-    let (cx, cy) = player_xy(g, ch).unwrap_or((1, 1));
+    let (cx, cy) = match weather_view_xy(g, ch) {
+        Some(p) => p,
+        None => {
+            g.send_to_char(
+                ch,
+                "Notify immortals that this zone's ZWeatherPoint is unset please.\r\n",
+            );
+            return;
+        }
+    };
     let standing_weather = with_map(g, |m| m.cell_weather(cx, cy));
-    if mortal && (standing_weather == WEATHER_FOG as i32 || standing_weather == WEATHER_MAGICFOG as i32)
+    if mortal
+        && (standing_weather == WEATHER_FOG as i32 || standing_weather == WEATHER_MAGICFOG as i32)
     {
-        g.send_to_char(ch, "The thick fog prevents you from determining the weather.\r\n");
+        g.send_to_char(
+            ch,
+            "The thick fog prevents you from determining the weather.\r\n",
+        );
         return;
     }
     let indoors = g
@@ -1304,15 +1436,33 @@ pub fn pweather(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     printweather(g, ch);
 }
 
+fn weather_view_xy(g: &GameState, ch: CharId) -> Option<(i32, i32)> {
+    if let Some(p) = player_xy(g, ch) {
+        return Some(p);
+    }
+    let zone_number = g
+        .get_char(ch)
+        .and_then(|c| c.in_room)
+        .and_then(|r| g.rooms.get(r))
+        .map(|r| r.zone)?;
+    with_map(g, |m| {
+        m.z_weather_points
+            .iter()
+            .find(|p| p.zone_number == zone_number)
+            .map(|p| (p.x, p.y))
+    })
+}
+
 /// printweather — the large player-centred weather map with the legend column.
 fn printweather(g: &mut GameState, ch: CharId) {
     let active = with_map(g, |m| m.is_active());
     if !active {
         return;
     }
-    // Player centre: their map cell, else their zone's ZWeatherPoint (which the
-    // Rust world does not carry yet), else fall back to (1,1).
-    let (x, y) = player_xy(g, ch).unwrap_or((1, 1));
+    let (x, y) = match weather_view_xy(g, ch) {
+        Some(p) => p,
+        None => return,
+    };
 
     let mut buf = String::new();
     buf.push_str(MAP_INDENT);
@@ -1341,8 +1491,14 @@ fn printweather(g: &mut GameState, ch: CharId) {
         let row = j + WEATHER_VISION_RADIUS_Y;
         match row {
             0 => line.push_str("&nDirections:"),
-            1 => line.push_str(&format!("&n{} = North {} = South", DIRECTION_NORTH, DIRECTION_SOUTH)),
-            2 => line.push_str(&format!("&n{} = East  {} = West", DIRECTION_EAST, DIRECTION_WEST)),
+            1 => line.push_str(&format!(
+                "&n{} = North {} = South",
+                DIRECTION_NORTH, DIRECTION_SOUTH
+            )),
+            2 => line.push_str(&format!(
+                "&n{} = East  {} = West",
+                DIRECTION_EAST, DIRECTION_WEST
+            )),
             3 => line.push_str(&format!("&n{} = Stationary", DIRECTION_STATIONARY)),
             5 => line.push_str("&nWeather:"),
             r if r > 5 => {
@@ -1419,7 +1575,10 @@ pub fn lweather(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 #[allow(dead_code)]
 pub fn do_togglemap(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let argument = arg.trim();
-    let name = g.get_char(ch).map(|c| c.get_name().to_string()).unwrap_or_default();
+    let name = g
+        .get_char(ch)
+        .map(|c| c.get_name().to_string())
+        .unwrap_or_default();
 
     if compare(argument, "on") {
         let already = with_map(g, |m| m.is_active());
@@ -1626,7 +1785,7 @@ pub fn weather_activity(g: &mut GameState) {
     // Advance the storms under the map lock, collecting the radial_activity hits
     // produced by each storm step. Release the lock BEFORE replaying them so
     // unit_activity (which mutates g.rooms / characters) is not deadlocked.
-    let hits = {
+    let events = {
         let mut tbl = map_table().lock().unwrap();
         if !tbl.contains_key(&lib) {
             let data = parse_worldmap(&lib);
@@ -1642,46 +1801,167 @@ pub fn weather_activity(g: &mut GameState) {
         m.weather_activity(&mut g.rng)
     };
 
-    // Replay radial_activity for every storm step (in order) against the live
-    // world. Only the surface-map block was spliced, so this is the path that
-    // actually fries/hurls PCs standing outdoors.
-    for hit in hits {
-        radial_activity(g, hit);
+    for event in events {
+        match event {
+            WeatherEvent::Message {
+                kind,
+                wtype,
+                radius,
+                x,
+                y,
+            } => {
+                send_weather_messages(g, kind, wtype, radius, x, y);
+            }
+            WeatherEvent::Radial(hit) => radial_activity(g, hit),
+        }
     }
 }
 
-/// radial_activity (maputils.c): walk the storm's diamond (its radius), and for
-/// every spliced map cell that holds people, run unit_activity (the per-room
-/// weather effect). The C version also fans out to ZWeatherPoint-controlled
-/// zones; the Rust world does not carry wzonecontrol yet, so only the map cells
-/// themselves are affected (the dominant case — PCs standing outdoors).
-fn radial_activity(g: &mut GameState, hit: RadialHit) {
-    let cx = hit.x;
-    let cy = hit.y;
-    let radius = hit.radius;
-    // Gather the affected map rooms first (avoid a borrow across unit_activity).
-    let mut rooms: Vec<RoomRnum> = Vec::new();
-    for y in (cy - radius)..=(cy + radius) {
-        for x in (cx - radius)..=(cx + radius) {
-            // isinradius_bycoords: inside the diamond's circumscribed circle.
-            if (x - cx) * (x - cx) + (y - cy) * (y - cy) > radius * radius {
-                continue;
+fn outdoor_room_has_people(g: &GameState, rnum: RoomRnum) -> bool {
+    g.rooms
+        .get(rnum)
+        .map(|r| !r.room_flags.contains(crate::room::RoomFlags::INDOORS) && !r.people.is_empty())
+        .unwrap_or(false)
+}
+
+fn zone_rooms_for_weather(g: &GameState, zone_number: i32) -> Vec<RoomRnum> {
+    g.rooms
+        .iter()
+        .enumerate()
+        .filter_map(|(rnum, room)| {
+            if room.zone == zone_number
+                && !room.room_flags.contains(crate::room::RoomFlags::INDOORS)
+                && !room.people.is_empty()
+            {
+                Some(rnum)
+            } else {
+                None
             }
-            let rnum = match g.map_coords_to_rnum(x, y) {
-                Some(r) => r,
-                None => continue,
-            };
-            let room = match g.rooms.get(rnum) {
-                Some(r) => r,
-                None => continue,
-            };
-            // !ROOM_INDOORS && has people (C: !world[i].people skip).
-            if room.room_flags.contains(crate::room::RoomFlags::INDOORS) || room.people.is_empty() {
-                continue;
+        })
+        .collect()
+}
+
+fn affected_weather_rooms(g: &GameState, cx: i32, cy: i32, radius: i32) -> Vec<RoomRnum> {
+    let mut rooms = Vec::new();
+    let mut seen = HashSet::new();
+    let controlled_zones = with_map(g, |m| {
+        let mut zones = Vec::new();
+        for y in (cy - radius)..=(cy + radius) {
+            for x in (cx - radius)..=(cx + radius) {
+                if !MapData::isinradius_bycoords(x, y, cx, cy, radius) {
+                    continue;
+                }
+                if let Some(rnum) = g.map_coords_to_rnum(x, y) {
+                    if outdoor_room_has_people(g, rnum) && seen.insert(rnum) {
+                        rooms.push(rnum);
+                    }
+                }
+                let (wx, wy) = m.wrap(x, y);
+                if let Some(zone) = m.cell_wzone_control[(wy - 1) as usize][(wx - 1) as usize] {
+                    zones.push(zone);
+                }
             }
+        }
+        zones
+    });
+
+    for zone in controlled_zones {
+        for rnum in zone_rooms_for_weather(g, zone) {
+            if seen.insert(rnum) {
+                rooms.push(rnum);
+            }
+        }
+    }
+    rooms
+}
+
+fn send_weather_messages(
+    g: &mut GameState,
+    kind: i32,
+    wtype: usize,
+    radius: i32,
+    cx: i32,
+    cy: i32,
+) {
+    if wtype >= WEATHER_TOTAL {
+        return;
+    }
+    let (near, above) = match kind {
+        WEATHER_MSG_FORM => (
+            format!("You see a {} brewing to your ", WEATHER_NAMES[wtype]),
+            format!("You see a {} brewing above you.\r\n", WEATHER_NAMES[wtype]),
+        ),
+        WEATHER_MSG_ACT => (
+            format!("You see a {} to your ", WEATHER_NAMES[wtype]),
+            format!("{}\r\n", WEATHER_MESSAGES[wtype]),
+        ),
+        WEATHER_MSG_STOP => (
+            format!("You see a {} dissipate to your ", WEATHER_NAMES[wtype]),
+            format!("The {} above you dissipates.\r\n", WEATHER_NAMES[wtype]),
+        ),
+        _ => return,
+    };
+
+    let mut delivered = HashSet::new();
+    let scan_radius = radius * 2;
+    for y in (cy - scan_radius)..=(cy + scan_radius) {
+        for x in (cx - scan_radius)..=(cx + scan_radius) {
+            let smode = with_map(g, |m| m.isinradius_wrap(x, y, cx, cy, radius));
+            let msg = if smode != 0 {
+                above.clone()
+            } else {
+                let mut s = near.clone();
+                if y < cy {
+                    s.push_str("south");
+                }
+                if y > cy {
+                    s.push_str("north");
+                }
+                if x < cx {
+                    s.push_str("east");
+                }
+                if x > cx {
+                    s.push_str("west");
+                }
+                s.push_str(".\r\n");
+                s
+            };
+            for rnum in weather_message_rooms(g, x, y) {
+                if delivered.insert(rnum) {
+                    g.send_to_room(rnum, &msg, None);
+                }
+            }
+        }
+    }
+}
+
+fn weather_message_rooms(g: &GameState, x: i32, y: i32) -> Vec<RoomRnum> {
+    let mut rooms = Vec::new();
+    let mut seen = HashSet::new();
+    let zone = with_map(g, |m| {
+        let (wx, wy) = m.wrap(x, y);
+        m.cell_wzone_control[(wy - 1) as usize][(wx - 1) as usize]
+    });
+    if let Some(rnum) = g.map_coords_to_rnum(x, y) {
+        if outdoor_room_has_people(g, rnum) && seen.insert(rnum) {
             rooms.push(rnum);
         }
     }
+    if let Some(zone) = zone {
+        for rnum in zone_rooms_for_weather(g, zone) {
+            if seen.insert(rnum) {
+                rooms.push(rnum);
+            }
+        }
+    }
+    rooms
+}
+
+/// radial_activity (maputils.c): walk the storm's diamond (its radius), and for
+/// every spliced map cell or ZWeatherPoint-controlled real-zone room that holds
+/// people, run unit_activity (the per-room weather effect).
+fn radial_activity(g: &mut GameState, hit: RadialHit) {
+    let rooms = affected_weather_rooms(g, hit.x, hit.y, hit.radius);
     for rnum in rooms {
         unit_activity(g, rnum, hit.wtype);
     }
@@ -1760,7 +2040,10 @@ fn unit_activity(g: &mut GameState, room: RoomRnum, wtype: usize) {
             msg.push_str(WEATHER_NAMES[wtype]);
             msg.push_str("!&n\r\n");
             g.send_to_char(ch, &msg);
-            let sanct = g.get_char(ch).map(|c| c.affect_flags & AFF_SANCTUARY != 0).unwrap_or(false);
+            let sanct = g
+                .get_char(ch)
+                .map(|c| c.affect_flags & AFF_SANCTUARY != 0)
+                .unwrap_or(false);
             let dmg = if sanct && WEATHER_DATA[wtype][2] >= 2 {
                 WEATHER_DATA[wtype][2] / 2
             } else {
@@ -1777,7 +2060,10 @@ fn unit_activity(g: &mut GameState, room: RoomRnum, wtype: usize) {
 
         // --- hurricane / tornado knockback (weight-gated) ---
         if wtype == WEATHER_HURRICANE || wtype == WEATHER_TORNADO {
-            let weight = g.get_char(ch).map(|c| c.player.weight as i32).unwrap_or(120);
+            let weight = g
+                .get_char(ch)
+                .map(|c| c.player.weight as i32)
+                .unwrap_or(120);
             let gate = weight.clamp(120, 160); // MIN(MAX(GET_WEIGHT,120),160)
             if g.rng.number(1, gate) <= 70 {
                 let name = WEATHER_NAMES[wtype];
@@ -1785,20 +2071,79 @@ fn unit_activity(g: &mut GameState, room: RoomRnum, wtype: usize) {
                 act(g, &room_msg, false, ch, None, ActArg::None, To::Room);
                 let self_msg = format!("The {} jettisons you into the air!\r\n", name);
                 g.send_to_char(ch, &self_msg);
-                // weather_mprand throws the PC a number of rooms across the map;
-                // the full move_char "flying" sequence is heavy, so we deliver the
-                // jettison messages and land the PC head-first where they stand
-                // (the observable knockback + landing). C re-seats the PC in the
-                // same origin room (oldroom) at POS_RESTING after the flight.
-                let land_msg = format!("{} falls from the sky landing head-first into the ground!\r\n",
-                    g.get_char(ch).map(|c| c.get_name().to_string()).unwrap_or_default());
-                g.send_to_char(ch, "You land head-first into the ground!\r\n");
-                act(g, &land_msg, false, ch, None, ActArg::Str(String::new()), To::Room);
+                let length = if wtype == WEATHER_HURRICANE { 12 } else { 8 };
+                let (origin, dest) = match weather_mprand(g, ch, length) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let oldroom = match g.map_coords_to_rnum(dest.0, dest.1) {
+                    Some(r) => r,
+                    None => continue,
+                };
+                let origin_room = g.map_coords_to_rnum(origin.0, origin.1);
                 if let Some(c) = g.get_char_mut(ch) {
+                    c.was_in_room = origin_room;
+                }
+                g.char_from_room(ch);
+                let fly_msg = format!(
+                    "You see {} flying through the air in the distance.\r\n",
+                    g.get_char(ch)
+                        .map(|c| c.get_name().to_string())
+                        .unwrap_or_default()
+                );
+                send_to_radius(
+                    g,
+                    &fly_msg,
+                    (origin.0 + dest.0) / 2,
+                    (origin.1 + dest.1) / 2,
+                    WEATHER_DATA[wtype][1] * 2,
+                );
+                let land_msg = format!(
+                    "{} falls from the sky landing head-first into the ground!\r\n",
+                    g.get_char(ch)
+                        .map(|c| c.get_name().to_string())
+                        .unwrap_or_default()
+                );
+                g.send_to_char(ch, "You land head-first into the ground!\r\n");
+                if let Some(c) = g.get_char_mut(ch) {
+                    c.was_in_room = None;
                     c.position = Position::Resting;
                 }
+                g.send_to_room(oldroom, &land_msg, None);
+                g.char_to_room(ch, oldroom);
             }
         }
+    }
+}
+
+fn char_weather_xy(g: &GameState, ch: CharId) -> Option<(i32, i32)> {
+    player_xy(g, ch).or_else(|| weather_view_xy(g, ch))
+}
+
+fn weather_mprand(g: &mut GameState, ch: CharId, length: i32) -> Option<((i32, i32), (i32, i32))> {
+    let (x, y) = char_weather_xy(g, ch)?;
+    for _ in 0..7 {
+        let attempt = g.rng.number(0, 7);
+        let half = length / 2;
+        let dest = match attempt {
+            0 if y - length >= 1 => (x, y - length),
+            1 if y + length <= g.max_map_y => (x, y + length),
+            2 if x + length <= g.max_map_x => (x + length, y),
+            3 if x - length >= 1 => (x - length, y),
+            4 if y - half >= 1 && x + half <= g.max_map_x => (x + half, y - half),
+            5 if y - half >= 1 && x - half >= 1 => (x - half, y - half),
+            6 if y + half <= g.max_map_y && x + half <= g.max_map_x => (x + half, y + half),
+            7 if y + half <= g.max_map_y && x - half >= 1 => (x - half, y + half),
+            _ => continue,
+        };
+        return Some(((x, y), dest));
+    }
+    None
+}
+
+fn send_to_radius(g: &mut GameState, msg: &str, cx: i32, cy: i32, radius: i32) {
+    for rnum in affected_weather_rooms(g, cx, cy, radius) {
+        g.send_to_room(rnum, msg, None);
     }
 }
 
@@ -1812,29 +2157,82 @@ fn weather_show_pos(g: &mut GameState, ch: CharId, wtype: usize) -> bool {
     };
     match pos {
         Position::MortallyWounded => {
-            act(g, "$n is mortally wounded, and will die soon, if not aided.", true, ch, None, ActArg::None, To::Room);
-            g.send_to_char(ch, "You are mortally wounded, and will die soon, if not aided.\r\n");
+            act(
+                g,
+                "$n is mortally wounded, and will die soon, if not aided.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            g.send_to_char(
+                ch,
+                "You are mortally wounded, and will die soon, if not aided.\r\n",
+            );
             false
         }
         Position::Incapacitated => {
-            act(g, "$n is incapacitated and will slowly die, if not aided.", true, ch, None, ActArg::None, To::Room);
-            g.send_to_char(ch, "You are incapacitated an will slowly die, if not aided.\r\n");
+            act(
+                g,
+                "$n is incapacitated and will slowly die, if not aided.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            g.send_to_char(
+                ch,
+                "You are incapacitated an will slowly die, if not aided.\r\n",
+            );
             false
         }
         Position::Stunned => {
-            act(g, "$n is stunned, but will probably regain consciousness again.", true, ch, None, ActArg::None, To::Room);
-            g.send_to_char(ch, "You're stunned, but will probably regain consciousness again.\r\n");
+            act(
+                g,
+                "$n is stunned, but will probably regain consciousness again.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            g.send_to_char(
+                ch,
+                "You're stunned, but will probably regain consciousness again.\r\n",
+            );
             false
         }
         Position::Dead => {
-            act(g, "$n is dead!  R.I.P.", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n is dead!  R.I.P.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             g.send_to_char(ch, "You are dead!  Sorry...\r\n");
             let (name, roomname) = {
-                let nm = g.get_char(ch).map(|c| c.get_name().to_string()).unwrap_or_default();
-                let rn = g.get_char(ch).and_then(|c| c.in_room).and_then(|r| g.rooms.get(r)).map(|r| r.name.clone()).unwrap_or_default();
+                let nm = g
+                    .get_char(ch)
+                    .map(|c| c.get_name().to_string())
+                    .unwrap_or_default();
+                let rn = g
+                    .get_char(ch)
+                    .and_then(|c| c.in_room)
+                    .and_then(|r| g.rooms.get(r))
+                    .map(|r| r.name.clone())
+                    .unwrap_or_default();
                 (nm, rn)
             };
-            mudlog(g, &format!("{} killed by weather at {}", name, roomname), LVL_IMMORT);
+            mudlog(
+                g,
+                &format!("{} killed by weather at {}", name, roomname),
+                LVL_IMMORT,
+            );
             // raw_kill: strip affects, death cry, weather corpse, extract/respawn.
             weather_die(g, ch, wtype);
             true
@@ -1929,8 +2327,16 @@ fn apply_thunderstorm_bolt(g: &mut GameState, ch: CharId, wtype: usize, bolt: i3
 /// weather_corpse_names (maputils.c): the adjective prepended to a weather
 /// corpse for the lethal storm types. A bare " " means "no adjective".
 const WEATHER_CORPSE_NAMES: [&str; WEATHER_TOTAL] = [
-    " ", " ", " ", "burnt crispy ", " ", " ", "torn apart ", "mangled ",
-    "frozen solid ", "savagely ripped up ",
+    " ",
+    " ",
+    " ",
+    "burnt crispy ",
+    " ",
+    " ",
+    "torn apart ",
+    "mangled ",
+    "frozen solid ",
+    "savagely ripped up ",
 ];
 
 /// The weather death path (maputils.c weather_show_pos POS_DEAD tail): stop
@@ -1958,20 +2364,30 @@ fn weather_die(g: &mut GameState, ch: CharId, wtype: usize) {
 
     if let Some(rnum) = g.get_char(ch).and_then(|c| c.in_room) {
         increase_blood(g, rnum);
-        let name = g.get_char(ch).map(|c| c.display_for_others()).unwrap_or_default();
+        let name = g
+            .get_char(ch)
+            .map(|c| c.display_for_others())
+            .unwrap_or_default();
         let corpse = make_weather_corpse(g, &name, wtype);
         let gold = g.get_char(ch).map(|c| c.points.gold).unwrap_or(0);
         let create_gold = g
             .get_char(ch)
             .map(|c| c.is_npc || (!c.is_npc && c.desc.is_some()))
             .unwrap_or(false);
-        let carried = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        let carried = g
+            .get_char(ch)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         for oid in carried {
             g.obj_from_anywhere(oid);
             g.obj_to_obj(oid, corpse);
         }
         let worn: Vec<usize> = (0..NUM_WEARS)
-            .filter(|&p| g.get_char(ch).map(|c| c.equipment[p].is_some()).unwrap_or(false))
+            .filter(|&p| {
+                g.get_char(ch)
+                    .map(|c| c.equipment[p].is_some())
+                    .unwrap_or(false)
+            })
             .collect();
         for p in worn {
             if let Some(oid) = g.unequip_char(ch, p) {
@@ -2008,7 +2424,7 @@ fn cleanup_weather_death_player_state(g: &mut GameState, ch: CharId) {
 /// make_weather_corpse (maputils.c): a corpse container holding the victim's
 /// loot. values[3]=1 marks it a corpse so the object decay path reaps it.
 fn make_weather_corpse(g: &mut GameState, who: &str, wtype: usize) -> ObjId {
-    use crate::object::{Object, ObjLoc, ObjectType};
+    use crate::object::{ObjLoc, Object, ObjectType};
     let corpse_name = WEATHER_CORPSE_NAMES.get(wtype).copied().unwrap_or(" ");
     let adjective = if corpse_name.starts_with(' ') {
         ""
@@ -2115,6 +2531,55 @@ mod tests {
         ch
     }
 
+    fn attach_conn(g: &mut GameState, ch: CharId, id: u64) -> ConnId {
+        let conn = ConnId(id);
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        if let Some(c) = g.get_char_mut(ch) {
+            c.desc = Some(conn);
+        }
+        conn
+    }
+
+    fn temp_lib_with_worldmap(
+        name: &str,
+        width: usize,
+        height: usize,
+        extra: &str,
+    ) -> std::path::PathBuf {
+        let mut dir = std::env::temp_dir();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        dir.push(format!(
+            "deltamud-{}-{}-{}",
+            name,
+            std::process::id(),
+            unique
+        ));
+        let world = dir.join("world");
+        std::fs::create_dir_all(&world).unwrap();
+        let row = ".".repeat(width);
+        let mut map = String::from(
+            "NewSector: .\n\
+SectName: Field\n\
+SectShow: .\n\
+SectMove: 1\n\
+SectSect: Field\n\
+EndSector\n\
+WorldMap:\n",
+        );
+        for _ in 0..height {
+            map.push_str(&row);
+            map.push('\n');
+        }
+        map.push_str("~\n");
+        map.push_str(extra);
+        std::fs::write(world.join("worldmap"), map).unwrap();
+        dir
+    }
+
     fn weather_corpse_descriptions(wtype: usize) -> (String, String) {
         let mut g = GameState::new(Config::default());
         let room = g.add_room(Room::new(
@@ -2178,7 +2643,10 @@ WorldMap:\n\
         let (short, desc) = weather_corpse_descriptions(WEATHER_FIRESTORM);
 
         assert_eq!(short, "the burnt crispy corpse of Stormvictim");
-        assert_eq!(desc, "The burnt crispy corpse of Stormvictim is lying here.");
+        assert_eq!(
+            desc,
+            "The burnt crispy corpse of Stormvictim is lying here."
+        );
     }
 
     #[test]
@@ -2187,6 +2655,90 @@ WorldMap:\n\
 
         assert_eq!(short, "the corpse of Stormvictim");
         assert_eq!(desc, "The corpse of Stormvictim is lying here.");
+    }
+
+    #[test]
+    fn weather_messages_fan_out_to_zweatherpoint_zone() {
+        let dir = temp_lib_with_worldmap("weather-msg", 5, 5, "ZWeatherPoint: 3 3 1\n");
+        let mut cfg = Config::default();
+        cfg.lib_path = dir.to_string_lossy().to_string();
+        let mut g = GameState::new(cfg);
+        let room = g.add_room(Room::new(100, 1, "Outside".into(), "Outside.".into()));
+        let ch = player_in_room(&mut g, "Watcher", room);
+        let conn = attach_conn(&mut g, ch, 1);
+
+        send_weather_messages(&mut g, WEATHER_MSG_ACT, WEATHER_RAINSTORM, 1, 3, 3);
+
+        assert!(g
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("A rain storm pours down on you from above."));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn radial_activity_fans_out_damage_to_zweatherpoint_zone() {
+        let dir = temp_lib_with_worldmap("weather-radial", 5, 5, "ZWeatherPoint: 3 3 1\n");
+        let mut cfg = Config::default();
+        cfg.lib_path = dir.to_string_lossy().to_string();
+        let mut g = GameState::new(cfg);
+        let room = g.add_room(Room::new(100, 1, "Outside".into(), "Outside.".into()));
+        let ch = player_in_room(&mut g, "Chilled", room);
+        g.get_char_mut(ch).unwrap().points.hit = 100;
+
+        radial_activity(
+            &mut g,
+            RadialHit {
+                wtype: WEATHER_BLIZZARD,
+                radius: 1,
+                x: 3,
+                y: 3,
+            },
+        );
+
+        assert_eq!(g.get_char(ch).unwrap().points.hit, 93);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tornado_knockback_relocates_and_sends_midpoint_message() {
+        let dir = temp_lib_with_worldmap("weather-knockback", 20, 20, "");
+        let mut cfg = Config::default();
+        cfg.lib_path = dir.to_string_lossy().to_string();
+        let mut g = GameState::new(cfg);
+        integrate_map_rooms(&mut g);
+        let origin = g.map_coords_to_rnum(10, 10).unwrap();
+        let observer_room = g.map_coords_to_rnum(10, 14).unwrap();
+        let victim = player_in_room(&mut g, "Flyer", origin);
+        let observer = player_in_room(&mut g, "Observer", observer_room);
+        let victim_conn = attach_conn(&mut g, victim, 1);
+        let observer_conn = attach_conn(&mut g, observer, 2);
+        {
+            let c = g.get_char_mut(victim).unwrap();
+            c.points.hit = 1000;
+            c.player.weight = 120;
+        }
+
+        unit_activity(&mut g, origin, WEATHER_TORNADO);
+
+        let dest = g.map_coords_to_rnum(10, 18).unwrap();
+        assert_eq!(g.get_char(victim).unwrap().in_room, Some(dest));
+        assert_eq!(g.get_char(victim).unwrap().position, Position::Resting);
+        assert!(g
+            .descriptors
+            .get(&observer_conn)
+            .unwrap()
+            .outbuf
+            .contains("You see Flyer flying through the air in the distance."));
+        assert!(g
+            .descriptors
+            .get(&victim_conn)
+            .unwrap()
+            .outbuf
+            .contains("You land head-first into the ground!"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -2245,7 +2797,11 @@ WorldMap:\n\
             .contains
             .iter()
             .copied()
-            .find(|&oid| g.get_obj(oid).map(|o| o.obj_type == ObjectType::Money).unwrap_or(false))
+            .find(|&oid| {
+                g.get_obj(oid)
+                    .map(|o| o.obj_type == ObjectType::Money)
+                    .unwrap_or(false)
+            })
             .expect("corpse money");
         assert_eq!(g.get_obj(money).unwrap().values[0], 1234);
     }
@@ -2274,7 +2830,12 @@ WorldMap:\n\
             });
         }
 
-        assert!(!apply_thunderstorm_bolt(&mut g, ch, WEATHER_THUNDERSTORM, 800));
+        assert!(!apply_thunderstorm_bolt(
+            &mut g,
+            ch,
+            WEATHER_THUNDERSTORM,
+            800
+        ));
 
         let c = g.get_char(ch).unwrap();
         assert_eq!(c.points.hit, 950);
