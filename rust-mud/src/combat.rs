@@ -628,6 +628,9 @@ pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, atta
             }
         }
     }
+    if g.get_char(victim).and_then(|c| c.master) == Some(ch) {
+        crate::cmd_movement::stop_follower(g, victim);
+    }
 
     // PK flagging on a non-PK MUD (fight.c do_actual_damage ~892).
     if !PK_ALLOWED {
@@ -698,9 +701,46 @@ pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, atta
         dam_message(g, dmg, ch, victim, TYPE_HIT);
     }
 
+    rescue_linkdead_victim(g, victim);
+
     if g.get_char(victim).map(|c| c.position == Position::Dead).unwrap_or(false) {
         die(g, ch, victim);
     }
+}
+
+fn rescue_linkdead_victim(g: &mut GameState, victim: CharId) {
+    let should_try = g
+        .get_char(victim)
+        .map(|c| !c.is_npc && c.desc.is_none())
+        .unwrap_or(false);
+    if !should_try {
+        return;
+    }
+    do_flee(g, victim);
+    if g.get_char(victim).and_then(|c| c.fighting).is_some() {
+        return;
+    }
+    let was_in = match g.get_char(victim).and_then(|c| c.in_room) {
+        Some(r) => r,
+        None => return,
+    };
+    if g.rooms.is_empty() {
+        return;
+    }
+    act(
+        g,
+        "$n is rescued by divine forces.",
+        false,
+        victim,
+        None,
+        ActArg::None,
+        To::Room,
+    );
+    if let Some(c) = g.get_char_mut(victim) {
+        c.was_in_room = Some(was_in);
+    }
+    g.char_from_room(victim);
+    g.char_to_room(victim, 0);
 }
 
 /// IS_WEAPON(type) (fight.c): TYPE_HIT..TYPE_STAB inclusive (the verb table).
@@ -1170,6 +1210,8 @@ mod tests {
     use crate::character::{Affect, Character};
     use crate::config::Config;
     use crate::connection::Descriptor;
+    use crate::flags::{AFF_CHARM, AFF_GROUP};
+    use crate::room::{Exit, Room};
 
     const TEST_W_BODY: usize = 5;
 
@@ -1389,6 +1431,78 @@ mod tests {
 
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
         assert!(!out.contains("Victim has some small wounds and bruises.\r\n"));
+    }
+
+    #[test]
+    fn damage_breaks_victim_follower_bond_to_attacker() {
+        let mut g = GameState::new(Config::default());
+        let attacker = player(&mut g, "Master");
+        let victim = player(&mut g, "Pet");
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.master = Some(attacker);
+            v.affect_flags |= AFF_CHARM | AFF_GROUP;
+        }
+        g.get_char_mut(attacker).unwrap().followers.push(victim);
+
+        damage_type(&mut g, attacker, victim, 1, TYPE_UNDEFINED);
+
+        let v = g.get_char(victim).unwrap();
+        assert_eq!(v.master, None);
+        assert_eq!(v.affect_flags & (AFF_CHARM | AFF_GROUP), 0);
+        assert!(!g.get_char(attacker).unwrap().followers.contains(&victim));
+    }
+
+    #[test]
+    fn link_dead_pc_successful_flee_is_rescued_to_room_zero() {
+        let mut g = GameState::new(Config::default());
+        let limbo = g.add_room(Room::new(0, 0, "Limbo".to_string(), "Limbo.".to_string()));
+        let combat_room = g.add_room(Room::new(100, 0, "Arena".to_string(), "Arena.".to_string()));
+        let flee_room = g.add_room(Room::new(101, 0, "Safe".to_string(), "Safe.".to_string()));
+        for dir in 0..NUM_OF_DIRS {
+            g.rooms[combat_room].exits[dir] = Some(Exit {
+                description: None,
+                keyword: None,
+                exit_info: 0,
+                key: NOTHING,
+                to_room: 101,
+            });
+        }
+        let attacker = player(&mut g, "Attacker");
+        let victim = player(&mut g, "Linkdead");
+        g.char_to_room(attacker, combat_room);
+        g.char_to_room(victim, combat_room);
+        g.get_char_mut(attacker).unwrap().fighting = Some(victim);
+        g.get_char_mut(victim).unwrap().fighting = Some(attacker);
+
+        damage_type(&mut g, attacker, victim, 1, TYPE_UNDEFINED);
+
+        let v = g.get_char(victim).unwrap();
+        assert_eq!(v.fighting, None);
+        assert_eq!(v.was_in_room, Some(flee_room));
+        assert_eq!(v.in_room, Some(limbo));
+        assert!(g.rooms[limbo].people.contains(&victim));
+    }
+
+    #[test]
+    fn link_dead_pc_failed_flee_is_not_rescued() {
+        let mut g = GameState::new(Config::default());
+        let limbo = g.add_room(Room::new(0, 0, "Limbo".to_string(), "Limbo.".to_string()));
+        let combat_room = g.add_room(Room::new(100, 0, "Arena".to_string(), "Arena.".to_string()));
+        let attacker = player(&mut g, "Attacker");
+        let victim = player(&mut g, "Linkdead");
+        g.char_to_room(attacker, combat_room);
+        g.char_to_room(victim, combat_room);
+        g.get_char_mut(attacker).unwrap().fighting = Some(victim);
+        g.get_char_mut(victim).unwrap().fighting = Some(attacker);
+
+        damage_type(&mut g, attacker, victim, 1, TYPE_UNDEFINED);
+
+        let v = g.get_char(victim).unwrap();
+        assert_eq!(v.fighting, Some(attacker));
+        assert_eq!(v.was_in_room, None);
+        assert_eq!(v.in_room, Some(combat_room));
+        assert!(!g.rooms[limbo].people.contains(&victim));
     }
 
     #[test]

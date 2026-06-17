@@ -2077,7 +2077,7 @@ fn add_follower(g: &mut GameState, ch: CharId, leader: CharId) {
 }
 
 /// stop_follower: break ch's follow link and announce (CircleMUD stop_follower).
-fn stop_follower(g: &mut GameState, ch: CharId) {
+pub(crate) fn stop_follower(g: &mut GameState, ch: CharId) {
     let master = match g.get_char(ch).and_then(|c| c.master) {
         Some(m) => m,
         None => return,
