@@ -31,7 +31,7 @@ use crate::dg_handler::{
     self, add_trigger, extract_script, remove_trigger, trigger_ids, with_trig, ScriptKey,
 };
 use crate::interpreter::{is_abbrev, one_argument};
-use crate::object::ObjLoc;
+use crate::object::{ObjLoc, ObjectAffect};
 use crate::room::EX_CLOSED;
 use crate::spell_parser::{get_char_world_vis, get_obj_world_vis, SKILL_LISTEN, SKILL_SPEED};
 use crate::state::GameState;
@@ -667,10 +667,7 @@ pub fn do_tstat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 }
 
 // ===========================================================================
-// do_rebalance (olc.c) — rebalance a zone's mob/obj stats. The stat recompute
-// (CLASS_APPMODNUM / set_mob_stats) needs the power/defense/technique balance
-// tables + ObjectProto.affected/min_level fields absent from the simplified
-// prototype model; the command flow and messages are faithful.
+// do_rebalance (olc.c) — rebalance a zone's mob/obj stats.
 // ===========================================================================
 pub fn do_rebalance(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let (what, rest) = crate::interpreter::one_argument(arg);
@@ -701,11 +698,26 @@ pub fn do_rebalance(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             return;
         }
     };
-    if !g.get_char(ch).map(|c| c.is_immortal()).unwrap_or(false) {
+    if !crate::olc::can_edit_zone(g, ch, zone_idx) {
         g.send_to_char(ch, "You do not have permission to edit that zone.\r\n");
         return;
     }
     let zone_number = g.zones[zone_idx].number;
+    let zone_start = zone_number * 100;
+    let zone_end = g.zones[zone_idx].top;
+    if tobalance == 1 {
+        for proto in g.obj_protos.values_mut() {
+            if proto.vnum >= zone_start && proto.vnum <= zone_end {
+                rebalance_object_proto(proto);
+            }
+        }
+    } else {
+        for proto in g.mob_protos.values_mut() {
+            if proto.vnum >= zone_start && proto.vnum <= zone_end {
+                rebalance_mobile_proto(proto);
+            }
+        }
+    }
     g.send_to_char(
         ch,
         &format!(
@@ -715,4 +727,215 @@ pub fn do_rebalance(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         ),
     );
     crate::olc::olc_add_to_save_list(zone_number, if tobalance == 1 { 1 } else { 3 });
+}
+
+fn rebalance_object_proto(proto: &mut crate::world::ObjectProto) {
+    if proto.min_level == 0 {
+        return;
+    }
+    const STRENGTHS: [[i32; 5]; 6] = [
+        [3, 3, 3, 3, 3],
+        [1, 5, 1, 5, 4],
+        [2, 3, 4, 4, 3],
+        [4, 1, 4, 2, 5],
+        [5, 1, 5, 2, 3],
+        [2, 5, 2, 2, 5],
+    ];
+    let row = if (0..5).contains(&proto.obj_class) {
+        (proto.obj_class + 1) as usize
+    } else {
+        0
+    };
+    let row = STRENGTHS[row];
+    let modnum =
+        |num: usize| -> i32 { 750 * row[num] * proto.min_level / 5 / 100 / (NUM_WEARS as i32) };
+    let applies = [
+        (crate::flags::APPLY_POWER, modnum(0)),
+        (crate::flags::APPLY_MPOWER, modnum(1)),
+        (crate::flags::APPLY_DEFENSE, modnum(2)),
+        (crate::flags::APPLY_MDEFENSE, modnum(3)),
+        (crate::flags::APPLY_TECHNIQUE, modnum(4)),
+    ];
+    if proto.affects.len() < applies.len() {
+        proto.affects.resize(
+            applies.len(),
+            ObjectAffect {
+                location: crate::flags::APPLY_NONE,
+                modifier: 0,
+            },
+        );
+    }
+    for (slot, (location, modifier)) in applies.into_iter().enumerate() {
+        proto.affects[slot] = ObjectAffect { location, modifier };
+    }
+}
+
+fn rebalance_mobile_proto(proto: &mut crate::world::MobileProto) {
+    let level = proto.level as i32;
+    let scaled = (level as f64 * 7.5) as i32;
+    proto.defense = (scaled * 7 / 10).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    proto.mdefense = proto.defense;
+    proto.power = (scaled * 8 / 10).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    proto.mpower = proto.defense;
+    proto.technique = proto.defense;
+    proto.damnodice = 1;
+    proto.damsizedice = 1 + (level - 1) * 3;
+    proto.hitpoints = 20 + (level - 1) * 17;
+    proto.gold = (level * 10) as Gold;
+    let etl_now = crate::limits::exp_to_level(level);
+    let etl_prev = crate::limits::exp_to_level(level - 1);
+    proto.experience = (((etl_now - etl_prev) / (19 + level as i64)) as f64 * 1.5) as Experience;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::Descriptor;
+    use crate::object::{ExtraFlags, ObjectType, WearFlags};
+    use crate::world::{MobileProto, ObjectProto, Zone};
+
+    fn connected_player(g: &mut GameState, conn: ConnId, name: &str, level: Level) -> CharId {
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        ch.desc = Some(conn);
+        ch.player.level = level;
+        let id = g.create_char(ch);
+        if let Some(d) = g.descriptors.get_mut(&conn) {
+            d.character = Some(id);
+        }
+        id
+    }
+
+    fn test_zone(number: i32, top: RoomVnum, builders: &str) -> Zone {
+        Zone {
+            number,
+            name: format!("Zone {}", number),
+            builders: builders.to_string(),
+            lifespan: 30,
+            age: 0,
+            top,
+            reset_mode: 2,
+            min_level: 0,
+            max_level: 60,
+            status_mode: 0,
+            map_x: None,
+            map_y: None,
+            reset_commands: Vec::new(),
+        }
+    }
+
+    fn object_proto(vnum: ObjVnum, short: &str) -> ObjectProto {
+        ObjectProto {
+            vnum,
+            name: short.to_string(),
+            short_desc: short.to_string(),
+            description: format!("{} is here.", short),
+            obj_type: ObjectType::Armor,
+            wear_flags: WearFlags::TAKE,
+            extra_flags: ExtraFlags::empty(),
+            weight: 1,
+            cost: 0,
+            rent: 0,
+            values: [0; 4],
+            curr_slots: 0,
+            total_slots: 0,
+            obj_class: -1,
+            min_level: 0,
+            bitvector: 0,
+            action_description: String::new(),
+            affects: Vec::new(),
+            ex_descriptions: Vec::new(),
+        }
+    }
+
+    fn mobile_proto(vnum: MobVnum, short: &str, level: Level) -> MobileProto {
+        MobileProto {
+            vnum,
+            name: short.to_string(),
+            short_desc: short.to_string(),
+            long_desc: format!("{} is here.\r\n", short),
+            description: String::new(),
+            level,
+            hitpoints: 1,
+            experience: 0,
+            gold: 0,
+            position: Position::Standing,
+            default_pos: Position::Standing,
+            sex: Gender::Neutral,
+            alignment: 0,
+            act_flags: 0,
+            affect_flags: 0,
+            armor: 0,
+            hitroll: 0,
+            damroll: 0,
+            damnodice: 1,
+            damsizedice: 1,
+            power: 0,
+            mpower: 0,
+            defense: 0,
+            mdefense: 0,
+            technique: 0,
+            abilities: None,
+            attack_type: 0,
+        }
+    }
+
+    #[test]
+    fn rebalance_objects_updates_zone_proto_applies() {
+        let mut g = GameState::new(Config::default());
+        g.zones.push(test_zone(1, 199, "Imm"));
+        let ch = connected_player(&mut g, ConnId(1), "Imm", LVL_IMMORT);
+        let mut target = object_proto(150, "target");
+        target.min_level = 10;
+        g.obj_protos.insert(150, target);
+        let mut outside = object_proto(250, "outside");
+        outside.min_level = 10;
+        g.obj_protos.insert(250, outside);
+
+        do_rebalance(&mut g, ch, "obj 1", 0);
+
+        let proto = g.obj_protos.get(&150).unwrap();
+        assert_eq!(proto.affects[0].location, crate::flags::APPLY_POWER);
+        assert_eq!(proto.affects[0].modifier, 2);
+        assert_eq!(proto.affects[1].location, crate::flags::APPLY_MPOWER);
+        assert_eq!(proto.affects[2].location, crate::flags::APPLY_DEFENSE);
+        assert_eq!(proto.affects[3].location, crate::flags::APPLY_MDEFENSE);
+        assert_eq!(proto.affects[4].location, crate::flags::APPLY_TECHNIQUE);
+        assert!(g.obj_protos.get(&250).unwrap().affects.is_empty());
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("Rebalancing objects in zone 1"));
+        crate::olc::olc_remove_from_save_list(1, crate::olc::OLC_SAVE_OBJ);
+    }
+
+    #[test]
+    fn rebalance_mobiles_updates_zone_proto_stats() {
+        let mut g = GameState::new(Config::default());
+        g.zones.push(test_zone(1, 199, "Imm"));
+        let ch = connected_player(&mut g, ConnId(1), "Imm", LVL_IMMORT);
+        g.mob_protos.insert(150, mobile_proto(150, "target", 10));
+        g.mob_protos.insert(250, mobile_proto(250, "outside", 10));
+
+        do_rebalance(&mut g, ch, "mob 1", 0);
+
+        let proto = g.mob_protos.get(&150).unwrap();
+        assert_eq!(proto.power, 60);
+        assert_eq!(proto.defense, 52);
+        assert_eq!(proto.mpower, 52);
+        assert_eq!(proto.mdefense, 52);
+        assert_eq!(proto.technique, 52);
+        assert_eq!(proto.damnodice, 1);
+        assert_eq!(proto.damsizedice, 28);
+        assert_eq!(proto.hitpoints, 173);
+        assert_eq!(proto.gold, 100);
+        assert!(proto.experience > 0);
+        assert_eq!(g.mob_protos.get(&250).unwrap().power, 0);
+        crate::olc::olc_remove_from_save_list(1, crate::olc::OLC_SAVE_MOB);
+    }
 }
