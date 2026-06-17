@@ -10,7 +10,7 @@
 
 use crate::act::{act, ActArg, To};
 use crate::constants::ATTACK_HIT_TEXT;
-use crate::flags::{AFF_HIDE, AFF_INVISIBLE, AFF_SANCTUARY, AFF_SLEEP};
+use crate::flags::{AFF_HIDE, AFF_INVISIBLE, AFF_SANCTUARY, AFF_SLEEP, MOB_WIMPY};
 use crate::object::{Object, ObjectType, ObjLoc};
 use crate::room::{RoomFlags, SectorType, EX_CLOSED};
 use crate::spell_parser::{MAX_SPELLS, SPELL_REDIRECT_CHARGE, SPELL_SLEEP, TYPE_UNDEFINED};
@@ -708,10 +708,80 @@ pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, atta
         dam_message(g, dmg, ch, victim, TYPE_HIT);
     }
 
+    send_position_feedback(g, ch, victim, dmg);
     rescue_linkdead_victim(g, victim);
 
     if g.get_char(victim).map(|c| c.position == Position::Dead).unwrap_or(false) {
         die(g, ch, victim);
+    }
+}
+
+fn send_position_feedback(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32) {
+    let (position, hit, max_hit, is_npc, mob_wimpy) = match g.get_char(victim) {
+        Some(v) => (
+            v.position,
+            v.points.hit,
+            v.points.max_hit,
+            v.is_npc,
+            v.is_npc && v.act_flags & MOB_WIMPY != 0,
+        ),
+        None => return,
+    };
+    match position {
+        Position::MortallyWounded => {
+            act(
+                g,
+                "$n is mortally wounded, and will die soon, if not aided.",
+                true,
+                victim,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            g.send_to_char(victim, "You are mortally wounded, and will die soon, if not aided.\r\n");
+        }
+        Position::Incapacitated => {
+            act(
+                g,
+                "$n is incapacitated and will slowly die, if not aided.",
+                true,
+                victim,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            g.send_to_char(victim, "You are incapacitated an will slowly die, if not aided.\r\n");
+        }
+        Position::Stunned => {
+            act(
+                g,
+                "$n is stunned, but will probably regain consciousness again.",
+                true,
+                victim,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            g.send_to_char(victim, "You're stunned, but will probably regain consciousness again.\r\n");
+        }
+        Position::Dead => {
+            act(g, "$n is dead!  R.I.P.", false, victim, None, ActArg::None, To::Room);
+            g.send_to_char(victim, "You are dead!  Sorry...\r\n");
+        }
+        _ => {
+            if max_hit > 0 && dmg > max_hit / 4 {
+                act(g, "That really did HURT!", false, victim, None, ActArg::None, To::Char);
+            }
+            if max_hit > 0 && hit < max_hit / 4 {
+                g.send_to_char(
+                    victim,
+                    "&RYou wish that your wounds would stop BLEEDING so much!&n\r\n",
+                );
+                if is_npc && ch != victim && mob_wimpy {
+                    do_flee(g, victim);
+                }
+            }
+        }
     }
 }
 
@@ -1484,6 +1554,100 @@ mod tests {
             .unwrap()
             .outbuf
             .contains("Attacker slowly fades into existence.\r\n"));
+    }
+
+    #[test]
+    fn damage_reports_stunned_position_to_victim_and_room() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Arena".to_string(), "Arena.".to_string()));
+        let attacker = player(&mut g, "Attacker");
+        let victim = connected_player(&mut g, "Victim", ConnId(1));
+        let observer = connected_player(&mut g, "Observer", ConnId(2));
+        g.char_to_room(attacker, room);
+        g.char_to_room(victim, room);
+        g.char_to_room(observer, room);
+
+        damage_type(&mut g, attacker, victim, 21, TYPE_UNDEFINED);
+
+        assert_eq!(g.get_char(victim).unwrap().position, Position::Stunned);
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("You're stunned, but will probably regain consciousness again.\r\n"));
+        assert!(g
+            .descriptors
+            .get(&ConnId(2))
+            .unwrap()
+            .outbuf
+            .contains("Victim is stunned, but will probably regain consciousness again.\r\n"));
+    }
+
+    #[test]
+    fn damage_reports_hurt_and_bleeding_thresholds() {
+        let mut g = GameState::new(Config::default());
+        let attacker = player(&mut g, "Attacker");
+        let victim = connected_player(&mut g, "Victim", ConnId(1));
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.points.max_hit = 100;
+            v.points.hit = 100;
+        }
+
+        damage_type(&mut g, attacker, victim, 30, TYPE_UNDEFINED);
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("That really did HURT!\r\n"));
+
+        g.descriptors.get_mut(&ConnId(1)).unwrap().outbuf.clear();
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.points.max_hit = 100;
+            v.points.hit = 30;
+            v.position = Position::Standing;
+        }
+        damage_type(&mut g, attacker, victim, 10, TYPE_UNDEFINED);
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("&RYou wish that your wounds would stop BLEEDING so much!&n\r\n"));
+    }
+
+    #[test]
+    fn bleeding_mob_with_wimpy_flag_attempts_to_flee() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Arena".to_string(), "Arena.".to_string()));
+        let safe = g.add_room(Room::new(101, 0, "Safe".to_string(), "Safe.".to_string()));
+        for dir in 0..NUM_OF_DIRS {
+            g.rooms[room].exits[dir] = Some(Exit {
+                description: None,
+                keyword: None,
+                exit_info: 0,
+                key: NOTHING,
+                to_room: 101,
+            });
+        }
+        let attacker = player(&mut g, "Attacker");
+        let victim = g.create_char(Character::new_npc(1));
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.points.max_hit = 100;
+            v.points.hit = 30;
+            v.act_flags |= MOB_WIMPY;
+        }
+        g.char_to_room(attacker, room);
+        g.char_to_room(victim, room);
+
+        damage_type(&mut g, attacker, victim, 10, TYPE_UNDEFINED);
+
+        assert_eq!(g.get_char(victim).unwrap().in_room, Some(safe));
+        assert_eq!(g.get_char(victim).unwrap().fighting, None);
     }
 
     #[test]
