@@ -473,7 +473,7 @@ fn same_obj(g: &GameState, a: ObjId, b: ObjId) -> bool {
 // diag_char_to_char (CircleMUD)
 // ---------------------------------------------------------------------------
 
-fn diag_char_to_char(g: &mut GameState, i: CharId, ch: CharId) {
+pub(crate) fn diag_char_to_char(g: &mut GameState, i: CharId, ch: CharId) {
     let (max, hit) = match g.get_char(i) {
         Some(c) => (c.points.max_hit, c.points.hit),
         None => return,

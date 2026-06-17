@@ -37,6 +37,7 @@ const SKILL_RIPOSTE: u16 = 535;
 const AVOID_FACTOR: i32 = 20; // spells.h
 
 // PRF2_* flags (structs.h) used by the intangible/ghost combat guards.
+const PRF2_DISPMOB: i64 = 1 << 5;
 const PRF2_MBUILDING: i64 = 1 << 6;
 const PRF2_INTANGIBLE: i64 = 1 << 9;
 const AFF_R_CHARGED: i64 = 1 << 26;
@@ -132,6 +133,13 @@ pub fn perform_violence(g: &mut GameState) {
         }
         if g.get_char(ch).map(|c| c.position != Position::Fighting).unwrap_or(true) {
             continue;
+        }
+        let show_diag = g
+            .get_char(ch)
+            .map(|c| !c.is_npc && c.prf2_flags & PRF2_DISPMOB == 0)
+            .unwrap_or(false);
+        if show_diag {
+            crate::cmd_informative::diag_char_to_char(g, victim, ch);
         }
         hit(g, ch, victim);
         damage_worn_equipment_after_hit(g, ch);
@@ -1336,6 +1344,51 @@ mod tests {
         g.get_char_mut(indestructible_pc).unwrap().aff_abils.dex = -100;
         damage_worn_equipment_after_hit(&mut g, attacker);
         assert_eq!(g.get_obj(pc_armor).unwrap().curr_slots, 3);
+    }
+
+    #[test]
+    fn perform_violence_shows_victim_health_to_pc_attacker() {
+        let mut g = GameState::new(Config::default());
+        let attacker = connected_player(&mut g, "Attacker", ConnId(1));
+        let victim = player(&mut g, "Victim");
+        {
+            let a = g.get_char_mut(attacker).unwrap();
+            a.fighting = Some(victim);
+            a.position = Position::Fighting;
+        }
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.points.max_hit = 100;
+            v.points.hit = 80;
+        }
+
+        perform_violence(&mut g);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("Victim has some small wounds and bruises.\r\n"));
+    }
+
+    #[test]
+    fn perform_violence_respects_disp_mob_suppression() {
+        let mut g = GameState::new(Config::default());
+        let attacker = connected_player(&mut g, "Attacker", ConnId(1));
+        let victim = player(&mut g, "Victim");
+        {
+            let a = g.get_char_mut(attacker).unwrap();
+            a.fighting = Some(victim);
+            a.position = Position::Fighting;
+            a.prf2_flags |= PRF2_DISPMOB;
+        }
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.points.max_hit = 100;
+            v.points.hit = 80;
+        }
+
+        perform_violence(&mut g);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(!out.contains("Victim has some small wounds and bruises.\r\n"));
     }
 
     #[test]
