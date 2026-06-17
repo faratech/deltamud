@@ -126,9 +126,8 @@ pub fn find_first_step(g: &GameState, src: RoomRnum, target: RoomRnum) -> i32 {
 
 // ---------------------------------------------------------------------------
 // CAN_GO (utils.h): an exit the char may actually walk through — exists, leads
-// somewhere real, and is not closed. Used by do_track's random-stumble branch.
-// (The C macro's mapmv clause has no representable backing here and degrades to
-// always-true, matching how the surrounding port handles absent map data.)
+// somewhere real, is not closed, and does not lead to an impassable map cell.
+// Used by do_track's random-stumble branch.
 // ---------------------------------------------------------------------------
 fn can_go(g: &GameState, ch: CharId, dir: usize) -> bool {
     let rnum = match g.get_char(ch).and_then(|c| c.in_room) {
@@ -139,10 +138,18 @@ fn can_go(g: &GameState, ch: CharId, dir: usize) -> bool {
         Some(e) => e,
         None => return false,
     };
-    if g.real_room(exit.to_room).is_none() {
+    let dest = match g.real_room(exit.to_room) {
+        Some(r) => r,
+        None => return false,
+    };
+    if exit.exit_info & EX_CLOSED != 0 {
         return false;
     }
-    exit.exit_info & EX_CLOSED == 0
+    let dest_room = g.room(dest);
+    if dest_room.map_x.is_some() && dest_room.map_y.is_some() && dest_room.mapmv == -1 {
+        return false;
+    }
+    true
 }
 
 /// him/her/it for a character (graph.c HMHR). act.rs keeps its hssh/hmhr
@@ -293,5 +300,97 @@ fn lose_prey(g: &mut GameState, ch: CharId, prey: CharId) {
     crate::cmd_comm::do_say(g, ch, &buf, 0);
     if let Some(c) = g.get_char_mut(ch) {
         c.hunting = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::room::{Exit, Room};
+
+    fn add_char(g: &mut GameState, room: RoomRnum) -> CharId {
+        let ch = g.create_char(Character::new_player(
+            "Tracker".to_string(),
+            Class::Warrior,
+            Race::Human,
+        ));
+        g.char_to_room(ch, room);
+        ch
+    }
+
+    fn open_exit(to_room: RoomVnum) -> Exit {
+        Exit {
+            description: None,
+            keyword: None,
+            exit_info: 0,
+            key: NOTHING,
+            to_room,
+        }
+    }
+
+    #[test]
+    fn can_go_allows_non_map_room_with_default_mapmv() {
+        let mut g = GameState::new(Config::default());
+        let src = g.add_room(Room::new(100, 0, "Start".to_string(), "Start.".to_string()));
+        let dest = g.add_room(Room::new(101, 0, "Normal".to_string(), "Normal.".to_string()));
+        g.room_mut(src).exits[EAST] = Some(open_exit(101));
+        let ch = add_char(&mut g, src);
+
+        assert_eq!(g.room(dest).mapmv, -1);
+        assert!(can_go(&g, ch, EAST));
+    }
+
+    #[test]
+    fn can_go_blocks_impassable_map_destination() {
+        let mut g = GameState::new(Config::default());
+        let src = g.add_room(Room::new(100, 0, "Start".to_string(), "Start.".to_string()));
+        let dest = g.add_room(Room::new(101, 0, "Wall".to_string(), "Wall.".to_string()));
+        {
+            let room = g.room_mut(dest);
+            room.map_x = Some(1);
+            room.map_y = Some(1);
+            room.mapmv = -1;
+        }
+        g.room_mut(src).exits[EAST] = Some(open_exit(101));
+        let ch = add_char(&mut g, src);
+
+        assert!(!can_go(&g, ch, EAST));
+    }
+
+    #[test]
+    fn can_go_allows_passable_map_destination() {
+        let mut g = GameState::new(Config::default());
+        let src = g.add_room(Room::new(100, 0, "Start".to_string(), "Start.".to_string()));
+        let dest = g.add_room(Room::new(101, 0, "Road".to_string(), "Road.".to_string()));
+        {
+            let room = g.room_mut(dest);
+            room.map_x = Some(1);
+            room.map_y = Some(1);
+            room.mapmv = 1;
+        }
+        g.room_mut(src).exits[EAST] = Some(open_exit(101));
+        let ch = add_char(&mut g, src);
+
+        assert!(can_go(&g, ch, EAST));
+    }
+
+    #[test]
+    fn bfs_still_routes_through_impassable_map_destination() {
+        let mut g = GameState::new(Config::default());
+        let src = g.add_room(Room::new(100, 0, "Start".to_string(), "Start.".to_string()));
+        let mid = g.add_room(Room::new(101, 0, "Wall".to_string(), "Wall.".to_string()));
+        let target = g.add_room(Room::new(102, 0, "Target".to_string(), "Target.".to_string()));
+        {
+            let room = g.room_mut(mid);
+            room.map_x = Some(1);
+            room.map_y = Some(1);
+            room.mapmv = -1;
+        }
+        g.room_mut(src).exits[EAST] = Some(open_exit(101));
+        g.room_mut(mid).exits[EAST] = Some(open_exit(102));
+
+        assert_eq!(find_first_step(&g, src, target), EAST as i32);
     }
 }

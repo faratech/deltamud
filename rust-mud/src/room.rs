@@ -123,6 +123,7 @@ pub struct Room {
     pub snow: u8,
     pub map_x: Option<i32>,
     pub map_y: Option<i32>,
+    pub mapmv: i32,
 
     // City-interior links (Map mods - Storm; structs.h linkmapnum/linkrnum).
     // linkrnum: real-room index of the city interior reached from a surface
@@ -159,6 +160,7 @@ impl Room {
             snow: 0,
             map_x: None,
             map_y: None,
+            mapmv: -1,
             linkrnum: None,
             linkmapnum: None,
             people: Vec::new(),

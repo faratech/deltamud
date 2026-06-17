@@ -167,6 +167,8 @@ struct Sector {
     desc: String,
     /// SectSect — the CircleMUD sector type index. C: s->sect (0/Inside default).
     sect: i32,
+    /// SectMove — movement cost for map cells. -1 marks an impassable map cell.
+    move_cost: i32,
 }
 
 /// One EntryPoint directive (maputils.c read_map): a link between a surface map
@@ -692,6 +694,7 @@ fn parse_worldmap(lib_path: &str) -> MapData {
     let mut cur_show: Option<String> = None;
     let mut cur_name: String = String::new();
     let mut cur_sect: i32 = 0;
+    let mut cur_move: i32 = 0;
     let mut cur_desc: String = String::new();
     // SectDesc multi-line accumulation (between `SectDesc:` and the next `~`).
     let mut in_sectdesc = false;
@@ -709,6 +712,7 @@ fn parse_worldmap(lib_path: &str) -> MapData {
                     name: std::mem::take(&mut cur_name),
                     desc: std::mem::take(&mut cur_desc),
                     sect: std::mem::take(&mut cur_sect),
+                    move_cost: std::mem::take(&mut cur_move),
                 },
             );
         }};
@@ -764,6 +768,7 @@ fn parse_worldmap(lib_path: &str) -> MapData {
             cur_name = String::new();
             cur_desc = String::new();
             cur_sect = 0;
+            cur_move = 0;
             continue;
         }
         if compare(&arg1, "SectShow:") {
@@ -782,6 +787,10 @@ fn parse_worldmap(lib_path: &str) -> MapData {
             // C: match the remainder against sector_types[] for the index.
             let want = get_arg_exclude(line, 1);
             cur_sect = sector_from_name(&want);
+            continue;
+        }
+        if compare(&arg1, "SectMove:") {
+            cur_move = atoi(&get_arg(line, 2));
             continue;
         }
         if compare(&arg1, "SectDesc:") {
@@ -811,8 +820,8 @@ fn parse_worldmap(lib_path: &str) -> MapData {
             entry_points.push(EntryPoint { x, y, interior_vnum: vnum, dir });
             continue;
         }
-        // SectMove/ZWeatherPoint/BuildExit/FlagRoom/SpecRoom: not needed for the
-        // render + splice; ignore them.
+        // ZWeatherPoint/BuildExit/FlagRoom/SpecRoom: not needed for the render
+        // + splice; ignore them.
     }
 
     // Flush a trailing sector with no EndSector.
@@ -1476,11 +1485,12 @@ pub fn integrate_map_rooms(g: &mut GameState) {
         if !m.is_active() {
             return; // No worldmap file / corrupt map: nothing to splice.
         }
-        // glyph -> (name, desc, sect) so we can build each room without the lock.
-        let meta: HashMap<char, (String, String, i32)> = m
+        // glyph -> (name, desc, sect, move_cost) so we can build each room
+        // without the lock.
+        let meta: HashMap<char, (String, String, i32, i32)> = m
             .sectors
             .iter()
-            .map(|(&id, s)| (id, (s.name.clone(), s.desc.clone(), s.sect)))
+            .map(|(&id, s)| (id, (s.name.clone(), s.desc.clone(), s.sect, s.move_cost)))
             .collect();
         (
             m.max_x,
@@ -1499,10 +1509,10 @@ pub fn integrate_map_rooms(g: &mut GameState) {
     let mut linear: RoomVnum = 0;
     for row in &grid {
         for &glyph in row {
-            let (name, desc, sect) = match glyph_meta.get(&glyph) {
-                Some(t) => (t.0.clone(), t.1.clone(), t.2),
+            let (name, desc, sect, move_cost) = match glyph_meta.get(&glyph) {
+                Some(t) => (t.0.clone(), t.1.clone(), t.2, t.3),
                 // C aborts on a missing sector; a quiet fallback keeps boot total.
-                None => (String::new(), String::new(), 0),
+                None => (String::new(), String::new(), 0, 0),
             };
             let x = (linear % max_x) + 1; // rm2x
             let y = (linear / max_x) + 1; // rm2y
@@ -1511,6 +1521,7 @@ pub fn integrate_map_rooms(g: &mut GameState) {
             room.sector_type = SectorType::from_i32(sect);
             room.map_x = Some(x);
             room.map_y = Some(y);
+            room.mapmv = move_cost;
             // add_room appends to rooms and registers the (virtual) vnum.
             g.add_room(room);
             linear += 1;
@@ -2119,6 +2130,47 @@ mod tests {
         let corpse = *g.rooms[room].contents.first().expect("weather corpse");
         let obj = g.get_obj(corpse).unwrap();
         (obj.short_description.clone(), obj.description.clone())
+    }
+
+    #[test]
+    fn integrate_map_rooms_preserves_sector_move_cost() {
+        let mut dir = std::env::temp_dir();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        dir.push(format!("deltamud-mapmv-{}-{}", std::process::id(), unique));
+        let world = dir.join("world");
+        std::fs::create_dir_all(&world).unwrap();
+        std::fs::write(
+            world.join("worldmap"),
+            "NewSector: .\n\
+SectName: Passable\n\
+SectShow: .\n\
+SectMove: 2\n\
+SectSect: Field\n\
+EndSector\n\
+NewSector: #\n\
+SectName: Wall\n\
+SectShow: #\n\
+SectMove: -1\n\
+SectSect: City\n\
+EndSector\n\
+WorldMap:\n\
+.#\n\
+~\n",
+        )
+        .unwrap();
+        let mut cfg = Config::default();
+        cfg.lib_path = dir.to_string_lossy().to_string();
+        let mut g = GameState::new(cfg);
+
+        integrate_map_rooms(&mut g);
+
+        let start = g.map_start_rnum.expect("map rooms spliced");
+        assert_eq!(g.room(start).mapmv, 2);
+        assert_eq!(g.room(start + 1).mapmv, -1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
