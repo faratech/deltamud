@@ -144,6 +144,7 @@ pub struct Character {
     pub alignment: i32,
     pub timer: i32,
     pub idle_tics: i32,
+    pub mob_wait: i32,
 
     // Group / follow
     pub master: Option<CharId>,
@@ -270,6 +271,7 @@ impl Character {
             alignment: 0,
             timer: 0,
             idle_tics: 0,
+            mob_wait: 0,
             master: None,
             followers: Vec::new(),
             riding: None,

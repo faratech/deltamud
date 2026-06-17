@@ -398,10 +398,16 @@ impl GameState {
         self.objs.swap_remove(&id);
     }
 
-    /// WAIT_STATE(ch, cycles) (utils.h): impose `cycles` pulses of command lag
-    /// on the character's descriptor. The heartbeat's input drain won't run the
-    /// next queued command until this counter decrements to <= 0.
+    /// WAIT_STATE(ch, cycles) (utils.h): impose `cycles` pulses of command lag.
+    /// PCs store this on their descriptor; NPCs use char_specials.wait_state
+    /// (`mob_wait`) so perform_violence can count down bash/trip recovery.
     pub fn set_wait_state(&mut self, id: CharId, cycles: i32) {
+        if let Some(c) = self.chars.get_mut(&id) {
+            if c.is_npc {
+                c.mob_wait = cycles;
+                return;
+            }
+        }
         if let Some(conn) = self.chars.get(&id).and_then(|c| c.desc) {
             if let Some(d) = self.descriptors.get_mut(&conn) {
                 d.wait = cycles;

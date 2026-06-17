@@ -136,6 +136,35 @@ pub fn perform_violence(g: &mut GameState) {
             stop_fighting(g, ch);
             continue;
         }
+        if g.get_char(ch).map(|c| c.is_npc).unwrap_or(false) {
+            let mut scrambled = false;
+            let mut waiting = false;
+            if let Some(c) = g.get_char_mut(ch) {
+                if c.mob_wait > 0 {
+                    c.mob_wait -= PULSE_VIOLENCE as i32;
+                    waiting = true;
+                    if c.mob_wait <= 0 {
+                        c.mob_wait = 0;
+                        if c.position < Position::Fighting {
+                            c.position = Position::Fighting;
+                            scrambled = true;
+                        }
+                    }
+                } else {
+                    c.mob_wait = 0;
+                    if c.position < Position::Fighting {
+                        c.position = Position::Fighting;
+                        scrambled = true;
+                    }
+                }
+            }
+            if scrambled {
+                act(g, "$n scrambles to $s feet!", true, ch, None, ActArg::None, To::Room);
+            }
+            if waiting {
+                continue;
+            }
+        }
         if g.get_char(ch).map(|c| c.position != Position::Fighting).unwrap_or(true) {
             continue;
         }
@@ -1725,6 +1754,46 @@ mod tests {
             .unwrap()
             .outbuf
             .contains("Snake bites you!\r\n"));
+    }
+
+    #[test]
+    fn npc_mob_wait_counts_down_and_recovers_to_fighting() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        let mut mob = Character::new_npc(99);
+        mob.player.name = "Bruiser".to_string();
+        mob.position = Position::Sitting;
+        mob.points.hit = 100;
+        mob.points.max_hit = 100;
+        mob.points.power = 1000;
+        mob.points.technique = 1000;
+        let mob = g.create_char(mob);
+        let victim = connected_player(&mut g, "Victim", ConnId(1));
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.points.hit = 100;
+            v.points.max_hit = 100;
+        }
+        g.char_to_room(mob, room);
+        g.char_to_room(victim, room);
+        g.get_char_mut(mob).unwrap().fighting = Some(victim);
+        g.set_wait_state(mob, PULSE_VIOLENCE as i32);
+
+        perform_violence(&mut g);
+
+        assert_eq!(g.get_char(mob).unwrap().mob_wait, 0);
+        assert_eq!(g.get_char(mob).unwrap().position, Position::Fighting);
+        assert_eq!(g.get_char(victim).unwrap().points.hit, 100);
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("Bruiser scrambles to its feet!\r\n"));
+
+        perform_violence(&mut g);
+
+        assert!(g.get_char(victim).unwrap().points.hit < 100);
     }
 
     #[test]
