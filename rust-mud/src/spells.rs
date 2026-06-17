@@ -27,7 +27,7 @@ use crate::types::*;
 
 use crate::cmd_informative::look_at_room;
 use crate::config::{MORTAL_START_ROOM, NUM_STARTROOMS};
-use crate::constants::DRINKS;
+use crate::constants::{AFFECTED_BITS, DRINKS, EXTRA_BITS};
 use crate::spell_parser::*;
 
 // ---------------------------------------------------------------------------
@@ -58,6 +58,11 @@ const MAX_OBJ_AFFECT: usize = 6;
 const MAX_PLAYER_STAT: i32 = 18;
 
 const PORTAL_VNUM: ObjVnum = 20;
+const LVL_HERO_IDENTIFY: Level = 100;
+const SECS_PER_MUD_HOUR: i64 = 75;
+const SECS_PER_MUD_DAY: i64 = 24 * SECS_PER_MUD_HOUR;
+const SECS_PER_MUD_MONTH: i64 = 35 * SECS_PER_MUD_DAY;
+const SECS_PER_MUD_YEAR: i64 = 17 * SECS_PER_MUD_MONTH;
 
 // ---------------------------------------------------------------------------
 // Small utils.h-style helpers.
@@ -694,7 +699,17 @@ pub fn spell_identify(
 ) {
     if let Some(obj) = obj {
         g.send_to_char(ch, "You feel informed:\r\n");
-        let (short, otype, weight, cost, rent) = g
+        let (
+            short,
+            otype,
+            weight,
+            cost,
+            rent,
+            bitvector,
+            extra_flags,
+            curr_slots,
+            total_slots,
+        ) = g
             .get_obj(obj)
             .map(|o| {
                 (
@@ -703,9 +718,13 @@ pub fn spell_identify(
                     o.weight,
                     o.cost,
                     o.rent,
+                    o.bitvector,
+                    o.extra_flags.bits() as i64,
+                    o.curr_slots,
+                    o.total_slots,
                 )
             })
-            .unwrap_or((String::new(), ObjectType::Other, 0, 0, 0));
+            .unwrap_or((String::new(), ObjectType::Other, 0, 0, 0, 0, 0, 0, 0));
 
         g.send_to_char(
             ch,
@@ -715,9 +734,30 @@ pub fn spell_identify(
                 item_type_name(otype)
             ),
         );
+        if bitvector != 0 {
+            g.send_to_char(
+                ch,
+                &format!(
+                    "Item will give you following abilities:  {}\r\n",
+                    crate::olc::sprintbit(bitvector, AFFECTED_BITS)
+                ),
+            );
+        }
+        g.send_to_char(
+            ch,
+            &format!(
+                "Item is: {}\r\n",
+                crate::olc::sprintbit(extra_flags, EXTRA_BITS)
+            ),
+        );
         g.send_to_char(
             ch,
             &format!("Weight: {}, Value: {}, Rent: {}\r\n", weight, cost, rent),
+        );
+        let viewer_level = g.get_char(ch).map(|c| c.player.level).unwrap_or(1);
+        g.send_to_char(
+            ch,
+            &identify_quality_line(curr_slots, total_slots, viewer_level),
         );
 
         // Type-specific details.
@@ -785,11 +825,13 @@ pub fn spell_identify(
             }
         }
     } else if let Some(victim) = victim {
-        let (name, height, weight, level, hit, mana) = g
+        let (name, is_npc, birth, height, weight, level, hit, mana) = g
             .get_char(victim)
             .map(|c| {
                 (
                     c.player.name.clone(),
+                    c.is_npc,
+                    c.player.time_birth,
                     c.player.height as i32,
                     c.player.weight as i32,
                     c.player.level as i32,
@@ -797,8 +839,18 @@ pub fn spell_identify(
                     c.points.mana,
                 )
             })
-            .unwrap_or((String::new(), 0, 0, 1, 0, 0));
+            .unwrap_or((String::new(), true, 0, 0, 0, 1, 0, 0));
         g.send_to_char(ch, &format!("Name: {}\r\n", name));
+        if !is_npc {
+            let (years, months, days, hours) = character_age_parts(birth);
+            g.send_to_char(
+                ch,
+                &format!(
+                    "{} is {} years, {} months, {} days and {} hours old.\r\n",
+                    name, years, months, days, hours
+                ),
+            );
+        }
         g.send_to_char(
             ch,
             &format!("Height {} cm, Weight {} pounds\r\n", height, weight),
@@ -843,6 +895,48 @@ fn item_type_name(t: ObjectType) -> &'static str {
         .get(t as usize)
         .copied()
         .unwrap_or("UNDEFINED")
+}
+
+fn identify_quality_line(curr_slots: i32, total_slots: i32, viewer_level: Level) -> String {
+    let condition = if total_slots != 0 {
+        curr_slots * 100 / total_slots
+    } else {
+        0
+    };
+    if total_slots == 0 && curr_slots == 0 {
+        "Quality: INDESTRUCTABLE\r\n".to_string()
+    } else if viewer_level >= LVL_HERO_IDENTIFY {
+        format!(
+            "Quality: {}/{}\r\nCondition: {} percent\r\n",
+            curr_slots, total_slots, condition
+        )
+    } else {
+        let label = match condition {
+            0..=19 => "Extremley Poor",
+            20..=29 => "Poor",
+            30..=39 => "Fair",
+            40..=49 => "Moderate",
+            50..=59 => "Good",
+            60..=69 => "Very Good",
+            70..=79 => "Excellent",
+            80..=89 => "Superior",
+            90..=99 => "Extremely Superior",
+            _ => "Brand New",
+        };
+        format!("Quality: {}\r\n", label)
+    }
+}
+
+fn character_age_parts(birth: i64) -> (i64, i64, i64, i64) {
+    let mut total = (chrono::Utc::now().timestamp() - birth).max(0);
+    let hours = (total / SECS_PER_MUD_HOUR) % 24;
+    total -= SECS_PER_MUD_HOUR * hours;
+    let days = (total / SECS_PER_MUD_DAY) % 35;
+    total -= SECS_PER_MUD_DAY * days;
+    let months = (total / SECS_PER_MUD_MONTH) % 17;
+    total -= SECS_PER_MUD_MONTH * months;
+    let years = total / SECS_PER_MUD_YEAR + 17;
+    (years, months, days, hours)
 }
 
 fn apply_type_name(loc: i32) -> &'static str {
@@ -1546,7 +1640,7 @@ mod tests {
     use crate::character::Character;
     use crate::config::Config;
     use crate::connection::Descriptor;
-    use crate::object::{ExtraFlags, ObjectType, WearFlags};
+    use crate::object::{ExtraFlags, Object, ObjectAffect, ObjectType, WearFlags};
     use crate::room::Room;
     use crate::world::{ObjectProto, Zone};
     use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -1583,6 +1677,14 @@ mod tests {
         );
     }
 
+    fn connected_player(g: &mut GameState, name: &str, conn: ConnId) -> CharId {
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut ch = Character::new_player(name.into(), Class::Cleric, Race::Human);
+        ch.desc = Some(conn);
+        g.create_char(ch)
+    }
+
     #[test]
     fn control_weather_is_silent() {
         let mut g = GameState::new(Config::default());
@@ -1596,6 +1698,59 @@ mod tests {
         spell_control_weather(&mut g, 1, ch, None, None);
 
         assert!(g.descriptors.get(&conn).unwrap().outbuf.is_empty());
+    }
+
+    #[test]
+    fn identify_object_reports_flags_abilities_and_quality() {
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(1);
+        let ch = connected_player(&mut g, "Caster", conn);
+        let mut obj = Object::new(100, "armor".to_string(), "a bright cuirass".to_string());
+        obj.obj_type = ObjectType::Armor;
+        obj.weight = 7;
+        obj.cost = 123;
+        obj.rent = 4;
+        obj.bitvector = AFF_SANCTUARY;
+        obj.extra_flags = ExtraFlags::GLOW | ExtraFlags::MAGIC;
+        obj.curr_slots = 2;
+        obj.total_slots = 10;
+        obj.values[0] = 5;
+        obj.affects.push(ObjectAffect {
+            location: APPLY_POWER,
+            modifier: 3,
+        });
+        let obj = g.create_obj(obj);
+
+        spell_identify(&mut g, 1, ch, None, Some(obj));
+
+        let out = &g.descriptors.get(&conn).unwrap().outbuf;
+        assert!(out.contains("Object 'a bright cuirass', Item type: ARMOR\r\n"));
+        assert!(out.contains("Item will give you following abilities:  SANCTUARY \r\n"));
+        assert!(out.contains("Item is: GLOW MAGIC \r\n"));
+        assert!(out.contains("Weight: 7, Value: 123, Rent: 4\r\n"));
+        assert!(out.contains("Quality: Poor\r\n"));
+        assert!(out.contains("Defense apply is 5\r\n"));
+        assert!(out.contains("Can affect you as :\r\n"));
+        assert!(out.contains("   Affects: POWER By 3\r\n"));
+    }
+
+    #[test]
+    fn identify_pc_reports_mud_age() {
+        let mut g = GameState::new(Config::default());
+        let ch = connected_player(&mut g, "Caster", ConnId(1));
+        let mut target = Character::new_player("Target".into(), Class::Cleric, Race::Human);
+        target.player.time_birth = chrono::Utc::now().timestamp()
+            - (2 * SECS_PER_MUD_YEAR)
+            - (3 * SECS_PER_MUD_MONTH)
+            - (4 * SECS_PER_MUD_DAY)
+            - (5 * SECS_PER_MUD_HOUR);
+        let target = g.create_char(target);
+
+        spell_identify(&mut g, 1, ch, Some(target), None);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("Name: Target\r\n"));
+        assert!(out.contains("Target is 19 years, 3 months, 4 days and 5 hours old.\r\n"));
     }
 
     #[test]
