@@ -311,7 +311,7 @@ fn check_perm_duration(g: &GameState, cid: CharId, bitvector: i64) -> bool {
 }
 
 /// appear(): break invisibility / hide, announce arrival (fight.c).
-fn appear(g: &mut GameState, cid: CharId) {
+pub(crate) fn appear(g: &mut GameState, cid: CharId) {
     // SPELL_INVISIBLE == 5 (spells.h). We clear the spell affect if present,
     // then the AFF_INVISIBLE flag, unless a permanent affect holds it.
     const SPELL_INVISIBLE: i32 = 5;

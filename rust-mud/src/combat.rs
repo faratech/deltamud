@@ -10,7 +10,7 @@
 
 use crate::act::{act, ActArg, To};
 use crate::constants::ATTACK_HIT_TEXT;
-use crate::flags::{AFF_SANCTUARY, AFF_SLEEP};
+use crate::flags::{AFF_HIDE, AFF_INVISIBLE, AFF_SANCTUARY, AFF_SLEEP};
 use crate::object::{Object, ObjectType, ObjLoc};
 use crate::room::{RoomFlags, SectorType, EX_CLOSED};
 use crate::spell_parser::{MAX_SPELLS, SPELL_REDIRECT_CHARGE, SPELL_SLEEP, TYPE_UNDEFINED};
@@ -630,6 +630,13 @@ pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, atta
     }
     if g.get_char(victim).and_then(|c| c.master) == Some(ch) {
         crate::cmd_movement::stop_follower(g, victim);
+    }
+    if g
+        .get_char(ch)
+        .map(|c| c.affect_flags & (AFF_INVISIBLE | AFF_HIDE) != 0)
+        .unwrap_or(false)
+    {
+        crate::cmd_other::appear(g, ch);
     }
 
     // PK flagging on a non-PK MUD (fight.c do_actual_damage ~892).
@@ -1451,6 +1458,32 @@ mod tests {
         assert_eq!(v.master, None);
         assert_eq!(v.affect_flags & (AFF_CHARM | AFF_GROUP), 0);
         assert!(!g.get_char(attacker).unwrap().followers.contains(&victim));
+    }
+
+    #[test]
+    fn damage_makes_hidden_or_invisible_attacker_appear() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Arena".to_string(), "Arena.".to_string()));
+        let attacker = player(&mut g, "Attacker");
+        let victim = player(&mut g, "Victim");
+        let observer = connected_player(&mut g, "Observer", ConnId(1));
+        g.char_to_room(attacker, room);
+        g.char_to_room(victim, room);
+        g.char_to_room(observer, room);
+        g.get_char_mut(attacker).unwrap().affect_flags |= AFF_HIDE | AFF_INVISIBLE;
+
+        damage_type(&mut g, attacker, victim, 1, TYPE_UNDEFINED);
+
+        assert_eq!(
+            g.get_char(attacker).unwrap().affect_flags & (AFF_HIDE | AFF_INVISIBLE),
+            0
+        );
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("Attacker slowly fades into existence.\r\n"));
     }
 
     #[test]
