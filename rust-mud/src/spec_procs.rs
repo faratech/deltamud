@@ -546,6 +546,7 @@ pub fn pet_shops(g: &mut GameState, ch: CharId, _me: RoomRnum, cmd: &str, arg: &
 
         g.char_to_room(newpet, ch_rnum);
         add_follower(g, newpet, ch);
+        crate::dg_triggers::load_mtrigger(g, newpet);
 
         g.send_to_char(ch, "May you enjoy your pet.\r\n");
         act(g, "$n buys $N as a pet.", false, ch, None, ActArg::Char(newpet), To::Room);
@@ -1541,4 +1542,111 @@ pub fn register_room_specs(
     }
     // Pet shops (ASSIGNROOM 3031 pet_shops in stock CircleMUD/DeltaMUD).
     assign(3031, pet_shops as crate::spec_assign::RoomSpecFn);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::Descriptor;
+    use crate::dg_db_scripts::TrigProto;
+    use crate::dg_handler::{ScriptKey, DG_TEST_LOCK, MOB_TRIGGER, MTRIG_LOAD};
+    use crate::room::Room;
+    use crate::world::MobileProto;
+
+    fn mobile_proto(vnum: MobVnum, short: &str) -> MobileProto {
+        MobileProto {
+            vnum,
+            name: short.to_string(),
+            short_desc: short.to_string(),
+            long_desc: format!("{} is here.\r\n", short),
+            description: String::new(),
+            level: 1,
+            hitpoints: 1,
+            experience: 0,
+            gold: 0,
+            position: Position::Standing,
+            default_pos: Position::Standing,
+            sex: Gender::Neutral,
+            alignment: 0,
+            act_flags: 0,
+            affect_flags: 0,
+            armor: 0,
+            hitroll: 0,
+            damroll: 0,
+            damnodice: 1,
+            damsizedice: 1,
+            power: 0,
+            mpower: 0,
+            defense: 0,
+            mdefense: 0,
+            technique: 0,
+            abilities: None,
+            attack_type: 0,
+        }
+    }
+
+    #[test]
+    fn pet_shop_purchase_fires_load_trigger_on_new_pet() {
+        let _dg = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        crate::dg_handler::boot_handler();
+        let mut g = GameState::new(Config::default());
+        let shop_room = g.add_room(Room::new(
+            3031,
+            0,
+            "Pet shop".to_string(),
+            "A pet shop.".to_string(),
+        ));
+        let pet_room = g.add_room(Room::new(
+            3032,
+            0,
+            "Pet room".to_string(),
+            "Pets wait here.".to_string(),
+        ));
+        let conn = ConnId(1);
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut buyer = Character::new_player("Buyer".to_string(), Class::Warrior, Race::Human);
+        buyer.desc = Some(conn);
+        buyer.points.gold = 1000;
+        let buyer = g.create_char(buyer);
+        g.char_to_room(buyer, shop_room);
+        g.mob_protos.insert(6200, mobile_proto(6200, "puppy"));
+
+        crate::dg_db_scripts::set_test_proto_trigger(
+            MOB_TRIGGER,
+            6200,
+            TrigProto {
+                vnum: 96200,
+                attach_type: MOB_TRIGGER,
+                name: "pet load marker".to_string(),
+                trigger_type: MTRIG_LOAD,
+                narg: 100,
+                arglist: String::new(),
+                cmdlist: vec![
+                    "set adopted yes".to_string(),
+                    "global adopted".to_string(),
+                    "halt".to_string(),
+                ],
+            },
+        );
+        let display_pet = g.load_mobile(6200).unwrap();
+        g.char_to_room(display_pet, pet_room);
+
+        assert!(pet_shops(&mut g, buyer, shop_room, "buy", "puppy"));
+
+        let bought_pet = g
+            .get_char(buyer)
+            .unwrap()
+            .followers
+            .iter()
+            .copied()
+            .find(|&cid| cid != display_pet)
+            .unwrap();
+        assert_eq!(
+            crate::dg_handler::get_global_var(ScriptKey::Mob(bought_pet), "adopted").as_deref(),
+            Some("yes")
+        );
+    }
 }

@@ -1503,12 +1503,15 @@ fn shopping_buy(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_i
         }
         bought += 1;
 
-        // Producing shop: hand over a fresh copy from the prototype
-        // (load_otrigger is a no-op here). Otherwise move the stock item.
+        // Producing shop: hand over a fresh copy from the prototype. Otherwise
+        // move the stock item.
         let given = if shop_producing(g, o, &shop) {
             let vnum = obj_vnum(g, o);
             match g.load_object(vnum) {
-                Some(fresh) => fresh,
+                Some(fresh) => {
+                    crate::dg_triggers::load_otrigger(g, fresh);
+                    fresh
+                }
                 None => break,
             }
         } else {
@@ -2231,6 +2234,11 @@ mod tests {
     use crate::character::Character;
     use crate::config::Config;
     use crate::connection::Descriptor;
+    use crate::dg_db_scripts::TrigProto;
+    use crate::dg_handler::{ScriptKey, DG_TEST_LOCK, OBJ_TRIGGER, OTRIG_LOAD};
+    use crate::object::{ExtraFlags, ObjectType, WearFlags};
+    use crate::room::Room;
+    use crate::world::ObjectProto;
 
     fn add_player(g: &mut GameState, name: &str, level: Level) -> CharId {
         let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
@@ -2245,6 +2253,30 @@ mod tests {
         ch.desc = Some(conn);
         ch.player.level = level;
         g.create_char(ch)
+    }
+
+    fn object_proto(vnum: ObjVnum, short: &str, cost: i32) -> ObjectProto {
+        ObjectProto {
+            vnum,
+            name: short.to_string(),
+            short_desc: short.to_string(),
+            description: format!("{} is here.", short),
+            obj_type: ObjectType::Other,
+            wear_flags: WearFlags::TAKE,
+            extra_flags: ExtraFlags::empty(),
+            weight: 1,
+            cost,
+            rent: 0,
+            values: [0; 4],
+            curr_slots: 0,
+            total_slots: 0,
+            obj_class: -1,
+            min_level: 0,
+            bitvector: 0,
+            action_description: String::new(),
+            affects: Vec::new(),
+            ex_descriptions: Vec::new(),
+        }
     }
 
     #[test]
@@ -2288,5 +2320,66 @@ mod tests {
 
         shops().lock().unwrap().clear();
         let _ = crate::modify::page_input(&mut g, conn, "q");
+    }
+
+    #[test]
+    fn producing_shop_purchase_fires_load_trigger_on_fresh_object() {
+        let _dg = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        crate::dg_handler::boot_handler();
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Shop".to_string(),
+            "A small shop.".to_string(),
+        ));
+        let buyer = connected_player(&mut g, ConnId(2), "Buyer", 20);
+        let keeper = g.create_char(Character::new_npc(9000));
+        g.char_to_room(buyer, room);
+        g.char_to_room(keeper, room);
+        g.get_char_mut(buyer).unwrap().points.gold = 1000;
+        g.obj_protos
+            .insert(5100, object_proto(5100, "triggered amulet", 10));
+
+        crate::dg_db_scripts::set_test_proto_trigger(
+            OBJ_TRIGGER,
+            5100,
+            TrigProto {
+                vnum: 95100,
+                attach_type: OBJ_TRIGGER,
+                name: "object load marker".to_string(),
+                trigger_type: OTRIG_LOAD,
+                narg: 100,
+                arglist: String::new(),
+                cmdlist: vec![
+                    "set bought yes".to_string(),
+                    "global bought".to_string(),
+                    "halt".to_string(),
+                ],
+            },
+        );
+        let stock = g.load_object(5100).unwrap();
+        g.obj_to_char(stock, keeper);
+
+        {
+            let mut guard = shops().lock().unwrap();
+            guard.clear();
+            let mut shop = ShopData::new(1);
+            shop.producing.push(5100);
+            shop.keeper = 9000;
+            shop.close1 = 28;
+            shop.close2 = 28;
+            shop.message_buy = "$n bought it.".to_string();
+            guard.push(shop);
+        }
+
+        shopping_buy(&mut g, "amulet", buyer, keeper, 0);
+
+        let bought = g.get_char(buyer).unwrap().carrying.first().copied().unwrap();
+        assert_eq!(
+            crate::dg_handler::get_global_var(ScriptKey::Obj(bought), "bought").as_deref(),
+            Some("yes")
+        );
+        shops().lock().unwrap().clear();
     }
 }

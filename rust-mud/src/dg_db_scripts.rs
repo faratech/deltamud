@@ -98,6 +98,20 @@ pub fn trig_proto(rnum: usize) -> Option<TrigProto> {
     index().lock().unwrap().get(rnum).cloned()
 }
 
+#[cfg(test)]
+pub fn set_test_proto_trigger(kind: i32, entity_vnum: i32, proto: TrigProto) {
+    let mut idx = index().lock().unwrap();
+    let rnum = idx.len();
+    vnum_map().lock().unwrap().insert(proto.vnum, rnum);
+    proto_scripts()
+        .lock()
+        .unwrap()
+        .entry((kind, entity_vnum))
+        .or_default()
+        .push(proto.vnum);
+    idx.push(proto);
+}
+
 /// read_trigger(rnum): instantiate a live TrigData from a prototype, returning
 /// its TrigId (trig_data_copy + install). Returns None if rnum is invalid.
 pub fn read_trigger(rnum: usize) -> Option<dg_handler::TrigId> {
