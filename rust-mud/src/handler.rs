@@ -4,7 +4,7 @@
 
 use crate::character::{CharPoints, Character};
 use crate::flags::*;
-use crate::object::ObjLoc;
+use crate::object::{ObjLoc, ObjectType};
 use crate::state::GameState;
 use crate::types::*;
 
@@ -45,6 +45,7 @@ impl GameState {
         if let Some(ch) = self.chars.get_mut(&cid) {
             ch.in_room = Some(rnum);
         }
+        self.adjust_room_light_for_char(cid, rnum, 1);
     }
 
     pub fn char_from_room(&mut self, cid: CharId) {
@@ -52,6 +53,7 @@ impl GameState {
             Some(r) => r,
             None => return,
         };
+        self.adjust_room_light_for_char(cid, rnum, -1);
         if let Some(room) = self.rooms.get_mut(rnum) {
             room.people.retain(|&c| c != cid);
         }
@@ -140,6 +142,7 @@ impl GameState {
         if let Some(o) = self.objs.get_mut(&oid) {
             o.loc = ObjLoc::Worn(cid, pos);
         }
+        self.adjust_room_light_for_equipment(cid, oid, pos, 1);
         // C equip path flags the PC for crash-save (BUG 14).
         self.mark_crash(cid);
         self.affect_total(cid);
@@ -156,10 +159,55 @@ impl GameState {
         if let Some(o) = self.objs.get_mut(&oid) {
             o.loc = ObjLoc::Nowhere;
         }
+        self.adjust_room_light_for_equipment(cid, oid, pos, -1);
         // C unequip path flags the PC for crash-save (BUG 14).
         self.mark_crash(cid);
         self.affect_total(cid);
         Some(oid)
+    }
+
+    fn adjust_room_light_for_char(&mut self, cid: CharId, rnum: RoomRnum, delta: i32) {
+        let has_lit_light = self
+            .chars
+            .get(&cid)
+            .and_then(|ch| ch.equipment[WEAR_LIGHT])
+            .map(|oid| self.is_lit_light(oid))
+            .unwrap_or(false);
+        if has_lit_light {
+            self.adjust_room_light(rnum, delta);
+        }
+    }
+
+    fn adjust_room_light_for_equipment(
+        &mut self,
+        cid: CharId,
+        oid: ObjId,
+        pos: usize,
+        delta: i32,
+    ) {
+        if pos != WEAR_LIGHT || !self.is_lit_light(oid) {
+            return;
+        }
+        if let Some(rnum) = self.chars.get(&cid).and_then(|c| c.in_room) {
+            self.adjust_room_light(rnum, delta);
+        }
+    }
+
+    fn is_lit_light(&self, oid: ObjId) -> bool {
+        self.objs
+            .get(&oid)
+            .map(|o| o.obj_type == ObjectType::Light && o.values[2] > 0)
+            .unwrap_or(false)
+    }
+
+    fn adjust_room_light(&mut self, rnum: RoomRnum, delta: i32) {
+        if let Some(room) = self.rooms.get_mut(rnum) {
+            if delta > 0 {
+                room.light = room.light.saturating_add(delta as u8);
+            } else if delta < 0 {
+                room.light = room.light.saturating_sub((-delta) as u8);
+            }
+        }
     }
 
     /// die_follower (utils.c): a character that follows / is followed is being
@@ -582,7 +630,7 @@ mod tests {
     use crate::character::Character;
     use crate::config::Config;
     use crate::connection::Descriptor;
-    use crate::object::{Object, ObjectAffect};
+    use crate::object::{Object, ObjectAffect, ObjectType};
     use crate::types::{Class, Race};
 
     fn fresh_game() -> GameState {
@@ -834,6 +882,70 @@ mod tests {
         assert_eq!(g.get_obj(inner).unwrap().weight, 5);
         assert_eq!(g.get_obj(outer).unwrap().weight, 15);
         assert_eq!(g.get_char(cid).unwrap().carry_weight, 15);
+    }
+
+    fn lit_light(g: &mut GameState) -> ObjId {
+        let mut light = Object::new(20, "torch".into(), "a torch".into());
+        light.obj_type = ObjectType::Light;
+        light.values[2] = 10;
+        g.create_obj(light)
+    }
+
+    #[test]
+    fn equip_and_unequip_lit_light_updates_room_light() {
+        let mut g = fresh_game();
+        let room = g.add_room(crate::room::Room::new(
+            10,
+            0,
+            "Lit".into(),
+            "A room.".into(),
+        ));
+        let cid = g.create_char(Character::new_player(
+            "Torchbearer".into(),
+            Class::Warrior,
+            Race::Human,
+        ));
+        g.char_to_room(cid, room);
+        let light = lit_light(&mut g);
+
+        g.equip_char(cid, light, WEAR_LIGHT);
+        assert_eq!(g.rooms[room].light, 1);
+
+        assert_eq!(g.unequip_char(cid, WEAR_LIGHT), Some(light));
+        assert_eq!(g.rooms[room].light, 0);
+    }
+
+    #[test]
+    fn moving_with_lit_light_moves_room_light_count() {
+        let mut g = fresh_game();
+        let from = g.add_room(crate::room::Room::new(
+            10,
+            0,
+            "From".into(),
+            "A room.".into(),
+        ));
+        let to = g.add_room(crate::room::Room::new(
+            11,
+            0,
+            "To".into(),
+            "A room.".into(),
+        ));
+        let cid = g.create_char(Character::new_player(
+            "Torchbearer".into(),
+            Class::Warrior,
+            Race::Human,
+        ));
+        let light = lit_light(&mut g);
+        g.equip_char(cid, light, WEAR_LIGHT);
+
+        g.char_to_room(cid, from);
+        assert_eq!(g.rooms[from].light, 1);
+
+        g.char_from_room(cid);
+        assert_eq!(g.rooms[from].light, 0);
+
+        g.char_to_room(cid, to);
+        assert_eq!(g.rooms[to].light, 1);
     }
 
     /// BUG 14: moving objects on/off a PC sets PLR_CRASH (so crash_save_all is
