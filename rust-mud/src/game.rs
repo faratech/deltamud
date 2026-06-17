@@ -260,6 +260,7 @@ impl Game {
             // awaits, where &mut self.state is free for the sync replay — we load
             // the player, replay the command, save, and extract.
             self.drain_offline_ops().await;
+            self.drain_player_save_requests().await;
             self.drain_pfileclean().await;
             self.flush_all().await;
 
@@ -1059,6 +1060,41 @@ impl Game {
             }
             Err(err) => {
                 warn!("pfileclean failed to delete PLR_DELETED player rows: {err}");
+            }
+        }
+    }
+
+    async fn drain_player_save_requests(&mut self) {
+        let requests = self.state.take_player_save_requests();
+        if requests.is_empty() {
+            return;
+        }
+
+        let mut snapshots = Vec::new();
+        for cid in requests {
+            let Some(ch) = self.state.get_char(cid) else {
+                continue;
+            };
+            if ch.is_npc {
+                continue;
+            }
+            snapshots.push(ch.clone());
+        }
+
+        for snapshot in snapshots {
+            self.state.update_player_index(
+                snapshot.idnum,
+                snapshot.get_name(),
+                snapshot.player.level,
+                snapshot.last_logon.timestamp(),
+                "",
+            );
+            if let Err(err) = self.db.save_player(&snapshot).await {
+                warn!(
+                    "queued save_player({}) failed: {}",
+                    snapshot.get_name(),
+                    err
+                );
             }
         }
     }

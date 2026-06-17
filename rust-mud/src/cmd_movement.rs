@@ -455,9 +455,17 @@ fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check
     // the char_from_room below, so the origin rnum captured at fn entry serves.
     let was_in = rnum;
 
+    // Arena prep/observer exits run after movement costs/triggers but before
+    // relocation in C, and can veto a combatant who is out of matches.
+    if !crate::arena::arena_leave_via_exit(g, ch, was_in, exit.to_room) {
+        return false;
+    }
+
     // Relocate.
     g.char_from_room(ch);
     g.char_to_room(ch, to_rnum);
+
+    crate::arena::arena_relay_move(g, ch, dir);
 
     // Drag the mount/rider along if it shared our origin room.
     if let Some(mount) = riding {
@@ -2593,6 +2601,140 @@ mod tests {
     use crate::connection::Descriptor;
     use crate::object::Object;
     use crate::room::{Exit, Room, SpecialExit};
+
+    fn arena_exit_game() -> (GameState, CharId, CharId, RoomRnum, RoomRnum, RoomRnum) {
+        crate::arena::reset_for_tests();
+
+        let mut g = GameState::new(Config::default());
+        let entrance = g.add_room(Room::new(
+            4800,
+            0,
+            "Arena Entrance".to_string(),
+            "The arena entrance.".to_string(),
+        ));
+        let prep = g.add_room(Room::new(
+            4801,
+            0,
+            "Arena Prep Room".to_string(),
+            "The prep room.".to_string(),
+        ));
+        let observer = g.add_room(Room::new(
+            4899,
+            0,
+            "Arena Observatory".to_string(),
+            "The observatory.".to_string(),
+        ));
+        g.rooms[prep].exits[NORTH] = Some(Exit {
+            description: None,
+            keyword: None,
+            exit_info: 0,
+            key: NOTHING,
+            to_room: 4800,
+        });
+        g.rooms[observer].exits[NORTH] = Some(Exit {
+            description: None,
+            keyword: None,
+            exit_info: 0,
+            key: NOTHING,
+            to_room: 4800,
+        });
+
+        let mut master = Character::new_npc(1);
+        master.player.name = "Arenamaster".to_string();
+        let master = g.create_char(master);
+        g.char_to_room(master, entrance);
+
+        let conn = ConnId(1);
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut ch = Character::new_player("Fighter".to_string(), Class::Warrior, Race::Human);
+        ch.desc = Some(conn);
+        ch.idnum = 1;
+        ch.player.level = 10;
+        ch.points.gold = 20_000;
+        ch.points.bank_gold = 5_000;
+        ch.points.mana = 77;
+        ch.points.move_points = 77;
+        ch.wimp_level = 12;
+        ch.recall_level = 34;
+        ch.affect_flags = AFF_INVISIBLE;
+        let ch = g.create_char(ch);
+        g.char_to_room(ch, entrance);
+
+        (g, ch, master, entrance, prep, observer)
+    }
+
+    #[test]
+    fn arena_combatant_exit_runs_prep_room_cleanup() {
+        let (mut g, ch, master, entrance, prep, _observer) = arena_exit_game();
+
+        assert!(crate::arena::arenaentrancemaster(
+            &mut g,
+            ch,
+            master,
+            "arena",
+            "combatant",
+        ));
+        assert_eq!(g.get_char(ch).unwrap().in_room, Some(prep));
+        assert_eq!(crate::arena::arena_stat(ch), crate::arena::ARENA_COMBATANT1);
+
+        assert!(perform_move(&mut g, ch, NORTH as i32, false));
+
+        let c = g.get_char(ch).unwrap();
+        assert_eq!(c.in_room, Some(entrance));
+        assert_eq!(crate::arena::arena_stat(ch), crate::arena::ARENA_NOT);
+        assert_eq!(c.points.mana, 1);
+        assert_eq!(c.points.move_points, 1);
+        assert_eq!(c.points.gold, 9_000);
+        assert_eq!(c.points.bank_gold, 5_000);
+        assert_eq!(c.wimp_level, 12);
+        assert_eq!(c.recall_level, 34);
+        assert_eq!(g.player_save_requests, vec![ch]);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("There's a penalty for leaving the arena"));
+    }
+
+    #[test]
+    fn arena_observer_exit_detaches_observer_state() {
+        let (mut g, combatant, master, entrance, _prep, observer_room) = arena_exit_game();
+        assert!(crate::arena::arenaentrancemaster(
+            &mut g,
+            combatant,
+            master,
+            "arena",
+            "combatant",
+        ));
+
+        let conn = ConnId(2);
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "observer".to_string()));
+        let mut observer =
+            Character::new_player("Watcher".to_string(), Class::Warrior, Race::Human);
+        observer.desc = Some(conn);
+        observer.idnum = 2;
+        observer.player.level = 10;
+        observer.points.gold = 1_000;
+        let observer = g.create_char(observer);
+        g.char_to_room(observer, entrance);
+
+        assert!(crate::arena::arenaentrancemaster(
+            &mut g,
+            observer,
+            master,
+            "arena",
+            "observer",
+        ));
+        assert_eq!(g.get_char(observer).unwrap().in_room, Some(observer_room));
+        assert_eq!(crate::arena::arena_stat(observer), crate::arena::ARENA_OBSERVER);
+        assert_eq!(crate::arena::arena_observing(observer), Some(combatant));
+
+        assert!(perform_move(&mut g, observer, NORTH as i32, false));
+
+        assert_eq!(g.get_char(observer).unwrap().in_room, Some(entrance));
+        assert_eq!(crate::arena::arena_stat(observer), crate::arena::ARENA_NOT);
+        assert_eq!(crate::arena::arena_observing(observer), None);
+    }
 
     fn movement_game() -> (GameState, CharId, RoomRnum, RoomRnum) {
         let mut g = GameState::new(Config::default());

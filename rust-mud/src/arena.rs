@@ -977,8 +977,7 @@ pub fn arena_leave_via_exit(g: &mut GameState, ch: CharId, from: RoomRnum, to_vn
             deobserve(ch);
             clearobservers(ch);
             set_stat(ch, ARENA_NOT);
-            // save_char(ch, NOWHERE) — persistence is the caller's concern; the
-            // PC's row is flushed by the regular async save path.
+            g.request_player_save(ch);
 
             // Repoint defaultobserve if the leaver was it.
             if get_defaultobserve() == Some(ch) {
@@ -1073,6 +1072,15 @@ pub fn forget_char(ch: CharId) {
                 c.last_fighting = None;
             }
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_for_tests() {
+    if let Ok(mut w) = arena().lock() {
+        w.chars.clear();
+        w.arenamaster = None;
+        w.defaultobserve = None;
     }
 }
 

@@ -106,6 +106,7 @@ pub struct GameState {
     // command, then saves + extracts. Empty in steady state.
     pub offline_ops: Vec<OfflineOp>,
     pub pfileclean_requested: bool,
+    pub player_save_requests: Vec<CharId>,
 
     next_char_id: u64,
     next_obj_id: u64,
@@ -153,6 +154,7 @@ impl GameState {
             player_table: Vec::new(),
             offline_ops: Vec::new(),
             pfileclean_requested: false,
+            player_save_requests: Vec::new(),
             next_char_id: 1,
             next_obj_id: 1,
             rng: Rng::default(),
@@ -350,6 +352,19 @@ impl GameState {
 
     pub fn take_pfileclean_request(&mut self) -> bool {
         std::mem::take(&mut self.pfileclean_requested)
+    }
+
+    /// Queue a live PC row save for the async game loop. This is the sync
+    /// command equivalent of C `save_char(ch, NOWHERE)` for handlers that cannot
+    /// await the database directly.
+    pub fn request_player_save(&mut self, ch: CharId) {
+        if !self.player_save_requests.contains(&ch) {
+            self.player_save_requests.push(ch);
+        }
+    }
+
+    pub fn take_player_save_requests(&mut self) -> Vec<CharId> {
+        std::mem::take(&mut self.player_save_requests)
     }
 
     // ---- Objects --------------------------------------------------------
