@@ -129,6 +129,12 @@ struct ClanTable {
 
 static CLANS: OnceLock<Mutex<ClanTable>> = OnceLock::new();
 
+#[cfg(test)]
+pub(crate) fn test_clan_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+}
+
 fn table() -> &'static Mutex<ClanTable> {
     // If boot_clans was never called (e.g. a unit test), install an empty
     // table with the default lib path so the commands still operate.
@@ -200,6 +206,26 @@ pub fn boot_clans(lib_path: &str) {
     // and a roster count over the live game is done in `clan who`.
     save_clans();
     eprintln!("Booting clans . . . Done.");
+}
+
+/// Rebuild loaded clan member counts from player_main aggregate rows, matching
+/// C boot_clans(): start every loaded clan at zero, count only valid clan
+/// indexes, and ignore applicants whose clan_rank is -1.
+pub fn recount_member_counts(counts: &[(i32, i32)]) {
+    let mut t = table().lock().unwrap();
+    for clan in &mut t.clans {
+        clan.members = 0;
+    }
+    for &(idx, count) in counts {
+        if idx < 0 || count <= 0 {
+            continue;
+        }
+        if let Some(clan) = t.clans.get_mut(idx as usize) {
+            clan.members = count;
+        }
+    }
+    drop(t);
+    save_clans();
 }
 
 /// CircleMUD save_clans(): serialize the whole table to clans.dat.
@@ -1715,5 +1741,49 @@ fn pers(g: &GameState, viewer: CharId, target: CharId) -> String {
         "A Mystical Being".to_string()
     } else {
         "someone".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_lib(name: &str) -> String {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("deltamud-clan-{}-{}", name, stamp));
+        std::fs::create_dir_all(path.join("etc")).unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn recount_member_counts_replaces_stale_loaded_counts() {
+        let _guard = test_clan_guard();
+        let lib = temp_lib("recount");
+        let mut first = ClanInfo::default();
+        first.name = "First".to_string();
+        first.members = 99;
+        let mut second = ClanInfo::default();
+        second.name = "Second".to_string();
+        second.members = 88;
+        let path = clan_file_path(&lib);
+        std::fs::write(&path, encode_clans(&[first, second])).unwrap();
+
+        boot_clans(&lib);
+        assert_eq!(with_clan(0, |c| c.members), Some(99));
+        assert_eq!(with_clan(1, |c| c.members), Some(88));
+
+        recount_member_counts(&[(0, 2), (1, 0), (4, 12), (-1, 7)]);
+
+        assert_eq!(with_clan(0, |c| c.members), Some(2));
+        assert_eq!(with_clan(1, |c| c.members), Some(0));
+        let saved = std::fs::read(&path).unwrap();
+        let decoded = decode_clans(&saved).unwrap();
+        assert_eq!(decoded[0].members, 2);
+        assert_eq!(decoded[1].members, 0);
+        let _ = std::fs::remove_dir_all(lib);
     }
 }

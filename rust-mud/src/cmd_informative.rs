@@ -3644,6 +3644,7 @@ mod tests {
 
     #[test]
     fn do_who_displays_clan_rank_and_clan_names() {
+        let _guard = crate::clan::test_clan_guard();
         crate::clan::set_test_clans(vec![(
             "Rustaceans".to_string(),
             vec!["Initiate".to_string(), "Captain".to_string()],

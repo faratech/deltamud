@@ -193,6 +193,25 @@ impl Database {
         Ok(conn.affected_rows())
     }
 
+    /// C boot_clans() recounts from player_main on every boot.
+    pub async fn clan_member_counts(&self) -> Result<Vec<(i32, i32)>> {
+        let mut conn = self.pool.get_conn().await?;
+        let rows: Vec<Row> = conn
+            .exec(
+                "SELECT clan, COUNT(*) FROM player_main WHERE clan >= 0 AND clan_rank != -1 GROUP BY clan",
+                (),
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let clan: Option<i32> = row.get(0);
+                let count: Option<u64> = row.get(1);
+                clan.zip(count).map(|(clan, count)| (clan, count as i32))
+            })
+            .collect())
+    }
+
     pub async fn save_player(&self, ch: &Character) -> Result<()> {
         // The password is never rewritten on a normal save; preserve the
         // stored hash (C re-supplies ch->player.passwd, which is unchanged).

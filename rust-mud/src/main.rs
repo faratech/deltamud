@@ -307,6 +307,7 @@ pub trait DatabaseInterface: Send + Sync {
     async fn save_player(&self, character: &character::Character) -> Result<()>;
     async fn verify_password(&self, name: &str, password: &str) -> Result<bool>;
     async fn delete_deleted_players(&self) -> Result<u64>;
+    async fn clan_member_counts(&self) -> Result<Vec<(i32, i32)>>;
     /// Every player's index row {idnum,name,level,last_logon,host} for the
     /// boot-time player_table build (C build_player_index, db.c).
     async fn list_players(&self) -> Result<Vec<crate::state::PlayerIndex>>;
@@ -334,6 +335,9 @@ impl DatabaseInterface for database::Database {
     }
     async fn delete_deleted_players(&self) -> Result<u64> {
         self.delete_deleted_players().await
+    }
+    async fn clan_member_counts(&self) -> Result<Vec<(i32, i32)>> {
+        self.clan_member_counts().await
     }
     async fn list_players(&self) -> Result<Vec<crate::state::PlayerIndex>> {
         self.list_players().await
@@ -433,6 +437,10 @@ async fn main() -> Result<()> {
         shop::boot_shops(&config.lib_path);
     }
     clan::boot_clans(&config.lib_path);
+    match db.clan_member_counts().await {
+        Ok(counts) => clan::recount_member_counts(&counts),
+        Err(e) => warn!("Could not recount clan members from player_main: {}", e),
+    }
     boards::boot_boards(&config.lib_path);
     ban::boot_ban(&config.lib_path);
     mail::boot_mail(&config.lib_path);

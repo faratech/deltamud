@@ -90,6 +90,19 @@ impl crate::DatabaseInterface for MockDatabase {
         Ok((before - players.len()) as u64)
     }
 
+    async fn clan_member_counts(&self) -> Result<Vec<(i32, i32)>> {
+        let players = self.players.lock().unwrap();
+        let mut counts: HashMap<i32, i32> = HashMap::new();
+        for stored in players.values() {
+            if stored.character.clan >= 0 && stored.character.clan_rank != -1 {
+                *counts.entry(stored.character.clan).or_insert(0) += 1;
+            }
+        }
+        let mut out: Vec<_> = counts.into_iter().collect();
+        out.sort_by_key(|(clan, _)| *clan);
+        Ok(out)
+    }
+
     async fn list_players(&self) -> Result<Vec<crate::state::PlayerIndex>> {
         // Build index rows from the stored Character clones (the mock has no
         // host column — host is connection-derived, "" here; the live
@@ -164,5 +177,45 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, vec!["Keep".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn clan_member_counts_aggregates_non_applicant_members() {
+        let db = MockDatabase::new();
+        let mut first = Character::new_player(
+            "First".to_string(),
+            crate::types::Class::Warrior,
+            crate::types::Race::Human,
+        );
+        first.clan = 2;
+        first.clan_rank = 1;
+        let mut second = Character::new_player(
+            "Second".to_string(),
+            crate::types::Class::Warrior,
+            crate::types::Race::Human,
+        );
+        second.clan = 2;
+        second.clan_rank = 0;
+        let mut applicant = Character::new_player(
+            "Applicant".to_string(),
+            crate::types::Class::Warrior,
+            crate::types::Race::Human,
+        );
+        applicant.clan = 2;
+        applicant.clan_rank = -1;
+        let mut noclan = Character::new_player(
+            "Noclan".to_string(),
+            crate::types::Class::Warrior,
+            crate::types::Race::Human,
+        );
+        noclan.clan = -1;
+        noclan.clan_rank = 1;
+
+        db.create_player(&first, "pass").await.unwrap();
+        db.create_player(&second, "pass").await.unwrap();
+        db.create_player(&applicant, "pass").await.unwrap();
+        db.create_player(&noclan, "pass").await.unwrap();
+
+        assert_eq!(db.clan_member_counts().await.unwrap(), vec![(2, 2)]);
     }
 }
