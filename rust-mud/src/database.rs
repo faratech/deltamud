@@ -169,6 +169,30 @@ impl Database {
         Ok(out)
     }
 
+    /// delete_player_entry() for every PLR_DELETED player. Child tables are
+    /// joined before player_main is removed so the act bit remains available.
+    pub async fn delete_deleted_players(&self) -> Result<u64> {
+        let mut conn = self.pool.get_conn().await?;
+        let bit = crate::flags::PLR_DELETED;
+        conn.exec_drop(
+            r"DELETE pa FROM player_affects pa
+              JOIN player_main pm ON pm.idnum = pa.idnum
+              WHERE (pm.act & ?) <> 0",
+            (bit,),
+        )
+        .await?;
+        conn.exec_drop(
+            r"DELETE ps FROM player_skills ps
+              JOIN player_main pm ON pm.idnum = ps.idnum
+              WHERE (pm.act & ?) <> 0",
+            (bit,),
+        )
+        .await?;
+        conn.exec_drop("DELETE FROM player_main WHERE (act & ?) <> 0", (bit,))
+            .await?;
+        Ok(conn.affected_rows())
+    }
+
     pub async fn save_player(&self, ch: &Character) -> Result<()> {
         // The password is never rewritten on a normal save; preserve the
         // stored hash (C re-supplies ch->player.passwd, which is unchanged).

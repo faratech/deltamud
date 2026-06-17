@@ -260,6 +260,7 @@ impl Game {
             // awaits, where &mut self.state is free for the sync replay — we load
             // the player, replay the command, save, and extract.
             self.drain_offline_ops().await;
+            self.drain_pfileclean().await;
             self.flush_all().await;
 
             // The `shutdown` immortal command sets this (C circle_shutdown=1);
@@ -1034,6 +1035,29 @@ impl Game {
             self.state.extract_char(id);
             if let Some(s) = snap {
                 let _ = self.db.save_player(&s).await;
+            }
+        }
+    }
+
+    async fn drain_pfileclean(&mut self) {
+        if !self.state.take_pfileclean_request() {
+            return;
+        }
+
+        match self.db.delete_deleted_players().await {
+            Ok(deleted) => {
+                info!("pfileclean deleted {} PLR_DELETED player row(s)", deleted);
+                match self.db.list_players().await {
+                    Ok(players) => {
+                        self.state.player_table = players;
+                    }
+                    Err(err) => {
+                        warn!("pfileclean deleted rows but failed to rebuild player index: {err}");
+                    }
+                }
+            }
+            Err(err) => {
+                warn!("pfileclean failed to delete PLR_DELETED player rows: {err}");
             }
         }
     }

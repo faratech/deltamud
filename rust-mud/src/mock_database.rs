@@ -83,6 +83,13 @@ impl crate::DatabaseInterface for MockDatabase {
         }
     }
 
+    async fn delete_deleted_players(&self) -> Result<u64> {
+        let mut players = self.players.lock().unwrap();
+        let before = players.len();
+        players.retain(|_, s| (s.character.act_flags & crate::flags::PLR_DELETED) == 0);
+        Ok((before - players.len()) as u64)
+    }
+
     async fn list_players(&self) -> Result<Vec<crate::state::PlayerIndex>> {
         // Build index rows from the stored Character clones (the mock has no
         // host column — host is connection-derived, "" here; the live
@@ -124,5 +131,38 @@ mod tests {
 
         assert!(!db.verify_password("Mort", "oldpass").await.unwrap());
         assert!(db.verify_password("Mort", "newpass").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn delete_deleted_players_removes_flagged_records() {
+        let db = MockDatabase::new();
+        let keep = Character::new_player(
+            "Keep".to_string(),
+            crate::types::Class::Warrior,
+            crate::types::Race::Human,
+        );
+        let mut delete = Character::new_player(
+            "Delete".to_string(),
+            crate::types::Class::Warrior,
+            crate::types::Race::Human,
+        );
+        delete.act_flags |= crate::flags::PLR_DELETED;
+
+        db.create_player(&keep, "keep-pass").await.unwrap();
+        db.create_player(&delete, "delete-pass").await.unwrap();
+
+        assert_eq!(db.delete_deleted_players().await.unwrap(), 1);
+        assert!(db.player_exists("Keep").await.unwrap());
+        assert!(!db.player_exists("Delete").await.unwrap());
+
+        let mut names: Vec<_> = db
+            .list_players()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["Keep".to_string()]);
     }
 }

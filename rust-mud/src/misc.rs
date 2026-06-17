@@ -21,10 +21,8 @@
 // `motd` text file in GameState (game.rs load_text_files reads lib/text/motd),
 // so do_reboot reloads that one synchronously and acknowledges the remaining
 // keywords — there is no wizlist/news/credits/help-table state on GameState to
-// re-read. do_pfileclean's actual row deletion is a database concern (the C
-// clean_pfile runs raw SQL); the Rust database layer owns the player table, so
-// this command logs + reports as in C but the SQL prune itself is deferred to
-// the database module (documented gap, no behavioural lie to the player).
+// re-read. do_pfileclean logs + reports as in C, then queues the async database
+// cleanup for game.rs to drain and reflect into player_table.
 
 use crate::act::{act, ActArg, To};
 use crate::constants::DIRS;
@@ -276,19 +274,11 @@ fn reload_motd(g: &mut GameState) {
 //
 // The C clean_pfile() walks player_main, calls delete_player_entry() for every
 // row whose `act` column has PLR_DELETED set, then rebuilds the in-memory
-// player index. The persistent player table lives in the async database layer
-// (sqlx) which a synchronous &mut GameState command can't reach, so the
-// faithful, reachable analogue here prunes any PLR_DELETED-flagged loaded
-// player from the live name index (players_by_name) — the in-memory player
-// index the C build_player_index() rebuilds. The password gate, the
+// player index. The Rust command path is synchronous, so it queues the database
+// work here; game.rs drains that request asynchronously and rebuilds
+// GameState.player_table after the SQL cleanup. The password gate, the
 // "Cleaning..." reply, and the mudlog line are copied verbatim from C.
-// (Documented gap: the on-disk/SQL row deletion is owned by the database
-// module; this command performs the reachable in-memory prune + logs the
-// request, and does not falsely claim the SQL rows were removed.)
 // ===========================================================================
-
-/// PLR_DELETED (structs.h: 1 << 10) — not yet in flags.rs.
-const PLR_DELETED: i64 = 1 << 10;
 
 pub fn do_pfileclean(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     // C: skip_spaces(&argument) then strcmp(argument, "OptimisePfile").
@@ -299,33 +289,9 @@ pub fn do_pfileclean(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         let name = g.get_char(ch).map(|c| c.get_name().to_string()).unwrap_or_default();
         // C: mudlog(buf, NRM, LVL_IMPL, TRUE).
         mudlog_imp(g, &format!("{} initiated playerfile clean.", name));
-        clean_pfile(g);
+        g.queue_pfileclean();
     } else {
         g.send_to_char(ch, "Not unless you know the password.\r\n");
-    }
-}
-
-/// clean_pfile() in-memory analogue: drop every PLR_DELETED-flagged loaded
-/// player from the name index (build_player_index would omit them after the C
-/// SQL prune). Online/non-deleted players are untouched.
-fn clean_pfile(g: &mut GameState) {
-    let deleted: Vec<String> = g
-        .players_by_name
-        .iter()
-        .filter_map(|(name, &id)| {
-            let flagged = g
-                .get_char(id)
-                .map(|c| !c.is_npc && (c.act_flags & PLR_DELETED) != 0)
-                .unwrap_or(false);
-            if flagged {
-                Some(name.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-    for name in deleted {
-        g.players_by_name.remove(&name);
     }
 }
 

@@ -105,6 +105,7 @@ pub struct GameState {
     // drains this each heartbeat — loads the player into the world, replays the
     // command, then saves + extracts. Empty in steady state.
     pub offline_ops: Vec<OfflineOp>,
+    pub pfileclean_requested: bool,
 
     next_char_id: u64,
     next_obj_id: u64,
@@ -151,6 +152,7 @@ impl GameState {
             players_by_name: HashMap::new(),
             player_table: Vec::new(),
             offline_ops: Vec::new(),
+            pfileclean_requested: false,
             next_char_id: 1,
             next_obj_id: 1,
             rng: Rng::default(),
@@ -337,6 +339,17 @@ impl GameState {
             target: target.to_string(),
             command: command.to_string(),
         });
+    }
+
+    /// Queue `pfileclean`'s async DB cleanup. The command path is synchronous,
+    /// so game.rs drains this between awaits and rebuilds player_table after
+    /// deleting PLR_DELETED rows from persistent storage.
+    pub fn queue_pfileclean(&mut self) {
+        self.pfileclean_requested = true;
+    }
+
+    pub fn take_pfileclean_request(&mut self) -> bool {
+        std::mem::take(&mut self.pfileclean_requested)
     }
 
     // ---- Objects --------------------------------------------------------

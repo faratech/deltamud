@@ -306,6 +306,7 @@ pub trait DatabaseInterface: Send + Sync {
     async fn load_player(&self, name: &str) -> Result<character::Character>;
     async fn save_player(&self, character: &character::Character) -> Result<()>;
     async fn verify_password(&self, name: &str, password: &str) -> Result<bool>;
+    async fn delete_deleted_players(&self) -> Result<u64>;
     /// Every player's index row {idnum,name,level,last_logon,host} for the
     /// boot-time player_table build (C build_player_index, db.c).
     async fn list_players(&self) -> Result<Vec<crate::state::PlayerIndex>>;
@@ -330,6 +331,9 @@ impl DatabaseInterface for database::Database {
     }
     async fn verify_password(&self, name: &str, p: &str) -> Result<bool> {
         self.verify_password(name, p).await
+    }
+    async fn delete_deleted_players(&self) -> Result<u64> {
+        self.delete_deleted_players().await
     }
     async fn list_players(&self) -> Result<Vec<crate::state::PlayerIndex>> {
         self.list_players().await
