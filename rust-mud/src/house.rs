@@ -1351,6 +1351,17 @@ pub fn house_for_owner(idnum: i64) -> Option<RoomVnum> {
     found
 }
 
+/// True if the control table records `vnum` as a house owned by `owner_idnum`.
+pub fn house_owned_by(vnum: RoomVnum, owner_idnum: i64) -> bool {
+    if owner_idnum < 0 {
+        return false;
+    }
+    let table = houses().lock().unwrap();
+    table
+        .iter()
+        .any(|h| h.vnum == vnum && h.owner == owner_idnum)
+}
+
 /// House_can_enter(ch, house): true if `ch` may enter the house at vnum `house`.
 /// GRGOD+ and non-houses always pass. Consulted by the movement gate.
 pub fn house_can_enter(g: &GameState, ch: CharId, house: RoomVnum) -> bool {
@@ -1377,6 +1388,19 @@ pub fn house_can_enter(g: &GameState, ch: CharId, house: RoomVnum) -> bool {
         }
         x if x == HOUSE_OPEN => true,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+pub fn set_test_houses(house_records: Vec<(RoomVnum, i64)>) {
+    let mut table = houses().lock().unwrap();
+    table.clear();
+    for (vnum, owner) in house_records {
+        let mut rec = HouseControlRec::blank();
+        rec.vnum = vnum;
+        rec.owner = owner;
+        rec.mode = HOUSE_PRIVATE;
+        table.push(rec);
     }
 }
 

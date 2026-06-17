@@ -18,6 +18,7 @@ use crate::character::Affect;
 use crate::flags::{
     APPLY_CON, APPLY_DEFENSE, APPLY_DEX, APPLY_HIT, APPLY_INT, APPLY_MANA, APPLY_MDEFENSE,
     APPLY_MOVE, APPLY_MPOWER, APPLY_NONE, APPLY_POWER, APPLY_STR, APPLY_TECHNIQUE, APPLY_WIS,
+    PRF2_INTANGIBLE,
 };
 use crate::object::{ObjLoc, ObjectType};
 use crate::room::RoomFlags;
@@ -1204,6 +1205,14 @@ pub fn spell_portal(
         g.send_to_char(ch, "Eldritch wizardry obstructs thee.\n\r");
         return;
     }
+    let victim_intangible = g
+        .get_char(victim)
+        .map(|c| c.prf2_flags & PRF2_INTANGIBLE != 0)
+        .unwrap_or(false);
+    if victim_intangible && (ch_level < LVL_IMMORT as i32 || is_npc(g, ch)) {
+        g.send_to_char(ch, "Eldritch wizardry obstructs thee.\n\r");
+        return;
+    }
     if ch_flags.contains(RoomFlags::TUNNEL) {
         g.send_to_char(ch, "There is no room in here to summon!\n\r");
         return;
@@ -1239,10 +1248,14 @@ pub fn spell_portal(
         g.send_to_char(ch, "Your target is protected against your magic.\n\r");
         return;
     }
-    if v_flags.contains(RoomFlags::HOUSE) {
-        // House-ownership table unported; treat as protected (C checks owner).
-        g.send_to_char(ch, "Your target is protected against your magic.\n\r");
-        return;
+    const ROOM_HOUSE_CRASH: u32 = 1 << 12;
+    if v_flags.contains(RoomFlags::HOUSE) || v_flags.bits() & ROOM_HOUSE_CRASH != 0 {
+        let caster_idnum = g.get_char(ch).map(|c| c.idnum).unwrap_or(-1);
+        let target_vnum = g.room(v_room).number;
+        if !crate::house::house_owned_by(target_vnum, caster_idnum) {
+            g.send_to_char(ch, "Your target is protected against your magic.\n\r");
+            return;
+        }
     }
     if v_flags.contains(RoomFlags::PRIVATE) {
         g.send_to_char(ch, "Your target is protected against your magic.\n\r");
@@ -1533,8 +1546,42 @@ mod tests {
     use crate::character::Character;
     use crate::config::Config;
     use crate::connection::Descriptor;
+    use crate::object::{ExtraFlags, ObjectType, WearFlags};
     use crate::room::Room;
-    use crate::world::Zone;
+    use crate::world::{ObjectProto, Zone};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn lock_test_houses() -> MutexGuard<'static, ()> {
+        static TEST_HOUSES_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        TEST_HOUSES_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    fn add_portal_proto(g: &mut GameState) {
+        g.obj_protos.insert(
+            PORTAL_VNUM,
+            ObjectProto {
+                vnum: PORTAL_VNUM,
+                name: "portal".to_string(),
+                short_desc: "a shimmering portal".to_string(),
+                description: "A shimmering portal hovers here.".to_string(),
+                obj_type: ObjectType::Portal,
+                wear_flags: WearFlags::TAKE,
+                extra_flags: ExtraFlags::empty(),
+                weight: 1,
+                cost: 0,
+                rent: 0,
+                values: [0; 4],
+                curr_slots: 0,
+                total_slots: 0,
+                obj_class: -1,
+                min_level: 0,
+                bitvector: 0,
+                action_description: String::new(),
+                affects: Vec::new(),
+                ex_descriptions: Vec::new(),
+            },
+        );
+    }
 
     #[test]
     fn control_weather_is_silent() {
@@ -1616,5 +1663,138 @@ mod tests {
             .unwrap()
             .outbuf
             .contains("You failed.\r\n"));
+    }
+
+    #[test]
+    fn portal_blocks_intangible_target_for_mortal_caster() {
+        let _guard = lock_test_houses();
+        crate::house::set_test_houses(Vec::new());
+        let mut g = GameState::new(Config::default());
+        add_portal_proto(&mut g);
+        let caster_room = g.add_room(Room::new(
+            100,
+            0,
+            "Caster room".to_string(),
+            "A quiet room.".to_string(),
+        ));
+        let target_room = g.add_room(Room::new(
+            101,
+            0,
+            "Target room".to_string(),
+            "A distant room.".to_string(),
+        ));
+        let conn = ConnId(1);
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut caster = Character::new_player("Caster".into(), Class::Cleric, Race::Human);
+        caster.desc = Some(conn);
+        caster.idnum = 10;
+        caster.player.level = 20;
+        let caster = g.create_char(caster);
+        let mut target = Character::new_player("Target".into(), Class::Cleric, Race::Human);
+        target.idnum = 11;
+        target.prf2_flags |= PRF2_INTANGIBLE;
+        let target = g.create_char(target);
+        g.char_to_room(caster, caster_room);
+        g.char_to_room(target, target_room);
+
+        spell_portal(&mut g, 20, caster, Some(target), None);
+
+        assert!(g
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("Eldritch wizardry obstructs thee.\n\r"));
+        assert!(g.room(caster_room).contents.is_empty());
+        assert!(g.room(target_room).contents.is_empty());
+    }
+
+    #[test]
+    fn portal_allows_target_in_casters_own_house() {
+        let _guard = lock_test_houses();
+        let mut g = GameState::new(Config::default());
+        add_portal_proto(&mut g);
+        let caster_room = g.add_room(Room::new(
+            100,
+            0,
+            "Caster room".to_string(),
+            "A quiet room.".to_string(),
+        ));
+        let house_room = g.add_room(Room::new(
+            200,
+            0,
+            "House room".to_string(),
+            "A private home.".to_string(),
+        ));
+        g.room_mut(house_room).room_flags |= RoomFlags::HOUSE;
+        crate::house::set_test_houses(vec![(200, 10)]);
+        let conn = ConnId(1);
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut caster = Character::new_player("Caster".into(), Class::Cleric, Race::Human);
+        caster.desc = Some(conn);
+        caster.idnum = 10;
+        caster.player.level = 20;
+        let caster = g.create_char(caster);
+        let mut target = Character::new_player("Target".into(), Class::Cleric, Race::Human);
+        target.idnum = 11;
+        let target = g.create_char(target);
+        g.char_to_room(caster, caster_room);
+        g.char_to_room(target, house_room);
+
+        spell_portal(&mut g, 20, caster, Some(target), None);
+
+        let out = &g.descriptors.get(&conn).unwrap().outbuf;
+        assert!(!out.contains("Your target is protected against your magic.\n\r"));
+        assert_eq!(g.room(caster_room).contents.len(), 1);
+        assert_eq!(g.room(house_room).contents.len(), 1);
+    }
+
+    #[test]
+    fn portal_blocks_target_in_another_players_house() {
+        let _guard = lock_test_houses();
+        let mut g = GameState::new(Config::default());
+        add_portal_proto(&mut g);
+        let caster_room = g.add_room(Room::new(
+            100,
+            0,
+            "Caster room".to_string(),
+            "A quiet room.".to_string(),
+        ));
+        let house_room = g.add_room(Room::new(
+            200,
+            0,
+            "House room".to_string(),
+            "A private home.".to_string(),
+        ));
+        g.room_mut(house_room).room_flags |= RoomFlags::HOUSE;
+        crate::house::set_test_houses(vec![(200, 99)]);
+        let conn = ConnId(1);
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut caster = Character::new_player("Caster".into(), Class::Cleric, Race::Human);
+        caster.desc = Some(conn);
+        caster.idnum = 10;
+        caster.player.level = 20;
+        let caster = g.create_char(caster);
+        let target = g.create_char(Character::new_player(
+            "Target".into(),
+            Class::Cleric,
+            Race::Human,
+        ));
+        g.char_to_room(caster, caster_room);
+        g.char_to_room(target, house_room);
+
+        spell_portal(&mut g, 20, caster, Some(target), None);
+
+        assert!(g
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("Your target is protected against your magic.\n\r"));
+        assert!(g.room(caster_room).contents.is_empty());
+        assert!(g.room(house_room).contents.is_empty());
     }
 }
