@@ -398,14 +398,23 @@ pub fn hit(g: &mut GameState, ch: CharId, victim: CharId) {
 /// wielded weapon" (the normal melee round), SKILL_BACKSTAB applies the
 /// level-scaled backstab multiplier and is passed through to `damage()`.
 pub fn hit_type(g: &mut GameState, ch: CharId, victim: CharId, ty: i32) {
-    // peaceful-room / same-room sanity is handled by callers and damage(); here
-    // we just resolve the swing as fight.c hit() does.
-    //
     // C `hit(ch,victim,type)` forwards `type` to `damage()`; for an untyped
     // melee swing that resolves to the weapon verb (GET_ATTACKTYPE), and
     // SKILL_BACKSTAB stays SKILL_BACKSTAB. Match that here.
     let attacktype = if ty == TYPE_UNDEFINED { get_attacktype(g, ch) } else { ty };
     let is_backstab = ty == SKILL_BACKSTAB as i32;
+
+    crate::dg_triggers::fight_mtrigger(g, ch);
+    crate::dg_triggers::fight_otrigger(g, ch);
+
+    let same_room = g.get_char(ch).and_then(|c| c.in_room)
+        == g.get_char(victim).and_then(|c| c.in_room);
+    if !same_room {
+        if g.get_char(ch).and_then(|c| c.fighting) == Some(victim) {
+            stop_fighting(g, ch);
+        }
+        return;
+    }
 
     let diceroll = g.rng.number(0, 100);
     let awake = g.get_char(victim).map(|c| c.position > Position::Sleeping).unwrap_or(false);
@@ -414,6 +423,7 @@ pub fn hit_type(g: &mut GameState, ch: CharId, victim: CharId, ty: i32) {
     if diceroll > chance(g, ch, victim, 0) && awake {
         // The attacker missed the victim (0 damage -> miss message).
         damage_type(g, ch, victim, 0, attacktype);
+        crate::dg_triggers::hitprcnt_mtrigger(g, victim);
         return;
     }
 
@@ -460,6 +470,7 @@ pub fn hit_type(g: &mut GameState, ch: CharId, victim: CharId, ty: i32) {
     // before set_fighting and combat would never start (BUG 4).
     damage_type(g, ch, victim, dam, attacktype);
     trigger_redirect_charge(g, ch, victim);
+    crate::dg_triggers::hitprcnt_mtrigger(g, victim);
 }
 
 fn trigger_redirect_charge(g: &mut GameState, ch: CharId, victim: CharId) {
@@ -1450,8 +1461,13 @@ mod tests {
     use crate::character::{Affect, Character};
     use crate::config::Config;
     use crate::connection::Descriptor;
+    use crate::dg_handler::{
+        self, add_trigger, install_trig, ScriptKey, TrigData, DG_TEST_LOCK, MOB_TRIGGER,
+        MTRIG_FIGHT, MTRIG_HITPRCNT, OBJ_TRIGGER, OTRIG_FIGHT,
+    };
     use crate::flags::{AFF_CHARM, AFF_GROUP, MOB_DBLATTACK, MOB_SPEC};
     use crate::room::{Exit, Room};
+    use std::collections::HashMap;
 
     const TEST_W_BODY: usize = 5;
 
@@ -1487,6 +1503,26 @@ mod tests {
         let oid = g.create_obj(obj);
         g.obj_to_char(oid, owner);
         oid
+    }
+
+    fn make_dg_trigger(attach_type: i32, trigger_type: i64, narg: i32, cmds: &[&str]) -> crate::dg_handler::TrigId {
+        install_trig(TrigData {
+            nr: 0,
+            vnum: 9999,
+            attach_type,
+            name: "combat test".to_string(),
+            trigger_type,
+            narg,
+            arglist: String::new(),
+            cmdlist: cmds.iter().map(|s| s.to_string()).collect(),
+            curr_line: 0,
+            depth: 0,
+            loops: 0,
+            wait_event: None,
+            var_list: Vec::new(),
+            purged: false,
+            loop_origin: HashMap::new(),
+        })
     }
 
     #[test]
@@ -1911,6 +1947,108 @@ mod tests {
 
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
         assert!(out.matches("\r\n").count() >= 2, "{out:?}");
+    }
+
+    #[test]
+    fn hit_fires_mob_fight_trigger() {
+        let _dg = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        dg_handler::boot_handler();
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        let mut mob = Character::new_npc(99);
+        mob.player.name = "Sentry".to_string();
+        mob.position = Position::Fighting;
+        mob.points.power = 1000;
+        mob.points.technique = 1000;
+        let mob = g.create_char(mob);
+        let victim = player(&mut g, "Victim");
+        g.char_to_room(mob, room);
+        g.char_to_room(victim, room);
+        g.get_char_mut(mob).unwrap().fighting = Some(victim);
+        let trig = make_dg_trigger(MOB_TRIGGER, MTRIG_FIGHT, 100, &[
+            "set fired yes",
+            "global fired",
+            "halt",
+        ]);
+        add_trigger(ScriptKey::Mob(mob), trig, -1);
+
+        hit(&mut g, mob, victim);
+
+        assert_eq!(
+            dg_handler::get_global_var(ScriptKey::Mob(mob), "fired").as_deref(),
+            Some("yes")
+        );
+    }
+
+    #[test]
+    fn hit_fires_equipped_object_fight_trigger() {
+        let _dg = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        dg_handler::boot_handler();
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        let attacker = player(&mut g, "Attacker");
+        let victim = player(&mut g, "Victim");
+        let obj = durable_item(&mut g, attacker, 1, 1);
+        g.char_to_room(attacker, room);
+        g.char_to_room(victim, room);
+        {
+            let a = g.get_char_mut(attacker).unwrap();
+            a.position = Position::Fighting;
+            a.fighting = Some(victim);
+            a.points.power = 1000;
+            a.points.technique = 1000;
+        }
+        let trig = make_dg_trigger(OBJ_TRIGGER, OTRIG_FIGHT, 100, &[
+            "set fired yes",
+            "global fired",
+            "halt",
+        ]);
+        add_trigger(ScriptKey::Obj(obj), trig, -1);
+
+        hit(&mut g, attacker, victim);
+
+        assert_eq!(
+            dg_handler::get_global_var(ScriptKey::Obj(obj), "fired").as_deref(),
+            Some("yes")
+        );
+    }
+
+    #[test]
+    fn hit_fires_victim_hitprcnt_trigger_after_damage() {
+        let _dg = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        dg_handler::boot_handler();
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        let attacker = player(&mut g, "Attacker");
+        let mut mob = Character::new_npc(99);
+        mob.player.name = "Target".to_string();
+        mob.position = Position::Fighting;
+        mob.points.hit = 2;
+        mob.points.max_hit = 100;
+        let victim = g.create_char(mob);
+        g.char_to_room(attacker, room);
+        g.char_to_room(victim, room);
+        {
+            let a = g.get_char_mut(attacker).unwrap();
+            a.position = Position::Fighting;
+            a.fighting = Some(victim);
+            a.points.power = 1000;
+            a.points.technique = 1000;
+        }
+        g.get_char_mut(victim).unwrap().fighting = Some(attacker);
+        let trig = make_dg_trigger(MOB_TRIGGER, MTRIG_HITPRCNT, 50, &[
+            "set low yes",
+            "global low",
+            "halt",
+        ]);
+        add_trigger(ScriptKey::Mob(victim), trig, -1);
+
+        hit(&mut g, attacker, victim);
+
+        assert_eq!(
+            dg_handler::get_global_var(ScriptKey::Mob(victim), "low").as_deref(),
+            Some("yes")
+        );
     }
 
     #[test]
