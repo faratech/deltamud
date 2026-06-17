@@ -1289,29 +1289,10 @@ fn replace_string(template: &str, singular: &str, plural: &str) -> String {
     out
 }
 
-/// flee: try a random exit out of combat (CircleMUD do_flee, simplified).
+/// flee: combat-internal wrapper around the command implementation, so wimpy
+/// mobs/players and link-dead rescue use the same C-fidelity path as typed flee.
 pub fn do_flee(g: &mut GameState, ch: CharId) {
-    let fighting = g.get_char(ch).and_then(|c| c.fighting);
-    let rnum = match g.get_char(ch).and_then(|c| c.in_room) {
-        Some(r) => r,
-        None => return,
-    };
-    for _ in 0..6 {
-        let dir = g.rng.number(0, (NUM_OF_DIRS - 1) as i32) as usize;
-        let to = g.room(rnum).exits[dir].as_ref().and_then(|e| g.real_room(e.to_room));
-        if let Some(to_rnum) = to {
-            act(g, "$n panics, and attempts to flee!", true, ch, None, ActArg::None, To::Room);
-            stop_fighting(g, ch);
-            g.char_from_room(ch);
-            g.char_to_room(ch, to_rnum);
-            g.send_to_char(ch, "You flee head over heels.\r\n");
-            act(g, "$n glances around, panting.", true, ch, None, ActArg::None, To::Room);
-            crate::cmd_informative::look_at_room(g, ch, false);
-            return;
-        }
-    }
-    let _ = fighting;
-    g.send_to_char(ch, "PANIC!  You couldn't escape!\r\n");
+    crate::cmd_offensive::do_flee(g, ch, "", 0);
 }
 
 #[cfg(test)]
@@ -1801,6 +1782,121 @@ mod tests {
             .unwrap()
             .outbuf
             .contains("You wimp out, and attempt to flee!\r\n"));
+    }
+
+    #[test]
+    fn flee_refuses_characters_below_fighting_position() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Arena".to_string(), "Arena.".to_string()));
+        let safe = g.add_room(Room::new(101, 0, "Safe".to_string(), "Safe.".to_string()));
+        g.rooms[room].exits[NORTH] = Some(Exit {
+            description: None,
+            keyword: None,
+            exit_info: 0,
+            key: NOTHING,
+            to_room: 101,
+        });
+        let attacker = player(&mut g, "Attacker");
+        let victim = connected_player(&mut g, "Victim", ConnId(1));
+        g.char_to_room(attacker, room);
+        g.char_to_room(victim, room);
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.position = Position::Stunned;
+            v.fighting = Some(attacker);
+        }
+
+        do_flee(&mut g, victim);
+
+        assert_eq!(g.get_char(victim).unwrap().in_room, Some(room));
+        assert!(!g.rooms[safe].people.contains(&victim));
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("You are in pretty bad shape, unable to flee!\r\n"));
+    }
+
+    #[test]
+    fn flee_does_not_choose_death_room_exits() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Arena".to_string(), "Arena.".to_string()));
+        let death = g.add_room(Room::new(101, 0, "Death".to_string(), "Death.".to_string()));
+        g.rooms[death].room_flags |= RoomFlags::DEATH;
+        for dir in 0..NUM_OF_DIRS {
+            g.rooms[room].exits[dir] = Some(Exit {
+                description: None,
+                keyword: None,
+                exit_info: 0,
+                key: NOTHING,
+                to_room: 101,
+            });
+        }
+        let attacker = player(&mut g, "Attacker");
+        let victim = connected_player(&mut g, "Victim", ConnId(1));
+        g.char_to_room(attacker, room);
+        g.char_to_room(victim, room);
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.position = Position::Fighting;
+            v.fighting = Some(attacker);
+        }
+
+        do_flee(&mut g, victim);
+
+        assert_eq!(g.get_char(victim).unwrap().in_room, Some(room));
+        assert!(!g.rooms[death].people.contains(&victim));
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("PANIC!  You couldn't escape!\r\n"));
+    }
+
+    #[test]
+    fn successful_non_arena_pc_flee_loses_experience() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Arena".to_string(), "Arena.".to_string()));
+        let safe = g.add_room(Room::new(101, 0, "Safe".to_string(), "Safe.".to_string()));
+        for dir in 0..NUM_OF_DIRS {
+            g.rooms[room].exits[dir] = Some(Exit {
+                description: None,
+                keyword: None,
+                exit_info: 0,
+                key: NOTHING,
+                to_room: 101,
+            });
+        }
+        let attacker = player(&mut g, "Attacker");
+        let victim = connected_player(&mut g, "Victim", ConnId(1));
+        {
+            let a = g.get_char_mut(attacker).unwrap();
+            a.points.max_hit = 100;
+            a.points.hit = 90;
+            a.player.level = 10;
+        }
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.position = Position::Fighting;
+            v.fighting = Some(attacker);
+            v.player.level = 15;
+            v.points.exp = 1_000;
+        }
+        g.char_to_room(attacker, room);
+        g.char_to_room(victim, room);
+
+        do_flee(&mut g, victim);
+
+        assert_eq!(g.get_char(victim).unwrap().in_room, Some(safe));
+        assert_eq!(g.get_char(victim).unwrap().points.exp, 900);
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("You lost 100 experience points for fleeing"));
     }
 
     #[test]
