@@ -1156,6 +1156,11 @@ fn die(g: &mut GameState, killer: CharId, victim: CharId) {
         return;
     }
 
+    apply_death_penalty(g, victim);
+    if !g.char_exists(victim) {
+        return;
+    }
+
     // DG death trigger fires before the corpse/extract (death_mtrigger). C
     // raw_kill suppresses the death cry when the trigger returns false.
     let cry = crate::dg_triggers::death_mtrigger(g, victim, Some(killer));
@@ -1222,8 +1227,34 @@ fn die(g: &mut GameState, killer: CharId, victim: CharId) {
         crate::arena::forget_char(victim);
         g.extract_char(victim);
     } else {
-        // Respawn the PC at its hometown (Tier-0 death penalty deferred).
-        respawn_pc(g, victim);
+        let level = g.get_char(victim).map(|c| c.player.level).unwrap_or(0);
+        if level < 30 {
+            respawn_pc(g, victim);
+        } else {
+            ghost_pc(g, victim);
+        }
+    }
+}
+
+fn apply_death_penalty(g: &mut GameState, victim: CharId) {
+    if let Some(rnum) = g.get_char(victim).and_then(|c| c.in_room) {
+        crate::maputils::increase_blood(g, rnum);
+    }
+
+    let (exp, level, is_npc) = match g.get_char(victim) {
+        Some(c) => (c.points.exp, c.player.level as i32, c.is_npc),
+        None => return,
+    };
+    let penalty = -((exp - crate::limits::exp_to_level(level - 1)) / 4);
+    crate::limits::gain_exp(g, victim, penalty);
+    if !g.char_exists(victim) || is_npc {
+        return;
+    }
+    if let Some(c) = g.get_char_mut(victim) {
+        c.act_flags &= !(PLR_KILLER | PLR_THIEF);
+        c.conditions[FULL] = 0;
+        c.conditions[THIRST] = 0;
+        c.conditions[DRUNK] = 0;
     }
 }
 
@@ -1436,6 +1467,34 @@ fn respawn_pc(g: &mut GameState, victim: CharId) {
     g.char_to_room(victim, rnum);
     g.send_to_char(victim, "\r\nYou feel your spirit drawn back to a familiar place...\r\n");
     crate::cmd_informative::look_at_room(g, victim, false);
+}
+
+fn ghost_pc(g: &mut GameState, victim: CharId) {
+    g.char_from_room(victim);
+    let rnum = g.real_room(99).unwrap_or(0);
+    if let Some(c) = g.get_char_mut(victim) {
+        c.prf2_flags |= PRF2_INTANGIBLE;
+        c.position = Position::Standing;
+        c.points.hit = 1;
+        c.points.mana = 1;
+        c.points.move_points = 1;
+        c.death_timer = 96;
+        c.fighting = None;
+    }
+    g.char_to_room(victim, rnum);
+    g.send_to_char(
+        victim,
+        "You suddenly find yourself floating in space... you feel nothing.\r\n",
+    );
+    act(
+        g,
+        "$n slowly materializes before you...\r\n",
+        false,
+        victim,
+        None,
+        ActArg::None,
+        To::Room,
+    );
 }
 
 /// dam_message (fight.c): the per-weapon-type damage message. The verb
@@ -2240,6 +2299,70 @@ mod tests {
             .unwrap()
             .outbuf
             .contains("You receive your share of experience -- 150 points.\r\n"));
+    }
+
+    #[test]
+    fn die_applies_pc_death_penalty_flags_conditions_and_blood() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        g.add_room(Room::new(3001, 0, "Home".to_string(), "A hometown.".to_string()));
+        let killer = player(&mut g, "Killer");
+        let victim = connected_player(&mut g, "Victim", ConnId(1));
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.player.level = 10;
+            v.points.exp = crate::limits::exp_to_level(9) + 400;
+            v.act_flags |= PLR_KILLER | PLR_THIEF;
+            v.conditions[FULL] = 12;
+            v.conditions[THIRST] = 12;
+            v.conditions[DRUNK] = 12;
+        }
+        g.char_to_room(killer, room);
+        g.char_to_room(victim, room);
+
+        die(&mut g, killer, victim);
+
+        let v = g.get_char(victim).unwrap();
+        assert_eq!(v.points.exp, crate::limits::exp_to_level(9) + 300);
+        assert_eq!(v.act_flags & (PLR_KILLER | PLR_THIEF), 0);
+        assert_eq!(v.conditions[FULL], 0);
+        assert_eq!(v.conditions[THIRST], 0);
+        assert_eq!(v.conditions[DRUNK], 0);
+        assert_eq!(g.room(room).blood, 1);
+    }
+
+    #[test]
+    fn die_sends_high_level_pc_to_ghost_limbo() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        let limbo = g.add_room(Room::new(99, 0, "Limbo".to_string(), "The ghost room.".to_string()));
+        let killer = player(&mut g, "Killer");
+        let victim = connected_player(&mut g, "Victim", ConnId(1));
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.player.level = 30;
+            v.points.hit = -20;
+            v.points.mana = 50;
+            v.points.move_points = 50;
+        }
+        g.char_to_room(killer, room);
+        g.char_to_room(victim, room);
+
+        die(&mut g, killer, victim);
+
+        let v = g.get_char(victim).unwrap();
+        assert_eq!(v.in_room, Some(limbo));
+        assert_eq!(v.prf2_flags & PRF2_INTANGIBLE, PRF2_INTANGIBLE);
+        assert_eq!(v.points.hit, 1);
+        assert_eq!(v.points.mana, 1);
+        assert_eq!(v.points.move_points, 1);
+        assert_eq!(v.death_timer, 96);
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("You suddenly find yourself floating in space... you feel nothing.\r\n"));
     }
 
     #[test]
