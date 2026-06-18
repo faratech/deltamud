@@ -26,7 +26,9 @@
 
 use crate::act::{act, ActArg, To};
 use crate::constants::DIRS;
-use crate::dg_db_scripts::{read_trigger, real_trigger};
+use crate::dg_db_scripts::{
+    add_proto_trigger, clear_proto_triggers, read_trigger, real_trigger, remove_proto_trigger,
+};
 use crate::dg_handler::{
     self, add_trigger, extract_script, remove_trigger, trigger_ids, with_trig, ScriptKey,
 };
@@ -44,7 +46,11 @@ const OK: &str = "Ok.\r\n";
 // ===========================================================================
 pub fn do_speed(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     // GET_SKILL(ch, SKILL_SPEED) == 0 -> doesn't know how.
-    if g.get_char(ch).map(|c| c.skill(SKILL_SPEED as u16)).unwrap_or(0) == 0 {
+    if g.get_char(ch)
+        .map(|c| c.skill(SKILL_SPEED as u16))
+        .unwrap_or(0)
+        == 0
+    {
         g.send_to_char(ch, "You have no idea how to speed.\r\n");
         return;
     }
@@ -87,9 +93,7 @@ fn can_listen_behind_door(g: &GameState, ch: CharId, dir: usize) -> bool {
         None => return false,
     };
     match g.room(rnum).exits[dir].as_ref() {
-        Some(e) => {
-            g.real_room(e.to_room).is_some() && (e.exit_info & EX_CLOSED) != 0
-        }
+        Some(e) => g.real_room(e.to_room).is_some() && (e.exit_info & EX_CLOSED) != 0,
         None => false,
     }
 }
@@ -111,7 +115,10 @@ pub fn do_listen(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     const ROOM_SPIEL: &str = "$n seems to listen intently for something.";
 
     let percent = g.rng.number(1, 101);
-    let skill = g.get_char(ch).map(|c| c.skill(SKILL_LISTEN as u16) as i32).unwrap_or(0);
+    let skill = g
+        .get_char(ch)
+        .map(|c| c.skill(SKILL_LISTEN as u16) as i32)
+        .unwrap_or(0);
     if skill < percent {
         g.send_to_char(ch, HEARD_NOTHING);
         return;
@@ -189,7 +196,10 @@ pub fn do_listen(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             let msg = if level >= 15 {
                 let est = (found + g.rng.number(0, 1) - g.rng.number(0, 1)).max(1);
                 let (lead, tail) = dir_listen_phrase(dir);
-                format!("You hear what might be {} creatures {}{}.\r\n", est, lead, tail)
+                format!(
+                    "You hear what might be {} creatures {}{}.\r\n",
+                    est, lead, tail
+                )
             } else {
                 let (lead, tail) = match dir {
                     5 => ("below", ""),
@@ -228,8 +238,20 @@ fn dir_listen_phrase(dir: usize) -> (&'static str, &'static str) {
 /// All keywords the C do_reboot recognises (besides "all"/"*"). Used to
 /// validate the argument so unknown options still hit the C error path.
 const RELOAD_KEYWORDS: &[&str] = &[
-    "wizlist", "immlist", "news", "credits", "circlemud", "motd", "imotd", "help", "info",
-    "policy", "handbook", "background", "startup", "xhelp",
+    "wizlist",
+    "immlist",
+    "news",
+    "credits",
+    "circlemud",
+    "motd",
+    "imotd",
+    "help",
+    "info",
+    "policy",
+    "handbook",
+    "background",
+    "startup",
+    "xhelp",
 ];
 
 pub fn do_reboot(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
@@ -286,7 +308,10 @@ pub fn do_pfileclean(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
     if argument == "OptimisePfile" {
         g.send_to_char(ch, "Cleaning Player File Now.\r\n");
-        let name = g.get_char(ch).map(|c| c.get_name().to_string()).unwrap_or_default();
+        let name = g
+            .get_char(ch)
+            .map(|c| c.get_name().to_string())
+            .unwrap_or_default();
         // C: mudlog(buf, NRM, LVL_IMPL, TRUE).
         mudlog_imp(g, &format!("{} initiated playerfile clean.", name));
         g.queue_pfileclean();
@@ -326,14 +351,25 @@ pub fn do_attach(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
     let tn: i32 = trig_name.parse().unwrap_or(0);
     // loc = (*loc_name) ? atoi(loc_name) : -1;
-    let loc: i32 = if loc_name.is_empty() { -1 } else { loc_name.parse().unwrap_or(0) };
+    let loc: i32 = if loc_name.is_empty() {
+        -1
+    } else {
+        loc_name.parse().unwrap_or(0)
+    };
 
     if is_abbrev(&kind, "mtr") {
         match get_char_world_vis(g, ch, &targ_name) {
             Some(victim) => {
                 let is_npc = g.get_char(victim).map(|c| c.is_npc).unwrap_or(false);
                 if is_npc {
-                    attach_to(g, ch, ScriptKey::Mob(victim), tn, loc, AttachDesc::Char(victim));
+                    attach_to(
+                        g,
+                        ch,
+                        ScriptKey::Mob(victim),
+                        tn,
+                        loc,
+                        AttachDesc::Char(victim),
+                    );
                 } else {
                     g.send_to_char(ch, "Players can't have scripts.\r\n");
                 }
@@ -343,20 +379,38 @@ pub fn do_attach(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     } else if is_abbrev(&kind, "otr") {
         match get_obj_world_vis(g, ch, &targ_name) {
             Some(object) => {
-                attach_to(g, ch, ScriptKey::Obj(object), tn, loc, AttachDesc::Obj(object));
+                attach_to(
+                    g,
+                    ch,
+                    ScriptKey::Obj(object),
+                    tn,
+                    loc,
+                    AttachDesc::Obj(object),
+                );
             }
             None => g.send_to_char(ch, "That object does not exist.\r\n"),
         }
     } else if is_abbrev(&kind, "wtr") {
         // C: isdigit(*targ_name) && !strchr(targ_name, '.')
-        let first_digit = targ_name.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+        let first_digit = targ_name
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false);
         if first_digit && !targ_name.contains('.') {
             // find_target_room reduces to a room-vnum lookup for digit input.
             let vnum: RoomVnum = targ_name.parse().unwrap_or(NOWHERE);
             match g.real_room(vnum) {
                 Some(room) => {
                     let rvnum = g.room(room).number;
-                    attach_to(g, ch, ScriptKey::Room(room), tn, loc, AttachDesc::Room(rvnum));
+                    attach_to(
+                        g,
+                        ch,
+                        ScriptKey::Room(room),
+                        tn,
+                        loc,
+                        AttachDesc::Room(rvnum),
+                    );
                 }
                 None => {
                     // find_target_room messages "No room exists..." then the C
@@ -383,10 +437,15 @@ enum AttachDesc {
 /// add_trigger, then print the C success / "trigger does not exist" message.
 fn attach_to(g: &mut GameState, ch: CharId, key: ScriptKey, tn: i32, loc: i32, desc: AttachDesc) {
     let rn = real_trigger(tn);
-    let tid = if rn >= 0 { read_trigger(rn as usize) } else { None };
+    let tid = if rn >= 0 {
+        read_trigger(rn as usize)
+    } else {
+        None
+    };
     match tid {
         Some(tid) => {
             add_trigger(key, tid, loc);
+            persist_proto_attach(g, key, tn);
             let trig_name = with_trig(tid, |t| t.name.clone()).unwrap_or_default();
             let msg = match desc {
                 AttachDesc::Char(c) => {
@@ -398,7 +457,10 @@ fn attach_to(g: &mut GameState, ch: CharId, key: ScriptKey, tn: i32, loc: i32, d
                     format!("Trigger {} ({}) attached to {}.\r\n", tn, trig_name, short)
                 }
                 AttachDesc::Room(vnum) => {
-                    format!("Trigger {} ({}) attached to room {}.\r\n", tn, trig_name, vnum)
+                    format!(
+                        "Trigger {} ({}) attached to room {}.\r\n",
+                        tn, trig_name, vnum
+                    )
                 }
             };
             g.send_to_char(ch, &msg);
@@ -436,8 +498,10 @@ pub fn do_detach(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             g.send_to_char(ch, "This room does not have any triggers.\r\n");
         } else if arg2 == "all" {
             extract_script(key);
+            persist_proto_clear(g, key);
             g.send_to_char(ch, "All triggers removed from room.\r\n");
         } else if remove_trigger(key, &arg2) {
+            persist_proto_remove(g, key, &arg2);
             g.send_to_char(ch, "Trigger removed.\r\n");
             // remove_trigger already drops the script container if it emptied
             // the trig_list; nothing else to do (matches C's TRIGGERS() check).
@@ -501,31 +565,101 @@ pub fn do_detach(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     if let Some(v) = victim {
         let is_npc = g.get_char(v).map(|c| c.is_npc).unwrap_or(false);
         let key = ScriptKey::Mob(v);
+        let trigger_all = trigger.as_deref() == Some("all");
         if !is_npc {
             g.send_to_char(ch, "Players don't have triggers.\r\n");
         } else if !dg_handler::has_script(key) {
             g.send_to_char(ch, "That mob doesn't have any triggers.\r\n");
-        } else if arg2 == "all" {
+        } else if trigger_all {
             extract_script(key);
+            persist_proto_clear(g, key);
             let short = char_short(g, v);
             g.send_to_char(ch, &format!("All triggers removed from {}.\r\n", short));
         } else if matches!(&trigger, Some(t) if remove_trigger(key, t)) {
+            if let Some(t) = &trigger {
+                persist_proto_remove(g, key, t);
+            }
             g.send_to_char(ch, "Trigger removed.\r\n");
         } else {
             g.send_to_char(ch, "That trigger was not found.\r\n");
         }
     } else if let Some(o) = object {
         let key = ScriptKey::Obj(o);
+        let trigger_all = trigger.as_deref() == Some("all");
         if !dg_handler::has_script(key) {
             g.send_to_char(ch, "That object doesn't have any triggers.\r\n");
-        } else if arg2 == "all" {
+        } else if trigger_all {
             extract_script(key);
+            persist_proto_clear(g, key);
             let short = obj_short(g, o);
             g.send_to_char(ch, &format!("All triggers removed from {}.\r\n", short));
         } else if matches!(&trigger, Some(t) if remove_trigger(key, t)) {
+            if let Some(t) = &trigger {
+                persist_proto_remove(g, key, t);
+            }
             g.send_to_char(ch, "Trigger removed.\r\n");
         } else {
             g.send_to_char(ch, "That trigger was not found.\r\n");
+        }
+    }
+}
+
+fn persist_proto_attach(g: &mut GameState, key: ScriptKey, trig_vnum: i32) {
+    let Some((kind, entity_vnum, save_kind)) = proto_target(g, key) else {
+        return;
+    };
+    if add_proto_trigger(kind, entity_vnum, trig_vnum) {
+        mark_proto_script_dirty(g, entity_vnum, save_kind);
+    }
+}
+
+fn persist_proto_remove(g: &mut GameState, key: ScriptKey, trigger: &str) {
+    let Some((kind, entity_vnum, save_kind)) = proto_target(g, key) else {
+        return;
+    };
+    if remove_proto_trigger(kind, entity_vnum, trigger) {
+        mark_proto_script_dirty(g, entity_vnum, save_kind);
+    }
+}
+
+fn persist_proto_clear(g: &mut GameState, key: ScriptKey) {
+    let Some((kind, entity_vnum, save_kind)) = proto_target(g, key) else {
+        return;
+    };
+    if clear_proto_triggers(kind, entity_vnum) {
+        mark_proto_script_dirty(g, entity_vnum, save_kind);
+    }
+}
+
+fn proto_target(g: &GameState, key: ScriptKey) -> Option<(i32, i32, i32)> {
+    match key {
+        ScriptKey::Mob(ch) => {
+            let vnum = g.get_char(ch).filter(|c| c.is_npc).map(|c| c.nr)?;
+            if vnum < 0 {
+                None
+            } else {
+                Some((key.trig_type(), vnum, crate::olc::OLC_SAVE_MOB))
+            }
+        }
+        ScriptKey::Obj(obj) => {
+            let vnum = g.get_obj(obj).map(|o| o.item_number)?;
+            if vnum < 0 {
+                None
+            } else {
+                Some((key.trig_type(), vnum, crate::olc::OLC_SAVE_OBJ))
+            }
+        }
+        ScriptKey::Room(room) => {
+            let vnum = g.rooms.get(room).map(|r| r.number)?;
+            Some((key.trig_type(), vnum, crate::olc::OLC_SAVE_ROOM))
+        }
+    }
+}
+
+fn mark_proto_script_dirty(g: &mut GameState, entity_vnum: i32, save_kind: i32) {
+    if let Some(zone_rnum) = crate::olc::real_zone(g, entity_vnum) {
+        if let Some(zone_number) = g.zones.get(zone_rnum).map(|z| z.number) {
+            crate::olc::olc_add_to_save_list(zone_number, save_kind);
         }
     }
 }
@@ -563,7 +697,13 @@ fn obj_short(g: &GameState, oid: ObjId) -> String {
 
 /// get_object_in_equip_vis: a worn item matching `name`.
 fn obj_in_equip(g: &GameState, ch: CharId, name: &str) -> Option<ObjId> {
-    let eq: Vec<ObjId> = g.get_char(ch)?.equipment.iter().flatten().copied().collect();
+    let eq: Vec<ObjId> = g
+        .get_char(ch)?
+        .equipment
+        .iter()
+        .flatten()
+        .copied()
+        .collect();
     g.get_obj_in_list_vis(ch, name, &eq)
 }
 
@@ -595,7 +735,10 @@ pub fn do_tlist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let (a, rest) = crate::interpreter::one_argument(arg);
     let (b, _) = crate::interpreter::one_argument(rest);
     if a.is_empty() {
-        g.send_to_char(ch, "Usage: tlist <begining number or zone> [<ending number>]\r\n");
+        g.send_to_char(
+            ch,
+            "Usage: tlist <begining number or zone> [<ending number>]\r\n",
+        );
         return;
     }
     let mut first: i32 = a.parse().unwrap_or(0);
@@ -606,7 +749,10 @@ pub fn do_tlist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         first + 99
     };
     if first < 0 || last < 0 {
-        g.send_to_char(ch, "Values must be between 0 and highest possible vnum.\n\r");
+        g.send_to_char(
+            ch,
+            "Values must be between 0 and highest possible vnum.\n\r",
+        );
         return;
     }
     if first >= last {
@@ -651,7 +797,10 @@ pub fn do_tstat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             _ => "Rooms",
         };
         let mut out = String::new();
-        out.push_str(&format!("Name: '{}',  VNum: [{:5}], RNum: [{:5}]\r\n", tp.name, tp.vnum, rnum));
+        out.push_str(&format!(
+            "Name: '{}',  VNum: [{:5}], RNum: [{:5}]\r\n",
+            tp.name, tp.vnum, rnum
+        ));
         out.push_str(&format!("Trigger Intended Assignment: {}\r\n", kind));
         out.push_str(&format!(
             "Trigger Type: {}, Numeric Arg: {}, Arg list: {}\r\n",

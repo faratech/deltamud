@@ -505,7 +505,15 @@ const fn c(
     min_level: u8,
     subcmd: i32,
 ) -> CommandDef {
-    CommandDef { name, min_position, handler, min_level, subcmd, godcmd: 0, godcmd_set: 0 }
+    CommandDef {
+        name,
+        min_position,
+        handler,
+        min_level,
+        subcmd,
+        godcmd: 0,
+        godcmd_set: 0,
+    }
 }
 
 // Shorthand for building god rows. `set` selects the godcmds bitvector (1..4),
@@ -542,7 +550,6 @@ use Position::*;
 pub static CMD_INFO: &[CommandDef] = &[
     // index 0 — must be first, reserved for specprocs
     c("RESERVED", Dead, DoNotImplemented, 0, 0),
-
     // directions — must come before other commands but after RESERVED
     c("north", Standing, DoMove, 0, SCMD_NORTH),
     c("east", Standing, DoMove, 0, SCMD_EAST),
@@ -550,7 +557,6 @@ pub static CMD_INFO: &[CommandDef] = &[
     c("west", Standing, DoMove, 0, SCMD_WEST),
     c("up", Standing, DoMove, 0, SCMD_UP),
     c("down", Standing, DoMove, 0, SCMD_DOWN),
-
     // main list
     g("addsnow", Dead, DoAddsnow, 3, GCMD3_ADDSNOW, 0),
     g("at", Dead, DoAt, 1, GCMD_AT, 0),
@@ -794,7 +800,14 @@ pub static CMD_INFO: &[CommandDef] = &[
     c("shout", Resting, DoGenComm, 0, SCMD_SHOUT),
     g("show", Dead, DoShow, 1, GCMD_GEN, 0),
     g("shutdow", Dead, DoShutdown, 1, GCMD_SHUTDOWN, 0),
-    g("shutdown", Dead, DoShutdown, 1, GCMD_SHUTDOWN, SCMD_SHUTDOWN),
+    g(
+        "shutdown",
+        Dead,
+        DoShutdown,
+        1,
+        GCMD_SHUTDOWN,
+        SCMD_SHUTDOWN,
+    ),
     c("sip", Resting, DoDrink, 0, SCMD_SIP),
     c("sit", Resting, DoSit, 0, 0),
     g("skillset", Sleeping, DoSkillset, 1, GCMD_SKILLSET, 0),
@@ -890,7 +903,6 @@ pub static CMD_INFO: &[CommandDef] = &[
     c("mremember", Dead, DoMremember, 0, 0),
     c("mforget", Dead, DoMforget, 0, 0),
     c("mtransform", Dead, DoMtransform, 0, 0),
-
     // terminator — must be last
     c("\n", Dead, DoNotImplemented, 0, 0),
 ];

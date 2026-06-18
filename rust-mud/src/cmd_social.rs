@@ -89,7 +89,10 @@ pub fn boot_socials(lib_path: Option<&str>) {
             // empty table so the server still boots (commands report "not
             // supported", matching C's find_action() == -1 path).
             eprintln!("SYSERR: can't open socials file '{}': {}", path, e);
-            SocialTable { list: Vec::new(), by_command: HashMap::new() }
+            SocialTable {
+                list: Vec::new(),
+                by_command: HashMap::new(),
+            }
         }
     };
     install_socials(table);
@@ -223,6 +226,12 @@ pub fn find_social(arg: &str) -> Option<String> {
         .map(|s| s.command.clone())
 }
 
+/// Minimum character level for an exact social command.
+pub fn social_min_level(command: &str) -> Option<i32> {
+    let table = SOCIALS.get()?.read().ok()?;
+    lookup(&table, command).map(|s| s.min_level_char)
+}
+
 /// Commands visible in the `socials` listing for a character level.
 pub fn social_commands_for_level(level: Level) -> Vec<String> {
     let Some(lock) = SOCIALS.get() else {
@@ -263,10 +272,11 @@ pub fn do_action(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
 pub fn do_action_named(g: &mut GameState, ch: CharId, command: &str, argument: &str) {
     // Snapshot the social (clone out of the static so we hold no borrow on the
     // table while mutating GameState).
-    let action = match SOCIALS
-        .get()
-        .and_then(|lock| lock.read().ok().and_then(|table| lookup(&table, command).cloned()))
-    {
+    let action = match SOCIALS.get().and_then(|lock| {
+        lock.read()
+            .ok()
+            .and_then(|table| lookup(&table, command).cloned())
+    }) {
         Some(a) => a.clone(),
         None => {
             g.send_to_char(ch, "That action is not supported.\r\n");
@@ -274,13 +284,22 @@ pub fn do_action_named(g: &mut GameState, ch: CharId, command: &str, argument: &
         }
     };
 
+    let level = g.get_char(ch).map(|c| c.player.level as i32).unwrap_or(0);
+    if level < action.min_level_char {
+        g.send_to_char(ch, "Huh?!?\r\n");
+        return;
+    }
+
     // Actor min-position gate. In C the social's min_char_position is copied into
     // complete_cmd_info[].minimum_position (act.social.c:361/376), so the command
     // interpreter's `GET_POS(ch) < minimum_position` check (interpreter.c:828)
     // refuses a sleeping/resting/fighting actor BEFORE do_action runs. The Rust
     // port dispatches socials past that gate, so enforce it here with the same
     // refusal text.
-    let ch_pos = g.get_char(ch).map(|c| c.position).unwrap_or(Position::Standing);
+    let ch_pos = g
+        .get_char(ch)
+        .map(|c| c.position)
+        .unwrap_or(Position::Standing);
     if (ch_pos as i32) < action.min_char_position {
         let msg = crate::interpreter::position_refusal_msg(ch_pos);
         if !msg.is_empty() {
@@ -323,7 +342,10 @@ pub fn do_action_named(g: &mut GameState, ch: CharId, command: &str, argument: &
     if vict.is_none() {
         // Fall back to an object in inventory or the room (char_obj_found).
         if action.char_obj_found.is_some() {
-            let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+            let inv = g
+                .get_char(ch)
+                .map(|c| c.carrying.clone())
+                .unwrap_or_default();
             let mut targ = g.get_obj_in_list_vis(ch, &buf, &inv);
             if targ.is_none() {
                 if let Some(rnum) = g.get_char(ch).and_then(|c| c.in_room) {
@@ -333,10 +355,28 @@ pub fn do_action_named(g: &mut GameState, ch: CharId, command: &str, argument: &
             }
             if let Some(oid) = targ {
                 if let Some(m) = action.char_obj_found.as_deref() {
-                    act_sleep(g, m, action.hide, ch, Some(oid), ActArg::None, To::Char, false);
+                    act_sleep(
+                        g,
+                        m,
+                        action.hide,
+                        ch,
+                        Some(oid),
+                        ActArg::None,
+                        To::Char,
+                        false,
+                    );
                 }
                 if let Some(m) = action.others_obj_found.as_deref() {
-                    act_sleep(g, m, action.hide, ch, Some(oid), ActArg::None, To::Room, false);
+                    act_sleep(
+                        g,
+                        m,
+                        action.hide,
+                        ch,
+                        Some(oid),
+                        ActArg::None,
+                        To::Room,
+                        false,
+                    );
                 }
                 return;
             }
@@ -373,7 +413,10 @@ pub fn do_action_named(g: &mut GameState, ch: CharId, command: &str, argument: &
         return;
     }
 
-    let vict_pos = g.get_char(vict).map(|c| c.position).unwrap_or(Position::Standing);
+    let vict_pos = g
+        .get_char(vict)
+        .map(|c| c.position)
+        .unwrap_or(Position::Standing);
     if (vict_pos as i32) < action.min_victim_position {
         act_sleep(
             g,
@@ -430,10 +473,28 @@ pub fn do_action_named(g: &mut GameState, ch: CharId, command: &str, argument: &
             act_sleep(g, m, false, ch, None, ActArg::Char(vict), To::Char, true);
         }
         if let Some(m) = action.others_found.as_deref() {
-            act_sleep(g, m, action.hide, ch, None, ActArg::Char(vict), To::NotVict, false);
+            act_sleep(
+                g,
+                m,
+                action.hide,
+                ch,
+                None,
+                ActArg::Char(vict),
+                To::NotVict,
+                false,
+            );
         }
         if let Some(m) = action.vict_found.as_deref() {
-            act_sleep(g, m, action.hide, ch, None, ActArg::Char(vict), To::Vict, false);
+            act_sleep(
+                g,
+                m,
+                action.hide,
+                ch,
+                None,
+                ActArg::Char(vict),
+                To::Vict,
+                false,
+            );
         }
     }
 }
@@ -456,7 +517,16 @@ fn emit_body(
     };
     // Replace $t but leave the act() escape $$ intact ($ -> literal $).
     let substituted = subst_body_part(msg, body);
-    act_sleep(g, &substituted, hide, ch, None, ActArg::Char(vict), to, to_sleep);
+    act_sleep(
+        g,
+        &substituted,
+        hide,
+        ch,
+        None,
+        ActArg::Char(vict),
+        to,
+        to_sleep,
+    );
 }
 
 /// Replace the `$t` code with `body`, preserving `$$` -> `$` and all other
@@ -502,7 +572,16 @@ fn ac_to_room(g: &mut GameState, string: &str, hide: bool, ch: CharId) {
         // C: send if (CAN_SEE || !hide_invis). When hide is false, always send;
         // when hide is true, only to those who can see the actor.
         if !hide || g.can_see(vict, ch) {
-            act_sleep(g, string, false, ch, None, ActArg::Char(vict), To::Vict, false);
+            act_sleep(
+                g,
+                string,
+                false,
+                ch,
+                None,
+                ActArg::Char(vict),
+                To::Vict,
+                false,
+            );
         }
     }
 }
@@ -532,14 +611,23 @@ pub fn do_insult(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         return;
     }
 
-    let vname = g.get_char(victim).map(|c| c.player.name.clone()).unwrap_or_default();
+    let vname = g
+        .get_char(victim)
+        .map(|c| c.player.name.clone())
+        .unwrap_or_default();
     g.send_to_char(ch, &format!("You insult {}.\r\n", vname));
 
     let roll = g.rng.number(0, 2);
     match roll {
         0 => {
-            let ch_male = g.get_char(ch).map(|c| c.player.sex == Gender::Male).unwrap_or(false);
-            let vic_male = g.get_char(victim).map(|c| c.player.sex == Gender::Male).unwrap_or(false);
+            let ch_male = g
+                .get_char(ch)
+                .map(|c| c.player.sex == Gender::Male)
+                .unwrap_or(false);
+            let vic_male = g
+                .get_char(victim)
+                .map(|c| c.player.sex == Gender::Male)
+                .unwrap_or(false);
             let msg = if ch_male {
                 if vic_male {
                     "$n accuses you of fighting like a woman!"
@@ -551,7 +639,16 @@ pub fn do_insult(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
             } else {
                 "$n tells you that you'd lose a beauty contest against a troll."
             };
-            act_sleep(g, msg, false, ch, None, ActArg::Char(victim), To::Vict, false);
+            act_sleep(
+                g,
+                msg,
+                false,
+                ch,
+                None,
+                ActArg::Char(victim),
+                To::Vict,
+                false,
+            );
         }
         1 => {
             act_sleep(
@@ -579,7 +676,16 @@ pub fn do_insult(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         }
     }
 
-    act_sleep(g, "$n insults $N.", true, ch, None, ActArg::Char(victim), To::NotVict, false);
+    act_sleep(
+        g,
+        "$n insults $N.",
+        true,
+        ch,
+        None,
+        ActArg::Char(victim),
+        To::NotVict,
+        false,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -600,10 +706,11 @@ pub fn do_gmote_named(g: &mut GameState, ch: CharId, command: &str, argument: &s
         return;
     }
 
-    let action = match SOCIALS
-        .get()
-        .and_then(|lock| lock.read().ok().and_then(|table| lookup(&table, command).cloned()))
-    {
+    let action = match SOCIALS.get().and_then(|lock| {
+        lock.read()
+            .ok()
+            .and_then(|table| lookup(&table, command).cloned())
+    }) {
         Some(a) => a.clone(),
         None => {
             g.send_to_char(ch, "That's not a social!\r\n");
@@ -662,7 +769,10 @@ pub fn do_gmote_named(g: &mut GameState, ch: CharId, command: &str, argument: &s
                 if crate::cmd_comm::isignoresend(g, v, ch, crate::cmd_comm::IGNORE_EMOTE) {
                     return;
                 }
-                let vpos = g.get_char(v).map(|c| c.position).unwrap_or(Position::Standing);
+                let vpos = g
+                    .get_char(v)
+                    .map(|c| c.position)
+                    .unwrap_or(Position::Standing);
                 if (vpos as i32) < action.min_victim_position {
                     act_sleep(
                         g,
@@ -718,7 +828,10 @@ fn gmote_broadcast(g: &mut GameState, msg: &str, ch: CharId, vict: Option<CharId
     };
     for to_id in recipients {
         // PRF_NOGOSS gate.
-        if g.get_char(to_id).map(|c| c.prf_flags & PRF_NOGOSS != 0).unwrap_or(true) {
+        if g.get_char(to_id)
+            .map(|c| c.prf_flags & PRF_NOGOSS != 0)
+            .unwrap_or(true)
+        {
             continue;
         }
         // Soundproof room gate.
@@ -749,7 +862,13 @@ fn gmote_broadcast(g: &mut GameState, msg: &str, ch: CharId, vict: Option<CharId
 /// a one-shot To::Vict act() against a scratch send is not possible without a
 /// connection, so we reproduce the $n/$N/$e... codes here for the common set
 /// used by socials.
-fn render_for(g: &GameState, template: &str, ch: CharId, vict_obj: ActArg, viewer: CharId) -> String {
+fn render_for(
+    g: &GameState,
+    template: &str,
+    ch: CharId,
+    vict_obj: ActArg,
+    viewer: CharId,
+) -> String {
     let mut out = String::with_capacity(template.len() + 16);
     let mut chars = template.chars();
     while let Some(c) = chars.next() {
@@ -830,7 +949,9 @@ fn get_char_vis(g: &GameState, ch: CharId, name: &str) -> Option<CharId> {
 }
 
 fn sex_of(g: &GameState, cid: CharId) -> Gender {
-    g.get_char(cid).map(|c| c.player.sex).unwrap_or(Gender::Neutral)
+    g.get_char(cid)
+        .map(|c| c.player.sex)
+        .unwrap_or(Gender::Neutral)
 }
 fn hssh(g: &GameState, cid: CharId) -> &'static str {
     match sex_of(g, cid) {
@@ -860,7 +981,9 @@ fn pers(g: &GameState, viewer: CharId, cid: CharId) -> String {
     if g.can_see(viewer, cid) {
         if let Some(ch) = g.get_char(cid) {
             return if ch.is_npc {
-                ch.short_desc.clone().unwrap_or_else(|| ch.player.name.clone())
+                ch.short_desc
+                    .clone()
+                    .unwrap_or_else(|| ch.player.name.clone())
             } else {
                 ch.player.name.clone()
             };

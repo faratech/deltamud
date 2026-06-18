@@ -61,8 +61,21 @@ pub const OLC_SAVE_ACTION: i32 = 6;
 
 /// `save_info_msg[]` (olc.c) — human label per OLC_SAVE_* tag.
 pub const SAVE_INFO_MSG: [&str; 7] = [
-    "Rooms", "Objects", "Zone info", "Mobiles", "Shops", "Help", "Actions",
+    "Rooms",
+    "Objects",
+    "Zone info",
+    "Mobiles",
+    "Shops",
+    "Help",
+    "Actions",
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DgScriptEditMode {
+    Main,
+    New,
+    Delete,
+}
 
 // ---------------------------------------------------------------------------
 // OLC color cols. The C get_char_cols() set per-char color pointers; the
@@ -183,7 +196,10 @@ pub fn olc_add_to_save_list(zone: i32, kind: i32) {
 
 /// olc_remove_from_save_list: drop the (zone, kind) entry once it is on disk.
 pub fn olc_remove_from_save_list(zone: i32, kind: i32) {
-    save_list().lock().unwrap().retain(|&(z, t)| !(z == zone && t == kind));
+    save_list()
+        .lock()
+        .unwrap()
+        .retain(|&(z, t)| !(z == zone && t == kind));
 }
 
 /// olc_saveinfo: tell the immortal which OLC components still need saving.
@@ -242,6 +258,179 @@ pub fn can_edit_zone(g: &GameState, ch: CharId, zone_rnum: usize) -> bool {
     crate::handler::isname(&c.player.name, &zone.builders)
 }
 
+/// Shared DG script-list menu used by redit/oedit/medit. This is the Rust
+/// analogue of dg_olc.c `dg_script_menu`: edit a prototype entity's attached
+/// trigger vnum list.
+pub fn dg_script_menu(g: &mut GameState, conn: ConnId, kind: i32, entity_vnum: i32) {
+    let mut out = String::from("     Script Editor\r\n\r\n     Trigger List:\r\n");
+    let triggers = crate::dg_db_scripts::proto_trigger_vnums(kind, entity_vnum);
+    if triggers.is_empty() {
+        out.push_str("     <none>\r\n");
+    } else {
+        for (idx, trig_vnum) in triggers.iter().enumerate() {
+            let (name, mismatch) = {
+                let rnum = crate::dg_db_scripts::real_trigger(*trig_vnum);
+                if rnum < 0 {
+                    ("unknown trigger".to_string(), true)
+                } else {
+                    match crate::dg_db_scripts::trig_proto(rnum as usize) {
+                        Some(proto) => (proto.name, proto.attach_type != kind),
+                        None => ("unknown trigger".to_string(), true),
+                    }
+                }
+            };
+            out.push_str(&format!(
+                "     {:2}) [{}{}{}] {}{}{}",
+                idx + 1,
+                CYN,
+                trig_vnum,
+                NRM,
+                CYN,
+                name,
+                NRM
+            ));
+            if mismatch {
+                out.push_str(&format!(
+                    "   {}** Mis-matched Trigger Type **{}\r\n",
+                    GRN, NRM
+                ));
+            } else {
+                out.push_str("\r\n");
+            }
+        }
+    }
+    out.push_str(&format!(
+        "\r\n {}N{})  New trigger for this script\r\n\
+         {}D{})  Delete a trigger in this script\r\n\
+         {}X{})  Exit Script Editor\r\n\r\n\
+             Enter choice :",
+        GRN, NRM, GRN, NRM, GRN, NRM
+    ));
+    send_to_conn(g, conn, &out);
+}
+
+/// Parse one line of the shared DG script-list editor. Returns false when the
+/// user exits back to the owning editor's main menu.
+pub fn dg_script_edit_parse(
+    g: &mut GameState,
+    conn: ConnId,
+    kind: i32,
+    entity_vnum: i32,
+    mode: &mut DgScriptEditMode,
+    line: &str,
+) -> bool {
+    match *mode {
+        DgScriptEditMode::Main => {
+            match line.trim().chars().next().map(|c| c.to_ascii_lowercase()) {
+                Some('x') => return false,
+                Some('n') => {
+                    send_to_conn(g, conn, "\r\nPlease enter position, vnum   (ex: 1, 200):");
+                    *mode = DgScriptEditMode::New;
+                }
+                Some('d') => {
+                    send_to_conn(g, conn, "     Which entry should be deleted?  0 to abort :");
+                    *mode = DgScriptEditMode::Delete;
+                }
+                _ => dg_script_menu(g, conn, kind, entity_vnum),
+            }
+        }
+        DgScriptEditMode::New => {
+            let Some((pos, trig_vnum)) = parse_script_position_vnum(line) else {
+                dg_script_menu(g, conn, kind, entity_vnum);
+                *mode = DgScriptEditMode::Main;
+                return true;
+            };
+            if pos == 0 || trig_vnum == 0 {
+                dg_script_menu(g, conn, kind, entity_vnum);
+                *mode = DgScriptEditMode::Main;
+                return true;
+            }
+            if crate::dg_db_scripts::real_trigger(trig_vnum) < 0 {
+                send_to_conn(
+                    g,
+                    conn,
+                    "Invalid Trigger VNUM!\r\nPlease enter position, vnum   (ex: 1, 200):",
+                );
+                return true;
+            }
+            if !can_edit_trigger_zone(g, conn, trig_vnum) {
+                send_to_conn(
+                    g,
+                    conn,
+                    "You do not have permissions to that zone.\r\nPlease enter position, vnum   (ex: 1, 200):",
+                );
+                return true;
+            }
+            if crate::dg_db_scripts::insert_proto_trigger(kind, entity_vnum, trig_vnum, pos) {
+                mark_dg_script_dirty(g, kind, entity_vnum);
+            }
+            *mode = DgScriptEditMode::Main;
+            dg_script_menu(g, conn, kind, entity_vnum);
+        }
+        DgScriptEditMode::Delete => {
+            let pos = line.trim().parse::<usize>().unwrap_or(0);
+            if pos != 0 && crate::dg_db_scripts::remove_proto_trigger_at(kind, entity_vnum, pos) {
+                mark_dg_script_dirty(g, kind, entity_vnum);
+            }
+            *mode = DgScriptEditMode::Main;
+            dg_script_menu(g, conn, kind, entity_vnum);
+        }
+    }
+    true
+}
+
+fn parse_script_position_vnum(line: &str) -> Option<(usize, i32)> {
+    let nums: Vec<i32> = line
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse::<i32>().ok())
+        .collect();
+    match nums.as_slice() {
+        [vnum] => Some((999, *vnum)),
+        [pos, vnum, ..] => Some(((*pos).max(0) as usize, *vnum)),
+        _ => None,
+    }
+}
+
+fn can_edit_trigger_zone(g: &GameState, conn: ConnId, trig_vnum: i32) -> bool {
+    let Some(ch) = g.descriptors.get(&conn).and_then(|d| d.character) else {
+        return false;
+    };
+    if g.get_char(ch)
+        .map(|c| c.player.level >= LVL_IMMORT)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    real_zone(g, trig_vnum)
+        .map(|zr| can_edit_zone(g, ch, zr))
+        .unwrap_or(false)
+}
+
+fn mark_dg_script_dirty(g: &mut GameState, kind: i32, entity_vnum: i32) {
+    let Some(zr) = real_zone(g, entity_vnum) else {
+        return;
+    };
+    let Some(zone) = g.zones.get(zr) else {
+        return;
+    };
+    let save_kind = match kind {
+        crate::dg_handler::MOB_TRIGGER => OLC_SAVE_MOB,
+        crate::dg_handler::OBJ_TRIGGER => OLC_SAVE_OBJ,
+        crate::dg_handler::WLD_TRIGGER => OLC_SAVE_ROOM,
+        _ => return,
+    };
+    olc_add_to_save_list(zone.number, save_kind);
+}
+
+fn send_to_conn(g: &mut GameState, conn: ConnId, msg: &str) {
+    if let Some(ch) = g.descriptors.get(&conn).and_then(|d| d.character) {
+        g.send_to_char(ch, msg);
+    } else if let Some(d) = g.descriptors.get_mut(&conn) {
+        d.write(msg);
+    }
+}
+
 // ===========================================================================
 // olc_save_to_disk: the per-component save dispatcher (olc.c do_olc save arm).
 // Writes a single zone's component to its CircleMUD world file and removes it
@@ -254,11 +443,9 @@ pub fn olc_save_to_disk(g: &mut GameState, zone_rnum: usize, kind: i32) {
     match kind {
         OLC_SAVE_ROOM => crate::redit::redit_save_to_disk(g, zone_rnum),
         OLC_SAVE_OBJ => crate::oedit::oedit_save_to_disk(g, zone_rnum),
-        OLC_SAVE_ZONE | OLC_SAVE_MOB | OLC_SAVE_SHOP => {
-            if let Some(z) = g.zones.get(zone_rnum).map(|z| z.number) {
-                olc_remove_from_save_list(z, kind);
-            }
-        }
+        OLC_SAVE_ZONE => crate::zedit::zedit_save_to_disk(g, zone_rnum),
+        OLC_SAVE_MOB => crate::medit::medit_save_to_disk(g, zone_rnum),
+        OLC_SAVE_SHOP => crate::sedit::sedit_save_zone_to_disk(g, zone_rnum),
         _ => {}
     }
 }
@@ -348,7 +535,12 @@ pub fn do_olc(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
             }
             _ => {}
         }
-    } else if !buf1.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    } else if !buf1
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
         // First arg is not a number. C: strn_cmp("save", buf1, 4) == 0 — the
         // first 4 chars of buf1 are "save" (i.e. buf1 begins with "save").
         if buf1.starts_with("save") {
@@ -451,7 +643,11 @@ pub fn do_olc(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
         let znumber = g.zones.get(zr).map(|z| z.number).unwrap_or(-1);
         g.send_to_char(
             ch,
-            &format!("Saving all {}s in zone {}.\r\n", olc_type_word(subcmd), znumber),
+            &format!(
+                "Saving all {}s in zone {}.\r\n",
+                olc_type_word(subcmd),
+                znumber
+            ),
         );
         olc_save_to_disk(g, zr, kind);
         return;
@@ -491,7 +687,11 @@ mod tests {
     use super::*;
     use crate::character::Character;
     use crate::config::Config;
+    use crate::connection::Descriptor;
+    use crate::dg_db_scripts::TrigProto;
     use crate::world::Zone;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
 
     fn zone(number: i32, builders: &str) -> Zone {
         Zone {
@@ -517,6 +717,21 @@ mod tests {
         g.create_char(ch)
     }
 
+    fn temp_lib(name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("deltamud-olc-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(path.join("world/zon")).unwrap();
+        std::fs::create_dir_all(path.join("world/mob")).unwrap();
+        std::fs::create_dir_all(path.join("world/shp")).unwrap();
+        path
+    }
+
+    fn olc_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
     #[test]
     fn can_edit_zone_uses_builder_list_below_impl() {
         let mut g = GameState::new(Config::default());
@@ -528,5 +743,161 @@ mod tests {
         assert!(can_edit_zone(&g, alice, 0));
         assert!(!can_edit_zone(&g, charlie, 0));
         assert!(can_edit_zone(&g, imp, 0));
+    }
+
+    #[test]
+    fn dg_script_editor_adds_deletes_and_marks_room_dirty() {
+        let _guard = olc_test_lock();
+        let mut g = GameState::new(Config::default());
+        g.zones.push(zone(42, "Root"));
+        olc_remove_from_save_list(42, OLC_SAVE_ROOM);
+
+        let conn = ConnId(99);
+        let ch = player(&mut g, "Root", LVL_IMPL);
+        g.get_char_mut(ch).unwrap().desc = Some(conn);
+        let mut d = Descriptor::new(conn, "example.test".to_string());
+        d.character = Some(ch);
+        g.descriptors.insert(conn, d);
+
+        crate::dg_db_scripts::set_test_proto_trigger(
+            crate::dg_handler::WLD_TRIGGER,
+            999_001,
+            TrigProto {
+                vnum: 4205,
+                attach_type: crate::dg_handler::WLD_TRIGGER,
+                name: "first room trigger".to_string(),
+                trigger_type: 1,
+                narg: 0,
+                arglist: String::new(),
+                cmdlist: vec!["say first".to_string()],
+            },
+        );
+        crate::dg_db_scripts::set_test_proto_trigger(
+            crate::dg_handler::WLD_TRIGGER,
+            999_002,
+            TrigProto {
+                vnum: 4206,
+                attach_type: crate::dg_handler::WLD_TRIGGER,
+                name: "second room trigger".to_string(),
+                trigger_type: 1,
+                narg: 0,
+                arglist: String::new(),
+                cmdlist: vec!["say second".to_string()],
+            },
+        );
+
+        let mut mode = DgScriptEditMode::Main;
+        assert!(dg_script_edit_parse(
+            &mut g,
+            conn,
+            crate::dg_handler::WLD_TRIGGER,
+            4201,
+            &mut mode,
+            "n",
+        ));
+        assert_eq!(mode, DgScriptEditMode::New);
+        assert!(dg_script_edit_parse(
+            &mut g,
+            conn,
+            crate::dg_handler::WLD_TRIGGER,
+            4201,
+            &mut mode,
+            "1, 4205",
+        ));
+        assert_eq!(
+            crate::dg_db_scripts::proto_trigger_vnums(crate::dg_handler::WLD_TRIGGER, 4201),
+            vec![4205]
+        );
+
+        assert!(dg_script_edit_parse(
+            &mut g,
+            conn,
+            crate::dg_handler::WLD_TRIGGER,
+            4201,
+            &mut mode,
+            "n",
+        ));
+        assert!(dg_script_edit_parse(
+            &mut g,
+            conn,
+            crate::dg_handler::WLD_TRIGGER,
+            4201,
+            &mut mode,
+            "4206",
+        ));
+        assert_eq!(
+            crate::dg_db_scripts::proto_trigger_vnums(crate::dg_handler::WLD_TRIGGER, 4201),
+            vec![4205, 4206]
+        );
+
+        assert!(dg_script_edit_parse(
+            &mut g,
+            conn,
+            crate::dg_handler::WLD_TRIGGER,
+            4201,
+            &mut mode,
+            "d",
+        ));
+        assert_eq!(mode, DgScriptEditMode::Delete);
+        assert!(dg_script_edit_parse(
+            &mut g,
+            conn,
+            crate::dg_handler::WLD_TRIGGER,
+            4201,
+            &mut mode,
+            "1",
+        ));
+        assert_eq!(
+            crate::dg_db_scripts::proto_trigger_vnums(crate::dg_handler::WLD_TRIGGER, 4201),
+            vec![4206]
+        );
+
+        olc_saveinfo(&mut g, ch);
+        let out = &g.descriptors.get(&conn).unwrap().outbuf;
+        assert!(out.contains("Rooms for zone 42"));
+        olc_remove_from_save_list(42, OLC_SAVE_ROOM);
+        crate::dg_db_scripts::clear_proto_triggers(crate::dg_handler::WLD_TRIGGER, 4201);
+    }
+
+    #[test]
+    fn central_olc_save_dispatches_zone_mob_and_shop_writers() {
+        let _guard = olc_test_lock();
+        let lib = temp_lib("central-save");
+        let mut cfg = Config::default();
+        cfg.lib_path = lib.to_string_lossy().to_string();
+        let mut g = GameState::new(cfg);
+        g.zones.push(zone(43, "Root"));
+
+        olc_add_to_save_list(43, OLC_SAVE_ZONE);
+        olc_add_to_save_list(43, OLC_SAVE_MOB);
+        olc_add_to_save_list(43, OLC_SAVE_SHOP);
+
+        olc_save_to_disk(&mut g, 0, OLC_SAVE_ZONE);
+        olc_save_to_disk(&mut g, 0, OLC_SAVE_MOB);
+        olc_save_to_disk(&mut g, 0, OLC_SAVE_SHOP);
+
+        let zon = lib.join("world/zon/43.zon");
+        let mob = lib.join("world/mob/43.mob");
+        let shp = lib.join("world/shp/43.shp");
+        assert!(std::fs::read_to_string(&zon).unwrap().contains("#43\n"));
+        assert_eq!(std::fs::read_to_string(&mob).unwrap(), "$\n");
+        assert!(std::fs::read_to_string(&shp)
+            .unwrap()
+            .starts_with("CircleMUD v3.0 Shop File~\n"));
+
+        let ch = player(&mut g, "Root", LVL_IMPL);
+        g.get_char_mut(ch).unwrap().desc = Some(ConnId(100));
+        let mut d = Descriptor::new(ConnId(100), "example.test".to_string());
+        d.character = Some(ch);
+        g.descriptors.insert(ConnId(100), d);
+        olc_saveinfo(&mut g, ch);
+        assert!(g
+            .descriptors
+            .get(&ConnId(100))
+            .unwrap()
+            .outbuf
+            .contains("The database is up to date."));
+
+        let _ = std::fs::remove_dir_all(&lib);
     }
 }

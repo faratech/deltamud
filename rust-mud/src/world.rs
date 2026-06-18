@@ -14,13 +14,51 @@ use crate::types::*;
 pub enum ResetCmd {
     // `load_chance` is DeltaMUD's per-command probability gate (reset_zone:
     // `number(1,100) >= arg4`, or arg3 for G). 0 => always loads (legacy zones).
-    LoadMob { if_flag: bool, mob_vnum: MobVnum, max_count: i32, room_vnum: RoomVnum, load_chance: i32 },
-    LoadObjInRoom { if_flag: bool, obj_vnum: ObjVnum, max_count: i32, room_vnum: RoomVnum, load_chance: i32 },
-    GiveObjToMob { if_flag: bool, obj_vnum: ObjVnum, max_count: i32, load_chance: i32 },
-    EquipMob { if_flag: bool, obj_vnum: ObjVnum, max_count: i32, wear_pos: usize, load_chance: i32 },
-    PutObjInObj { if_flag: bool, obj_vnum: ObjVnum, max_count: i32, container_vnum: ObjVnum, load_chance: i32 },
-    RemoveObj { if_flag: bool, room_vnum: RoomVnum, obj_vnum: ObjVnum },
-    Door { if_flag: bool, room_vnum: RoomVnum, direction: usize, state: i32 },
+    LoadMob {
+        if_flag: bool,
+        mob_vnum: MobVnum,
+        max_count: i32,
+        room_vnum: RoomVnum,
+        load_chance: i32,
+    },
+    LoadObjInRoom {
+        if_flag: bool,
+        obj_vnum: ObjVnum,
+        max_count: i32,
+        room_vnum: RoomVnum,
+        load_chance: i32,
+    },
+    GiveObjToMob {
+        if_flag: bool,
+        obj_vnum: ObjVnum,
+        max_count: i32,
+        load_chance: i32,
+    },
+    EquipMob {
+        if_flag: bool,
+        obj_vnum: ObjVnum,
+        max_count: i32,
+        wear_pos: usize,
+        load_chance: i32,
+    },
+    PutObjInObj {
+        if_flag: bool,
+        obj_vnum: ObjVnum,
+        max_count: i32,
+        container_vnum: ObjVnum,
+        load_chance: i32,
+    },
+    RemoveObj {
+        if_flag: bool,
+        room_vnum: RoomVnum,
+        obj_vnum: ObjVnum,
+    },
+    Door {
+        if_flag: bool,
+        room_vnum: RoomVnum,
+        direction: usize,
+        state: i32,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -126,7 +164,13 @@ impl GameState {
         // (CircleMUD mobs otherwise default to 11/13). C applies these in
         // interpret_espec then copies real_abils -> aff_abils.
         mob.real_abils = proto.abilities.unwrap_or(crate::character::Abilities {
-            str: 13, str_add: 0, intel: 13, wis: 13, dex: 13, con: 13, cha: 13,
+            str: 13,
+            str_add: 0,
+            intel: 13,
+            wis: 13,
+            dex: 13,
+            con: 13,
+            cha: 13,
         });
         mob.aff_abils = mob.real_abils;
         mob.alignment = proto.alignment;
@@ -143,7 +187,11 @@ impl GameState {
         mob.points.move_points = 80;
         mob.points.max_move = 80;
         // CircleMUD stores AC*10; an unarmored mob is AC 10 -> stored 100.
-        mob.points.armor = if proto.armor == 0 { 100 } else { proto.armor as ArmorClass };
+        mob.points.armor = if proto.armor == 0 {
+            100
+        } else {
+            proto.armor as ArmorClass
+        };
         mob.points.hitroll = proto.hitroll;
         mob.points.damroll = proto.damroll;
         // DeltaMUD extended combat stats (the `X` stats-line variant).
@@ -268,7 +316,13 @@ impl GameState {
             }
 
             match cmd {
-                ResetCmd::LoadMob { mob_vnum, max_count, room_vnum, load_chance, .. } => {
+                ResetCmd::LoadMob {
+                    mob_vnum,
+                    max_count,
+                    room_vnum,
+                    load_chance,
+                    ..
+                } => {
                     if mob_counts.get(mob_vnum).copied().unwrap_or(0) >= *max_count
                         || self.rng.number(1, 100) < *load_chance
                     {
@@ -277,7 +331,10 @@ impl GameState {
                     }
                     let rnum = match self.real_room(*room_vnum) {
                         Some(r) => r,
-                        None => { last_cmd = false; continue; }
+                        None => {
+                            last_cmd = false;
+                            continue;
+                        }
                     };
                     if let Some(mob) = self.load_mobile(*mob_vnum) {
                         self.char_to_room(mob, rnum);
@@ -291,7 +348,13 @@ impl GameState {
                         last_cmd = false;
                     }
                 }
-                ResetCmd::LoadObjInRoom { obj_vnum, max_count, room_vnum, load_chance, .. } => {
+                ResetCmd::LoadObjInRoom {
+                    obj_vnum,
+                    max_count,
+                    room_vnum,
+                    load_chance,
+                    ..
+                } => {
                     if obj_counts.get(obj_vnum).copied().unwrap_or(0) >= *max_count
                         || self.rng.number(1, 100) < *load_chance
                     {
@@ -300,7 +363,10 @@ impl GameState {
                     }
                     let rnum = match self.real_room(*room_vnum) {
                         Some(r) => r,
-                        None => { last_cmd = false; continue; }
+                        None => {
+                            last_cmd = false;
+                            continue;
+                        }
                     };
                     if let Some(obj) = self.load_object(*obj_vnum) {
                         self.obj_to_room(obj, rnum);
@@ -314,7 +380,12 @@ impl GameState {
                         last_cmd = false;
                     }
                 }
-                ResetCmd::GiveObjToMob { obj_vnum, max_count, load_chance, .. } => {
+                ResetCmd::GiveObjToMob {
+                    obj_vnum,
+                    max_count,
+                    load_chance,
+                    ..
+                } => {
                     // C 'G': gated on mob_load (not just a live mob pointer).
                     if obj_counts.get(obj_vnum).copied().unwrap_or(0) >= *max_count
                         || last_mob.is_none()
@@ -335,7 +406,13 @@ impl GameState {
                         last_cmd = false;
                     }
                 }
-                ResetCmd::EquipMob { obj_vnum, max_count, wear_pos, load_chance, .. } => {
+                ResetCmd::EquipMob {
+                    obj_vnum,
+                    max_count,
+                    wear_pos,
+                    load_chance,
+                    ..
+                } => {
                     // C 'E': gated on mob_load (not just a live mob pointer).
                     if obj_counts.get(obj_vnum).copied().unwrap_or(0) >= *max_count
                         || last_mob.is_none()
@@ -357,7 +434,13 @@ impl GameState {
                         last_cmd = false;
                     }
                 }
-                ResetCmd::PutObjInObj { obj_vnum, max_count, container_vnum, load_chance, .. } => {
+                ResetCmd::PutObjInObj {
+                    obj_vnum,
+                    max_count,
+                    container_vnum,
+                    load_chance,
+                    ..
+                } => {
                     // C 'P': gated on obj_load (a prior 'O' must have loaded).
                     if obj_counts.get(obj_vnum).copied().unwrap_or(0) >= *max_count
                         || !obj_load
@@ -373,7 +456,10 @@ impl GameState {
                         .map(|(id, _)| *id);
                     let container = match container {
                         Some(c) => c,
-                        None => { last_cmd = false; continue; }
+                        None => {
+                            last_cmd = false;
+                            continue;
+                        }
                     };
                     if let Some(obj) = self.load_object(*obj_vnum) {
                         self.obj_to_obj(obj, container);
@@ -386,17 +472,20 @@ impl GameState {
                         last_cmd = false;
                     }
                 }
-                ResetCmd::RemoveObj { room_vnum, obj_vnum, .. } => {
+                ResetCmd::RemoveObj {
+                    room_vnum,
+                    obj_vnum,
+                    ..
+                } => {
                     // C 'R' (db.c ~2084): get_obj_in_list_num returns only the
                     // FIRST matching object in the room; extract it once. Always
                     // sets last_cmd=1 (even if no match). On a match, C sets obj=NULL,
                     // so the trailing NO_RENT bit does NOT fire this iteration.
                     if let Some(rnum) = self.real_room(*room_vnum) {
-                        let found = self.rooms[rnum]
-                            .contents
-                            .iter()
-                            .copied()
-                            .find(|&o| self.objs.get(&o).map(|x| x.item_number) == Some(*obj_vnum));
+                        let found =
+                            self.rooms[rnum].contents.iter().copied().find(|&o| {
+                                self.objs.get(&o).map(|x| x.item_number) == Some(*obj_vnum)
+                            });
                         if let Some(o) = found {
                             self.obj_from_anywhere(o);
                             self.extract_obj(o);
@@ -408,15 +497,22 @@ impl GameState {
                         last_cmd = false;
                     }
                 }
-                ResetCmd::Door { room_vnum, direction, state, .. } => {
+                ResetCmd::Door {
+                    room_vnum,
+                    direction,
+                    state,
+                    ..
+                } => {
                     // C 'D' (db.c ~2095): manipulate ONLY the EX_CLOSED/EX_LOCKED
                     // bits via REMOVE_BIT/SET_BIT, preserving EX_ISDOOR/EX_PICKPROOF/
                     // EX_HIDDEN. state 0 = open (clear CLOSED+LOCKED), 1 = closed
                     // (set CLOSED, clear LOCKED), 2 = closed+locked (set both). Any
                     // other state leaves the bits unchanged.
                     if let Some(rnum) = self.real_room(*room_vnum) {
-                        if let Some(exit) =
-                            self.rooms[rnum].exits.get_mut(*direction).and_then(|e| e.as_mut())
+                        if let Some(exit) = self.rooms[rnum]
+                            .exits
+                            .get_mut(*direction)
+                            .and_then(|e| e.as_mut())
                         {
                             match *state {
                                 0 => {

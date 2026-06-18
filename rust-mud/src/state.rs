@@ -292,7 +292,9 @@ impl GameState {
         if arg.is_empty() {
             return None;
         }
-        self.player_table.iter().find(|p| p.name.eq_ignore_ascii_case(arg))
+        self.player_table
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(arg))
     }
 
     /// UPSERT a player_table row (keyed on idnum), keeping the index fresh as

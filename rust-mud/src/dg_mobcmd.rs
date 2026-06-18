@@ -68,7 +68,9 @@ pub fn take_owner_purged() -> bool {
 fn mob_log(g: &GameState, mob: CharId, msg: &str) {
     let (short, vnum) = match g.get_char(mob) {
         Some(c) => (
-            c.short_desc.clone().unwrap_or_else(|| c.player.name.clone()),
+            c.short_desc
+                .clone()
+                .unwrap_or_else(|| c.player.name.clone()),
             c.nr,
         ),
         None => ("<extracted>".to_string(), NOBODY),
@@ -102,7 +104,9 @@ fn mob_or_impl(g: &GameState, ch: CharId) -> bool {
 
 /// C: `if (AFF_FLAGGED(ch, AFF_CHARM)) return;`
 fn is_charmed(g: &GameState, ch: CharId) -> bool {
-    g.get_char(ch).map(|c| c.affect_flags & AFF_CHARM != 0).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.affect_flags & AFF_CHARM != 0)
+        .unwrap_or(false)
 }
 
 /// C: the extra implementor gate several commands carry —
@@ -156,7 +160,11 @@ fn dg_get_char(g: &GameState, name: &str) -> Option<CharId> {
 fn dg_get_obj(g: &GameState, name: &str) -> Option<ObjId> {
     if let Some(id) = parse_uid(name) {
         let oid = ObjId(id);
-        return if g.get_obj(oid).is_some() { Some(oid) } else { None };
+        return if g.get_obj(oid).is_some() {
+            Some(oid)
+        } else {
+            None
+        };
     }
     for oid in g.obj_ids() {
         if let Some(o) = g.get_obj(oid) {
@@ -213,7 +221,11 @@ fn find_target_room(g: &GameState, mob: CharId, raw: &str) -> Option<RoomRnum> {
     if roomstr.is_empty() {
         return None;
     }
-    let first_is_digit = roomstr.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+    let first_is_digit = roomstr
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false);
     if first_is_digit && !roomstr.contains('.') {
         let vnum: RoomVnum = roomstr.parse().unwrap_or(NOWHERE);
         return g.real_room(vnum);
@@ -255,8 +267,8 @@ fn find_target_room(g: &GameState, mob: CharId, raw: &str) -> Option<RoomRnum> {
 
 #[derive(Clone, Copy)]
 enum Tok {
-    Char(char),     // a token whose substitution char is `kind`
-    Obj,            // a ` object token
+    Char(char), // a token whose substitution char is `kind`
+    Obj,        // a ` object token
 }
 
 /// A parsed sub_write template: literal text segments interleaved with tokens.
@@ -354,7 +366,9 @@ fn pers(g: &GameState, viewer: CharId, target: CharId) -> String {
     if g.can_see(viewer, target) {
         if let Some(c) = g.get_char(target) {
             return if c.is_npc {
-                c.short_desc.clone().unwrap_or_else(|| c.player.name.clone())
+                c.short_desc
+                    .clone()
+                    .unwrap_or_else(|| c.player.name.clone())
             } else {
                 c.player.name.clone()
             };
@@ -364,11 +378,17 @@ fn pers(g: &GameState, viewer: CharId, target: CharId) -> String {
         .get_char(target)
         .map(|c| !c.is_npc && c.player.level >= LVL_IMMORT)
         .unwrap_or(false);
-    if imm { "A Mystical Being".to_string() } else { "someone".to_string() }
+    if imm {
+        "A Mystical Being".to_string()
+    } else {
+        "someone".to_string()
+    }
 }
 /// OBJS(obj, viewer): object short description, else "something".
 fn objs_short(g: &GameState, oid: ObjId) -> String {
-    g.get_obj(oid).map(|o| o.short_description.clone()).unwrap_or_else(|| "something".to_string())
+    g.get_obj(oid)
+        .map(|o| o.short_description.clone())
+        .unwrap_or_else(|| "something".to_string())
 }
 
 /// C sub_write_to_char: render the template for one recipient and send it.
@@ -389,13 +409,11 @@ fn sub_write_to_char(
             Tok::Char(kind) => {
                 let tgt = ctoks[i];
                 match kind {
-                    '~' => {
-                        match tgt {
-                            None => sb.push_str("someone"),
-                            Some(t) if t == to => sb.push_str("you"),
-                            Some(t) => sb.push_str(&pers(g, to, t)),
-                        }
-                    }
+                    '~' => match tgt {
+                        None => sb.push_str("someone"),
+                        Some(t) if t == to => sb.push_str("you"),
+                        Some(t) => sb.push_str(&pers(g, to, t)),
+                    },
                     '@' => match tgt {
                         None => sb.push_str("someone's"),
                         Some(t) if t == to => sb.push_str("your"),
@@ -597,7 +615,11 @@ fn do_mkill(g: &mut GameState, ch: CharId, argument: &str) {
         match dg_get_char(g, &arg) {
             Some(v) => v,
             None => {
-                mob_log(g, ch, &format!("mkill: victim ({}) not found", display_arg(&arg)));
+                mob_log(
+                    g,
+                    ch,
+                    &format!("mkill: victim ({}) not found", display_arg(&arg)),
+                );
                 return;
             }
         }
@@ -617,7 +639,9 @@ fn do_mkill(g: &mut GameState, ch: CharId, argument: &str) {
     // Charmed mob attacking its master — already guarded by is_charmed above,
     // but C re-checks against ch->master for the AFF set directly.
     let master = g.get_char(ch).and_then(|c| c.master);
-    if g.get_char(ch).map(|c| c.affect_flags & AFF_CHARM != 0).unwrap_or(false)
+    if g.get_char(ch)
+        .map(|c| c.affect_flags & AFF_CHARM != 0)
+        .unwrap_or(false)
         && master == Some(victim)
     {
         mob_log(g, ch, "mkill: charmed mob attacking master");
@@ -656,7 +680,10 @@ fn do_mjunk(g: &mut GameState, ch: CharId, argument: &str) {
             detach_and_extract_obj(g, oid);
             return;
         }
-        let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        let inv = g
+            .get_char(ch)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         if let Some(oid) = g.get_obj_in_list_vis(ch, &arg, &inv) {
             detach_and_extract_obj(g, oid);
         }
@@ -664,10 +691,15 @@ fn do_mjunk(g: &mut GameState, ch: CharId, argument: &str) {
     }
 
     // FIND_ALL / FIND_ALLDOT branch: scan inventory.
-    let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let inv = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     for oid in inv {
         let matches = if is_all_dot {
-            g.get_obj(oid).map(|o| isname(&dot_name, &o.name)).unwrap_or(false)
+            g.get_obj(oid)
+                .map(|o| isname(&dot_name, &o.name))
+                .unwrap_or(false)
         } else {
             true // plain "all"
         };
@@ -701,7 +733,11 @@ fn do_mechoaround(g: &mut GameState, ch: CharId, argument: &str) {
         match dg_get_char(g, &arg) {
             Some(v) => v,
             None => {
-                mob_log(g, ch, &format!("mechoaround: victim ({}) does not exist", display_arg(&arg)));
+                mob_log(
+                    g,
+                    ch,
+                    &format!("mechoaround: victim ({}) does not exist", display_arg(&arg)),
+                );
                 return;
             }
         }
@@ -709,7 +745,11 @@ fn do_mechoaround(g: &mut GameState, ch: CharId, argument: &str) {
         match get_char_room_vis(g, ch, &arg) {
             Some(v) => v,
             None => {
-                mob_log(g, ch, &format!("mechoaround: victim ({}) does not exist", arg));
+                mob_log(
+                    g,
+                    ch,
+                    &format!("mechoaround: victim ({}) does not exist", arg),
+                );
                 return;
             }
         }
@@ -738,7 +778,11 @@ fn do_msend(g: &mut GameState, ch: CharId, argument: &str) {
         match dg_get_char(g, &arg) {
             Some(v) => v,
             None => {
-                mob_log(g, ch, &format!("msend: victim ({}) does not exist", display_arg(&arg)));
+                mob_log(
+                    g,
+                    ch,
+                    &format!("msend: victim ({}) does not exist", display_arg(&arg)),
+                );
                 return;
             }
         }
@@ -994,7 +1038,10 @@ fn do_mteleport(g: &mut GameState, ch: CharId, argument: &str) {
         }
         let people = g.room(here).people.clone();
         for vict in people {
-            if g.get_char(vict).map(|c| c.player.level < LVL_IMMORT).unwrap_or(false) {
+            if g.get_char(vict)
+                .map(|c| c.player.level < LVL_IMMORT)
+                .unwrap_or(false)
+            {
                 g.char_from_room(vict);
                 g.char_to_room(vict, target);
             }
@@ -1004,7 +1051,11 @@ fn do_mteleport(g: &mut GameState, ch: CharId, argument: &str) {
             match dg_get_char(g, &arg1) {
                 Some(v) => v,
                 None => {
-                    mob_log(g, ch, &format!("mteleport: victim ({}) does not exist", display_arg(&arg1)));
+                    mob_log(
+                        g,
+                        ch,
+                        &format!("mteleport: victim ({}) does not exist", display_arg(&arg1)),
+                    );
                     return;
                 }
             }
@@ -1012,12 +1063,19 @@ fn do_mteleport(g: &mut GameState, ch: CharId, argument: &str) {
             match get_char_vis(g, ch, &arg1) {
                 Some(v) => v,
                 None => {
-                    mob_log(g, ch, &format!("mteleport: victim ({}) does not exist", arg1));
+                    mob_log(
+                        g,
+                        ch,
+                        &format!("mteleport: victim ({}) does not exist", arg1),
+                    );
                     return;
                 }
             }
         };
-        if g.get_char(vict).map(|c| c.player.level < LVL_IMMORT).unwrap_or(false) {
+        if g.get_char(vict)
+            .map(|c| c.player.level < LVL_IMMORT)
+            .unwrap_or(false)
+        {
             g.char_from_room(vict);
             g.char_to_room(vict, target);
         }
@@ -1060,9 +1118,7 @@ fn do_mforce(g: &mut GameState, ch: CharId, argument: &str) {
                 Some(c) => {
                     // i->character && !i->connected — a playing PC; mobs have no
                     // descriptor so this naturally restricts to players.
-                    c.desc.is_some()
-                        && c.player.level < ch_level
-                        && c.player.level < LVL_IMMORT
+                    c.desc.is_some() && c.player.level < ch_level && c.player.level < LVL_IMMORT
                 }
                 None => false,
             };
@@ -1075,7 +1131,11 @@ fn do_mforce(g: &mut GameState, ch: CharId, argument: &str) {
             match dg_get_char(g, &arg) {
                 Some(v) => v,
                 None => {
-                    mob_log(g, ch, &format!("mforce: victim ({}) does not exist", display_arg(&arg)));
+                    mob_log(
+                        g,
+                        ch,
+                        &format!("mforce: victim ({}) does not exist", display_arg(&arg)),
+                    );
                     return;
                 }
             }
@@ -1092,7 +1152,10 @@ fn do_mforce(g: &mut GameState, ch: CharId, argument: &str) {
             mob_log(g, ch, "mforce: forcing self");
             return;
         }
-        if g.get_char(victim).map(|c| c.player.level < LVL_IMMORT).unwrap_or(false) {
+        if g.get_char(victim)
+            .map(|c| c.player.level < LVL_IMMORT)
+            .unwrap_or(false)
+        {
             command_interpreter(g, victim, command);
         }
     }
@@ -1119,7 +1182,11 @@ fn do_mexp(g: &mut GameState, ch: CharId, argument: &str) {
         match dg_get_char(g, &name) {
             Some(v) => v,
             None => {
-                mob_log(g, ch, &format!("mexp: victim ({}) does not exist", display_arg(&name)));
+                mob_log(
+                    g,
+                    ch,
+                    &format!("mexp: victim ({}) does not exist", display_arg(&name)),
+                );
                 return;
             }
         }
@@ -1157,7 +1224,11 @@ fn do_mgold(g: &mut GameState, ch: CharId, argument: &str) {
         match dg_get_char(g, &name) {
             Some(v) => v,
             None => {
-                mob_log(g, ch, &format!("mgold: victim ({}) does not exist", display_arg(&name)));
+                mob_log(
+                    g,
+                    ch,
+                    &format!("mgold: victim ({}) does not exist", display_arg(&name)),
+                );
                 return;
             }
         }
@@ -1208,7 +1279,11 @@ fn do_mhunt(g: &mut GameState, ch: CharId, argument: &str) {
         match dg_get_char(g, &arg) {
             Some(v) => v,
             None => {
-                mob_log(g, ch, &format!("mhunt: victim ({}) does not exist", display_arg(&arg)));
+                mob_log(
+                    g,
+                    ch,
+                    &format!("mhunt: victim ({}) does not exist", display_arg(&arg)),
+                );
                 return;
             }
         }
@@ -1248,7 +1323,11 @@ fn do_mremember(g: &mut GameState, ch: CharId, argument: &str) {
         match dg_get_char(g, &arg) {
             Some(v) => v,
             None => {
-                mob_log(g, ch, &format!("mremember: victim ({}) does not exist", display_arg(&arg)));
+                mob_log(
+                    g,
+                    ch,
+                    &format!("mremember: victim ({}) does not exist", display_arg(&arg)),
+                );
                 return;
             }
         }
@@ -1256,12 +1335,20 @@ fn do_mremember(g: &mut GameState, ch: CharId, argument: &str) {
         match get_char_vis(g, ch, &arg) {
             Some(v) => v,
             None => {
-                mob_log(g, ch, &format!("mremember: victim ({}) does not exist", arg));
+                mob_log(
+                    g,
+                    ch,
+                    &format!("mremember: victim ({}) does not exist", arg),
+                );
                 return;
             }
         }
     };
-    let cmd_opt = if cmd.is_empty() { None } else { Some(cmd.to_string()) };
+    let cmd_opt = if cmd.is_empty() {
+        None
+    } else {
+        Some(cmd.to_string())
+    };
     script_mem_add(ch, victim, cmd_opt);
 }
 
@@ -1286,7 +1373,11 @@ fn do_mforget(g: &mut GameState, ch: CharId, argument: &str) {
         match dg_get_char(g, &arg) {
             Some(v) => v,
             None => {
-                mob_log(g, ch, &format!("mforget: victim ({}) does not exist", display_arg(&arg)));
+                mob_log(
+                    g,
+                    ch,
+                    &format!("mforget: victim ({}) does not exist", display_arg(&arg)),
+                );
                 return;
             }
         }
@@ -1317,7 +1408,10 @@ fn do_mtransform(g: &mut GameState, ch: CharId, argument: &str) {
     // C: a descriptor means a switched immortal — they must use 'switch', not
     // mtransform (no proto vnum to return to).
     if g.get_char(ch).map(|c| c.desc.is_some()).unwrap_or(false) {
-        g.send_to_char(ch, "You've got no VNUM to return to, dummy! try 'switch'\r\n");
+        g.send_to_char(
+            ch,
+            "You've got no VNUM to return to, dummy! try 'switch'\r\n",
+        );
         return;
     }
     let (arg, _) = one_argument(argument);
@@ -1325,7 +1419,12 @@ fn do_mtransform(g: &mut GameState, ch: CharId, argument: &str) {
         mob_log(g, ch, "mtransform: missing argument");
         return;
     }
-    if !arg.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    if !arg
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
         mob_log(g, ch, "mtransform: bad argument");
         return;
     }
@@ -1465,8 +1564,8 @@ use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone)]
 pub struct ScriptMemory {
-    pub id: CharId,           // remembered victim's arena id
-    pub cmd: Option<String>,  // optional command to mforce on the mob when seen
+    pub id: CharId,          // remembered victim's arena id
+    pub cmd: Option<String>, // optional command to mforce on the mob when seen
 }
 
 static SCRIPT_MEM: OnceLock<Mutex<HashMap<CharId, Vec<ScriptMemory>>>> = OnceLock::new();
@@ -1477,7 +1576,9 @@ fn script_mem() -> &'static Mutex<HashMap<CharId, Vec<ScriptMemory>>> {
 
 fn script_mem_add(mob: CharId, victim: CharId, cmd: Option<String>) {
     let mut m = script_mem().lock().unwrap();
-    m.entry(mob).or_default().push(ScriptMemory { id: victim, cmd });
+    m.entry(mob)
+        .or_default()
+        .push(ScriptMemory { id: victim, cmd });
 }
 
 fn script_mem_forget(mob: CharId, victim: CharId) {
@@ -1492,7 +1593,12 @@ fn script_mem_forget(mob: CharId, victim: CharId) {
 
 /// VM read API: snapshot a mob's remembered victims (for the MEMORY trigger).
 pub fn script_mem_list(mob: CharId) -> Vec<ScriptMemory> {
-    script_mem().lock().unwrap().get(&mob).cloned().unwrap_or_default()
+    script_mem()
+        .lock()
+        .unwrap()
+        .get(&mob)
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Drop all script memory for a mob (call when the mob is extracted, so a

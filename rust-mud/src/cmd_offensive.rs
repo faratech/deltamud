@@ -25,7 +25,7 @@
 
 use crate::act::{act, ActArg, To};
 use crate::character::Affect;
-use crate::combat::{chance, check_killer, damage, damage_type, hit, hit_type, set_fighting};
+use crate::combat::{self, chance, check_killer, damage_type, hit, hit_type, set_fighting};
 use crate::flags::*;
 use crate::handler::check_perm_duration;
 use crate::object::ObjectType;
@@ -92,10 +92,14 @@ fn get_level(g: &GameState, ch: CharId) -> Level {
     g.get_char(ch).map(|c| c.player.level).unwrap_or(0)
 }
 fn get_class(g: &GameState, ch: CharId) -> Class {
-    g.get_char(ch).map(|c| c.player.class).unwrap_or(Class::Warrior)
+    g.get_char(ch)
+        .map(|c| c.player.class)
+        .unwrap_or(Class::Warrior)
 }
 fn get_pos(g: &GameState, ch: CharId) -> Position {
-    g.get_char(ch).map(|c| c.position).unwrap_or(Position::Standing)
+    g.get_char(ch)
+        .map(|c| c.position)
+        .unwrap_or(Position::Standing)
 }
 fn get_hit(g: &GameState, ch: CharId) -> i32 {
     g.get_char(ch).map(|c| c.points.hit).unwrap_or(0)
@@ -115,11 +119,15 @@ fn get_skill(g: &GameState, ch: CharId, num: u16) -> i32 {
 }
 /// IS_AFFECTED(ch, bit) — affect bitvector test.
 fn is_affected(g: &GameState, ch: CharId, bit: i64) -> bool {
-    g.get_char(ch).map(|c| c.affect_flags & bit != 0).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.affect_flags & bit != 0)
+        .unwrap_or(false)
 }
 /// MOB_FLAGGED(ch, flag) — NPC act-flag test.
 fn mob_flagged(g: &GameState, ch: CharId, flag: i64) -> bool {
-    g.get_char(ch).map(|c| c.is_npc && (c.act_flags & flag != 0)).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.is_npc && (c.act_flags & flag != 0))
+        .unwrap_or(false)
 }
 /// AWAKE(ch) — position above sleeping.
 fn awake(g: &GameState, ch: CharId) -> bool {
@@ -172,26 +180,13 @@ fn stop_fighting(g: &mut GameState, ch: CharId) {
     }
 }
 
-/// raw_kill(ch=victim, killer): immortal "kill" instakill (db.c). With the
-/// death system at Tier-0 we route through combat by delivering lethal damage,
-/// which produces the corpse + extract/respawn exactly as a normal death does.
 fn raw_kill(g: &mut GameState, victim: CharId, killer: CharId) {
-    // C raw_kill() extracts the victim directly, bypassing the combat damage
-    // path (and therefore dam_multi). To stay faithful while reusing the
-    // corpse/respawn path, drain the victim to a guaranteed-lethal hp first so
-    // the death resolves even if dam_multi would scale a normal blow to zero.
-    if let Some(c) = g.get_char_mut(victim) {
-        c.points.hit = -100;
-    }
-    set_fighting(g, killer, victim);
-    damage(g, killer, victim, 1);
+    combat::raw_kill(g, victim, Some(killer));
 }
 
-/// deathblow(ch, victim, dam, attacktype) (fight.c): a guaranteed killing blow
-/// that bypasses the to-hit roll. Tier-0 routes the lethal damage through
-/// combat::damage so the corpse/respawn path runs identically.
 fn deathblow(g: &mut GameState, ch: CharId, victim: CharId, dam: i32) {
-    damage(g, ch, victim, dam);
+    let attacktype = combat::get_attacktype(g, ch);
+    combat::deathblow(g, ch, victim, dam, attacktype);
 }
 
 // ===========================================================================
@@ -200,7 +195,10 @@ fn deathblow(g: &mut GameState, ch: CharId, victim: CharId, dam: i32) {
 
 pub fn do_assist(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     if fighting(g, ch).is_some() {
-        g.send_to_char(ch, "You're already fighting!  How can you assist someone else?\r\n");
+        g.send_to_char(
+            ch,
+            "You're already fighting!  How can you assist someone else?\r\n",
+        );
         return;
     }
     let (arg, _) = crate::interpreter::one_argument(argument);
@@ -231,22 +229,62 @@ pub fn do_assist(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
     let opponent = match opponent {
         None => {
-            act(g, "But nobody is fighting $M!", false, ch, None, ActArg::Char(helpee), To::Char);
+            act(
+                g,
+                "But nobody is fighting $M!",
+                false,
+                ch,
+                None,
+                ActArg::Char(helpee),
+                To::Char,
+            );
             return;
         }
         Some(o) => o,
     };
     if !can_see(g, ch, opponent) {
-        act(g, "You can't see who is fighting $M!", false, ch, None, ActArg::Char(helpee), To::Char);
+        act(
+            g,
+            "You can't see who is fighting $M!",
+            false,
+            ch,
+            None,
+            ActArg::Char(helpee),
+            To::Char,
+        );
         return;
     }
     if !PK_ALLOWED && !is_npc(g, opponent) {
-        act(g, "Use 'murder' if you really want to attack $N.", false, ch, None, ActArg::Char(opponent), To::Char);
+        act(
+            g,
+            "Use 'murder' if you really want to attack $N.",
+            false,
+            ch,
+            None,
+            ActArg::Char(opponent),
+            To::Char,
+        );
         return;
     }
     g.send_to_char(ch, "You join the fight!\r\n");
-    act(g, "$N assists you!", false, helpee, None, ActArg::Char(ch), To::Char);
-    act(g, "$n assists $N.", false, ch, None, ActArg::Char(helpee), To::NotVict);
+    act(
+        g,
+        "$N assists you!",
+        false,
+        helpee,
+        None,
+        ActArg::Char(ch),
+        To::Char,
+    );
+    act(
+        g,
+        "$n assists $N.",
+        false,
+        ch,
+        None,
+        ActArg::Char(helpee),
+        To::NotVict,
+    );
     hit(g, ch, opponent);
 }
 
@@ -270,12 +308,28 @@ pub fn do_hit(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
     };
     if vict == ch {
         g.send_to_char(ch, "You hit yourself...OUCH!.\r\n");
-        act(g, "$n hits $mself, and says OUCH!", false, ch, None, ActArg::Char(vict), To::Room);
+        act(
+            g,
+            "$n hits $mself, and says OUCH!",
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Room,
+        );
         return;
     }
     // Charmed: can't hit your own master.
     if is_affected(g, ch, AFF_CHARM) && get_master(g, ch) == Some(vict) {
-        act(g, "$N is just such a good friend, you simply can't hit $M.", false, ch, None, ActArg::Char(vict), To::Char);
+        act(
+            g,
+            "$N is just such a good friend, you simply can't hit $M.",
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Char,
+        );
         return;
     }
 
@@ -342,9 +396,33 @@ pub fn do_kill(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
         g.send_to_char(ch, "Your mother would be so sad.. :(\r\n");
         return;
     }
-    act(g, "You chop $M to pieces!  Ah!  The blood!", false, ch, None, ActArg::Char(vict), To::Char);
-    act(g, "$N chops you to pieces!", false, vict, None, ActArg::Char(ch), To::Char);
-    act(g, "$n brutally slays $N!", false, ch, None, ActArg::Char(vict), To::NotVict);
+    act(
+        g,
+        "You chop $M to pieces!  Ah!  The blood!",
+        false,
+        ch,
+        None,
+        ActArg::Char(vict),
+        To::Char,
+    );
+    act(
+        g,
+        "$N chops you to pieces!",
+        false,
+        vict,
+        None,
+        ActArg::Char(ch),
+        To::Char,
+    );
+    act(
+        g,
+        "$n brutally slays $N!",
+        false,
+        ch,
+        None,
+        ActArg::Char(vict),
+        To::NotVict,
+    );
     raw_kill(g, vict, ch);
 }
 
@@ -376,11 +454,27 @@ pub fn do_target(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
     };
     if vict == ch {
         g.send_to_char(ch, "You hit yourself...OUCH!.\r\n");
-        act(g, "$n hits $mself, and says OUCH!", false, ch, None, ActArg::Char(vict), To::Room);
+        act(
+            g,
+            "$n hits $mself, and says OUCH!",
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Room,
+        );
         return;
     }
     if is_affected(g, ch, AFF_CHARM) && get_master(g, ch) == Some(vict) {
-        act(g, "$N is just such a good friend, you simply can't hit $M.", false, ch, None, ActArg::Char(vict), To::Char);
+        act(
+            g,
+            "$N is just such a good friend, you simply can't hit $M.",
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Char,
+        );
         return;
     }
     if !PK_ALLOWED {
@@ -397,18 +491,62 @@ pub fn do_target(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
     }
 
     let percent = g.rng.number(1, 401); // 101% (>401) impossible -> always rolls
-    let mut prob = if is_npc(g, ch) { 90 } else { get_skill(g, ch, SKILL_TARGET) };
+    let mut prob = if is_npc(g, ch) {
+        90
+    } else {
+        get_skill(g, ch, SKILL_TARGET)
+    };
     prob += chance(g, ch, vict, 0) * 3;
 
     if percent > prob {
-        act(g, "You try to switch target, but your current opponent keep you busy!", false, ch, None, ActArg::None, To::Char);
-        act(g, "$n makes some desperate attempts to attack another opponent!", false, ch, None, ActArg::None, To::Room);
+        act(
+            g,
+            "You try to switch target, but your current opponent keep you busy!",
+            false,
+            ch,
+            None,
+            ActArg::None,
+            To::Char,
+        );
+        act(
+            g,
+            "$n makes some desperate attempts to attack another opponent!",
+            false,
+            ch,
+            None,
+            ActArg::None,
+            To::Room,
+        );
         g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 2);
         return;
     }
-    act(g, "You start fighting $N!", false, ch, None, ActArg::Char(vict), To::Char);
-    act(g, "$n starts fighting $N!", false, ch, None, ActArg::Char(vict), To::NotVict);
-    act(g, "$n starts fighting you!", false, ch, None, ActArg::Char(vict), To::Vict);
+    act(
+        g,
+        "You start fighting $N!",
+        false,
+        ch,
+        None,
+        ActArg::Char(vict),
+        To::Char,
+    );
+    act(
+        g,
+        "$n starts fighting $N!",
+        false,
+        ch,
+        None,
+        ActArg::Char(vict),
+        To::NotVict,
+    );
+    act(
+        g,
+        "$n starts fighting you!",
+        false,
+        ch,
+        None,
+        ActArg::Char(vict),
+        To::Vict,
+    );
     hit(g, ch, vict);
     g.set_wait_state(ch, PULSE_VIOLENCE as i32 * 2);
 }
@@ -441,24 +579,58 @@ pub fn do_backstab(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) 
     // value[3] must be the piercing attack type.
     let attacktype = g.get_obj(weapon).map(|o| o.values[3]).unwrap_or(0);
     if attacktype != TYPE_PIERCE - TYPE_HIT {
-        g.send_to_char(ch, "Only piercing weapons can be used for backstabbing.\r\n");
+        g.send_to_char(
+            ch,
+            "Only piercing weapons can be used for backstabbing.\r\n",
+        );
         return;
     }
     if fighting(g, vict).is_some() {
-        g.send_to_char(ch, "You can't backstab a fighting person -- they're too alert!\r\n");
+        g.send_to_char(
+            ch,
+            "You can't backstab a fighting person -- they're too alert!\r\n",
+        );
         return;
     }
 
     if mob_flagged(g, vict, MOB_AWARE) {
-        act(g, "You notice $N lunging at you!", false, vict, None, ActArg::Char(ch), To::Char);
-        act(g, "$e notices you lunging at $m!", false, vict, None, ActArg::Char(ch), To::Vict);
-        act(g, "$n notices $N lunging at $m!", false, vict, None, ActArg::Char(ch), To::NotVict);
+        act(
+            g,
+            "You notice $N lunging at you!",
+            false,
+            vict,
+            None,
+            ActArg::Char(ch),
+            To::Char,
+        );
+        act(
+            g,
+            "$e notices you lunging at $m!",
+            false,
+            vict,
+            None,
+            ActArg::Char(ch),
+            To::Vict,
+        );
+        act(
+            g,
+            "$n notices $N lunging at $m!",
+            false,
+            vict,
+            None,
+            ActArg::Char(ch),
+            To::NotVict,
+        );
         hit(g, vict, ch);
         return;
     }
 
     let percent = g.rng.number(1, 101);
-    let prob = if is_npc(g, ch) { 90 } else { get_skill(g, ch, SKILL_BACKSTAB) };
+    let prob = if is_npc(g, ch) {
+        90
+    } else {
+        get_skill(g, ch, SKILL_BACKSTAB)
+    };
 
     if awake(g, vict) && percent > prob {
         // Missed backstab: a 0-damage SKILL_BACKSTAB hit (act.offensive.c).
@@ -494,18 +666,37 @@ pub fn do_order(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     }
 
     if is_affected(g, ch, AFF_CHARM) {
-        g.send_to_char(ch, "Your superior would not aprove of you giving orders.\r\n");
+        g.send_to_char(
+            ch,
+            "Your superior would not aprove of you giving orders.\r\n",
+        );
         return;
     }
 
     if let Some(vict) = vict {
         let buf = format!("$N orders you to '{}'", message);
         act(g, &buf, false, vict, None, ActArg::Char(ch), To::Char);
-        act(g, "$n gives $N an order.", false, ch, None, ActArg::Char(vict), To::Room);
+        act(
+            g,
+            "$n gives $N an order.",
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Room,
+        );
 
         let obeys = get_master(g, vict) == Some(ch) && is_affected(g, vict, AFF_CHARM);
         if !obeys {
-            act(g, "$n has an indifferent look.", false, vict, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n has an indifferent look.",
+                false,
+                vict,
+                None,
+                ActArg::None,
+                To::Room,
+            );
         } else {
             g.send_to_char(ch, OK);
             crate::interpreter::command_interpreter(g, vict, &message);
@@ -516,7 +707,10 @@ pub fn do_order(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         act(g, &buf, false, ch, None, ActArg::None, To::Room);
 
         let org_room = g.get_char(ch).and_then(|c| c.in_room);
-        let followers = g.get_char(ch).map(|c| c.followers.clone()).unwrap_or_default();
+        let followers = g
+            .get_char(ch)
+            .map(|c| c.followers.clone())
+            .unwrap_or_default();
         let mut found = false;
         for k in followers {
             let same_room = g.get_char(k).and_then(|c| c.in_room) == org_room;
@@ -545,7 +739,11 @@ pub fn do_flee(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
 
     let was_fighting = fighting(g, ch);
     // IS_ARENACOMBATANT(ch) ? minlevel = 1 : minlevel = 15 (act.offensive.c).
-    let minlevel: Level = if crate::arena::is_arena_combatant(ch) { 1 } else { 15 };
+    let minlevel: Level = if crate::arena::is_arena_combatant(ch) {
+        1
+    } else {
+        15
+    };
 
     for _ in 0..6 {
         let attempt = g.rng.number(0, (NUM_OF_DIRS - 1) as i32) as usize;
@@ -565,7 +763,15 @@ pub fn do_flee(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
             continue;
         }
 
-        act(g, "$n panics, and attempts to flee!", true, ch, None, ActArg::None, To::Room);
+        act(
+            g,
+            "$n panics, and attempts to flee!",
+            true,
+            ch,
+            None,
+            ActArg::None,
+            To::Room,
+        );
         if flee_simple_move(g, ch, attempt) {
             g.send_to_char(ch, "You flee head over heels.\r\n");
             if was_fighting.is_some() && !is_npc(g, ch) && get_level(g, ch) >= minlevel {
@@ -587,7 +793,15 @@ pub fn do_flee(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
                 }
             }
         } else {
-            act(g, "$n tries to flee, but can't!", true, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n tries to flee, but can't!",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
         }
         return;
     }
@@ -604,7 +818,10 @@ fn flee_simple_move(g: &mut GameState, ch: CharId, dir: usize) -> bool {
         Some(r) => r,
         None => return false,
     };
-    let to_rnum = match g.room(rnum).exits[dir].as_ref().and_then(|e| g.real_room(e.to_room)) {
+    let to_rnum = match g.room(rnum).exits[dir]
+        .as_ref()
+        .and_then(|e| g.real_room(e.to_room))
+    {
         Some(r) => r,
         None => return false,
     };
@@ -640,7 +857,10 @@ pub fn do_chain_footing(g: &mut GameState, ch: CharId, argument: &str, _subcmd: 
     let (arg, _) = crate::interpreter::one_argument(argument);
 
     if get_class(g, ch) != CLASS_WARRIOR && get_level(g, ch) < LVL_IMMORT {
-        g.send_to_char(ch, "You'd better leave all the martial arts to fighters.\r\n");
+        g.send_to_char(
+            ch,
+            "You'd better leave all the martial arts to fighters.\r\n",
+        );
         return;
     }
     let vict = match g.get_char_room_vis(ch, &arg) {
@@ -654,7 +874,10 @@ pub fn do_chain_footing(g: &mut GameState, ch: CharId, argument: &str, _subcmd: 
         },
     };
     if fighting(g, ch).is_some() && fighting(g, ch) != Some(vict) {
-        g.send_to_char(ch, "You're too busy fighting to throw yourself at ANOTHER person!\r\n");
+        g.send_to_char(
+            ch,
+            "You're too busy fighting to throw yourself at ANOTHER person!\r\n",
+        );
         return;
     }
     if vict == ch {
@@ -662,16 +885,30 @@ pub fn do_chain_footing(g: &mut GameState, ch: CharId, argument: &str, _subcmd: 
         return;
     }
     if in_peaceful_room(g, ch) {
-        g.send_to_char(ch, "This room just has such a peaceful, easy feeling...\r\n");
+        g.send_to_char(
+            ch,
+            "This room just has such a peaceful, easy feeling...\r\n",
+        );
         return;
     }
 
     let percent = g.rng.number(1, 401);
-    let mut prob = if is_npc(g, ch) { 90 } else { get_skill(g, ch, SKILL_CHAIN_FOOTING) };
+    let mut prob = if is_npc(g, ch) {
+        90
+    } else {
+        get_skill(g, ch, SKILL_CHAIN_FOOTING)
+    };
     prob += chance(g, ch, vict, 0) * 3;
 
     // Already chained?
-    let already = g.get_char(vict).map(|c| c.affected.iter().any(|a| a.spell_type == SKILL_CHAIN_FOOTING as i32)).unwrap_or(false);
+    let already = g
+        .get_char(vict)
+        .map(|c| {
+            c.affected
+                .iter()
+                .any(|a| a.spell_type == SKILL_CHAIN_FOOTING as i32)
+        })
+        .unwrap_or(false);
     if already {
         g.send_to_char(ch, "Whoops, they're already chained. Doh.\r\n");
         return;
@@ -687,16 +924,64 @@ pub fn do_chain_footing(g: &mut GameState, ch: CharId, argument: &str, _subcmd: 
     }
 
     if percent > prob {
-        act(g, "$N lunges at you, but you step aside and laugh at $e.", false, vict, None, ActArg::Char(ch), To::Char);
-        act(g, "$n lunges at $N, but gets a face full of dirt instead!", false, ch, None, ActArg::Char(vict), To::NotVict);
-        act(g, "You lunge at $N, but get a face full of dirt instead!", false, ch, None, ActArg::Char(vict), To::Char);
+        act(
+            g,
+            "$N lunges at you, but you step aside and laugh at $e.",
+            false,
+            vict,
+            None,
+            ActArg::Char(ch),
+            To::Char,
+        );
+        act(
+            g,
+            "$n lunges at $N, but gets a face full of dirt instead!",
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::NotVict,
+        );
+        act(
+            g,
+            "You lunge at $N, but get a face full of dirt instead!",
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Char,
+        );
         if let Some(c) = g.get_char_mut(ch) {
             c.position = Position::Sitting;
         }
     } else {
-        act(g, "$N lunges at you and skillfully chains your feet together!", false, vict, None, ActArg::Char(ch), To::Char);
-        act(g, "$n lunges at $N and skillfully chains $S feet together!", false, ch, None, ActArg::Char(vict), To::NotVict);
-        act(g, "You lunge at $N and skillfully chain $S feet together!", false, ch, None, ActArg::Char(vict), To::Char);
+        act(
+            g,
+            "$N lunges at you and skillfully chains your feet together!",
+            false,
+            vict,
+            None,
+            ActArg::Char(ch),
+            To::Char,
+        );
+        act(
+            g,
+            "$n lunges at $N and skillfully chains $S feet together!",
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::NotVict,
+        );
+        act(
+            g,
+            "You lunge at $N and skillfully chain $S feet together!",
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Char,
+        );
         let af = Affect {
             spell_type: SKILL_CHAIN_FOOTING as i32,
             duration: 2,
@@ -727,7 +1012,10 @@ pub fn do_bash(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     let (arg, _) = crate::interpreter::one_argument(argument);
 
     if get_class(g, ch) != CLASS_WARRIOR && get_level(g, ch) < LVL_IMMORT {
-        g.send_to_char(ch, "You'd better leave all the martial arts to fighters.\r\n");
+        g.send_to_char(
+            ch,
+            "You'd better leave all the martial arts to fighters.\r\n",
+        );
         return;
     }
     let vict = match g.get_char_room_vis(ch, &arg) {
@@ -749,12 +1037,19 @@ pub fn do_bash(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         return;
     }
     if in_peaceful_room(g, ch) {
-        g.send_to_char(ch, "This room just has such a peaceful, easy feeling...\r\n");
+        g.send_to_char(
+            ch,
+            "This room just has such a peaceful, easy feeling...\r\n",
+        );
         return;
     }
 
     let mut percent = g.rng.number(1, 401);
-    let mut prob = if is_npc(g, ch) { 90 } else { get_skill(g, ch, SKILL_BASH) };
+    let mut prob = if is_npc(g, ch) {
+        90
+    } else {
+        get_skill(g, ch, SKILL_BASH)
+    };
     prob += chance(g, ch, vict, 0) * 3;
 
     if mob_flagged(g, vict, MOB_NOBASH) {
@@ -811,7 +1106,15 @@ pub fn do_rescue(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
     let tmp_ch = match tmp_ch {
         None => {
-            act(g, "But nobody is fighting $M!", false, ch, None, ActArg::Char(vict), To::Char);
+            act(
+                g,
+                "But nobody is fighting $M!",
+                false,
+                ch,
+                None,
+                ActArg::Char(vict),
+                To::Char,
+            );
             return;
         }
         Some(t) => t,
@@ -830,8 +1133,24 @@ pub fn do_rescue(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         return;
     }
     g.send_to_char(ch, "Banzai!!  To the rescue!!!\r\n");
-    act(g, "You are rescued by $N, leaving you confused.", false, vict, None, ActArg::Char(ch), To::Char);
-    act(g, "$n heroically rescues $N!", false, ch, None, ActArg::Char(vict), To::NotVict);
+    act(
+        g,
+        "You are rescued by $N, leaving you confused.",
+        false,
+        vict,
+        None,
+        ActArg::Char(ch),
+        To::Char,
+    );
+    act(
+        g,
+        "$n heroically rescues $N!",
+        false,
+        ch,
+        None,
+        ActArg::Char(vict),
+        To::NotVict,
+    );
 
     if fighting(g, vict) == Some(tmp_ch) {
         stop_fighting(g, vict);
@@ -854,7 +1173,10 @@ pub fn do_rescue(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
 pub fn do_kick(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     if get_class(g, ch) != CLASS_WARRIOR && get_level(g, ch) < LVL_IMMORT {
-        g.send_to_char(ch, "You'd better leave all the martial arts to fighters.\r\n");
+        g.send_to_char(
+            ch,
+            "You'd better leave all the martial arts to fighters.\r\n",
+        );
         return;
     }
     let (arg, _) = crate::interpreter::one_argument(argument);
@@ -874,7 +1196,11 @@ pub fn do_kick(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         return;
     }
     let percent = g.rng.number(1, 401);
-    let mut prob = if is_npc(g, ch) { 90 } else { get_skill(g, ch, SKILL_KICK) };
+    let mut prob = if is_npc(g, ch) {
+        90
+    } else {
+        get_skill(g, ch, SKILL_KICK)
+    };
     prob += chance(g, ch, vict, 0) * 3;
 
     // SKILL_KICK attack type (act.offensive.c); skill_message gap as above.
@@ -943,7 +1269,10 @@ pub fn do_berserk(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     let mut dmg = 1;
     if let Some(w) = wielded(g, ch) {
         if g.get_obj(w).map(|o| o.obj_type) == Some(ObjectType::Weapon) {
-            let (n, s) = g.get_obj(w).map(|o| (o.values[1], o.values[2])).unwrap_or((0, 0));
+            let (n, s) = g
+                .get_obj(w)
+                .map(|o| (o.values[1], o.values[2]))
+                .unwrap_or((0, 0));
             dmg += g.rng.dice(n, s);
         }
     }
@@ -987,16 +1316,43 @@ pub fn do_disarm(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         return;
     } else if !is_npc(g, ch) && get_skill(g, ch, SKILL_DISARM) == 0 {
         // Doesn't know how: if wielding, you lose your own weapon.
-        if g.get_char(ch).and_then(|c| c.equipment[WEAR_WIELD]).is_some() {
+        if g.get_char(ch)
+            .and_then(|c| c.equipment[WEAR_WIELD])
+            .is_some()
+        {
             if let Some(obj) = g.unequip_char(ch, WEAR_WIELD) {
                 let rnum = g.get_char(ch).and_then(|c| c.in_room);
                 if let Some(rnum) = rnum {
                     g.obj_to_room(obj, rnum);
                 }
             }
-            act(g, "While trying to disarm $N, you lose your own weapon.", true, ch, None, ActArg::Char(vict), To::Char);
-            act(g, "While trying to disarm you, $n loses $s own weapon.", true, ch, None, ActArg::Char(vict), To::Vict);
-            act(g, "While trying to disarm $N, $n loses $s own weapon.", true, ch, None, ActArg::Char(vict), To::NotVict);
+            act(
+                g,
+                "While trying to disarm $N, you lose your own weapon.",
+                true,
+                ch,
+                None,
+                ActArg::Char(vict),
+                To::Char,
+            );
+            act(
+                g,
+                "While trying to disarm you, $n loses $s own weapon.",
+                true,
+                ch,
+                None,
+                ActArg::Char(vict),
+                To::Vict,
+            );
+            act(
+                g,
+                "While trying to disarm $N, $n loses $s own weapon.",
+                true,
+                ch,
+                None,
+                ActArg::Char(vict),
+                To::NotVict,
+            );
         } else {
             g.send_to_char(ch, "You dont know of that skill.\r\n");
         }
@@ -1009,26 +1365,81 @@ pub fn do_disarm(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     }
 
     // Victim isn't wielding.
-    if g.get_char(vict).and_then(|c| c.equipment[WEAR_WIELD]).is_none() {
+    if g.get_char(vict)
+        .and_then(|c| c.equipment[WEAR_WIELD])
+        .is_none()
+    {
         g.send_to_char(ch, "Disarm what weapon?!\r\n");
         return;
     }
 
     let percent = g.rng.number(1, 401);
-    let mut prob = if is_npc(g, ch) { 90 } else { get_skill(g, ch, SKILL_DISARM) };
+    let mut prob = if is_npc(g, ch) {
+        90
+    } else {
+        get_skill(g, ch, SKILL_DISARM)
+    };
     prob += chance(g, ch, vict, 0) * 3;
 
     if percent > prob && get_pos(g, vict) > Position::Sleeping {
-        act(g, "$n tries to disarm $N but fails.", true, ch, None, ActArg::Char(vict), To::NotVict);
-        act(g, "You try to disarm $N but fail.", true, ch, None, ActArg::Char(vict), To::Char);
-        act(g, "$n tries to disarm you but fails.", true, ch, None, ActArg::Char(vict), To::Vict);
+        act(
+            g,
+            "$n tries to disarm $N but fails.",
+            true,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::NotVict,
+        );
+        act(
+            g,
+            "You try to disarm $N but fail.",
+            true,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Char,
+        );
+        act(
+            g,
+            "$n tries to disarm you but fails.",
+            true,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Vict,
+        );
         if fighting(g, vict).is_none() {
             hit(g, vict, ch);
         }
     } else {
-        act(g, "$n makes $N drop his weapon to the ground with some fast moves.", true, ch, None, ActArg::Char(vict), To::NotVict);
-        act(g, "With some fast moves you manage to make $N drop the weapon.", true, ch, None, ActArg::Char(vict), To::Char);
-        act(g, "$n performs some fast moves, and makes you drop your weapon.", true, ch, None, ActArg::Char(vict), To::Vict);
+        act(
+            g,
+            "$n makes $N drop his weapon to the ground with some fast moves.",
+            true,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::NotVict,
+        );
+        act(
+            g,
+            "With some fast moves you manage to make $N drop the weapon.",
+            true,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Char,
+        );
+        act(
+            g,
+            "$n performs some fast moves, and makes you drop your weapon.",
+            true,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Vict,
+        );
         if let Some(obj) = g.unequip_char(vict, WEAR_WIELD) {
             let rnum = g.get_char(vict).and_then(|c| c.in_room);
             if let Some(rnum) = rnum {
@@ -1073,14 +1484,42 @@ pub fn do_trip(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     }
 
     if is_npc(g, vict) && mob_flagged(g, vict, MOB_NOBASH) {
-        act(g, "You try to trip $N but can't.", true, ch, None, ActArg::Char(vict), To::Char);
-        act(g, "$n tries to trip you, but you are unmovable.", true, ch, None, ActArg::Char(vict), To::Vict);
-        act(g, "$n tries to trip $N, but can't.", true, ch, None, ActArg::Char(vict), To::NotVict);
+        act(
+            g,
+            "You try to trip $N but can't.",
+            true,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Char,
+        );
+        act(
+            g,
+            "$n tries to trip you, but you are unmovable.",
+            true,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Vict,
+        );
+        act(
+            g,
+            "$n tries to trip $N, but can't.",
+            true,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::NotVict,
+        );
         return;
     }
 
     let percent = g.rng.number(1, 501);
-    let mut prob = if is_npc(g, ch) { 90 } else { get_skill(g, ch, SKILL_TRIP) };
+    let mut prob = if is_npc(g, ch) {
+        90
+    } else {
+        get_skill(g, ch, SKILL_TRIP)
+    };
     prob += chance(g, ch, vict, 0) * 3;
 
     // SKILL_TRIP attack type (act.offensive.c); skill_message gap as above.
@@ -1125,7 +1564,10 @@ pub fn do_camouflage(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i3
         return;
     }
 
-    g.send_to_char(ch, "You attempt to camouflage yourself with your surroundings.\r\n");
+    g.send_to_char(
+        ch,
+        "You attempt to camouflage yourself with your surroundings.\r\n",
+    );
     if let Some(c) = g.get_char_mut(ch) {
         c.points.move_points -= 25;
     }
@@ -1136,7 +1578,7 @@ pub fn do_camouflage(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i3
     let dex = g.get_char(ch).map(|c| c.aff_abils.dex as i32).unwrap_or(0);
     let hide_bonus = crate::constants::DEX_APP_SKILL
         [crate::constants::app_index(dex, crate::constants::DEX_APP_SKILL.len())]
-        .hide;
+    .hide;
     let mut prob = get_skill(g, ch, SKILL_CAMOUFLAGE) + hide_bonus;
     let r = g.rng.number(10, 15);
     let mut percent = g.rng.number((prob as f32 * 0.6) as i32, 101) - (get_level(g, ch) as i32 / r);
@@ -1154,14 +1596,23 @@ pub fn do_camouflage(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i3
         return;
     }
 
-    let name = g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default();
+    let name = g
+        .get_char(ch)
+        .map(|c| c.player.name.clone())
+        .unwrap_or_default();
     let buf = format!("{} has disappeared from view!\r\n", name);
     act(g, &buf, true, ch, None, ActArg::None, To::Room);
     if let Some(vict) = fighting(g, ch) {
         stop_fighting(g, vict);
         stop_fighting(g, ch);
-        let vname = g.get_char(vict).map(|c| c.player.name.clone()).unwrap_or_default();
-        let line = format!("{} is befuddled, having lost sight of his target.\r\n", vname);
+        let vname = g
+            .get_char(vict)
+            .map(|c| c.player.name.clone())
+            .unwrap_or_default();
+        let line = format!(
+            "{} is befuddled, having lost sight of his target.\r\n",
+            vname
+        );
         let rnum = g.get_char(ch).and_then(|c| c.in_room);
         if let Some(rnum) = rnum {
             g.send_to_room(rnum, &line, None);
@@ -1181,12 +1632,18 @@ pub fn do_blanket(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) 
     if (get_class(g, ch) != CLASS_THIEF || get_skill(g, ch, SKILL_BLANKET) <= 0)
         && get_level(g, ch) < LVL_IMMORT
     {
-        g.send_to_char(ch, "You don't seem to have the blanket camouflage ability.\r\n");
+        g.send_to_char(
+            ch,
+            "You don't seem to have the blanket camouflage ability.\r\n",
+        );
         return;
     }
 
     if get_pos(g, ch) != Position::Fighting {
-        g.send_to_char(ch, "You can only blanket comouflage your group when fighting.\r\n");
+        g.send_to_char(
+            ch,
+            "You can only blanket comouflage your group when fighting.\r\n",
+        );
         return;
     }
 
@@ -1210,7 +1667,10 @@ pub fn do_blanket(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) 
         remove_temporary_hide(g, k);
     }
 
-    let followers = g.get_char(k).map(|c| c.followers.clone()).unwrap_or_default();
+    let followers = g
+        .get_char(k)
+        .map(|c| c.followers.clone())
+        .unwrap_or_default();
     let mut grpsize = 0;
     for f in followers.iter().copied() {
         if is_affected(g, f, AFF_GROUP) && g.get_char(f).and_then(|c| c.in_room) == ch_room {
@@ -1223,7 +1683,7 @@ pub fn do_blanket(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) 
     let dex = g.get_char(ch).map(|c| c.aff_abils.dex as i32).unwrap_or(0);
     let hide_bonus = crate::constants::DEX_APP_SKILL
         [crate::constants::app_index(dex, crate::constants::DEX_APP_SKILL.len())]
-        .hide;
+    .hide;
     let mut prob = get_skill(g, ch, SKILL_CAMOUFLAGE) + hide_bonus - grpsize;
     let r = g.rng.number(10, 15);
     let mut percent = g.rng.number((prob as f32 * 0.6) as i32, 101) - (get_level(g, ch) as i32 / r);
@@ -1244,15 +1704,24 @@ pub fn do_blanket(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) 
     // Success: hide the leader (and the rest of the group).
     let mut befuddled = false;
     if k_in_room || k == ch {
-        let kname = g.get_char(k).map(|c| c.player.name.clone()).unwrap_or_default();
+        let kname = g
+            .get_char(k)
+            .map(|c| c.player.name.clone())
+            .unwrap_or_default();
         let buf = format!("{} has disappeared from view!\r\n", kname);
         act(g, &buf, true, k, None, ActArg::None, To::Room);
         if let Some(vict) = fighting(g, k) {
             stop_fighting(g, vict);
             stop_fighting(g, k);
             if !befuddled {
-                let vname = g.get_char(vict).map(|c| c.player.name.clone()).unwrap_or_default();
-                let line = format!("{} is befuddled, having lost sight of his target.\r\n", vname);
+                let vname = g
+                    .get_char(vict)
+                    .map(|c| c.player.name.clone())
+                    .unwrap_or_default();
+                let line = format!(
+                    "{} is befuddled, having lost sight of his target.\r\n",
+                    vname
+                );
                 if let Some(rnum) = ch_room {
                     g.send_to_room(rnum, &line, None);
                 }
@@ -1269,12 +1738,21 @@ pub fn do_blanket(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) 
             if let Some(vict) = fighting(g, f) {
                 stop_fighting(g, vict);
                 stop_fighting(g, f);
-                let fname = g.get_char(f).map(|c| c.player.name.clone()).unwrap_or_default();
+                let fname = g
+                    .get_char(f)
+                    .map(|c| c.player.name.clone())
+                    .unwrap_or_default();
                 let buf = format!("{} has disappeared from view!\r\n", fname);
                 act(g, &buf, true, f, None, ActArg::None, To::Room);
                 if !befuddled {
-                    let vname = g.get_char(vict).map(|c| c.player.name.clone()).unwrap_or_default();
-                    let line = format!("{} is befuddled, having lost sight of his target.\r\n", vname);
+                    let vname = g
+                        .get_char(vict)
+                        .map(|c| c.player.name.clone())
+                        .unwrap_or_default();
+                    let line = format!(
+                        "{} is befuddled, having lost sight of his target.\r\n",
+                        vname
+                    );
                     if let Some(rnum) = ch_room {
                         g.send_to_room(rnum, &line, None);
                     }

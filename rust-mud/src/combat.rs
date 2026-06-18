@@ -19,7 +19,7 @@ use crate::object::{ObjLoc, Object, ObjectType};
 use crate::room::{RoomFlags, SectorType, EX_CLOSED};
 use crate::spell_parser::{
     MAX_SPELLS, SKILL_ADRENALINE, SKILL_BLOODLUST, SKILL_CARNALRAGE, SPELL_REDIRECT_CHARGE,
-    SPELL_SLEEP, SPELL_WORD_OF_RECALL, SPELL_WORD_OF_RETREAT, TYPE_UNDEFINED,
+    SPELL_SLEEP, TYPE_UNDEFINED,
 };
 use crate::state::GameState;
 use crate::types::*;
@@ -799,6 +799,13 @@ pub fn damage(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32) {
     damage_type(g, ch, victim, dmg, TYPE_UNDEFINED);
 }
 
+/// deathblow(ch, victim, dam, attacktype): same damage pipeline as C
+/// do_actual_damage(..., deathblow=1), notably bypassing the normal weapon
+/// death-message branch that is only for non-deathblow kills.
+pub fn deathblow(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, attacktype: i32) {
+    do_actual_damage(g, ch, victim, dmg, attacktype, true);
+}
+
 const ADRENALINE_HP_PERCENT: i32 = 5;
 
 fn adrenaline_rush(g: &mut GameState, ch: CharId, damage: i32) {
@@ -859,6 +866,17 @@ fn adrenaline_rush(g: &mut GameState, ch: CharId, damage: i32) {
 /// emit the weapon/skill damage message, update position, drive retaliation
 /// and death. `attacktype` selects the verb table and the dam_multi flavour.
 pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, attacktype: i32) {
+    do_actual_damage(g, ch, victim, dmg, attacktype, false);
+}
+
+fn do_actual_damage(
+    g: &mut GameState,
+    ch: CharId,
+    victim: CharId,
+    dmg: i32,
+    attacktype: i32,
+    deathblow: bool,
+) {
     // Attempt to damage a corpse -> resolve its death and bail (fight.c ~806).
     if g.get_char(victim)
         .map(|c| c.position <= Position::Dead)
@@ -1048,9 +1066,7 @@ pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, atta
                 .get_char(ch)
                 .map(|c| c.prf2_flags & PRF2_MERCY != 0)
                 .unwrap_or(false);
-            // `deathblow` is not modelled in this path (false): a normal kill
-            // tries the weapon's death-blow skill_message first, per C.
-            if (vict_dead && !ch_mercy && !ch_npc) || dmg == 0 {
+            if (vict_dead && !deathblow && !ch_mercy && !ch_npc) || dmg == 0 {
                 if !crate::fight_messages::skill_message(g, dmg, ch, victim, attacktype) {
                     dam_message(g, dmg, ch, victim, attacktype);
                 }
@@ -1411,6 +1427,48 @@ pub(crate) fn death_cry(g: &mut GameState, ch: CharId) {
     }
 }
 
+/// raw_kill(ch, killer) (fight.c): direct death path used by immortal `kill`
+/// and script/environment paths that should bypass combat guards, damage
+/// scaling, mercy, PK side effects, and XP loss.
+pub fn raw_kill(g: &mut GameState, victim: CharId, killer: Option<CharId>) {
+    if !g.char_exists(victim) {
+        return;
+    }
+    if let Some(k) = killer {
+        stop_fighting(g, k);
+    }
+    stop_fighting(g, victim);
+
+    if let Some(c) = g.get_char_mut(victim) {
+        c.affected.clear();
+    }
+    g.affect_total(victim);
+
+    let cry = match killer {
+        Some(k) => crate::dg_triggers::death_mtrigger(g, victim, Some(k)),
+        None => true,
+    };
+    if cry {
+        death_cry(g, victim);
+    }
+
+    make_corpse_for_victim(g, victim);
+
+    let is_npc = g.get_char(victim).map(|c| c.is_npc).unwrap_or(false);
+    if is_npc {
+        crate::mobact::clear_memory(victim);
+        crate::arena::forget_char(victim);
+        g.extract_char(victim);
+    } else {
+        let level = g.get_char(victim).map(|c| c.player.level).unwrap_or(0);
+        if level < 30 {
+            respawn_pc(g, victim);
+        } else {
+            ghost_pc(g, victim);
+        }
+    }
+}
+
 /// Handle a death: messages, loot to a corpse, extract NPC / respawn PC.
 fn die(g: &mut GameState, killer: CharId, victim: CharId) {
     stop_fighting(g, killer);
@@ -1458,58 +1516,7 @@ fn die(g: &mut GameState, killer: CharId, victim: CharId) {
         death_cry(g, victim);
     }
 
-    let rnum = g.get_char(victim).and_then(|c| c.in_room);
-
-    // Make a corpse holding the victim's inventory + equipment.
-    if let Some(rnum) = rnum {
-        let name = g
-            .get_char(victim)
-            .map(|c| c.display_for_others())
-            .unwrap_or_default();
-        let corpse = make_corpse(g, &name);
-        // Move carried + worn objects into the corpse.
-        let carried = g
-            .get_char(victim)
-            .map(|c| c.carrying.clone())
-            .unwrap_or_default();
-        for oid in carried {
-            g.obj_from_anywhere(oid);
-            g.obj_to_obj(oid, corpse);
-        }
-        let worn: Vec<usize> = (0..NUM_WEARS)
-            .filter(|&p| {
-                g.get_char(victim)
-                    .map(|c| c.equipment[p].is_some())
-                    .unwrap_or(false)
-            })
-            .collect();
-        for p in worn {
-            if let Some(oid) = g.unequip_char(victim, p) {
-                g.obj_to_obj(oid, corpse);
-            }
-        }
-
-        // Transfer the victim's gold into the corpse as a money object
-        // (make_corpse, fight.c ~332). The C anti-dupe guard only mints the
-        // coins for an NPC or a still-connected PC; either way the gold is
-        // zeroed so it can't be looted twice.
-        let gold = g.get_char(victim).map(|c| c.points.gold).unwrap_or(0);
-        if gold > 0 {
-            let has_desc = g
-                .get_char(victim)
-                .map(|c| c.is_npc || c.desc.is_some())
-                .unwrap_or(false);
-            if has_desc {
-                let money = create_money(g, gold);
-                g.obj_to_obj(money, corpse);
-            }
-            if let Some(c) = g.get_char_mut(victim) {
-                c.points.gold = 0;
-            }
-        }
-
-        g.obj_to_room(corpse, rnum);
-    }
+    make_corpse_for_victim(g, victim);
 
     if is_npc {
         crate::mobact::clear_memory(victim);
@@ -1523,6 +1530,57 @@ fn die(g: &mut GameState, killer: CharId, victim: CharId) {
             ghost_pc(g, victim);
         }
     }
+}
+
+fn make_corpse_for_victim(g: &mut GameState, victim: CharId) {
+    let rnum = match g.get_char(victim).and_then(|c| c.in_room) {
+        Some(r) => r,
+        None => return,
+    };
+
+    let name = g
+        .get_char(victim)
+        .map(|c| c.display_for_others())
+        .unwrap_or_default();
+    let corpse = make_corpse(g, &name);
+
+    let carried = g
+        .get_char(victim)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
+    for oid in carried {
+        g.obj_from_anywhere(oid);
+        g.obj_to_obj(oid, corpse);
+    }
+    let worn: Vec<usize> = (0..NUM_WEARS)
+        .filter(|&p| {
+            g.get_char(victim)
+                .map(|c| c.equipment[p].is_some())
+                .unwrap_or(false)
+        })
+        .collect();
+    for p in worn {
+        if let Some(oid) = g.unequip_char(victim, p) {
+            g.obj_to_obj(oid, corpse);
+        }
+    }
+
+    let gold = g.get_char(victim).map(|c| c.points.gold).unwrap_or(0);
+    if gold > 0 {
+        let has_desc = g
+            .get_char(victim)
+            .map(|c| c.is_npc || c.desc.is_some())
+            .unwrap_or(false);
+        if has_desc {
+            let money = create_money(g, gold);
+            g.obj_to_obj(money, corpse);
+        }
+        if let Some(c) = g.get_char_mut(victim) {
+            c.points.gold = 0;
+        }
+    }
+
+    g.obj_to_room(corpse, rnum);
 }
 
 fn handle_pc_kill_side_effects(g: &mut GameState, killer: CharId, victim: CharId) {
@@ -2058,6 +2116,67 @@ mod tests {
         let oid = g.create_obj(obj);
         g.obj_to_char(oid, owner);
         oid
+    }
+
+    #[test]
+    fn raw_kill_respawns_pc_without_death_penalty() {
+        let mut g = GameState::new(Config::default());
+        let start = g.add_room(Room::new(
+            3001,
+            0,
+            "Start".to_string(),
+            "Start.".to_string(),
+        ));
+        let pit = g.add_room(Room::new(3002, 0, "Pit".to_string(), "Pit.".to_string()));
+        let killer = player(&mut g, "Killer");
+        let victim = player(&mut g, "Victim");
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.player.level = 20;
+            v.player.hometown = 3001;
+            v.points.exp = 12_345;
+            v.points.hit = -5;
+            v.position = Position::Dead;
+        }
+        g.char_to_room(killer, pit);
+        g.char_to_room(victim, pit);
+
+        raw_kill(&mut g, victim, Some(killer));
+
+        let v = g.get_char(victim).unwrap();
+        assert_eq!(v.points.exp, 12_345);
+        assert_eq!(v.points.hit, 1);
+        assert_eq!(v.position, Position::Resting);
+        assert_eq!(v.in_room, Some(start));
+    }
+
+    #[test]
+    fn deathblow_uses_dedicated_lethal_damage_path() {
+        let mut g = GameState::new(Config::default());
+        let start = g.add_room(Room::new(
+            3001,
+            0,
+            "Start".to_string(),
+            "Start.".to_string(),
+        ));
+        let killer = player(&mut g, "Killer");
+        let victim = player(&mut g, "Victim");
+        {
+            let v = g.get_char_mut(victim).unwrap();
+            v.player.level = 20;
+            v.player.hometown = 3001;
+            v.points.hit = 1;
+            v.points.max_hit = 1;
+        }
+        g.char_to_room(killer, start);
+        g.char_to_room(victim, start);
+
+        deathblow(&mut g, killer, victim, 100, TYPE_HIT);
+
+        let v = g.get_char(victim).unwrap();
+        assert_eq!(v.points.hit, 1);
+        assert_eq!(v.position, Position::Resting);
+        assert_eq!(v.in_room, Some(start));
     }
 
     fn make_dg_trigger(
@@ -3165,7 +3284,12 @@ mod tests {
             v.points.hit = 30;
             v.recall_level = 25;
         }
-        let scroll_id = scroll(&mut g, victim, "recall", SPELL_WORD_OF_RECALL);
+        let scroll_id = scroll(
+            &mut g,
+            victim,
+            "recall",
+            crate::spell_parser::SPELL_WORD_OF_RECALL,
+        );
         g.char_to_room(attacker, combat_room);
         g.char_to_room(victim, combat_room);
 
@@ -3190,7 +3314,12 @@ mod tests {
             v.points.hit = 30;
             v.retreat_level = 25;
         }
-        let scroll_id = scroll(&mut g, victim, "retreat", SPELL_WORD_OF_RETREAT);
+        let scroll_id = scroll(
+            &mut g,
+            victim,
+            "retreat",
+            crate::spell_parser::SPELL_WORD_OF_RETREAT,
+        );
         g.char_to_room(attacker, room);
         g.char_to_room(victim, room);
 

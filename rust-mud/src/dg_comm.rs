@@ -45,7 +45,9 @@ pub const TO_ROOM: i32 = 1 << 1;
 // ---------------------------------------------------------------------------
 
 fn sex_of(g: &GameState, cid: CharId) -> Gender {
-    g.get_char(cid).map(|c| c.player.sex).unwrap_or(Gender::Neutral)
+    g.get_char(cid)
+        .map(|c| c.player.sex)
+        .unwrap_or(Gender::Neutral)
 }
 
 /// HSHR(ch): his / her / its.
@@ -75,7 +77,9 @@ fn pers(g: &GameState, target: CharId, viewer: CharId) -> String {
     match g.get_char(target) {
         Some(ch) => {
             if ch.is_npc {
-                ch.short_desc.clone().unwrap_or_else(|| ch.player.name.clone())
+                ch.short_desc
+                    .clone()
+                    .unwrap_or_else(|| ch.player.name.clone())
             } else {
                 ch.player.name.clone()
             }

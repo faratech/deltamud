@@ -90,9 +90,9 @@ pub struct IgnoreEntry {
 
 #[derive(Debug, Clone)]
 pub struct Character {
-    pub id: CharId,    // runtime arena id (per session)
-    pub idnum: i64,    // persistent player id (player_main.idnum); -1 for mobs
-    pub nr: MobVnum,   // mob prototype vnum, or NOBODY(-1) for players
+    pub id: CharId,  // runtime arena id (per session)
+    pub idnum: i64,  // persistent player id (player_main.idnum); -1 for mobs
+    pub nr: MobVnum, // mob prototype vnum, or NOBODY(-1) for players
     pub is_npc: bool,
     /// Owning connection (None for NPCs and link-dead PCs). Mirrors C ch->desc.
     pub desc: Option<ConnId>,
@@ -168,7 +168,7 @@ pub struct Character {
 
     // player_special_data_saved
     pub skills: HashMap<u16, u8>, // spell/skill number -> proficiency
-    pub padding0: i32, // PADDING0 (was spells_to_learn); saved for C cross-compat
+    pub padding0: i32,            // PADDING0 (was spells_to_learn); saved for C cross-compat
     pub talks: [bool; MAX_TONGUE],
     pub conditions: [i8; NUM_CONDITIONS],
     pub wimp_level: i32,
@@ -338,7 +338,15 @@ impl Character {
         ch.player.level = 1;
         // Default ability scores (proper class-weighted rolling lands with
         // class.c / do_start in Batch 6). These keep level-1 combat sane.
-        ch.real_abils = Abilities { str: 16, str_add: 0, intel: 13, wis: 13, dex: 13, con: 14, cha: 13 };
+        ch.real_abils = Abilities {
+            str: 16,
+            str_add: 0,
+            intel: 13,
+            wis: 13,
+            dex: 13,
+            con: 14,
+            cha: 13,
+        };
         ch.aff_abils = ch.real_abils;
         ch.points = CharPoints {
             hit: 20,
@@ -399,7 +407,10 @@ impl Character {
 
     /// citizen_colors[rank] (constants.c), bounds-guarded.
     pub fn citizen_color(&self) -> &'static str {
-        crate::constants::CITIZEN_COLORS.get(self.citizen as usize).copied().unwrap_or("&n")
+        crate::constants::CITIZEN_COLORS
+            .get(self.citizen as usize)
+            .copied()
+            .unwrap_or("&n")
     }
 
     pub fn skill(&self, num: u16) -> u8 {

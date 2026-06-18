@@ -84,7 +84,8 @@ pub static RACE_MENU: &str = "\r\n\
 /// Con, Cha. Used by `roll_real_abils` via GET_RACE_MIN/GET_RACE_MAX.
 pub static STAT_TABLE: [[i32; 12]; NUM_RACES] = [
     /*            Str      Int      Wis      Dex      Con      Cha   */
-    /* Human    */ [6, 16, 6, 16, 6, 16, 6, 16, 6, 16, 6, 16],
+    /* Human    */
+    [6, 16, 6, 16, 6, 16, 6, 16, 6, 16, 6, 16],
     /* Elf      */ [4, 15, 8, 17, 3, 16, 7, 19, 6, 14, 8, 15],
     /* Gnome    */ [6, 16, 7, 15, 5, 17, 5, 16, 8, 17, 5, 15],
     /* Dwarf    */ [9, 18, 4, 14, 4, 16, 4, 15, 12, 18, 3, 15],

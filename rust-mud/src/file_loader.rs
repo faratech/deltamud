@@ -1,13 +1,13 @@
-use crate::world::{Zone, MobileProto, ObjectProto, ResetCmd};
-use crate::room::{Room, Exit, RoomFlags, SectorType};
-use crate::object::{WearFlags, ExtraFlags, ObjectType};
+use crate::object::{ExtraFlags, ObjectType, WearFlags};
+use crate::room::{Exit, Room, RoomFlags, SectorType};
 use crate::state::GameState;
 use crate::types::*;
+use crate::world::{MobileProto, ObjectProto, ResetCmd, Zone};
+use anyhow::Result;
+use log::{info, warn};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use anyhow::Result;
-use log::{info, warn};
 
 /// structs.h MAX_OBJ_AFFECT — number of stat-apply slots an object carries.
 const MAX_OBJ_AFFECT: usize = 6;
@@ -17,29 +17,30 @@ pub struct FileLoader;
 impl FileLoader {
     pub async fn load_world(world: &mut GameState, base_path: &str) -> Result<()> {
         let world_path = Path::new(base_path).join("world");
-        
+
         // Load zones
         FileLoader::load_zones(world, &world_path.join("zon"))?;
-        
+
         // Load rooms
         FileLoader::load_rooms(world, &world_path.join("wld"))?;
-        
+
         // Load mobiles
         FileLoader::load_mobiles(world, &world_path.join("mob"))?;
-        
+
         // Load objects
         FileLoader::load_objects(world, &world_path.join("obj"))?;
-        
-        info!("World loaded: {} zones, {} rooms, {} mobs, {} objects",
+
+        info!(
+            "World loaded: {} zones, {} rooms, {} mobs, {} objects",
             world.zones.len(),
             world.rooms.len(),
             world.mob_protos.len(),
             world.obj_protos.len()
         );
-        
+
         Ok(())
     }
-    
+
     fn load_zones(world: &mut GameState, path: &Path) -> Result<()> {
         let index_path = path.join("index");
         let file = File::open(&index_path)?;
@@ -53,13 +54,17 @@ impl FileLoader {
 
             let zone_file = path.join(&line);
             if let Err(e) = FileLoader::load_zone_file(world, &zone_file) {
-                warn!("Failed to load zone {:?}: {}", zone_file.file_name().unwrap_or_default(), e);
+                warn!(
+                    "Failed to load zone {:?}: {}",
+                    zone_file.file_name().unwrap_or_default(),
+                    e
+                );
             }
         }
 
         Ok(())
     }
-    
+
     fn load_zone_file(world: &mut GameState, path: &Path) -> Result<()> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
@@ -74,25 +79,32 @@ impl FileLoader {
             }
             let zone_num: i32 = match hdr[1..].trim().parse() {
                 Ok(v) => v,
-                Err(_) => { i += 1; continue; }
+                Err(_) => {
+                    i += 1;
+                    continue;
+                }
             };
             i += 1;
 
             // Zone name (single line, ~-terminated). Mirrors load_zones in db.c.
-            let name = lines.get(i)
+            let name = lines
+                .get(i)
                 .map(|s| s.split('~').next().unwrap_or("").trim().to_string())
                 .unwrap_or_default();
             i += 1;
 
             // Builders line (single line, ~-terminated) — always present in the
             // DeltaMUD format (Z.builders = str_dup(buf)).
-            let builders = lines.get(i)
+            let builders = lines
+                .get(i)
                 .map(|s| s.split('~').next().unwrap_or("").trim().to_string())
                 .unwrap_or_default();
             i += 1;
 
             // Zone header: top lifespan reset_mode
-            let parts: Vec<&str> = lines.get(i).map(|s| s.split_whitespace().collect())
+            let parts: Vec<&str> = lines
+                .get(i)
+                .map(|s| s.split_whitespace().collect())
                 .unwrap_or_default();
             let top: i32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
             let lifespan: i32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(30);
@@ -100,7 +112,9 @@ impl FileLoader {
             i += 1;
 
             // Level/status line: lvl1 lvl2 status_mode (required in DeltaMUD).
-            let lvl_parts: Vec<&str> = lines.get(i).map(|s| s.split_whitespace().collect())
+            let lvl_parts: Vec<&str> = lines
+                .get(i)
+                .map(|s| s.split_whitespace().collect())
                 .unwrap_or_default();
             let lvl1: i32 = lvl_parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
             let lvl2: i32 = lvl_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(50);
@@ -205,7 +219,7 @@ impl FileLoader {
             _ => None,
         }
     }
-    
+
     fn load_rooms(world: &mut GameState, path: &Path) -> Result<()> {
         let index_path = path.join("index");
         let file = File::open(&index_path)?;
@@ -219,13 +233,17 @@ impl FileLoader {
 
             let room_file = path.join(&line);
             if let Err(e) = FileLoader::load_room_file(world, &room_file) {
-                warn!("Failed to load rooms {:?}: {}", room_file.file_name().unwrap_or_default(), e);
+                warn!(
+                    "Failed to load rooms {:?}: {}",
+                    room_file.file_name().unwrap_or_default(),
+                    e
+                );
             }
         }
 
         Ok(())
     }
-    
+
     fn load_room_file(world: &mut GameState, path: &Path) -> Result<()> {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
@@ -267,7 +285,10 @@ impl FileLoader {
                 let parts: Vec<&str> = line.split_whitespace().collect();
 
                 let zone = parts.first().unwrap_or(&"0").parse()?;
-                let flags = parts.get(1).map(|s| Self::asciiflag_conv(s) as u32).unwrap_or(0);
+                let flags = parts
+                    .get(1)
+                    .map(|s| Self::asciiflag_conv(s) as u32)
+                    .unwrap_or(0);
                 let sector = parts.get(2).unwrap_or(&"0").parse::<i32>()?;
 
                 let mut room = Room::new(vnum, zone, name, description);
@@ -292,9 +313,7 @@ impl FileLoader {
                                     break;
                                 }
                                 let lt = line.trim();
-                                if lt.starts_with('T')
-                                    && lt[1..].trim().parse::<i32>().is_ok()
-                                {
+                                if lt.starts_with('T') && lt[1..].trim().parse::<i32>().is_ok() {
                                     crate::dg_db_scripts::parse_trigger_line(2, vnum, lt);
                                 } else {
                                     // Not a trigger — hand this header to the
@@ -315,14 +334,23 @@ impl FileLoader {
                             line.clear();
                             reader.read_line(&mut line)?;
                             let parts: Vec<&str> = line.split_whitespace().collect();
-                            let raw_flag: i32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+                            let raw_flag: i32 =
+                                parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
                             let key = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(-1);
                             let to_room = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
                             let exit_info = Self::door_flag(raw_flag);
                             if dir < NUM_OF_DIRS {
                                 room.exits[dir] = Some(Exit {
-                                    description: if exit_desc.is_empty() { None } else { Some(exit_desc) },
-                                    keyword: if keywords.is_empty() { None } else { Some(keywords) },
+                                    description: if exit_desc.is_empty() {
+                                        None
+                                    } else {
+                                        Some(exit_desc)
+                                    },
+                                    keyword: if keywords.is_empty() {
+                                        None
+                                    } else {
+                                        Some(keywords)
+                                    },
                                     exit_info,
                                     key,
                                     to_room,
@@ -339,14 +367,31 @@ impl FileLoader {
                             line.clear();
                             reader.read_line(&mut line)?;
                             let parts: Vec<&str> = line.split_whitespace().collect();
-                            let raw_flag: i32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+                            let raw_flag: i32 =
+                                parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
                             let key = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(-1);
                             let to_room = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
                             room.special_exit = Some(crate::room::SpecialExit {
-                                general_description: if general_description.is_empty() { None } else { Some(general_description) },
-                                keyword: if keyword.is_empty() { None } else { Some(keyword) },
-                                ex_name: if ex_name.is_empty() { None } else { Some(ex_name) },
-                                leave_msg: if leave_msg.is_empty() { None } else { Some(leave_msg) },
+                                general_description: if general_description.is_empty() {
+                                    None
+                                } else {
+                                    Some(general_description)
+                                },
+                                keyword: if keyword.is_empty() {
+                                    None
+                                } else {
+                                    Some(keyword)
+                                },
+                                ex_name: if ex_name.is_empty() {
+                                    None
+                                } else {
+                                    Some(ex_name)
+                                },
+                                leave_msg: if leave_msg.is_empty() {
+                                    None
+                                } else {
+                                    Some(leave_msg)
+                                },
                                 exit_info: Self::door_flag(raw_flag),
                                 key,
                                 to_room,
@@ -369,30 +414,34 @@ impl FileLoader {
             }
             line.clear();
         }
-        
+
         Ok(())
     }
-    
+
     fn load_mobiles(world: &mut GameState, path: &Path) -> Result<()> {
         let index_path = path.join("index");
         let file = File::open(&index_path)?;
         let reader = BufReader::new(file);
-        
+
         for line in reader.lines() {
             let line = line?;
             if line == "$" {
                 break;
             }
-            
+
             let mob_file = path.join(&line);
             if let Err(e) = FileLoader::load_mobile_file(world, &mob_file) {
-                warn!("Failed to load mobs {:?}: {}", mob_file.file_name().unwrap_or_default(), e);
+                warn!(
+                    "Failed to load mobs {:?}: {}",
+                    mob_file.file_name().unwrap_or_default(),
+                    e
+                );
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Parse a mobile file in DeltaMUD/CircleMUD format.
     /// Mirrors C reference /web/deltamud/src/db.c:1043-1340
     /// (parse_simple_mob, parse_enhanced_mob, parse_mobile).
@@ -433,7 +482,10 @@ impl FileLoader {
             }
             let vnum: MobVnum = match trimmed[1..].trim().parse() {
                 Ok(v) => v,
-                Err(_) => { i += 1; continue; }
+                Err(_) => {
+                    i += 1;
+                    continue;
+                }
             };
             i += 1;
             let start = i;
@@ -443,14 +495,23 @@ impl FileLoader {
                     parsed += 1;
                 }
                 Err(e) => {
-                    warn!("mob #{} in {:?} skipped: {}", vnum, path.file_name().unwrap_or_default(), e);
+                    warn!(
+                        "mob #{} in {:?} skipped: {}",
+                        vnum,
+                        path.file_name().unwrap_or_default(),
+                        e
+                    );
                     failed += 1;
                     // Advance to the next '#' or end — parse may have left
                     // the cursor anywhere.
-                    if i <= start { i = start; }
+                    if i <= start {
+                        i = start;
+                    }
                     while i < lines.len() {
                         let t = lines[i].trim();
-                        if t.starts_with('#') || t == "$" || t == "$~" { break; }
+                        if t.starts_with('#') || t == "$" || t == "$~" {
+                            break;
+                        }
                         i += 1;
                     }
                 }
@@ -458,7 +519,12 @@ impl FileLoader {
         }
 
         if parsed + failed > 0 {
-            info!("{:?}: {} mobs parsed, {} failed", path.file_name().unwrap_or_default(), parsed, failed);
+            info!(
+                "{:?}: {} mobs parsed, {} failed",
+                path.file_name().unwrap_or_default(),
+                parsed,
+                failed
+            );
         }
         Ok(())
     }
@@ -475,7 +541,10 @@ impl FileLoader {
             .ok_or_else(|| anyhow::anyhow!("missing flag line"))?;
         let flag_parts: Vec<&str> = flag_line.split_whitespace().collect();
         if flag_parts.len() < 4 {
-            return Err(anyhow::anyhow!("flag line has {} fields, need 4", flag_parts.len()));
+            return Err(anyhow::anyhow!(
+                "flag line has {} fields, need 4",
+                flag_parts.len()
+            ));
         }
         // Action flags (f1) and affect flags (f2): asciiflag_conv, exactly as
         // db.c parse_mobile (MOB_FLAGS = asciiflag_conv(f1); SET MOB_ISNPC;
@@ -484,7 +553,11 @@ impl FileLoader {
         let act_flags = Self::asciiflag_conv(flag_parts[0]) as i64 | crate::flags::MOB_ISNPC;
         let affect_flags = Self::asciiflag_conv(flag_parts[1]) as i64;
         let alignment: i32 = flag_parts[2].parse().unwrap_or(0);
-        let letter = flag_parts[3].chars().next().unwrap_or('S').to_ascii_uppercase();
+        let letter = flag_parts[3]
+            .chars()
+            .next()
+            .unwrap_or('S')
+            .to_ascii_uppercase();
 
         // Stats line: either classic (9 numbers with dice) or X-prefixed
         // (DeltaMUD extended power/mpower/defense/mdefense/technique).
@@ -496,7 +569,8 @@ impl FileLoader {
         // Gold + experience line.
         let ge_line = Self::next_content_line(lines, i)
             .ok_or_else(|| anyhow::anyhow!("missing gold/exp line"))?;
-        let ge: Vec<i64> = ge_line.split_whitespace()
+        let ge: Vec<i64> = ge_line
+            .split_whitespace()
             .filter_map(|s| s.parse().ok())
             .collect();
         let gold = *ge.get(0).unwrap_or(&0) as i32;
@@ -505,7 +579,8 @@ impl FileLoader {
         // Position / default_pos / sex.
         let pos_line = Self::next_content_line(lines, i)
             .ok_or_else(|| anyhow::anyhow!("missing position line"))?;
-        let pos_parts: Vec<i32> = pos_line.split_whitespace()
+        let pos_parts: Vec<i32> = pos_line
+            .split_whitespace()
             .filter_map(|s| s.parse().ok())
             .collect();
         let position = (*pos_parts.get(0).unwrap_or(&8)).clamp(0, 9) as u8;
@@ -522,18 +597,28 @@ impl FileLoader {
         if letter == 'E' {
             // Start from the C default ability set (11/13) and overlay especs.
             let mut ab = crate::character::Abilities {
-                str: 13, str_add: 0, intel: 13, wis: 13, dex: 13, con: 13, cha: 13,
+                str: 13,
+                str_add: 0,
+                intel: 13,
+                wis: 13,
+                dex: 13,
+                con: 13,
+                cha: 13,
             };
             while *i < lines.len() {
                 let t = lines[*i].trim();
                 *i += 1;
-                if t == "E" { break; }
+                if t == "E" {
+                    break;
+                }
                 if t.starts_with('#') || t == "$" || t == "$~" {
                     // Ran off the end of the mob without an E — recover.
                     *i -= 1;
                     break;
                 }
-                if t.is_empty() { continue; }
+                if t.is_empty() {
+                    continue;
+                }
                 Self::interpret_espec(t, &mut ab, &mut attack_type);
             }
             abilities = Some(ab);
@@ -585,11 +670,7 @@ impl FileLoader {
     /// Parse one espec keyword line ("Str: 18", "BareHandAttack: 4", ...) and
     /// apply it. Matches db.c interpret_espec/parse_espec: keyword:value split,
     /// case-sensitive keyword names, RANGE-clamped values.
-    fn interpret_espec(
-        line: &str,
-        ab: &mut crate::character::Abilities,
-        attack_type: &mut i32,
-    ) {
+    fn interpret_espec(line: &str, ab: &mut crate::character::Abilities, attack_type: &mut i32) {
         let (key, val) = match line.split_once(':') {
             Some((k, v)) => (k.trim(), v.trim()),
             None => (line.trim(), ""),
@@ -623,7 +704,10 @@ impl FileLoader {
         let nums = Self::stat_numbers(trimmed);
         // nums[0] is level; combat stats follow.
         let g = |idx: usize| -> i16 {
-            nums.get(idx).copied().unwrap_or(0).clamp(i16::MIN as i32, i16::MAX as i32) as i16
+            nums.get(idx)
+                .copied()
+                .unwrap_or(0)
+                .clamp(i16::MIN as i32, i16::MAX as i32) as i16
         };
         (g(1), g(2), g(3), g(4), g(5))
     }
@@ -672,11 +756,15 @@ impl FileLoader {
             let raw = lines[*i];
             *i += 1;
             if let Some(pos) = raw.find('~') {
-                if !out.is_empty() { out.push('\n'); }
+                if !out.is_empty() {
+                    out.push('\n');
+                }
                 out.push_str(&raw[..pos]);
                 return Ok(out);
             }
-            if !out.is_empty() { out.push('\n'); }
+            if !out.is_empty() {
+                out.push('\n');
+            }
             out.push_str(raw);
         }
         Err(anyhow::anyhow!("unterminated ~-string"))
@@ -698,10 +786,14 @@ impl FileLoader {
     /// Both formats put level first: classic `LEVEL thac0 ac ...` or
     /// `XLEVEL power mpower defense mdefense technique ...`.
     fn extract_level(stats_line: &str) -> Result<u8> {
-        let first = stats_line.trim().split_whitespace().next()
+        let first = stats_line
+            .trim()
+            .split_whitespace()
+            .next()
             .ok_or_else(|| anyhow::anyhow!("empty stats line"))?;
         let digits = first.trim_start_matches('X').trim_start_matches('x');
-        let level: i32 = digits.parse()
+        let level: i32 = digits
+            .parse()
             .map_err(|_| anyhow::anyhow!("bad level token {:?}", first))?;
         Ok(level.clamp(0, 200) as u8)
     }
@@ -710,22 +802,26 @@ impl FileLoader {
         let index_path = path.join("index");
         let file = File::open(&index_path)?;
         let reader = BufReader::new(file);
-        
+
         for line in reader.lines() {
             let line = line?;
             if line == "$" {
                 break;
             }
-            
+
             let obj_file = path.join(&line);
             if let Err(e) = FileLoader::load_object_file(world, &obj_file) {
-                warn!("Failed to load objs {:?}: {}", obj_file.file_name().unwrap_or_default(), e);
+                warn!(
+                    "Failed to load objs {:?}: {}",
+                    obj_file.file_name().unwrap_or_default(),
+                    e
+                );
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Read a tilde-terminated (possibly multi-line) string from a reader.
     fn read_tilde_buf(reader: &mut BufReader<File>) -> Result<String> {
         let mut out = String::new();
@@ -827,9 +923,15 @@ impl FileLoader {
             line.clear();
             reader.read_line(&mut line)?;
             let parts: Vec<&str> = line.split_whitespace().collect();
-            let obj_type = parts.first().and_then(|s| s.parse::<i32>().ok()).unwrap_or(12);
+            let obj_type = parts
+                .first()
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(12);
             let extra_flags = parts.get(1).map(|s| Self::asciiflag_conv(s)).unwrap_or(0);
-            let wear_flags = parts.get(2).map(|s| Self::asciiflag_conv(s) as u32).unwrap_or(1);
+            let wear_flags = parts
+                .get(2)
+                .map(|s| Self::asciiflag_conv(s) as u32)
+                .unwrap_or(1);
 
             // values line: up to 6 numbers. value[0..4] are obj values;
             // value[4]/value[5] become curr_slots/total_slots when in 0..=100.
@@ -842,12 +944,11 @@ impl FileLoader {
             }
             let v4: i32 = vparts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
             let v5: i32 = vparts.get(5).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let (curr_slots, total_slots) =
-                if (0..=100).contains(&v4) && (0..=100).contains(&v5) {
-                    (v4, v5)
-                } else {
-                    (0, 0)
-                };
+            let (curr_slots, total_slots) = if (0..=100).contains(&v4) && (0..=100).contains(&v5) {
+                (v4, v5)
+            } else {
+                (0, 0)
+            };
 
             // weight, cost, rent.
             line.clear();

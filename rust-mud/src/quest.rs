@@ -60,7 +60,7 @@ const QUEST_ITEM7: ObjVnum = 3160; // Belt of Invisibility       10,000qp
 const QUEST_ITEM8: ObjVnum = 9000; // Black-eyed Ringstone        5,000qp
 const QUEST_ITEM9: ObjVnum = 9001; // Black-eyed Infinite Loop     4,000qp
 const QUEST_ITEM10: ObjVnum = 6814; // A golden claw               3,000qp
-// items 11..13 are gold / training / practices (no object)
+                                    // items 11..13 are gold / training / practices (no object)
 const QUEST_ITEM14: ObjVnum = 18702; // Boots of Water Walking       800qp
 const QUEST_ITEM15: ObjVnum = 9010; // A gold brick (50,000)          500qp
 
@@ -113,7 +113,9 @@ pub fn boot_quest(_lib_path: &str) {
 
 #[inline]
 fn is_questor(g: &GameState, ch: CharId) -> bool {
-    g.get_char(ch).map(|c| c.act_flags & PLR_QUESTOR != 0).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.act_flags & PLR_QUESTOR != 0)
+        .unwrap_or(false)
 }
 
 /// quest.c qchance(n): true (1..100) <= n.
@@ -152,7 +154,15 @@ fn estimate_difficulty(g: &GameState, ch: CharId, victim: CharId) -> i32 {
 /// the text after that name is the spoken sentence, so we send <text> as-is.
 fn questman_tell(g: &mut GameState, questman: CharId, player: CharId, msg: &str) {
     let line = format!("$n tells you, '{}'", msg);
-    act(g, &line, false, questman, None, ActArg::Char(player), To::Vict);
+    act(
+        g,
+        &line,
+        false,
+        questman,
+        None,
+        ActArg::Char(player),
+        To::Vict,
+    );
 }
 
 /// two_arguments: first two space-delimited tokens, lowercased like the C
@@ -213,10 +223,7 @@ pub fn do_autoquest(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32)
                 let name = g.obj_protos.get(&qobj).map(|p| p.name.clone());
                 match name {
                     Some(n) => {
-                        let msg = format!(
-                            "You are on a quest to recover the fabled {}!\r\n",
-                            n
-                        );
+                        let msg = format!("You are on a quest to recover the fabled {}!\r\n", n);
                         g.send_to_char(ch, &msg);
                     }
                     None => g.send_to_char(ch, "You aren't currently on a quest.\r\n"),
@@ -226,10 +233,7 @@ pub fn do_autoquest(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32)
                 let name = g.mob_protos.get(&qmob).map(|p| p.short_desc.clone());
                 match name {
                     Some(n) => {
-                        let msg = format!(
-                            "You are on a quest to slay the dreaded {}!\r\n",
-                            n
-                        );
+                        let msg = format!("You are on a quest to slay the dreaded {}!\r\n", n);
                         g.send_to_char(ch, &msg);
                     }
                     None => g.send_to_char(ch, "You aren't currently on a quest.\r\n"),
@@ -318,8 +322,24 @@ pub fn do_autoquest(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32)
 // ---------------------------------------------------------------------------
 
 fn do_quest_list(g: &mut GameState, ch: CharId, questman: CharId) {
-    act(g, "$n asks $N for a list of quest items.", false, ch, None, ActArg::Char(questman), To::Room);
-    act(g, "You ask $N for a list of quest items.", false, ch, None, ActArg::Char(questman), To::Char);
+    act(
+        g,
+        "$n asks $N for a list of quest items.",
+        false,
+        ch,
+        None,
+        ActArg::Char(questman),
+        To::Room,
+    );
+    act(
+        g,
+        "You ask $N for a list of quest items.",
+        false,
+        ch,
+        None,
+        ActArg::Char(questman),
+        To::Char,
+    );
     let list = "Current Quest Items available for Purchase:\r\n\r\n\
          #1 - 500,000..........Sword of the Gods\r\n\
          #2 - 30,000qp.........Midgaard Hero Vest\r\n\
@@ -370,12 +390,20 @@ fn do_quest_buy(g: &mut GameState, ch: CharId, questman: CharId, arg2: &str) {
         ("#3 divine bag holding", 25000, Reward::Obj(QUEST_ITEM3)),
         ("#4 necklace recall", 20000, Reward::Obj(QUEST_ITEM4)),
         ("#5 pendant age", 17000, Reward::Obj(QUEST_ITEM5)),
-        ("#6 hat nourish nourishment eternal", 15000, Reward::Obj(QUEST_ITEM6)),
+        (
+            "#6 hat nourish nourishment eternal",
+            15000,
+            Reward::Obj(QUEST_ITEM6),
+        ),
         ("#7 belt invis invisbility", 10000, Reward::Obj(QUEST_ITEM7)),
         ("#8 ringstone", 5000, Reward::Obj(QUEST_ITEM8)),
         ("#9 infinet infinite loop", 4000, Reward::Obj(QUEST_ITEM9)),
         ("#10 golden claw", 3000, Reward::Obj(QUEST_ITEM10)),
-        ("#14 boots water walk walking", 800, Reward::Obj(QUEST_ITEM14)),
+        (
+            "#14 boots water walk walking",
+            800,
+            Reward::Obj(QUEST_ITEM14),
+        ),
         ("#13 practices prac practice", 1000, Reward::Practices(30)),
         ("#12 train training", 1500, Reward::Training(1)),
         ("#11 gold gp", 2000, Reward::Gold(2000000)),
@@ -394,7 +422,10 @@ fn do_quest_buy(g: &mut GameState, ch: CharId, questman: CharId, arg2: &str) {
     let entry = match matched {
         Some(e) => e,
         None => {
-            let name = g.get_char(ch).map(|c| c.get_name().to_string()).unwrap_or_default();
+            let name = g
+                .get_char(ch)
+                .map(|c| c.get_name().to_string())
+                .unwrap_or_default();
             let _ = name; // C prepends the name as the tell-target token only.
             questman_tell(g, questman, ch, "I don't have that item, sorry.");
             return;
@@ -403,7 +434,12 @@ fn do_quest_buy(g: &mut GameState, ch: CharId, questman: CharId, arg2: &str) {
 
     let (_kw, price, reward) = entry;
     if qp < *price {
-        questman_tell(g, questman, ch, "Sorry, but you don't have enough quest points for that.");
+        questman_tell(
+            g,
+            questman,
+            ch,
+            "Sorry, but you don't have enough quest points for that.",
+        );
         return;
     }
 
@@ -416,8 +452,24 @@ fn do_quest_buy(g: &mut GameState, ch: CharId, questman: CharId, arg2: &str) {
         Reward::Obj(vnum) => {
             // create_object + obj_to_char (after the act() lines, per C order).
             if let Some(oid) = create_object(g, *vnum) {
-                act(g, "$N gives $p to $n.", false, ch, Some(oid), ActArg::Char(questman), To::Room);
-                act(g, "$N gives you $p.", false, ch, Some(oid), ActArg::Char(questman), To::Char);
+                act(
+                    g,
+                    "$N gives $p to $n.",
+                    false,
+                    ch,
+                    Some(oid),
+                    ActArg::Char(questman),
+                    To::Room,
+                );
+                act(
+                    g,
+                    "$N gives you $p.",
+                    false,
+                    ch,
+                    Some(oid),
+                    ActArg::Char(questman),
+                    To::Char,
+                );
                 g.obj_to_char(oid, ch);
             }
         }
@@ -425,8 +477,24 @@ fn do_quest_buy(g: &mut GameState, ch: CharId, questman: CharId, arg2: &str) {
             if let Some(c) = g.get_char_mut(ch) {
                 c.spells_to_learn += *n;
             }
-            act(g, "$N gives 30 practices to $n.", false, ch, None, ActArg::Char(questman), To::Room);
-            act(g, "$N gives you 30 practices.", false, ch, None, ActArg::Char(questman), To::Char);
+            act(
+                g,
+                "$N gives 30 practices to $n.",
+                false,
+                ch,
+                None,
+                ActArg::Char(questman),
+                To::Room,
+            );
+            act(
+                g,
+                "$N gives you 30 practices.",
+                false,
+                ch,
+                None,
+                ActArg::Char(questman),
+                To::Char,
+            );
         }
         Reward::Training(n) => {
             // GET_TRAINING maps to a not-yet-ported `training` ubyte; track it
@@ -434,18 +502,46 @@ fn do_quest_buy(g: &mut GameState, ch: CharId, questman: CharId, arg2: &str) {
             // C does (training counter). Until the field lands the act() lines
             // still fire and points are spent, matching the player-visible path.
             let _ = n;
-            act(g, "$N gives 1 training session to $n.", false, ch, None, ActArg::Char(questman), To::Room);
-            act(g, "$N gives you 1 training session.", false, ch, None, ActArg::Char(questman), To::Char);
+            act(
+                g,
+                "$N gives 1 training session to $n.",
+                false,
+                ch,
+                None,
+                ActArg::Char(questman),
+                To::Room,
+            );
+            act(
+                g,
+                "$N gives you 1 training session.",
+                false,
+                ch,
+                None,
+                ActArg::Char(questman),
+                To::Char,
+            );
         }
         Reward::Gold(amount) => {
             if let Some(c) = g.get_char_mut(ch) {
                 c.points.gold += *amount;
             }
-            act(g, "$N gives 2,000,000 gold pieces to $n.", false, ch, None, ActArg::Char(questman), To::Room);
+            act(
+                g,
+                "$N gives 2,000,000 gold pieces to $n.",
+                false,
+                ch,
+                None,
+                ActArg::Char(questman),
+                To::Room,
+            );
             act(
                 g,
                 "$N has 2,000,000 in gold transfered from $s Swiss account to your balance.",
-                false, ch, None, ActArg::Char(questman), To::Char,
+                false,
+                ch,
+                None,
+                ActArg::Char(questman),
+                To::Char,
             );
         }
     }
@@ -456,8 +552,24 @@ fn do_quest_buy(g: &mut GameState, ch: CharId, questman: CharId, arg2: &str) {
 // ---------------------------------------------------------------------------
 
 fn do_quest_request(g: &mut GameState, ch: CharId, questman: CharId) {
-    act(g, "$n asks $N for a quest.", false, ch, None, ActArg::Char(questman), To::Room);
-    act(g, "You ask $N for a quest.", false, ch, None, ActArg::Char(questman), To::Char);
+    act(
+        g,
+        "$n asks $N for a quest.",
+        false,
+        ch,
+        None,
+        ActArg::Char(questman),
+        To::Room,
+    );
+    act(
+        g,
+        "You ask $N for a quest.",
+        false,
+        ch,
+        None,
+        ActArg::Char(questman),
+        To::Char,
+    );
 
     if is_questor(g, ch) {
         questman_tell(g, questman, ch, "But you're already on a quest!");
@@ -465,12 +577,20 @@ fn do_quest_request(g: &mut GameState, ch: CharId, questman: CharId) {
     }
     let nq = g.get_char(ch).map(|c| c.next_quest).unwrap_or(0);
     if nq > 0 {
-        questman_tell(g, questman, ch, "You're very brave, but let someone else have a chance.");
+        questman_tell(
+            g,
+            questman,
+            ch,
+            "You're very brave, but let someone else have a chance.",
+        );
         questman_tell(g, questman, ch, "Come back later.");
         return;
     }
 
-    let name = g.get_char(ch).map(|c| c.get_name().to_string()).unwrap_or_default();
+    let name = g
+        .get_char(ch)
+        .map(|c| c.get_name().to_string())
+        .unwrap_or_default();
     let msg = format!("Thank you, brave {}!\r\n", name);
     g.send_to_char(ch, &msg);
 
@@ -497,12 +617,33 @@ fn do_quest_request(g: &mut GameState, ch: CharId, questman: CharId) {
 // ---------------------------------------------------------------------------
 
 fn do_quest_complete(g: &mut GameState, ch: CharId, questman: CharId) {
-    act(g, "$n informs $N $e has completed $s quest.", false, ch, None, ActArg::Char(questman), To::Room);
-    act(g, "You inform $N you have completed $s quest.", false, ch, None, ActArg::Char(questman), To::Char);
+    act(
+        g,
+        "$n informs $N $e has completed $s quest.",
+        false,
+        ch,
+        None,
+        ActArg::Char(questman),
+        To::Room,
+    );
+    act(
+        g,
+        "You inform $N you have completed $s quest.",
+        false,
+        ch,
+        None,
+        ActArg::Char(questman),
+        To::Char,
+    );
 
     // GET_QUESTGIVER(ch) != questman ?
     if get_questgiver(ch) != Some(questman) {
-        questman_tell(g, questman, ch, "I never sent you on a quest! Perhaps you're thinking of someone else.");
+        questman_tell(
+            g,
+            questman,
+            ch,
+            "I never sent you on a quest! Perhaps you're thinking of someone else.",
+        );
         return;
     }
 
@@ -547,9 +688,14 @@ fn do_quest_complete(g: &mut GameState, ch: CharId, questman: CharId) {
         else if qobj > 0 && cd > 0 {
             // Find the quest object in the player's inventory.
             let found: Option<ObjId> = {
-                let carrying = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+                let carrying = g
+                    .get_char(ch)
+                    .map(|c| c.carrying.clone())
+                    .unwrap_or_default();
                 carrying.into_iter().find(|&oid| {
-                    g.get_obj(oid).map(|o| o.item_number == qobj).unwrap_or(false)
+                    g.get_obj(oid)
+                        .map(|o| o.item_number == qobj)
+                        .unwrap_or(false)
                 })
             };
 
@@ -557,8 +703,24 @@ fn do_quest_complete(g: &mut GameState, ch: CharId, questman: CharId) {
                 let reward = g.rng.number(1500, 25000);
                 let pointreward = g.rng.number(10, 40);
 
-                act(g, "You hand $p to $N.", false, ch, Some(oid), ActArg::Char(questman), To::Char);
-                act(g, "$n hands $p to $N.", false, ch, Some(oid), ActArg::Char(questman), To::Room);
+                act(
+                    g,
+                    "You hand $p to $N.",
+                    false,
+                    ch,
+                    Some(oid),
+                    ActArg::Char(questman),
+                    To::Char,
+                );
+                act(
+                    g,
+                    "$n hands $p to $N.",
+                    false,
+                    ch,
+                    Some(oid),
+                    ActArg::Char(questman),
+                    To::Room,
+                );
 
                 // obj_from_char + extract_obj.
                 g.obj_from_anywhere(oid);
@@ -590,13 +752,23 @@ fn do_quest_complete(g: &mut GameState, ch: CharId, questman: CharId) {
                 }
                 return;
             } else {
-                questman_tell(g, questman, ch, "You haven't completed the quest yet, but there is still time!");
+                questman_tell(
+                    g,
+                    questman,
+                    ch,
+                    "You haven't completed the quest yet, but there is still time!",
+                );
                 return;
             }
         }
         // --- Still in progress (positive mob/obj, time remaining) ----------
         else if (qmob > 0 || qobj > 0) && cd > 0 {
-            questman_tell(g, questman, ch, "You haven't completed the quest yet, but there is still time!");
+            questman_tell(
+                g,
+                questman,
+                ch,
+                "You haven't completed the quest yet, but there is still time!",
+            );
             return;
         }
     }
@@ -604,7 +776,12 @@ fn do_quest_complete(g: &mut GameState, ch: CharId, questman: CharId) {
     // Fell through: either out of time, or never requested.
     let nq = g.get_char(ch).map(|c| c.next_quest).unwrap_or(0);
     if nq > 0 {
-        questman_tell(g, questman, ch, "But you didn't complete your quest in time!");
+        questman_tell(
+            g,
+            questman,
+            ch,
+            "But you didn't complete your quest in time!",
+        );
     } else {
         questman_tell(g, questman, ch, "You have to REQUEST a quest first.");
     }
@@ -729,7 +906,10 @@ fn generate_quest(g: &mut GameState, ch: CharId, questman: CharId) {
         let oid = match questitem {
             Some(o) => o,
             None => {
-                g.send_to_char(ch, "Error: questitem does not exist! please notify the imms\r\n");
+                g.send_to_char(
+                    ch,
+                    "Error: questitem does not exist! please notify the imms\r\n",
+                );
                 return;
             }
         };
@@ -740,7 +920,10 @@ fn generate_quest(g: &mut GameState, ch: CharId, questman: CharId) {
             c.quest_obj = item_vnum;
         }
 
-        let short = g.get_obj(oid).map(|o| o.short_description.clone()).unwrap_or_default();
+        let short = g
+            .get_obj(oid)
+            .map(|o| o.short_description.clone())
+            .unwrap_or_default();
         let msg = format!(
             "A rare and valuable {} has been stolen from the museum!\r\n",
             short
@@ -748,14 +931,23 @@ fn generate_quest(g: &mut GameState, ch: CharId, questman: CharId) {
         g.send_to_char(ch, &msg);
 
         let zone_name = zone_name_of_room(g, victim_room);
-        let room_name = g.room_opt(victim_room).map(|r| r.name.clone()).unwrap_or_default();
-        let msg = format!("Look in the general area of {} for {}!\r\n", zone_name, room_name);
+        let room_name = g
+            .room_opt(victim_room)
+            .map(|r| r.name.clone())
+            .unwrap_or_default();
+        let msg = format!(
+            "Look in the general area of {} for {}!\r\n",
+            zone_name, room_name
+        );
         g.send_to_char(ch, &msg);
         return;
     }
 
     // Otherwise: a kill-the-mob quest.
-    let victim_name = g.get_char(victim).map(|c| c.display_for_others()).unwrap_or_default();
+    let victim_name = g
+        .get_char(victim)
+        .map(|c| c.display_for_others())
+        .unwrap_or_default();
     match g.rng.number(0, 1) {
         0 => {
             let m = format!(
@@ -780,7 +972,10 @@ fn generate_quest(g: &mut GameState, ch: CharId, questman: CharId) {
         }
     }
 
-    let room_name = g.room_opt(victim_room).map(|r| r.name.clone()).unwrap_or_default();
+    let room_name = g
+        .room_opt(victim_room)
+        .map(|r| r.name.clone())
+        .unwrap_or_default();
     if !room_name.is_empty() {
         let m = format!(
             "Seek {} out somewhere in the vicinity of {}!\r\n",
@@ -800,7 +995,12 @@ fn generate_quest(g: &mut GameState, ch: CharId, questman: CharId) {
 
 /// The "Sorry, no quests for you now" failure path (generate_quest victim==NULL).
 fn deny_quest(g: &mut GameState, ch: CharId, questman: CharId) {
-    questman_tell(g, questman, ch, "Sorry, but I don't have any quests for you now. Try again later");
+    questman_tell(
+        g,
+        questman,
+        ch,
+        "Sorry, but I don't have any quests for you now. Try again later",
+    );
     set_questgiver(ch, None);
     if let Some(c) = g.get_char_mut(ch) {
         c.next_quest = 1;
@@ -861,7 +1061,10 @@ pub fn quest_on_kill(g: &mut GameState, killer: CharId, victim: CharId) -> bool 
     }
 
     g.send_to_char(killer, "You have almost completed your QUEST!\n\r");
-    g.send_to_char(killer, "Return to the questmaster before your time runs out!\n\r");
+    g.send_to_char(
+        killer,
+        "Return to the questmaster before your time runs out!\n\r",
+    );
 
     // questdiff = estimate_difficulty(killer, quest target); clamp; /5; negate.
     // The C re-reads the prototype as a throwaway mob; we estimate against the

@@ -17,12 +17,18 @@ The command surface is substantially ported: the Rust `CMD_INFO` table matches t
 Known remaining parity work is mostly integration and fidelity detail, not whole missing systems:
 
 - **Persistence compatibility:** SQL `player_main` is broad and current, and player aliases now round-trip through C-compatible `plralias/<bucket>/<name>.alias` sidecars. Rent/crash object files, houses, boards, clans, and mail still use Rust text formats rather than C raw on-disk records. Do not share live C persistence files with Rust without a migration/compatibility pass.
-- **Character creation:** the Rust nanny path skips C states for newbie prompts, deity, hometown, stat reroll/accept, and creation-time `do_start_init` (#87).
-- **Combat and flags:** `deathblow` and immortal raw-kill semantics still route through normal damage; the current tracker item is #92.
-- **Command semantics:** complex aliases execute immediately instead of being queued through descriptor wait (#86), social minimum level is not enforced, `wizhelp` ignores per-command GCMD bits, and `socials` omits the static `insult` social (#90).
-- **OLC/DG authoring:** trigger prototype editing is strong, but redit/oedit/medit do not expose the C DG attachment-list editor, room saves drop room `T` trigger attachments (#89), and central `olc save` does not dispatch every editor's disk writer (#88).
-- **Runtime/admin policy:** ban enforcement misses C hostname, `BAN_NEW`, and `BAN_SELECT` paths (#91).
-- **Other fidelity gaps:** `slist` emits no spell rows, several `APPLY_*` locations are narrower than C, autowiz/clan offline reporting are not fully SQL-backed, and some OLC text editors do not support the full C `/a /c /d /e /f /i /h /l /n /r /s` command set.
+- **Runtime/admin fidelity:** save currently records an empty player host, played-time updates and corrupted-value clamps are narrower than C, `slist` emits no spell rows, several `APPLY_*` locations are narrower than C, and autowiz/clan offline reporting are not fully SQL-backed.
+- **OLC/editor fidelity:** the main OLC save dispatcher covers room, object, mobile, zone, and shop writers, and redit/oedit/medit expose DG attachment editing. Remaining gaps are the partial C string-editor slash command set (`/a /c /d /e /f /i /h /l /n /r /s`) and first-class mobile prototype special-procedure bindings from OLC.
+
+Recently resolved tracker-backed parity fixes:
+
+- Complex aliases now expand through the descriptor input queue one command per pulse, preserving C-style wait timing (#86).
+- Character creation now walks the C nanny sequence for newbie, sex, race, deity, class, hometown/stat rolls, and `do_start_init` setup (#87).
+- Central `olc save` dispatches room/object/mobile/zone/shop disk writers (#88).
+- DG attachment editing is wired in redit/oedit/medit, and room saves preserve room `T` trigger attachment lines (#89).
+- Social minimum levels, `wizhelp` GCMD filtering, and the static `insult` social listing are covered (#90).
+- Hostname-based `BAN_NEW` and `BAN_SELECT` login gates are implemented (#91).
+- Immortal raw-kill and `deathblow` now use dedicated side-effect paths instead of normal damage routing (#92).
 
 ## Build / run / test
 
@@ -30,7 +36,7 @@ Known remaining parity work is mostly integration and fidelity detail, not whole
 cd /web/deltamud/rust-mud
 cargo build                 # debug
 cargo build --release       # optimized (LTO+strip; ~1.5 min from clean)
-cargo test                  # ~27 tests (mostly DG-script parsing, in dg_*.rs + password.rs)
+cargo test                  # 211 tests across commands, combat, DG, OLC, nanny/login, persistence, and protocol helpers
 cargo test <name>           # a single test by substring
 cargo clippy --all-targets  # lint (CI runs this; not gated)
 
@@ -48,7 +54,7 @@ Key env vars (read in `config.rs` + `main.rs`):
 ### Testing against a running server
 Scripted-telnet test with raw `nc` (the IAC input filter now tolerates telnet negotiation, but `nc` avoids it entirely):
 ```bash
-( printf 'Tester\r\ny\r\npass\r\npass\r\nm\r\nw\r\nh\r\n'; sleep 1; printf 'score\r\n'; sleep 0.5; printf 'quit\r\n' ) | nc -q9 127.0.0.1 4000
+( printf 'Tester\r\ny\r\npass\r\npass\r\ny\r\nm\r\na\r\na\r\nc\r\ny\r\n'; sleep 1; printf 'score\r\n'; sleep 0.5; printf 'quit\r\n' ) | nc -q9 127.0.0.1 4000
 ```
 Gotchas that waste time:
 - **First character created becomes the Implementor** (`idnum == 1`, level 105, all god-command bits). Later characters are mortals — many immortal commands (`goto`, `load`, `stat`, `set`, `skillset`) will return "Huh?!?" for them.
@@ -75,7 +81,7 @@ Gotchas that waste time:
 **Subsystem map** (find by name; each port is intended to track the C oracle, with current gaps listed above):
 - `act()` message engine (`act.rs`, from comm.c `perform_act`): `$n/$N/$m/$s/$e/$o/$p` substitution + per-recipient visibility.
 - DG Scripts VM: `dg_scripts.rs` (`script_driver`, depth guard 10 + while-loop guard 30), `dg_handler.rs`/`dg_event.rs`/`dg_db_scripts.rs`, `dg_{mob,obj,wld}cmd.rs`, fire-hooks in `dg_triggers.rs`. **Triggers must boot before the world** (`main.rs` calls `boot_dg_scripts` before `load_world`).
-- OLC: `olc.rs` + `redit/oedit/medit/zedit/sedit/aedit/hedit/trigedit.rs` (nested-input editors; per-conn state in module-static `OnceLock<Mutex<...>>` keyed by `ConnId`; explicit save paths and DG attachment editors still need parity work).
+- OLC: `olc.rs` + `redit/oedit/medit/zedit/sedit/aedit/hedit/trigedit.rs` (nested-input editors; per-conn state in module-static `OnceLock<Mutex<...>>` keyed by `ConnId`; room/object/mobile/zone/shop central save dispatch is wired; DG attachment editors are exposed in redit/oedit/medit; string-editor slash-command parity is still partial).
 - Persistence: `database.rs` (real 83-column `player_main` + `player_affects`/`player_skills`), `database_compat.rs` (the column<->Character mapping), `mock_database.rs`, `objsave.rs` (Rust-format rent/crash object files, not C binary compatible), `password.rs` (crypt-compatible).
 - Spec procs (`spec_procs.rs`/`spec_assign.rs`), combat (`combat.rs`: DeltaMUD's `chance()`/`dam_multi()` from utils.c, not stock THAC0), magic (`magic.rs`/`spell_parser.rs`/`spells.rs`), economy (`shop/clan/boards/mail/house/quest/auction`).
 

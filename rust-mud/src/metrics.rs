@@ -124,7 +124,9 @@ impl Metrics {
         s.push_str("# TYPE deltamud_players gauge\n");
         s.push_str(&format!("deltamud_players {}\n", players));
 
-        s.push_str("# HELP deltamud_connections_total Total TCP connections accepted since boot.\n");
+        s.push_str(
+            "# HELP deltamud_connections_total Total TCP connections accepted since boot.\n",
+        );
         s.push_str("# TYPE deltamud_connections_total counter\n");
         s.push_str(&format!("deltamud_connections_total {}\n", connections));
 
@@ -138,7 +140,10 @@ impl Metrics {
 
         s.push_str("# HELP deltamud_heartbeat_tick_micros_max High-water mark of any single heartbeat pulse in microseconds.\n");
         s.push_str("# TYPE deltamud_heartbeat_tick_micros_max gauge\n");
-        s.push_str(&format!("deltamud_heartbeat_tick_micros_max {}\n", max_tick));
+        s.push_str(&format!(
+            "deltamud_heartbeat_tick_micros_max {}\n",
+            max_tick
+        ));
 
         s.push_str("# HELP deltamud_mobs Current number of mobiles (NPCs) in the world.\n");
         s.push_str("# TYPE deltamud_mobs gauge\n");

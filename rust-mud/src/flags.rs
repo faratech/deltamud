@@ -23,14 +23,20 @@ pub const AFF_CHARM: i64 = 1 << 21;
 // PRF_* — player preferences.
 pub const PRF_BRIEF: i64 = 1 << 0;
 pub const PRF_COMPACT: i64 = 1 << 1;
+pub const PRF_DISPHP: i64 = 1 << 4;
+pub const PRF_DISPMANA: i64 = 1 << 5;
+pub const PRF_DISPMOVE: i64 = 1 << 6;
 pub const PRF_NOHASSLE: i64 = 1 << 8;
 pub const PRF_NOREPEAT: i64 = 1 << 11;
 pub const PRF_HOLYLIGHT: i64 = 1 << 12;
 pub const PRF_COLOR_1: i64 = 1 << 13;
 pub const PRF_COLOR_2: i64 = 1 << 14;
+pub const PRF_DISPEXP: i64 = 1 << 26;
+pub const PRF_NOLOOKSTACK: i64 = 1 << 30;
 
 // PRF2_* — second player preference bitvector.
 pub const PRF2_LOCKOUT: i64 = 1 << 1;
+pub const PRF2_DISPMOB: i64 = 1 << 5;
 pub const PRF2_MBUILDING: i64 = 1 << 6;
 pub const PRF2_INTANGIBLE: i64 = 1 << 9;
 

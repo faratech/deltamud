@@ -325,7 +325,10 @@ pub fn do_aedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     // "save" — flush all actions to disk (do_olc save path for AEDIT).
     if is_abbrev(&buf1, "save") {
         g.send_to_char(ch, "Saving all actions.\r\n");
-        let name = g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default();
+        let name = g
+            .get_char(ch)
+            .map(|c| c.player.name.clone())
+            .unwrap_or_default();
         log::info!("OLC: {} saves all actions.", name);
         aedit_save_to_disk(&lib_path);
         return;
@@ -523,10 +526,11 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             match trimmed.chars().next() {
                 Some('y') | Some('Y') => {
                     aedit_save_internally(g, conn);
-                    let cmd =
-                        with_state(conn, |st| st.action.command.clone()).unwrap_or_default();
-                    let name =
-                        g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default();
+                    let cmd = with_state(conn, |st| st.action.command.clone()).unwrap_or_default();
+                    let name = g
+                        .get_char(ch)
+                        .map(|c| c.player.name.clone())
+                        .unwrap_or_default();
                     log::info!("OLC: {} edits action {}", name, cmd);
                     g.send_to_char(ch, "Action saved to memory.\r\n");
                     cleanup(conn);
@@ -603,7 +607,10 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     let storage = with_state(conn, |st| st.storage.clone()).unwrap_or_default();
                     g.send_to_char(
                         ch,
-                        &format!("Invalid choice!\r\nDo you wish to add the '{}' action? ", storage),
+                        &format!(
+                            "Invalid choice!\r\nDo you wish to add the '{}' action? ",
+                            storage
+                        ),
                     );
                 }
             }
@@ -653,67 +660,106 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     aedit_disp_menu(g, conn);
                 }
                 Some('a') | Some('A') => prompt_field(
-                    g, conn, ch, AeditMode::NovictChar,
+                    g,
+                    conn,
+                    ch,
+                    AeditMode::NovictChar,
                     "Enter social shown to the Character when there is no argument supplied.",
                     |a| &a.char_no_arg,
                 ),
                 Some('b') | Some('B') => prompt_field(
-                    g, conn, ch, AeditMode::NovictOthers,
+                    g,
+                    conn,
+                    ch,
+                    AeditMode::NovictOthers,
                     "Enter social shown to Others when there is no argument supplied.",
                     |a| &a.others_no_arg,
                 ),
                 Some('c') | Some('C') => prompt_field(
-                    g, conn, ch, AeditMode::VictNotFound,
+                    g,
+                    conn,
+                    ch,
+                    AeditMode::VictNotFound,
                     "Enter text shown to the Character when his victim isnt found.",
                     |a| &a.not_found,
                 ),
                 Some('d') | Some('D') => prompt_field(
-                    g, conn, ch, AeditMode::SelfChar,
+                    g,
+                    conn,
+                    ch,
+                    AeditMode::SelfChar,
                     "Enter social shown to the Character when it is its own victim.",
                     |a| &a.char_auto,
                 ),
                 Some('e') | Some('E') => prompt_field(
-                    g, conn, ch, AeditMode::SelfOthers,
+                    g,
+                    conn,
+                    ch,
+                    AeditMode::SelfOthers,
                     "Enter social shown to Others when the Char is its own victim.",
                     |a| &a.others_auto,
                 ),
                 Some('f') | Some('F') => prompt_field(
-                    g, conn, ch, AeditMode::VictCharFound,
+                    g,
+                    conn,
+                    ch,
+                    AeditMode::VictCharFound,
                     "Enter normal social shown to the Character when the victim is found.",
                     |a| &a.char_found,
                 ),
                 Some('g') | Some('G') => prompt_field(
-                    g, conn, ch, AeditMode::VictOthersFound,
+                    g,
+                    conn,
+                    ch,
+                    AeditMode::VictOthersFound,
                     "Enter normal social shown to Others when the victim is found.",
                     |a| &a.others_found,
                 ),
                 Some('h') | Some('H') => prompt_field(
-                    g, conn, ch, AeditMode::VictVictFound,
+                    g,
+                    conn,
+                    ch,
+                    AeditMode::VictVictFound,
                     "Enter normal social shown to the Victim when the victim is found.",
                     |a| &a.vict_found,
                 ),
                 Some('i') | Some('I') => prompt_field(
-                    g, conn, ch, AeditMode::VictCharBodyFound,
+                    g,
+                    conn,
+                    ch,
+                    AeditMode::VictCharBodyFound,
                     "Enter 'body part' social shown to the Character when the victim is found.",
                     |a| &a.char_body_found,
                 ),
                 Some('j') | Some('J') => prompt_field(
-                    g, conn, ch, AeditMode::VictOthersBodyFound,
+                    g,
+                    conn,
+                    ch,
+                    AeditMode::VictOthersBodyFound,
                     "Enter 'body part' social shown to Others when the victim is found.",
                     |a| &a.others_body_found,
                 ),
                 Some('k') | Some('K') => prompt_field(
-                    g, conn, ch, AeditMode::VictVictBodyFound,
+                    g,
+                    conn,
+                    ch,
+                    AeditMode::VictVictBodyFound,
                     "Enter 'body part' social shown to the Victim when the victim is found.",
                     |a| &a.vict_body_found,
                 ),
                 Some('l') | Some('L') => prompt_field(
-                    g, conn, ch, AeditMode::ObjCharFound,
+                    g,
+                    conn,
+                    ch,
+                    AeditMode::ObjCharFound,
                     "Enter 'object' social shown to the Character when the object is found.",
                     |a| &a.char_obj_found,
                 ),
                 Some('m') | Some('M') => prompt_field(
-                    g, conn, ch, AeditMode::ObjOthersFound,
+                    g,
+                    conn,
+                    ch,
+                    AeditMode::ObjOthersFound,
                     "Enter 'object' social shown to the Room when the object is found.",
                     |a| &a.others_obj_found,
                 ),
@@ -809,8 +855,12 @@ fn prompt_field(
     label: &str,
     get: impl Fn(&SocialAction) -> &Option<String>,
 ) {
-    let old = with_state(conn, |st| get(&st.action).clone().unwrap_or_else(|| "NULL".to_string()))
-        .unwrap_or_else(|| "NULL".to_string());
+    let old = with_state(conn, |st| {
+        get(&st.action)
+            .clone()
+            .unwrap_or_else(|| "NULL".to_string())
+    })
+    .unwrap_or_else(|| "NULL".to_string());
     g.send_to_char(ch, &format!("{}\r\n[OLD]: {}\r\n[NEW]: ", label, old));
     with_state(conn, |st| st.mode = next);
 }
@@ -854,7 +904,11 @@ fn aedit_save_internally(g: &mut GameState, conn: ConnId) {
     aedit_save_to_disk(&lib_path);
     let socials_path = format!("{}/{}", lib_path.trim_end_matches('/'), SOCMESS_REL);
     if let Err(e) = crate::cmd_social::reload_socials(Some(&socials_path)) {
-        log::warn!("SYSERR: can't reload socials file '{}': {}", socials_path, e);
+        log::warn!(
+            "SYSERR: can't reload socials file '{}': {}",
+            socials_path,
+            e
+        );
     }
 }
 

@@ -236,7 +236,10 @@ fn mag_manacost(g: &GameState, ch: CharId, spellnum: i32) -> i32 {
     let (mana_max, mana_min, mana_change) = spell_mana_params(spellnum).unwrap_or((0, 0, 0));
     let computed = mana_max - mana_change * (level - LVL_IMMORT as i32);
     let mut mana = computed.max(mana_min);
-    if g.get_char(ch).map(|c| c.affect_flags & crate::flags::AFF_AUTUS != 0).unwrap_or(false) {
+    if g.get_char(ch)
+        .map(|c| c.affect_flags & crate::flags::AFF_AUTUS != 0)
+        .unwrap_or(false)
+    {
         mana >>= 1;
     }
     mana
@@ -468,8 +471,19 @@ fn make_potion(g: &mut GameState, ch: CharId, potion: i32, container: ObjId) {
 
     // 1-in-3 catastrophic explosion for mortals.
     if g.rng.number(1, 3) == 3 && level < LVL_IMMORT {
-        g.send_to_char(ch, "As you begin mixing the potion, it violently explodes!\r\n");
-        act(g, "$n begins to mix a potion, but it suddenly explodes!", false, ch, None, ActArg::None, To::Room);
+        g.send_to_char(
+            ch,
+            "As you begin mixing the potion, it violently explodes!\r\n",
+        );
+        act(
+            g,
+            "$n begins to mix a potion, but it suddenly explodes!",
+            false,
+            ch,
+            None,
+            ActArg::None,
+            To::Room,
+        );
         g.obj_from_anywhere(container);
         g.extract_obj(container);
         let dam_hi = mag_manacost(g, ch, potion) * 2;
@@ -490,8 +504,19 @@ fn make_potion(g: &mut GameState, ch: CharId, potion: i32, container: ObjId) {
                 c.points.mana -= mana;
             }
         }
-        g.send_to_char(ch, &format!("You create a {} potion.\r\n", spell_name(potion)));
-        act(g, "$n creates a potion!", false, ch, None, ActArg::None, To::Room);
+        g.send_to_char(
+            ch,
+            &format!("You create a {} potion.\r\n", spell_name(potion)),
+        );
+        act(
+            g,
+            "$n creates a potion!",
+            false,
+            ch,
+            None,
+            ActArg::None,
+            To::Room,
+        );
         g.obj_from_anywhere(container);
         g.extract_obj(container);
     } else {
@@ -550,7 +575,10 @@ pub fn do_brew(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
 
     // Locate the container in inventory.
-    let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let inv = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     let container = g.get_obj_in_list_vis(ch, &bottle_name, &inv);
     let found = container.is_some();
 
@@ -561,7 +589,10 @@ pub fn do_brew(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
     }
     if !found {
-        g.send_to_char(ch, &format!("You don't have {} in your inventory!\r\n", bottle_name));
+        g.send_to_char(
+            ch,
+            &format!("You don't have {} in your inventory!\r\n", bottle_name),
+        );
         return;
     }
 
@@ -590,8 +621,19 @@ fn make_scroll(g: &mut GameState, ch: CharId, scroll: i32, paper: ObjId) {
 
     // 1-in-3 catastrophic explosion for mortals.
     if g.rng.number(1, 3) == 3 && level < LVL_IMMORT {
-        g.send_to_char(ch, "As you begin inscribing the final rune, the scroll violently explodes!\r\n");
-        act(g, "$n tries to scribe a spell, but it explodes!", false, ch, None, ActArg::None, To::Room);
+        g.send_to_char(
+            ch,
+            "As you begin inscribing the final rune, the scroll violently explodes!\r\n",
+        );
+        act(
+            g,
+            "$n tries to scribe a spell, but it explodes!",
+            false,
+            ch,
+            None,
+            ActArg::None,
+            To::Room,
+        );
         g.obj_from_anywhere(paper);
         g.extract_obj(paper);
         let dam_hi = mag_manacost(g, ch, scroll) * 2;
@@ -612,12 +654,26 @@ fn make_scroll(g: &mut GameState, ch: CharId, scroll: i32, paper: ObjId) {
                 c.points.mana -= mana;
             }
         }
-        g.send_to_char(ch, &format!("You create a scroll of {}.\r\n", spell_name(scroll)));
-        act(g, "$n creates a scroll!", false, ch, None, ActArg::None, To::Room);
+        g.send_to_char(
+            ch,
+            &format!("You create a scroll of {}.\r\n", spell_name(scroll)),
+        );
+        act(
+            g,
+            "$n creates a scroll!",
+            false,
+            ch,
+            None,
+            ActArg::None,
+            To::Room,
+        );
         g.obj_from_anywhere(paper);
         g.extract_obj(paper);
     } else {
-        g.send_to_char(ch, "You don't have enough mana to scribe such a powerful spell!\r\n");
+        g.send_to_char(
+            ch,
+            "You don't have enough mana to scribe such a powerful spell!\r\n",
+        );
         return;
     }
 
@@ -628,7 +684,10 @@ fn make_scroll(g: &mut GameState, ch: CharId, scroll: i32, paper: ObjId) {
         format!("{} {} scroll", spell_name(scroll), garbled),
         format!("a {} scroll", garbled),
     );
-    obj.description = format!("A parchment inscribed with the runes '{}' lies here.", garbled);
+    obj.description = format!(
+        "A parchment inscribed with the runes '{}' lies here.",
+        garbled
+    );
     obj.action_description = Some(format!("It appears to be a {} scroll.", spell_name(scroll)));
     obj.obj_type = ObjectType::Scroll;
     obj.wear_flags = WearFlags::TAKE;
@@ -670,7 +729,10 @@ pub fn do_scribe(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
 
     // Locate the paper in inventory.
-    let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let inv = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     let paper = g.get_obj_in_list_vis(ch, &paper_name, &inv);
     let found = paper.is_some();
 
@@ -681,7 +743,10 @@ pub fn do_scribe(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
     }
     if !found {
-        g.send_to_char(ch, &format!("You don't have {} in your inventory!\r\n", paper_name));
+        g.send_to_char(
+            ch,
+            &format!("You don't have {} in your inventory!\r\n", paper_name),
+        );
         return;
     }
 
@@ -705,7 +770,9 @@ pub fn do_scribe(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
 /// GET_ADD (utils.h): the strength-addition sub-stat (aff_abils.str_add).
 fn get_add(g: &GameState, ch: CharId) -> i32 {
-    g.get_char(ch).map(|c| c.aff_abils.str_add as i32).unwrap_or(0)
+    g.get_char(ch)
+        .map(|c| c.aff_abils.str_add as i32)
+        .unwrap_or(0)
 }
 
 pub fn do_forge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
@@ -731,17 +798,29 @@ pub fn do_forge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
 
-    let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let inv = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     let weapon = match g.get_obj_in_list_vis(ch, &weapon_name, &inv) {
         Some(w) => w,
         None => {
-            g.send_to_char(ch, &format!("You don't have {} in your inventory!\r\n", weapon_name));
+            g.send_to_char(
+                ch,
+                &format!("You don't have {} in your inventory!\r\n", weapon_name),
+            );
             return;
         }
     };
 
     if g.get_obj(weapon).map(|o| o.obj_type) != Some(ObjectType::Weapon) {
-        g.send_to_char(ch, &format!("It doesn't look like {} would make a good weapon...\r\n", weapon_name));
+        g.send_to_char(
+            ch,
+            &format!(
+                "It doesn't look like {} would make a good weapon...\r\n",
+                weapon_name
+            ),
+        );
         return;
     }
 
@@ -751,7 +830,10 @@ pub fn do_forge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
 
-    if g.get_obj(weapon).map(|o| o.extra_flags.contains(ExtraFlags::MAGIC)).unwrap_or(false) {
+    if g.get_obj(weapon)
+        .map(|o| o.extra_flags.contains(ExtraFlags::MAGIC))
+        .unwrap_or(false)
+    {
         g.send_to_char(ch, "The weapon is imbued with magical powers beyond your grasp.\r\nYou cannot further affect its form.\r\n");
         return;
     }
@@ -773,8 +855,19 @@ pub fn do_forge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let roll = g.rng.number(lo, hi);
     let threshold = prob + (level as i32 / g.rng.number(5, 10));
     if roll > threshold && level < LVL_IMMORT {
-        g.send_to_char(ch, "As you pound out the dents in the weapon, you hit a weak spot and it explodes!\r\n");
-        act(g, "$n tries to forge a weapon, but it explodes!", false, ch, None, ActArg::None, To::Room);
+        g.send_to_char(
+            ch,
+            "As you pound out the dents in the weapon, you hit a weak spot and it explodes!\r\n",
+        );
+        act(
+            g,
+            "$n tries to forge a weapon, but it explodes!",
+            false,
+            ch,
+            None,
+            ActArg::None,
+            To::Room,
+        );
         g.obj_from_anywhere(weapon);
         g.extract_obj(weapon);
         let dam = g.rng.number(10, 22);
@@ -800,7 +893,15 @@ pub fn do_forge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     // Over-stress check: if the new dice roll exceeds level/2.5, it shatters.
     if g.rng.dice(new_v1, new_v2) as f64 > (lvl as f64 / 2.5) {
         g.send_to_char(ch, "As you pound out the dents in the weapon, you stress it beyond it's ability and it explodes!\r\n");
-        act(g, "$n tries to forge a weapon, but it explodes!", false, ch, None, ActArg::None, To::Room);
+        act(
+            g,
+            "$n tries to forge a weapon, but it explodes!",
+            false,
+            ch,
+            None,
+            ActArg::None,
+            To::Room,
+        );
         g.obj_from_anywhere(weapon);
         g.extract_obj(weapon);
         let dam = g.rng.number(10, 50);
@@ -819,5 +920,13 @@ pub fn do_forge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
 
     g.send_to_char(ch, "You have forged new life into the weapon!\r\n");
-    act(g, "$n vigorously pounds on a weapon!", false, ch, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n vigorously pounds on a weapon!",
+        false,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
 }

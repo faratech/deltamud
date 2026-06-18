@@ -114,7 +114,10 @@ fn short_descr(g: &GameState, ch: CharId) -> String {
 /// The list of characters in a character's room (world[in_room].people order).
 fn people_in_room(g: &GameState, ch: CharId) -> Vec<CharId> {
     match in_room(g, ch) {
-        Some(rnum) => g.room_opt(rnum).map(|r| r.people.clone()).unwrap_or_default(),
+        Some(rnum) => g
+            .room_opt(rnum)
+            .map(|r| r.people.clone())
+            .unwrap_or_default(),
         None => Vec::new(),
     }
 }
@@ -262,7 +265,15 @@ fn do_npc_rescue(g: &mut GameState, hero: CharId, victim: CharId) -> bool {
         return false;
     }
 
-    act(g, "You bravely rescue $N.\r\n", false, hero, None, ActArg::Char(victim), To::Char);
+    act(
+        g,
+        "You bravely rescue $N.\r\n",
+        false,
+        hero,
+        None,
+        ActArg::Char(victim),
+        To::Char,
+    );
     act(
         g,
         "You are rescued by $N, your loyal friend!\r\n",
@@ -272,7 +283,15 @@ fn do_npc_rescue(g: &mut GameState, hero: CharId, victim: CharId) -> bool {
         ActArg::Char(hero),
         To::Char,
     );
-    act(g, "$n heroically rescues $N.", false, hero, None, ActArg::Char(victim), To::NotVict);
+    act(
+        g,
+        "$n heroically rescues $N.",
+        false,
+        hero,
+        None,
+        ActArg::Char(victim),
+        To::NotVict,
+    );
 
     // stop_fighting(bad_guy); stop_fighting(hero); then engage each other.
     npc_stop_fighting(g, bad_guy);
@@ -338,7 +357,15 @@ fn block_way(
     let guarded = g.real_room(in_room_vnum);
     if in_room(g, ch) == guarded && cmd_num == prohibited {
         if !member_of_staff(g, ch) {
-            act(g, "The guard roars at $n and pushes $m back.", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "The guard roars at $n and pushes $m back.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
         }
         g.send_to_char(
             ch,
@@ -386,19 +413,75 @@ fn fry_victim(g: &mut GameState, ch: CharId) {
 
     match g.rng.number(0, 8) {
         1 | 2 | 3 => {
-            act(g, "You raise your hand in a dramatical gesture.", true, ch, None, ActArg::None, To::Char);
-            act(g, "$n raises $s hand in a dramatical gesture.", true, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "You raise your hand in a dramatical gesture.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
+            act(
+                g,
+                "$n raises $s hand in a dramatical gesture.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             // cast_spell (ch, tch, 0, SPELL_COLOR_SPRAY) — disabled in C.
         }
         4 | 5 => {
-            act(g, "You concentrate and mumble to yourself.", true, ch, None, ActArg::None, To::Char);
-            act(g, "$n concentrates, and mumbles to $mself.", true, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "You concentrate and mumble to yourself.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Char,
+            );
+            act(
+                g,
+                "$n concentrates, and mumbles to $mself.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             // cast_spell (ch, tch, 0, SPELL_HARM) — disabled in C.
         }
         6 | 7 => {
-            act(g, "You look deeply into the eyes of $N.", true, ch, None, ActArg::Char(tch), To::Char);
-            act(g, "$n looks deeply into the eyes of $N.", true, ch, None, ActArg::Char(tch), To::NotVict);
-            act(g, "You see an ill-boding flame in the eye of $n.", true, ch, None, ActArg::Char(tch), To::Vict);
+            act(
+                g,
+                "You look deeply into the eyes of $N.",
+                true,
+                ch,
+                None,
+                ActArg::Char(tch),
+                To::Char,
+            );
+            act(
+                g,
+                "$n looks deeply into the eyes of $N.",
+                true,
+                ch,
+                None,
+                ActArg::Char(tch),
+                To::NotVict,
+            );
+            act(
+                g,
+                "You see an ill-boding flame in the eye of $n.",
+                true,
+                ch,
+                None,
+                ActArg::Char(tch),
+                To::Vict,
+            );
             // cast_spell (ch, tch, 0, SPELL_FIREBALL) — disabled in C.
         }
         _ => {
@@ -456,8 +539,9 @@ struct KingWalk {
 }
 
 fn king_walks() -> &'static std::sync::Mutex<std::collections::HashMap<CharId, KingWalk>> {
-    static WALKS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<CharId, KingWalk>>> =
-        std::sync::OnceLock::new();
+    static WALKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<CharId, KingWalk>>,
+    > = std::sync::OnceLock::new();
     WALKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -496,10 +580,7 @@ pub fn king_welmar(g: &mut GameState, _ch: CharId, me: CharId, cmd: &str, _arg: 
     // A real command, or the King is too hurt / asleep-and-not-walking: bail
     // (but persist whatever scheduling decision we just made).
     let pos = position(g, ch);
-    if !cmd.is_empty()
-        || pos < Position::Sleeping
-        || (pos == Position::Sleeping && !moving)
-    {
+    if !cmd.is_empty() || pos < Position::Sleeping || (pos == Position::Sleeping && !moving) {
         store_king_walk(ch, path, index, moving);
         return false;
     }
@@ -534,7 +615,15 @@ pub fn king_welmar(g: &mut GameState, _ch: CharId, me: CharId, cmd: &str, _arg: 
             if let Some(c) = g.get_char_mut(ch) {
                 c.position = Position::Standing;
             }
-            act(g, "$n awakens and stands up.", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n awakens and stands up.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
         }
         b'S' => {
             if let Some(c) = g.get_char_mut(ch) {
@@ -554,7 +643,15 @@ pub fn king_welmar(g: &mut GameState, _ch: CharId, me: CharId, cmd: &str, _arg: 
             if let Some(c) = g.get_char_mut(ch) {
                 c.position = Position::Sitting;
             }
-            act(g, "$n sits down on his great throne.", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n sits down on his great throne.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
         }
         b's' => {
             if let Some(c) = g.get_char_mut(ch) {
@@ -563,10 +660,26 @@ pub fn king_welmar(g: &mut GameState, _ch: CharId, me: CharId, cmd: &str, _arg: 
             act(g, "$n stands up.", false, ch, None, ActArg::None, To::Room);
         }
         b'G' => {
-            act(g, "$n says 'Good morning, trusted friends.'", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n says 'Good morning, trusted friends.'",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
         }
         b'g' => {
-            act(g, "$n says 'Good morning, dear subjects.'", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n says 'Good morning, dear subjects.'",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
         }
         b'o' => {
             crate::cmd_movement::do_gen_door(g, ch, "door", SCMD_UNLOCK);
@@ -589,7 +702,14 @@ pub fn king_welmar(g: &mut GameState, _ch: CharId, me: CharId, cmd: &str, _arg: 
 
 fn store_king_walk(ch: CharId, path: &'static [u8], index: usize, moving: bool) {
     let mut map = king_walks().lock().unwrap();
-    map.insert(ch, KingWalk { path, index, moving });
+    map.insert(
+        ch,
+        KingWalk {
+            path,
+            index,
+            moving,
+        },
+    );
 }
 
 // SCMD_* door subcommands (cmd_movement.rs keeps them private, so the castle
@@ -629,48 +749,248 @@ pub fn training_master(g: &mut GameState, _ch: CharId, me: CharId, cmd: &str, _a
                 }
                 match g.rng.number(0, 7) {
                     0 => {
-                        act(g, "$n hits $N on $s head with a powerful blow.", false, p1, None, ActArg::Char(p2), To::NotVict);
-                        act(g, "You hit $N on $s head with a powerful blow.", false, p1, None, ActArg::Char(p2), To::Char);
-                        act(g, "$n hits you on your head with a powerful blow.", false, p1, None, ActArg::Char(p2), To::Vict);
+                        act(
+                            g,
+                            "$n hits $N on $s head with a powerful blow.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(p2),
+                            To::NotVict,
+                        );
+                        act(
+                            g,
+                            "You hit $N on $s head with a powerful blow.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(p2),
+                            To::Char,
+                        );
+                        act(
+                            g,
+                            "$n hits you on your head with a powerful blow.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(p2),
+                            To::Vict,
+                        );
                     }
                     1 => {
-                        act(g, "$n hits $N in $s chest with a thrust.", false, p1, None, ActArg::Char(p2), To::NotVict);
-                        act(g, "You manage to thrust $N in the chest.", false, p1, None, ActArg::Char(p2), To::Char);
-                        act(g, "$n manages to thrust you in your chest.", false, p1, None, ActArg::Char(p2), To::Vict);
+                        act(
+                            g,
+                            "$n hits $N in $s chest with a thrust.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(p2),
+                            To::NotVict,
+                        );
+                        act(
+                            g,
+                            "You manage to thrust $N in the chest.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(p2),
+                            To::Char,
+                        );
+                        act(
+                            g,
+                            "$n manages to thrust you in your chest.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(p2),
+                            To::Vict,
+                        );
                     }
                     2 => {
                         g.send_to_char(ch, "You command your pupils to bow\r\n.");
-                        act(g, "$n commands his pupils to bow.", false, ch, None, ActArg::None, To::Room);
-                        act(g, "$n bows before $N.", false, p1, None, ActArg::Char(p2), To::NotVict);
-                        act(g, "$N bows before $n.", false, p1, None, ActArg::Char(p2), To::NotVict);
-                        act(g, "You bow before $N, who returns your gesture.", false, p1, None, ActArg::Char(p2), To::Char);
-                        act(g, "You bow before $n, who returns your gesture.", false, p1, None, ActArg::Char(p2), To::Vict);
+                        act(
+                            g,
+                            "$n commands his pupils to bow.",
+                            false,
+                            ch,
+                            None,
+                            ActArg::None,
+                            To::Room,
+                        );
+                        act(
+                            g,
+                            "$n bows before $N.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(p2),
+                            To::NotVict,
+                        );
+                        act(
+                            g,
+                            "$N bows before $n.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(p2),
+                            To::NotVict,
+                        );
+                        act(
+                            g,
+                            "You bow before $N, who returns your gesture.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(p2),
+                            To::Char,
+                        );
+                        act(
+                            g,
+                            "You bow before $n, who returns your gesture.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(p2),
+                            To::Vict,
+                        );
                     }
                     3 => {
-                        act(g, "$N yells at $n, as he fumbles and drops his sword.", false, p1, None, ActArg::Char(ch), To::NotVict);
-                        act(g, "$n quickly picks up his weapon.", false, p1, None, ActArg::None, To::Room);
-                        act(g, "$N yells at you, as you fumble, losing your weapon.", false, p1, None, ActArg::Char(ch), To::Char);
+                        act(
+                            g,
+                            "$N yells at $n, as he fumbles and drops his sword.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(ch),
+                            To::NotVict,
+                        );
+                        act(
+                            g,
+                            "$n quickly picks up his weapon.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::None,
+                            To::Room,
+                        );
+                        act(
+                            g,
+                            "$N yells at you, as you fumble, losing your weapon.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(ch),
+                            To::Char,
+                        );
                         g.send_to_char(p1, "You quickly pick up your weapon again.");
-                        act(g, "You yell at $n, as he fumbles, losing his weapon.", false, p1, None, ActArg::Char(ch), To::Vict);
+                        act(
+                            g,
+                            "You yell at $n, as he fumbles, losing his weapon.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(ch),
+                            To::Vict,
+                        );
                     }
                     4 => {
-                        act(g, "$N tricks $n, and slashes him across the back.", false, p1, None, ActArg::Char(p2), To::NotVict);
-                        act(g, "$N tricks you, and slashes you across your back.", false, p1, None, ActArg::Char(p2), To::Char);
-                        act(g, "You trick $n, and quickly slash him across his back.", false, p1, None, ActArg::Char(p2), To::Vict);
+                        act(
+                            g,
+                            "$N tricks $n, and slashes him across the back.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(p2),
+                            To::NotVict,
+                        );
+                        act(
+                            g,
+                            "$N tricks you, and slashes you across your back.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(p2),
+                            To::Char,
+                        );
+                        act(
+                            g,
+                            "You trick $n, and quickly slash him across his back.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(p2),
+                            To::Vict,
+                        );
                     }
                     5 => {
-                        act(g, "$n lunges a blow at $N but $N parries skillfully.", false, p1, None, ActArg::Char(p2), To::NotVict);
-                        act(g, "You lunge a blow at $N but $E parries skillfully.", false, p1, None, ActArg::Char(p2), To::Char);
-                        act(g, "$n lunges a blow at you, but you skillfully parry it.", false, p1, None, ActArg::Char(p2), To::Vict);
+                        act(
+                            g,
+                            "$n lunges a blow at $N but $N parries skillfully.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(p2),
+                            To::NotVict,
+                        );
+                        act(
+                            g,
+                            "You lunge a blow at $N but $E parries skillfully.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(p2),
+                            To::Char,
+                        );
+                        act(
+                            g,
+                            "$n lunges a blow at you, but you skillfully parry it.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(p2),
+                            To::Vict,
+                        );
                     }
                     6 => {
-                        act(g, "$n clumsily tries to kick $N, but misses.", false, p1, None, ActArg::Char(p2), To::NotVict);
-                        act(g, "You clumsily miss $N with your poor excuse for a kick.", false, p1, None, ActArg::Char(p2), To::Char);
-                        act(g, "$n fails an unusually clumsy attempt at kicking you.", false, p1, None, ActArg::Char(p2), To::Vict);
+                        act(
+                            g,
+                            "$n clumsily tries to kick $N, but misses.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(p2),
+                            To::NotVict,
+                        );
+                        act(
+                            g,
+                            "You clumsily miss $N with your poor excuse for a kick.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(p2),
+                            To::Char,
+                        );
+                        act(
+                            g,
+                            "$n fails an unusually clumsy attempt at kicking you.",
+                            false,
+                            p1,
+                            None,
+                            ActArg::Char(p2),
+                            To::Vict,
+                        );
                     }
                     _ => {
                         g.send_to_char(ch, "You show your pupils an advanced technique.");
-                        act(g, "$n shows his pupils an advanced technique.", false, ch, None, ActArg::None, To::Room);
+                        act(
+                            g,
+                            "$n shows his pupils an advanced technique.",
+                            false,
+                            ch,
+                            None,
+                            ActArg::None,
+                            To::Room,
+                        );
                     }
                 }
             }
@@ -782,7 +1102,10 @@ pub fn james(g: &mut GameState, _ch: CharId, me: CharId, cmd: &str, _arg: &str) 
     }
 
     let contents = match in_room(g, ch) {
-        Some(rnum) => g.room_opt(rnum).map(|r| r.contents.clone()).unwrap_or_default(),
+        Some(rnum) => g
+            .room_opt(rnum)
+            .map(|r| r.contents.clone())
+            .unwrap_or_default(),
         None => return false,
     };
 
@@ -799,7 +1122,15 @@ pub fn james(g: &mut GameState, _ch: CharId, me: CharId, cmd: &str, _arg: &str) 
                 ActArg::None,
                 To::Room,
             );
-            act(g, "$n picks up a piece of trash.", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n picks up a piece of trash.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             g.obj_from_anywhere(first);
             g.obj_to_char(first, ch);
             return true;
@@ -819,13 +1150,24 @@ pub fn cleaning(g: &mut GameState, _ch: CharId, me: CharId, cmd: &str, _arg: &st
     }
 
     let contents = match in_room(g, ch) {
-        Some(rnum) => g.room_opt(rnum).map(|r| r.contents.clone()).unwrap_or_default(),
+        Some(rnum) => g
+            .room_opt(rnum)
+            .map(|r| r.contents.clone())
+            .unwrap_or_default(),
         None => return false,
     };
 
     for oid in contents {
         if is_trash(g, oid) {
-            act(g, "$n picks up some trash.", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n picks up some trash.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             g.obj_from_anywhere(oid);
             g.obj_to_char(oid, ch);
             return true;
@@ -882,37 +1224,205 @@ pub fn peter(g: &mut GameState, _ch: CharId, me: CharId, cmd: &str, _arg: &str) 
         if let Some(guard) = find_guard(g, ch) {
             match g.rng.number(0, 5) {
                 0 => {
-                    act(g, "$N comes sharply into attention as $n inspects $M.", false, ch, None, ActArg::Char(guard), To::NotVict);
-                    act(g, "$N comes sharply into attention as you inspect $M.", false, ch, None, ActArg::Char(guard), To::Char);
-                    act(g, "You go sharply into attention as $n inspects you.", false, ch, None, ActArg::Char(guard), To::Vict);
+                    act(
+                        g,
+                        "$N comes sharply into attention as $n inspects $M.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::NotVict,
+                    );
+                    act(
+                        g,
+                        "$N comes sharply into attention as you inspect $M.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::Char,
+                    );
+                    act(
+                        g,
+                        "You go sharply into attention as $n inspects you.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::Vict,
+                    );
                 }
                 1 => {
-                    act(g, "$N looks very small, as $n roars at $M.", false, ch, None, ActArg::Char(guard), To::NotVict);
-                    act(g, "$N looks very small as you roar at $M.", false, ch, None, ActArg::Char(guard), To::Char);
-                    act(g, "You feel very small as $N roars at you.", false, ch, None, ActArg::Char(guard), To::Vict);
+                    act(
+                        g,
+                        "$N looks very small, as $n roars at $M.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::NotVict,
+                    );
+                    act(
+                        g,
+                        "$N looks very small as you roar at $M.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::Char,
+                    );
+                    act(
+                        g,
+                        "You feel very small as $N roars at you.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::Vict,
+                    );
                 }
                 2 => {
-                    act(g, "$n gives $N some Royal directions.", false, ch, None, ActArg::Char(guard), To::NotVict);
-                    act(g, "You give $N some Royal directions.", false, ch, None, ActArg::Char(guard), To::Char);
-                    act(g, "$n gives you some Royal directions.", false, ch, None, ActArg::Char(guard), To::Vict);
+                    act(
+                        g,
+                        "$n gives $N some Royal directions.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::NotVict,
+                    );
+                    act(
+                        g,
+                        "You give $N some Royal directions.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::Char,
+                    );
+                    act(
+                        g,
+                        "$n gives you some Royal directions.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::Vict,
+                    );
                 }
                 3 => {
-                    act(g, "$n looks at you.", false, ch, None, ActArg::Char(guard), To::Vict);
-                    act(g, "$n looks at $N.", false, ch, None, ActArg::Char(guard), To::NotVict);
-                    act(g, "$n growls: 'Those boots need polishing!'", false, ch, None, ActArg::Char(guard), To::Room);
-                    act(g, "You growl at $N.", false, ch, None, ActArg::Char(guard), To::Char);
+                    act(
+                        g,
+                        "$n looks at you.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::Vict,
+                    );
+                    act(
+                        g,
+                        "$n looks at $N.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::NotVict,
+                    );
+                    act(
+                        g,
+                        "$n growls: 'Those boots need polishing!'",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::Room,
+                    );
+                    act(
+                        g,
+                        "You growl at $N.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::Char,
+                    );
                 }
                 4 => {
-                    act(g, "$n looks at you.", false, ch, None, ActArg::Char(guard), To::Vict);
-                    act(g, "$n looks at $N.", false, ch, None, ActArg::Char(guard), To::NotVict);
-                    act(g, "$n growls: 'Straighten that collar!'", false, ch, None, ActArg::Char(guard), To::Room);
-                    act(g, "You growl at $N.", false, ch, None, ActArg::Char(guard), To::Char);
+                    act(
+                        g,
+                        "$n looks at you.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::Vict,
+                    );
+                    act(
+                        g,
+                        "$n looks at $N.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::NotVict,
+                    );
+                    act(
+                        g,
+                        "$n growls: 'Straighten that collar!'",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::Room,
+                    );
+                    act(
+                        g,
+                        "You growl at $N.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::Char,
+                    );
                 }
                 _ => {
-                    act(g, "$n looks at you.", false, ch, None, ActArg::Char(guard), To::Vict);
-                    act(g, "$n looks at $N.", false, ch, None, ActArg::Char(guard), To::NotVict);
-                    act(g, "$n growls: 'That chain mail looks rusty!  CLEAN IT !!!'", false, ch, None, ActArg::Char(guard), To::Room);
-                    act(g, "You growl at $N.", false, ch, None, ActArg::Char(guard), To::Char);
+                    act(
+                        g,
+                        "$n looks at you.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::Vict,
+                    );
+                    act(
+                        g,
+                        "$n looks at $N.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::NotVict,
+                    );
+                    act(
+                        g,
+                        "$n growls: 'That chain mail looks rusty!  CLEAN IT !!!'",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::Room,
+                    );
+                    act(
+                        g,
+                        "You growl at $N.",
+                        false,
+                        ch,
+                        None,
+                        ActArg::Char(guard),
+                        To::Char,
+                    );
                 }
             }
         }
@@ -946,34 +1456,178 @@ pub fn jerry(g: &mut GameState, _ch: CharId, me: CharId, cmd: &str, _arg: &str) 
                 }
                 match g.rng.number(0, 5) {
                     0 => {
-                        act(g, "$n rolls the dice and cheers loudly at the result.", false, g1, None, ActArg::Char(g2), To::NotVict);
-                        act(g, "You roll the dice and cheer. GREAT!", false, g1, None, ActArg::Char(g2), To::Char);
-                        act(g, "$n cheers loudly as $e rolls the dice.", false, g1, None, ActArg::Char(g2), To::Vict);
+                        act(
+                            g,
+                            "$n rolls the dice and cheers loudly at the result.",
+                            false,
+                            g1,
+                            None,
+                            ActArg::Char(g2),
+                            To::NotVict,
+                        );
+                        act(
+                            g,
+                            "You roll the dice and cheer. GREAT!",
+                            false,
+                            g1,
+                            None,
+                            ActArg::Char(g2),
+                            To::Char,
+                        );
+                        act(
+                            g,
+                            "$n cheers loudly as $e rolls the dice.",
+                            false,
+                            g1,
+                            None,
+                            ActArg::Char(g2),
+                            To::Vict,
+                        );
                     }
                     1 => {
-                        act(g, "$n curses the Goddess of Luck roundly as he sees $N's roll.", false, g1, None, ActArg::Char(g2), To::NotVict);
-                        act(g, "You curse the Goddess of Luck as $N rolls.", false, g1, None, ActArg::Char(g2), To::Char);
-                        act(g, "$n swears angrily. You are in luck!", false, g1, None, ActArg::Char(g2), To::Vict);
+                        act(
+                            g,
+                            "$n curses the Goddess of Luck roundly as he sees $N's roll.",
+                            false,
+                            g1,
+                            None,
+                            ActArg::Char(g2),
+                            To::NotVict,
+                        );
+                        act(
+                            g,
+                            "You curse the Goddess of Luck as $N rolls.",
+                            false,
+                            g1,
+                            None,
+                            ActArg::Char(g2),
+                            To::Char,
+                        );
+                        act(
+                            g,
+                            "$n swears angrily. You are in luck!",
+                            false,
+                            g1,
+                            None,
+                            ActArg::Char(g2),
+                            To::Vict,
+                        );
                     }
                     2 => {
-                        act(g, "$n sighs loudly and gives $N some gold.", false, g1, None, ActArg::Char(g2), To::NotVict);
-                        act(g, "You sigh loudly at the pain of having to give $N some gold.", false, g1, None, ActArg::Char(g2), To::Char);
-                        act(g, "$n sighs loudly as $e gives you your rightful win.", false, g1, None, ActArg::Char(g2), To::Vict);
+                        act(
+                            g,
+                            "$n sighs loudly and gives $N some gold.",
+                            false,
+                            g1,
+                            None,
+                            ActArg::Char(g2),
+                            To::NotVict,
+                        );
+                        act(
+                            g,
+                            "You sigh loudly at the pain of having to give $N some gold.",
+                            false,
+                            g1,
+                            None,
+                            ActArg::Char(g2),
+                            To::Char,
+                        );
+                        act(
+                            g,
+                            "$n sighs loudly as $e gives you your rightful win.",
+                            false,
+                            g1,
+                            None,
+                            ActArg::Char(g2),
+                            To::Vict,
+                        );
                     }
                     3 => {
-                        act(g, "$n smiles remorsefully as $N's roll tops his.", false, g1, None, ActArg::Char(g2), To::NotVict);
-                        act(g, "You smile sadly as you see that $N beats you. Again.", false, g1, None, ActArg::Char(g2), To::Char);
-                        act(g, "$n smiles remorsefully as your roll tops his.", false, g1, None, ActArg::Char(g2), To::Vict);
+                        act(
+                            g,
+                            "$n smiles remorsefully as $N's roll tops his.",
+                            false,
+                            g1,
+                            None,
+                            ActArg::Char(g2),
+                            To::NotVict,
+                        );
+                        act(
+                            g,
+                            "You smile sadly as you see that $N beats you. Again.",
+                            false,
+                            g1,
+                            None,
+                            ActArg::Char(g2),
+                            To::Char,
+                        );
+                        act(
+                            g,
+                            "$n smiles remorsefully as your roll tops his.",
+                            false,
+                            g1,
+                            None,
+                            ActArg::Char(g2),
+                            To::Vict,
+                        );
                     }
                     4 => {
-                        act(g, "$n excitedly follows the dice with his eyes.", false, g1, None, ActArg::Char(g2), To::NotVict);
-                        act(g, "You excitedly follow the dice with your eyes.", false, g1, None, ActArg::Char(g2), To::Char);
-                        act(g, "$n excitedly follows the dice with his eyes.", false, g1, None, ActArg::Char(g2), To::Vict);
+                        act(
+                            g,
+                            "$n excitedly follows the dice with his eyes.",
+                            false,
+                            g1,
+                            None,
+                            ActArg::Char(g2),
+                            To::NotVict,
+                        );
+                        act(
+                            g,
+                            "You excitedly follow the dice with your eyes.",
+                            false,
+                            g1,
+                            None,
+                            ActArg::Char(g2),
+                            To::Char,
+                        );
+                        act(
+                            g,
+                            "$n excitedly follows the dice with his eyes.",
+                            false,
+                            g1,
+                            None,
+                            ActArg::Char(g2),
+                            To::Vict,
+                        );
                     }
                     _ => {
-                        act(g, "$n says 'Well, my luck has to change soon', as he shakes the dice.", false, g1, None, ActArg::Char(g2), To::NotVict);
-                        act(g, "You say 'Well, my luck has to change soon' and shake the dice.", false, g1, None, ActArg::Char(g2), To::Char);
-                        act(g, "$n says 'Well, my luck has to change soon', as he shakes the dice.", false, g1, None, ActArg::Char(g2), To::Vict);
+                        act(
+                            g,
+                            "$n says 'Well, my luck has to change soon', as he shakes the dice.",
+                            false,
+                            g1,
+                            None,
+                            ActArg::Char(g2),
+                            To::NotVict,
+                        );
+                        act(
+                            g,
+                            "You say 'Well, my luck has to change soon' and shake the dice.",
+                            false,
+                            g1,
+                            None,
+                            ActArg::Char(g2),
+                            To::Char,
+                        );
+                        act(
+                            g,
+                            "$n says 'Well, my luck has to change soon', as he shakes the dice.",
+                            false,
+                            g1,
+                            None,
+                            ActArg::Char(g2),
+                            To::Vict,
+                        );
                     }
                 }
             }

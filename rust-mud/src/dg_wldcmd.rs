@@ -134,7 +134,9 @@ fn name_matches_char(g: &GameState, cid: CharId, name: &str) -> bool {
         .unwrap_or(false)
 }
 fn name_matches_obj(g: &GameState, oid: ObjId, name: &str) -> bool {
-    g.get_obj(oid).map(|o| crate::handler::isname(name, &o.name)).unwrap_or(false)
+    g.get_obj(oid)
+        .map(|o| crate::handler::isname(name, &o.name))
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +146,11 @@ fn name_matches_obj(g: &GameState, oid: ObjId, name: &str) -> bool {
 fn get_char_by_room(g: &GameState, room: RoomRnum, name: &str) -> Option<CharId> {
     if let Some(id) = parse_uid(name) {
         let cid = find_char_by_id(g, id)?;
-        return if visible_target(g, cid) { Some(cid) } else { None };
+        return if visible_target(g, cid) {
+            Some(cid)
+        } else {
+            None
+        };
     }
     // Room occupants first.
     if let Some(r) = g.room_opt(room) {
@@ -455,7 +461,10 @@ fn do_wdoor(g: &mut GameState, room: RoomRnum, argument: &str) {
     }
 
     // Ensure the exit exists (CREATE if absent), then edit the requested field.
-    let exists = g.room_opt(rm).map(|r| r.exits[dir].is_some()).unwrap_or(false);
+    let exists = g
+        .room_opt(rm)
+        .map(|r| r.exits[dir].is_some())
+        .unwrap_or(false);
     if !exists {
         if let Some(r) = g.rooms.get_mut(rm) {
             r.exits[dir] = Some(Exit {
@@ -551,7 +560,10 @@ fn do_wteleport(g: &mut GameState, room: RoomRnum, argument: &str) {
             wld_log(g, room, "wteleport all target is itself");
             return;
         }
-        let people = g.room_opt(room).map(|r| r.people.clone()).unwrap_or_default();
+        let people = g
+            .room_opt(room)
+            .map(|r| r.people.clone())
+            .unwrap_or_default();
         for ch in people {
             g.char_from_room(ch);
             g.char_to_room(ch, target);
@@ -574,7 +586,10 @@ fn do_wforce(g: &mut GameState, room: RoomRnum, argument: &str) {
     }
 
     if arg1.eq_ignore_ascii_case("all") {
-        let people = g.room_opt(room).map(|r| r.people.clone()).unwrap_or_default();
+        let people = g
+            .room_opt(room)
+            .map(|r| r.people.clone())
+            .unwrap_or_default();
         for ch in people {
             if g.char_exists(ch) && !is_immortal(g, ch) {
                 command_interpreter(g, ch, line);
@@ -608,14 +623,20 @@ fn do_wpurge(g: &mut GameState, room: RoomRnum, argument: &str) {
     let (arg, _) = one_arg(argument);
 
     if arg.is_empty() {
-        let people = g.room_opt(room).map(|r| r.people.clone()).unwrap_or_default();
+        let people = g
+            .room_opt(room)
+            .map(|r| r.people.clone())
+            .unwrap_or_default();
         for ch in people {
             if g.get_char(ch).map(|c| c.is_npc).unwrap_or(false) {
                 crate::dg_handler::on_char_extracted(g, ch);
                 g.extract_char(ch);
             }
         }
-        let contents = g.room_opt(room).map(|r| r.contents.clone()).unwrap_or_default();
+        let contents = g
+            .room_opt(room)
+            .map(|r| r.contents.clone())
+            .unwrap_or_default();
         for o in contents {
             crate::dg_handler::on_obj_extracted(g, o);
             g.obj_from_anywhere(o);
@@ -676,7 +697,11 @@ fn do_wload(g: &mut GameState, room: RoomRnum, argument: &str) {
 fn do_wdamage(g: &mut GameState, room: RoomRnum, argument: &str) {
     let (name, amount, _) = two_args(argument);
     // C requires isdigit(*amount): a leading '-' fails the syntax gate.
-    let amount_ok = amount.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+    let amount_ok = amount
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false);
     if name.is_empty() || amount.is_empty() || !amount_ok {
         wld_log(g, room, "wdamage: bad syntax");
         return;
@@ -685,7 +710,9 @@ fn do_wdamage(g: &mut GameState, room: RoomRnum, argument: &str) {
 
     let all = name.eq_ignore_ascii_case("all");
     let targets: Vec<CharId> = if all {
-        g.room_opt(room).map(|r| r.people.clone()).unwrap_or_default()
+        g.room_opt(room)
+            .map(|r| r.people.clone())
+            .unwrap_or_default()
     } else {
         match get_char_by_room(g, room, &name) {
             Some(ch) => vec![ch],
@@ -727,7 +754,11 @@ fn do_wat(g: &mut GameState, room: RoomRnum, argument: &str) {
     let arg2 = arg2.trim();
     if location.is_empty()
         || arg2.is_empty()
-        || !location.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+        || !location
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
     {
         wld_log(g, room, "wat: bad syntax");
         return;
@@ -777,7 +808,11 @@ const WLD_CMDS: &[WldCmd] = &[
     WldCmd("wasound", |g, r, a, _| do_wasound(g, r, a), 0),
     WldCmd("wdoor", |g, r, a, _| do_wdoor(g, r, a), 0),
     WldCmd("wecho", |g, r, a, _| do_wecho(g, r, a), 0),
-    WldCmd("wechoaround", |g, r, a, sc| do_wsend(g, r, a, sc), SCMD_WECHOAROUND),
+    WldCmd(
+        "wechoaround",
+        |g, r, a, sc| do_wsend(g, r, a, sc),
+        SCMD_WECHOAROUND,
+    ),
     WldCmd("wexp", |g, r, a, _| do_wexp(g, r, a), 0),
     WldCmd("wforce", |g, r, a, _| do_wforce(g, r, a), 0),
     WldCmd("wload", |g, r, a, _| do_wload(g, r, a), 0),
@@ -791,5 +826,7 @@ const WLD_CMDS: &[WldCmd] = &[
 
 /// GET_LEVEL(ch) >= LVL_IMMORT.
 fn is_immortal(g: &GameState, ch: CharId) -> bool {
-    g.get_char(ch).map(|c| c.player.level >= LVL_IMMORT).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.player.level >= LVL_IMMORT)
+        .unwrap_or(false)
 }

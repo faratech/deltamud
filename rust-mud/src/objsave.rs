@@ -148,11 +148,15 @@ fn is_npc(g: &GameState, ch: CharId) -> bool {
 }
 
 fn get_name(g: &GameState, ch: CharId) -> String {
-    g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default()
+    g.get_char(ch)
+        .map(|c| c.player.name.clone())
+        .unwrap_or_default()
 }
 
 fn invis_lev(g: &GameState, ch: CharId) -> u8 {
-    g.get_char(ch).map(|c| c.invis_level.max(0) as u8).unwrap_or(0)
+    g.get_char(ch)
+        .map(|c| c.invis_level.max(0) as u8)
+        .unwrap_or(0)
 }
 
 /// GET_OBJ_RENT(): per-day rent cost of an object.
@@ -220,10 +224,10 @@ fn obj_to_store(g: &GameState, oid: ObjId, locate: i32, out: &mut String) {
         o.cost,
         o.rent,
         o.timer,
-        o.level,  // min_level
-        0,        // bitvector (no Object field yet)
-        0,        // curr_slots
-        0,        // total_slots
+        o.level, // min_level
+        0,       // bitvector (no Object field yet)
+        0,       // curr_slots
+        0,       // total_slots
         o.values[0],
         o.values[1],
         o.values[2],
@@ -285,7 +289,10 @@ fn obj_from_store(g: &mut GameState, line: &str) -> Option<(ObjId, i32)> {
         if idx + 1 < nums.len() {
             let loc: i32 = nums[idx].parse().unwrap_or(0);
             let modi: i32 = nums[idx + 1].parse().unwrap_or(0);
-            affects.push(ObjectAffect { location: loc, modifier: modi });
+            affects.push(ObjectAffect {
+                location: loc,
+                modifier: modi,
+            });
             idx += 2;
         }
     }
@@ -453,7 +460,10 @@ fn crash_is_unrentable(g: &GameState, oid: ObjId) -> bool {
         _ => None,
     };
     if let Some(owner) = owner {
-        let lvl = g.get_char(owner).map(|c| c.player.level as i32).unwrap_or(0);
+        let lvl = g
+            .get_char(owner)
+            .map(|c| c.player.level as i32)
+            .unwrap_or(0);
         if lvl + 10 < o.level as i32 {
             return true;
         }
@@ -541,7 +551,10 @@ fn crash_save_obj(g: &GameState, oid: ObjId, locate: i32, out: &mut String) {
     // We emit this object first, then recurse into contents at the next row,
     // which yields the identical (locate, object) set the C stream produces.
     obj_to_store(g, oid, locate, out);
-    let contains = g.get_obj(oid).map(|o| o.contains.clone()).unwrap_or_default();
+    let contains = g
+        .get_obj(oid)
+        .map(|o| o.contains.clone())
+        .unwrap_or_default();
     let inner_locate = locate.min(0) - 1;
     for c in contains {
         crash_save_obj(g, c, inner_locate, out);
@@ -643,7 +656,10 @@ pub fn crash_rentsave(g: &mut GameState, ch: CharId, cost: i32) {
         return;
     }
     crash_extract_norents_from_equipped(g, ch);
-    let carrying = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let carrying = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     for oid in carrying {
         crash_extract_norents(g, oid);
     }
@@ -674,7 +690,10 @@ pub fn crash_cryosave(g: &mut GameState, ch: CharId, cost: i32) {
         return;
     }
     crash_extract_norents_from_equipped(g, ch);
-    let carrying = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let carrying = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     for oid in carrying {
         crash_extract_norents(g, oid);
     }
@@ -710,7 +729,10 @@ pub fn crash_idlesave(g: &mut GameState, ch: CharId) {
         return;
     }
     crash_extract_norents_from_equipped(g, ch);
-    let carrying = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let carrying = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     for oid in carrying {
         crash_extract_norents(g, oid);
     }
@@ -736,14 +758,22 @@ pub fn crash_idlesave(g: &mut GameState, ch: CharId) {
         let _ = cost_eq;
 
         // drop the single most expensive carried item until affordable.
-        while cost > gold + account && !g.get_char(ch).map(|c| c.carrying.is_empty()).unwrap_or(true) {
+        while cost > gold + account
+            && !g
+                .get_char(ch)
+                .map(|c| c.carrying.is_empty())
+                .unwrap_or(true)
+        {
             crash_extract_expensive(g, ch);
             cost = inventory_rent(g, ch) << 1;
         }
     }
 
     // If nothing left at all, delete the file and bail.
-    let has_inv = !g.get_char(ch).map(|c| c.carrying.is_empty()).unwrap_or(true);
+    let has_inv = !g
+        .get_char(ch)
+        .map(|c| c.carrying.is_empty())
+        .unwrap_or(true);
     let has_eq = (0..NUM_WEARS).any(|j| g.get_char(ch).and_then(|c| c.equipment[j]).is_some());
     if !has_inv && !has_eq {
         crash_delete_file(g, ch);
@@ -766,7 +796,10 @@ pub fn crash_idlesave(g: &mut GameState, ch: CharId) {
 /// Crash_extract_expensive(): extract the single highest-rent item in the
 /// player's top-level inventory (objsave.c walks ch->carrying only).
 fn crash_extract_expensive(g: &mut GameState, ch: CharId) {
-    let carrying = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let carrying = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     let mut max: Option<ObjId> = None;
     let mut max_rent = i32::MIN;
     for oid in carrying {
@@ -783,7 +816,10 @@ fn crash_extract_expensive(g: &mut GameState, ch: CharId) {
 }
 
 fn inventory_rent(g: &GameState, ch: CharId) -> i32 {
-    let carrying = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let carrying = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     carrying.iter().map(|&o| crash_calculate_rent(g, o)).sum()
 }
 
@@ -805,7 +841,10 @@ fn extract_all_player_objects(g: &mut GameState, ch: CharId) {
             roots.push(o);
         }
     }
-    let carrying = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let carrying = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     for o in carrying {
         g.obj_from_anywhere(o);
         roots.push(o);
@@ -868,7 +907,11 @@ pub fn crash_load_full(g: &mut GameState, ch: CharId) -> CrashLoadResult {
                 );
             }
             let lev = invis_lev(g, ch).max(LVL_IMMORT);
-            mudlog(g, &format!("{} entering game with no equipment.", name), lev);
+            mudlog(
+                g,
+                &format!("{} entering game with no equipment.", name),
+                lev,
+            );
             return CrashLoadResult::CrashOrNone;
         }
     };
@@ -950,15 +993,20 @@ pub fn crash_load_full(g: &mut GameState, ch: CharId) -> CrashLoadResult {
                 }
             }
             if !cont_row[0].is_empty() {
-                let is_container =
-                    g.get_obj(obj).map(|o| o.obj_type == ObjectType::Container).unwrap_or(false);
+                let is_container = g
+                    .get_obj(obj)
+                    .map(|o| o.obj_type == ObjectType::Container)
+                    .unwrap_or(false);
                 if is_container {
                     // remove from eq, fill, re-equip.
                     let slot = (locate - 1) as usize;
                     let removed = g.unequip_char(ch, slot);
                     if let Some(removed) = removed {
                         // empty it (should already be empty) then fill in order.
-                        let existing = g.get_obj(removed).map(|o| o.contains.clone()).unwrap_or_default();
+                        let existing = g
+                            .get_obj(removed)
+                            .map(|o| o.contains.clone())
+                            .unwrap_or_default();
                         for c in existing {
                             g.obj_from_anywhere(c);
                             g.obj_to_char(c, ch);
@@ -980,7 +1028,7 @@ pub fn crash_load_full(g: &mut GameState, ch: CharId) -> CrashLoadResult {
         } else {
             // ---- locate <= 0 ----------------------------------------------
             let neg = (-locate) as usize; // 0 for inventory, 1.. for nesting.
-            // Higher rows than this item's own row have lost their container.
+                                          // Higher rows than this item's own row have lost their container.
             let mut j = MAX_BAG_ROW - 1;
             while j > neg {
                 if !cont_row[j].is_empty() {
@@ -995,11 +1043,16 @@ pub fn crash_load_full(g: &mut GameState, ch: CharId) -> CrashLoadResult {
             // If a content list exists at exactly this row, this object is its
             // container.
             if j == neg && !cont_row[j].is_empty() {
-                let is_container =
-                    g.get_obj(obj).map(|o| o.obj_type == ObjectType::Container).unwrap_or(false);
+                let is_container = g
+                    .get_obj(obj)
+                    .map(|o| o.obj_type == ObjectType::Container)
+                    .unwrap_or(false);
                 if is_container {
                     g.obj_from_anywhere(obj); // take from char
-                    let existing = g.get_obj(obj).map(|o| o.contains.clone()).unwrap_or_default();
+                    let existing = g
+                        .get_obj(obj)
+                        .map(|o| o.contains.clone())
+                        .unwrap_or_default();
                     for c in existing {
                         g.obj_from_anywhere(c);
                         g.obj_to_char(c, ch);
@@ -1133,7 +1186,9 @@ fn crash_report_unrentables(g: &mut GameState, ch: CharId, recep: CharId, oid: O
             count += 1;
             let line = format!(
                 "$n tells you, 'You cannot store {}.'",
-                g.get_obj(o).map(|x| x.short_description.clone()).unwrap_or_default()
+                g.get_obj(o)
+                    .map(|x| x.short_description.clone())
+                    .unwrap_or_default()
             );
             act(g, &line, false, recep, Some(o), ActArg::Char(ch), To::Vict);
         }
@@ -1164,7 +1219,9 @@ fn crash_report_rent(
                 let line = format!(
                     "$n tells you, '{:5} coins for {}..'",
                     obj_rent(g, o) * factor,
-                    g.get_obj(o).map(|x| x.short_description.clone()).unwrap_or_default()
+                    g.get_obj(o)
+                        .map(|x| x.short_description.clone())
+                        .unwrap_or_default()
                 );
                 act(g, &line, false, recep, Some(o), ActArg::Char(ch), To::Vict);
             }
@@ -1193,10 +1250,19 @@ fn crash_rent_deadline(g: &mut GameState, ch: CharId, recep: CharId, cost: i64) 
 
 /// Crash_offer_rent(): the price quote. Returns the total cost (0 == decline /
 /// can't store). When `display`, narrates the itemized breakdown.
-fn crash_offer_rent(g: &mut GameState, ch: CharId, recep: CharId, display: bool, factor: i32) -> i64 {
+fn crash_offer_rent(
+    g: &mut GameState,
+    ch: CharId,
+    recep: CharId,
+    display: bool,
+    factor: i32,
+) -> i64 {
     // Report unrentables first; any present cancels the offer.
     let mut norent = 0;
-    let carrying = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let carrying = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     for oid in &carrying {
         norent += crash_report_unrentables(g, ch, recep, *oid);
     }
@@ -1213,11 +1279,29 @@ fn crash_offer_rent(g: &mut GameState, ch: CharId, recep: CharId, display: bool,
     let mut numitems: i64 = 0;
 
     for oid in &carrying {
-        crash_report_rent(g, ch, recep, *oid, &mut totalcost, &mut numitems, display, factor);
+        crash_report_rent(
+            g,
+            ch,
+            recep,
+            *oid,
+            &mut totalcost,
+            &mut numitems,
+            display,
+            factor,
+        );
     }
     for i in 0..NUM_WEARS {
         if let Some(oid) = g.get_char(ch).and_then(|c| c.equipment[i]) {
-            crash_report_rent(g, ch, recep, oid, &mut totalcost, &mut numitems, display, factor);
+            crash_report_rent(
+                g,
+                ch,
+                recep,
+                oid,
+                &mut totalcost,
+                &mut numitems,
+                display,
+                factor,
+            );
         }
     }
 
@@ -1243,7 +1327,10 @@ fn crash_offer_rent(g: &mut GameState, ch: CharId, recep: CharId, display: bool,
     }
 
     if display {
-        let line = format!("$n tells you, 'Plus, my {} coin fee..'", MIN_RENT_COST * factor);
+        let line = format!(
+            "$n tells you, 'Plus, my {} coin fee..'",
+            MIN_RENT_COST * factor
+        );
         act(g, &line, false, recep, None, ActArg::Char(ch), To::Vict);
 
         // C objsave.c Crash_offer_rent: town-citizens (GET_CITIZEN >= 1) get a
@@ -1252,7 +1339,10 @@ fn crash_offer_rent(g: &mut GameState, ch: CharId, recep: CharId, display: bool,
         // the floor is MAX(1, ...). READ_CITIZEN selects the title by sex.
         let citizen = g.get_char(ch).map(|c| c.citizen).unwrap_or(0) as i64;
         if citizen >= 1 {
-            let sex = g.get_char(ch).map(|c| c.player.sex).unwrap_or(Gender::Neutral);
+            let sex = g
+                .get_char(ch)
+                .map(|c| c.player.sex)
+                .unwrap_or(Gender::Neutral);
             let title = {
                 let idx = match sex {
                     Gender::Male => 0,
@@ -1277,7 +1367,11 @@ fn crash_offer_rent(g: &mut GameState, ch: CharId, recep: CharId, display: bool,
         let line = format!(
             "$n tells you, 'For a total of {} coins{}.'",
             totalcost,
-            if factor == RENT_FACTOR { " per day" } else { "" }
+            if factor == RENT_FACTOR {
+                " per day"
+            } else {
+                ""
+            }
         );
         act(g, &line, false, recep, None, ActArg::Char(ch), To::Vict);
 
@@ -1303,13 +1397,7 @@ fn crash_offer_rent(g: &mut GameState, ch: CharId, recep: CharId, display: bool,
 /// gen_receptionist(): the shared rent/offer logic for both the receptionist
 /// (RENT_FACTOR) and cryogenicist (CRYO_FACTOR). Returns true if it handled the
 /// command (CircleMUD SPECIAL convention).
-fn gen_receptionist(
-    g: &mut GameState,
-    ch: CharId,
-    recep: CharId,
-    cmd: &str,
-    mode: i32,
-) -> bool {
+fn gen_receptionist(g: &mut GameState, ch: CharId, recep: CharId, cmd: &str, mode: i32) -> bool {
     // !ch->desc || IS_NPC(ch): receptionist only serves real players.
     let serves = g
         .get_char(ch)

@@ -133,10 +133,16 @@ fn set_stat(id: CharId, stat: u8) {
 }
 
 fn observing_of(id: CharId) -> Option<CharId> {
-    arena().lock().ok().and_then(|w| w.chars.get(&id).and_then(|c| c.observing))
+    arena()
+        .lock()
+        .ok()
+        .and_then(|w| w.chars.get(&id).and_then(|c| c.observing))
 }
 fn observe_by_of(id: CharId) -> Option<CharId> {
-    arena().lock().ok().and_then(|w| w.chars.get(&id).and_then(|c| c.observe_by))
+    arena()
+        .lock()
+        .ok()
+        .and_then(|w| w.chars.get(&id).and_then(|c| c.observe_by))
 }
 fn set_observing(id: CharId, to: Option<CharId>) {
     if let Ok(mut w) = arena().lock() {
@@ -150,7 +156,11 @@ fn set_observe_by(id: CharId, to: Option<CharId>) {
 }
 
 fn get_flee_timer(id: CharId) -> i32 {
-    arena().lock().ok().and_then(|w| w.chars.get(&id).map(|c| c.flee_timer)).unwrap_or(0)
+    arena()
+        .lock()
+        .ok()
+        .and_then(|w| w.chars.get(&id).map(|c| c.flee_timer))
+        .unwrap_or(0)
 }
 fn set_flee_timer(id: CharId, v: i32) {
     if let Ok(mut w) = arena().lock() {
@@ -158,7 +168,10 @@ fn set_flee_timer(id: CharId, v: i32) {
     }
 }
 fn get_last_fighting(id: CharId) -> Option<CharId> {
-    arena().lock().ok().and_then(|w| w.chars.get(&id).and_then(|c| c.last_fighting))
+    arena()
+        .lock()
+        .ok()
+        .and_then(|w| w.chars.get(&id).and_then(|c| c.last_fighting))
 }
 fn set_last_fighting(id: CharId, v: Option<CharId>) {
     if let Ok(mut w) = arena().lock() {
@@ -224,7 +237,9 @@ fn level(g: &GameState, id: CharId) -> u8 {
     g.get_char(id).map(|c| c.player.level).unwrap_or(0)
 }
 fn get_name(g: &GameState, id: CharId) -> String {
-    g.get_char(id).map(|c| c.player.name.clone()).unwrap_or_default()
+    g.get_char(id)
+        .map(|c| c.player.name.clone())
+        .unwrap_or_default()
 }
 fn get_gold(g: &GameState, id: CharId) -> i32 {
     g.get_char(id).map(|c| c.points.gold).unwrap_or(0)
@@ -345,7 +360,15 @@ fn trans_to_preproom(g: &mut GameState, ch: CharId) {
     if let Some(rnum) = g.real_room(ARENA_PREPROOM) {
         g.char_to_room(ch, rnum);
     }
-    act(g, "$n has entered the Arena Prep Room.", false, ch, None, ActArg::None, To::NotVict);
+    act(
+        g,
+        "$n has entered the Arena Prep Room.",
+        false,
+        ch,
+        None,
+        ActArg::None,
+        To::NotVict,
+    );
     crate::cmd_informative::look_at_room(g, ch, false);
 }
 
@@ -386,7 +409,15 @@ pub fn match_over(
     let roll = g.rng.number(5, 15);
     let winnings = ((lvl * ARENA_COMBATANT_FEE * roll) as f64 * 0.1) as i32;
 
-    act(g, "$n has WON this match!", false, winner, None, ActArg::None, To::NotVict);
+    act(
+        g,
+        "$n has WON this match!",
+        false,
+        winner,
+        None,
+        ActArg::None,
+        To::NotVict,
+    );
     g.send_to_char(
         winner,
         &format!(
@@ -402,7 +433,15 @@ pub fn match_over(
     }
     set_flee_timer(winner, 0);
 
-    act(g, "$n has lost this match!", false, loser, None, ActArg::None, To::NotVict);
+    act(
+        g,
+        "$n has lost this match!",
+        false,
+        loser,
+        None,
+        ActArg::None,
+        To::NotVict,
+    );
     g.send_to_char(loser, "\r\n&RYou have lost the match!  Sorry...&n\r\n\r\n");
     if let Some(c) = g.get_char_mut(loser) {
         if c.losses < 254 {
@@ -430,7 +469,12 @@ pub fn match_over(
 
     inc_matchcount(g, loser);
 
-    let announce = format!("{} has won a match against {}! {}", get_name(g, winner), get_name(g, loser), msg);
+    let announce = format!(
+        "{} has won a match against {}! {}",
+        get_name(g, winner),
+        get_name(g, loser),
+        msg
+    );
     arena_channel(g, &announce);
     log::info!("{}", announce);
 
@@ -475,7 +519,10 @@ pub fn restore_bup_affects(g: &mut GameState, ch: CharId) {
     if is_npc(g, ch) {
         return;
     }
-    let saved = arena().lock().ok().and_then(|mut w| w.chars.get_mut(&ch).and_then(|c| c.bup.take()));
+    let saved = arena()
+        .lock()
+        .ok()
+        .and_then(|mut w| w.chars.get_mut(&ch).and_then(|c| c.bup.take()));
     if let Some(c) = g.get_char_mut(ch) {
         // First clear off the arena affects.
         c.affected.clear();
@@ -561,7 +608,8 @@ pub fn send_to_observers(g: &mut GameState, messg: &str, who: CharId) {
     }
     let mut tmp = observe_by_of(who);
     while let Some(t) = tmp {
-        if get_stat(t) == ARENA_OBSERVER && g.get_char(t).map(|c| c.desc.is_some()).unwrap_or(false) {
+        if get_stat(t) == ARENA_OBSERVER && g.get_char(t).map(|c| c.desc.is_some()).unwrap_or(false)
+        {
             g.send_to_char(t, messg);
         }
         tmp = observe_by_of(t);
@@ -589,7 +637,13 @@ fn findanyinarena(g: &GameState) -> Option<CharId> {
 //
 // Spec-proc signature: returns true if the command was consumed.
 // ===========================================================================
-pub fn arenaentrancemaster(g: &mut GameState, ch: CharId, me: CharId, cmd: &str, arg: &str) -> bool {
+pub fn arenaentrancemaster(
+    g: &mut GameState,
+    ch: CharId,
+    me: CharId,
+    cmd: &str,
+    arg: &str,
+) -> bool {
     // arenamaster = me; (set every call, like C.)
     set_arenamaster(me);
 
@@ -613,7 +667,11 @@ pub fn arenaentrancemaster(g: &mut GameState, ch: CharId, me: CharId, cmd: &str,
         if ofee == 0 {
             mybuf = format!("{} and as an observer it's FREE!", mybuf);
         } else {
-            mybuf = format!("{} and as an observer it's {} coins.", mybuf, numdisplay(ofee as i64));
+            mybuf = format!(
+                "{} and as an observer it's {} coins.",
+                mybuf,
+                numdisplay(ofee as i64)
+            );
         }
         master_tell(g, ch, &mybuf);
         deobserve(ch);
@@ -634,19 +692,47 @@ pub fn arenaentrancemaster(g: &mut GameState, ch: CharId, me: CharId, cmd: &str,
             crate::cmd_social::do_action_named(g, me, "puke", &name);
             return true;
         }
-        let mybuf = format!("{} That'll be {} coins, thanks!", name, numdisplay(fee as i64));
+        let mybuf = format!(
+            "{} That'll be {} coins, thanks!",
+            name,
+            numdisplay(fee as i64)
+        );
         master_tell(g, ch, &mybuf);
         if let Some(c) = g.get_char_mut(ch) {
             c.points.gold -= fee;
         }
         set_stat(ch, ARENA_COMBATANT1);
-        act(g, "$n admits $N as a combatant into the arena.", false, me, None, ActArg::Char(ch), To::NotVict);
-        act(g, "$n admits you as a combatant into the arena.", false, me, None, ActArg::Char(ch), To::Vict);
+        act(
+            g,
+            "$n admits $N as a combatant into the arena.",
+            false,
+            me,
+            None,
+            ActArg::Char(ch),
+            To::NotVict,
+        );
+        act(
+            g,
+            "$n admits you as a combatant into the arena.",
+            false,
+            me,
+            None,
+            ActArg::Char(ch),
+            To::Vict,
+        );
         g.char_from_room(ch);
         if let Some(rnum) = g.real_room(ARENA_PREPROOM) {
             g.char_to_room(ch, rnum);
         }
-        act(g, "$n has arrived.", false, ch, None, ActArg::None, To::NotVict);
+        act(
+            g,
+            "$n has arrived.",
+            false,
+            ch,
+            None,
+            ActArg::None,
+            To::NotVict,
+        );
         crate::cmd_informative::look_at_room(g, ch, false);
 
         // Maintain defaultobserve: keep it if it's a live combatant, else use ch.
@@ -691,12 +777,20 @@ pub fn arenaentrancemaster(g: &mut GameState, ch: CharId, me: CharId, cmd: &str,
         if fee == 0 {
             master_tell(g, ch, &format!("{} It's free to observe now!", name));
         } else {
-            master_tell(g, ch, &format!("{} That'll be {} coins, thanks!", name, fee));
+            master_tell(
+                g,
+                ch,
+                &format!("{} That'll be {} coins, thanks!", name, fee),
+            );
         }
         master_tell(
             g,
             ch,
-            &format!("{} You're currently observing the actions of {}.", name, get_name(g, default)),
+            &format!(
+                "{} You're currently observing the actions of {}.",
+                name,
+                get_name(g, default)
+            ),
         );
         // Now let's link.
         linkobserve(ch, default);
@@ -705,13 +799,37 @@ pub fn arenaentrancemaster(g: &mut GameState, ch: CharId, me: CharId, cmd: &str,
             c.points.gold -= fee;
         }
         set_stat(ch, ARENA_OBSERVER);
-        act(g, "$n admits $N into the arena observatory.", false, me, None, ActArg::Char(ch), To::NotVict);
-        act(g, "$n admits you into the arena observatory.", false, me, None, ActArg::Char(ch), To::Vict);
+        act(
+            g,
+            "$n admits $N into the arena observatory.",
+            false,
+            me,
+            None,
+            ActArg::Char(ch),
+            To::NotVict,
+        );
+        act(
+            g,
+            "$n admits you into the arena observatory.",
+            false,
+            me,
+            None,
+            ActArg::Char(ch),
+            To::Vict,
+        );
         g.char_from_room(ch);
         if let Some(rnum) = g.real_room(ARENA_OBSERVEROOM) {
             g.char_to_room(ch, rnum);
         }
-        act(g, "$n has arrived.", false, ch, None, ActArg::None, To::NotVict);
+        act(
+            g,
+            "$n has arrived.",
+            false,
+            ch,
+            None,
+            ActArg::None,
+            To::NotVict,
+        );
         crate::cmd_informative::look_at_room(g, ch, false);
 
         if level(g, ch) < LVL_IMMORT {
@@ -722,7 +840,11 @@ pub fn arenaentrancemaster(g: &mut GameState, ch: CharId, me: CharId, cmd: &str,
     }
 
     // Anything else: greet and reset to ARENA_NOT.
-    master_tell(g, ch, &format!("{} Welcome to my Arena! Combatant or Observer?\r\n", name));
+    master_tell(
+        g,
+        ch,
+        &format!("{} Welcome to my Arena! Combatant or Observer?\r\n", name),
+    );
     deobserve(ch);
     clearobservers(ch);
     set_stat(ch, ARENA_NOT);
@@ -746,7 +868,10 @@ pub fn do_observe(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
             Some(v) => get_name(g, v),
             None => "nobody".to_string(),
         };
-        g.send_to_char(ch, &format!("You're currently observing the actions of {}.\r\n", who));
+        g.send_to_char(
+            ch,
+            &format!("You're currently observing the actions of {}.\r\n", who),
+        );
         return;
     }
 
@@ -776,7 +901,13 @@ pub fn do_observe(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
     deobserve(ch);
     linkobserve(ch, victim);
-    g.send_to_char(ch, &format!("You're now observing the actions of {}.\r\n", get_name(g, victim)));
+    g.send_to_char(
+        ch,
+        &format!(
+            "You're now observing the actions of {}.\r\n",
+            get_name(g, victim)
+        ),
+    );
 }
 
 // ===========================================================================
@@ -809,9 +940,15 @@ pub fn arena_flee_start(g: &mut GameState, ch: CharId, was_fighting: CharId) -> 
         return false;
     }
     let loss = {
-        let max = g.get_char(was_fighting).map(|c| c.points.max_hit).unwrap_or(0);
+        let max = g
+            .get_char(was_fighting)
+            .map(|c| c.points.max_hit)
+            .unwrap_or(0);
         let cur = g.get_char(was_fighting).map(|c| c.points.hit).unwrap_or(0);
-        let wlvl = g.get_char(was_fighting).map(|c| c.player.level as i64).unwrap_or(0);
+        let wlvl = g
+            .get_char(was_fighting)
+            .map(|c| c.player.level as i64)
+            .unwrap_or(0);
         (max - cur) as i64 * wlvl
     };
     g.send_to_char(
@@ -840,7 +977,15 @@ pub fn arena_recall(g: &mut GameState, victim: CharId) -> bool {
     }
 
     if is_arena_combatant(victim) {
-        act(g, "$n disappears.", true, victim, None, ActArg::None, To::Room);
+        act(
+            g,
+            "$n disappears.",
+            true,
+            victim,
+            None,
+            ActArg::None,
+            To::Room,
+        );
 
         let mut victor = fighting(g, victim);
         let mut msg = "(Recalled)".to_string();
@@ -859,18 +1004,42 @@ pub fn arena_recall(g: &mut GameState, victim: CharId) -> bool {
         if let Some(rnum) = g.real_room(ARENA_PREPROOM) {
             g.char_to_room(victim, rnum);
         }
-        act(g, "$n appears in the middle of the room.", true, victim, None, ActArg::None, To::Room);
+        act(
+            g,
+            "$n appears in the middle of the room.",
+            true,
+            victim,
+            None,
+            ActArg::None,
+            To::Room,
+        );
         crate::cmd_informative::look_at_room(g, victim, false);
         return true;
     }
 
     if get_stat(victim) == ARENA_OBSERVER {
-        act(g, "$n disappears.", true, victim, None, ActArg::None, To::Room);
+        act(
+            g,
+            "$n disappears.",
+            true,
+            victim,
+            None,
+            ActArg::None,
+            To::Room,
+        );
         g.char_from_room(victim);
         if let Some(rnum) = g.real_room(ARENA_OBSERVEROOM) {
             g.char_to_room(victim, rnum);
         }
-        act(g, "$n appears in the middle of the room.", true, victim, None, ActArg::None, To::Room);
+        act(
+            g,
+            "$n appears in the middle of the room.",
+            true,
+            victim,
+            None,
+            ActArg::None,
+            To::Room,
+        );
         crate::cmd_informative::look_at_room(g, victim, false);
         return true;
     }
@@ -915,7 +1084,12 @@ pub fn arena_flee_pulse(g: &mut GameState, ch: CharId) {
 //
 // `from` is the room the char is leaving; `to_vnum` is the destination vnum.
 // ===========================================================================
-pub fn arena_leave_via_exit(g: &mut GameState, ch: CharId, from: RoomRnum, to_vnum: RoomVnum) -> bool {
+pub fn arena_leave_via_exit(
+    g: &mut GameState,
+    ch: CharId,
+    from: RoomRnum,
+    to_vnum: RoomVnum,
+) -> bool {
     let obs_room = g.real_room(ARENA_OBSERVEROOM);
     let prep_room = g.real_room(ARENA_PREPROOM);
     let name = get_name(g, ch);
@@ -935,7 +1109,15 @@ pub fn arena_leave_via_exit(g: &mut GameState, ch: CharId, from: RoomRnum, to_vn
     // Leaving the prep room.
     if Some(from) == prep_room {
         if to_vnum == ARENA_ENTRANCE {
-            act(g, "$n has left the arena.", false, ch, None, ActArg::None, To::NotVict);
+            act(
+                g,
+                "$n has left the arena.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::NotVict,
+            );
             if lvl < LVL_IMMORT {
                 arena_channel(g, &format!("{} has left the arena.", name));
             }
@@ -1025,7 +1207,9 @@ pub fn arena_relay_move(g: &mut GameState, ch: CharId, dir: usize) {
     }
     let name = get_name(g, ch);
     let dirname = DIR_NAMES.get(dir).copied().unwrap_or("somewhere");
-    let roomname = in_room(g, ch).map(|r| g.room(r).name.clone()).unwrap_or_default();
+    let roomname = in_room(g, ch)
+        .map(|r| g.room(r).name.clone())
+        .unwrap_or_default();
     let msg = format!("{} heads {} to: {}.\r\n", name, dirname, roomname);
     send_to_observers(g, &msg, ch);
 }

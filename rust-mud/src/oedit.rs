@@ -73,6 +73,7 @@ enum OeditMode {
     Level,
     Durability,
     Durability2,
+    Script(olc::DgScriptEditMode),
 }
 
 #[derive(Clone)]
@@ -92,9 +93,9 @@ struct ObjEdit {
     timer: i32,
     level: i32,
     obj_class: i32,
-    cslots: i32, // current durability (DeltaMUD GET_OBJ_CSLOTS)
-    tslots: i32, // total durability   (GET_OBJ_TSLOTS)
-    bitvector: i64, // permanent AFF_ affects
+    cslots: i32,                           // current durability (DeltaMUD GET_OBJ_CSLOTS)
+    tslots: i32,                           // total durability   (GET_OBJ_TSLOTS)
+    bitvector: i64,                        // permanent AFF_ affects
     affects: [(i32, i32); MAX_OBJ_AFFECT], // (location, modifier)
     extra_descriptions: Vec<(String, String)>,
 }
@@ -152,7 +153,11 @@ pub fn do_oedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
     };
 
-    let conflict = states().lock().unwrap().values().any(|s| s.obj.vnum == vnum);
+    let conflict = states()
+        .lock()
+        .unwrap()
+        .values()
+        .any(|s| s.obj.vnum == vnum);
     if conflict {
         g.send_to_char(ch, "That object is currently being edited.\r\n");
         return;
@@ -262,7 +267,13 @@ fn begin_text(g: &mut GameState, conn: ConnId, seed: &str, mode: OeditMode) {
 fn text_input(conn: ConnId, line: &str) -> Option<Option<String>> {
     let trimmed = line.trim_end_matches(['\r', '\n']);
     if trimmed == "/s" || trimmed == "~" {
-        return Some(Some(text_bufs().lock().unwrap().remove(&conn).unwrap_or_default()));
+        return Some(Some(
+            text_bufs()
+                .lock()
+                .unwrap()
+                .remove(&conn)
+                .unwrap_or_default(),
+        ));
     }
     if trimmed == "/a" {
         text_bufs().lock().unwrap().remove(&conn);
@@ -296,7 +307,10 @@ fn disp_menu(g: &mut GameState, conn: ConnId) {
             .unwrap_or("Generic")
             .to_string()
     };
-    let act_desc = o.action_description.clone().unwrap_or_else(|| "<not set>\r\n".to_string());
+    let act_desc = o
+        .action_description
+        .clone()
+        .unwrap_or_else(|| "<not set>\r\n".to_string());
 
     let body = format!(
         "-- Item number : [{cyn}{vnum}{nrm}]\r\n\
@@ -319,6 +333,7 @@ fn disp_menu(g: &mut GameState, conn: ConnId) {
          {grn}H{nrm}) Permanent Affects : {cyn}{aff}\r\n\
          {grn}K{nrm}) Intended Class : {cyn}{class}\r\n\
          {grn}L{nrm}) Level       : {cyn}{level}\r\n\
+         {grn}S{nrm}) Script      : {cyn}{script}\r\n\
          {grn}Q{nrm}) Quit\r\n\
          Enter choice : ",
         cyn = CYN, nrm = NRM, grn = GRN, yel = YEL,
@@ -327,6 +342,11 @@ fn disp_menu(g: &mut GameState, conn: ConnId) {
         weight = o.weight, cost = o.cost, rent = o.rent, timer = o.timer,
         v0 = o.values[0], v1 = o.values[1], v2 = o.values[2], v3 = o.values[3],
         cslots = o.cslots, tslots = o.tslots, aff = aff_str, class = class_str, level = o.level,
+        script = if crate::dg_db_scripts::proto_trigger_vnums(crate::dg_handler::OBJ_TRIGGER, o.vnum).is_empty() {
+            "Not Set."
+        } else {
+            "Set."
+        },
     );
     send(g, conn, &body);
     let _ = with_state(conn, |s| s.mode = OeditMode::MainMenu);
@@ -342,7 +362,10 @@ fn disp_bit_menu(g: &mut GameState, conn: ConnId, table: &[&str], one_based: boo
         let n = if one_based { i + 1 } else { i };
         out.push_str(&format!(
             "{grn}{n:2}{nrm}) {name:<20.20} {sep}",
-            grn = GRN, nrm = NRM, n = n, name = name,
+            grn = GRN,
+            nrm = NRM,
+            n = n,
+            name = name,
             sep = if columns % 2 == 0 { "\r\n" } else { "" },
         ));
     }
@@ -363,7 +386,9 @@ fn disp_extra_menu(g: &mut GameState, conn: ConnId) {
         conn,
         &format!(
             "\r\nObject flags: {cyn}{f}{nrm}\r\nEnter object extra flag (0 to quit) : ",
-            cyn = CYN, nrm = NRM, f = olc::sprintbit(cur, EXTRA_BITS),
+            cyn = CYN,
+            nrm = NRM,
+            f = olc::sprintbit(cur, EXTRA_BITS),
         ),
     );
 }
@@ -376,7 +401,9 @@ fn disp_wear_menu(g: &mut GameState, conn: ConnId) {
         conn,
         &format!(
             "\r\nWear flags: {cyn}{f}{nrm}\r\nEnter wear flag, 0 to quit : ",
-            cyn = CYN, nrm = NRM, f = olc::sprintbit(cur, WEAR_BITS),
+            cyn = CYN,
+            nrm = NRM,
+            f = olc::sprintbit(cur, WEAR_BITS),
         ),
     );
 }
@@ -389,7 +416,9 @@ fn disp_perm_affects_menu(g: &mut GameState, conn: ConnId) {
         conn,
         &format!(
             "\r\nObject permanent affects: {cyn}{f}{nrm}\r\nEnter object affect (0 to quit) : ",
-            cyn = CYN, nrm = NRM, f = olc::sprintbit(cur, AFFECTED_BITS),
+            cyn = CYN,
+            nrm = NRM,
+            f = olc::sprintbit(cur, AFFECTED_BITS),
         ),
     );
 }
@@ -404,11 +433,18 @@ fn disp_spells_menu(g: &mut GameState, conn: ConnId) {
         let name = crate::spell_parser::skill_name(i);
         out.push_str(&format!(
             "{grn}{n:2}{nrm}) {yel}{name:<20.20} {sep}",
-            grn = GRN, nrm = NRM, yel = YEL, n = i, name = name,
+            grn = GRN,
+            nrm = NRM,
+            yel = YEL,
+            n = i,
+            name = name,
             sep = if columns % 3 == 0 { "\r\n" } else { "" },
         ));
     }
-    out.push_str(&format!("\r\n{nrm}Enter spell choice (0 for none) : ", nrm = NRM));
+    out.push_str(&format!(
+        "\r\n{nrm}Enter spell choice (0 for none) : ",
+        nrm = NRM
+    ));
     send(g, conn, &out);
 }
 
@@ -419,7 +455,11 @@ fn disp_liquid_menu(g: &mut GameState, conn: ConnId) {
         columns += 1;
         out.push_str(&format!(
             "{grn}{n:2}{nrm}) {yel}{name:<20.20} {sep}",
-            grn = GRN, nrm = NRM, yel = YEL, n = i, name = name,
+            grn = GRN,
+            nrm = NRM,
+            yel = YEL,
+            n = i,
+            name = name,
             sep = if columns % 2 == 0 { "\r\n" } else { "" },
         ));
     }
@@ -431,8 +471,8 @@ fn disp_liquid_menu(g: &mut GameState, conn: ConnId) {
 fn disp_weapon_menu(g: &mut GameState, conn: ConnId) {
     // attack_hit_text[].singular — use a faithful DeltaMUD attack list.
     const ATTACKS: &[&str] = &[
-        "hit", "sting", "whip", "slash", "bite", "bludgeon", "crush", "pound",
-        "claw", "maul", "thrash", "pierce", "blast", "punch", "stab", "shock",
+        "hit", "sting", "whip", "slash", "bite", "bludgeon", "crush", "pound", "claw", "maul",
+        "thrash", "pierce", "blast", "punch", "stab", "shock",
     ];
     let mut out = String::new();
     let mut columns = 0;
@@ -440,7 +480,10 @@ fn disp_weapon_menu(g: &mut GameState, conn: ConnId) {
         columns += 1;
         out.push_str(&format!(
             "{grn}{n:2}{nrm}) {name:<20.20} {sep}",
-            grn = GRN, nrm = NRM, n = i, name = name,
+            grn = GRN,
+            nrm = NRM,
+            n = i,
+            name = name,
             sep = if columns % 2 == 0 { "\r\n" } else { "" },
         ));
     }
@@ -457,7 +500,10 @@ fn disp_container_flags_menu(g: &mut GameState, conn: ConnId) {
          {grn}4{nrm}) LOCKED\r\n\
          Container flags: {cyn}{f}{nrm}\r\n\
          Enter flag, 0 to quit : ",
-        grn = GRN, nrm = NRM, cyn = CYN, f = olc::sprintbit(cur, CONTAINER_BITS),
+        grn = GRN,
+        nrm = NRM,
+        cyn = CYN,
+        f = olc::sprintbit(cur, CONTAINER_BITS),
     );
     send(g, conn, &body);
 }
@@ -470,15 +516,26 @@ fn disp_prompt_apply_menu(g: &mut GameState, conn: ConnId) {
             let ty = olc::sprinttype(*loc, APPLY_TYPES);
             out.push_str(&format!(
                 " {grn}{n}{nrm}) {modi:+} to {ty}\r\n",
-                grn = GRN, nrm = NRM, n = i + 1, modi = modi, ty = ty,
+                grn = GRN,
+                nrm = NRM,
+                n = i + 1,
+                modi = modi,
+                ty = ty,
             ));
         } else {
-            out.push_str(&format!(" {grn}{n}{nrm}) None.\r\n", grn = GRN, nrm = NRM, n = i + 1));
+            out.push_str(&format!(
+                " {grn}{n}{nrm}) None.\r\n",
+                grn = GRN,
+                nrm = NRM,
+                n = i + 1
+            ));
         }
     }
     out.push_str(&format!(
         " {grn}{n}{nrm}) Autoset object applies.\r\nEnter affection to modify (0 to quit) : ",
-        grn = GRN, nrm = NRM, n = MAX_OBJ_AFFECT + 1,
+        grn = GRN,
+        nrm = NRM,
+        n = MAX_OBJ_AFFECT + 1,
     ));
     send(g, conn, &out);
     let _ = with_state(conn, |s| s.mode = OeditMode::PromptApply);
@@ -493,11 +550,24 @@ fn disp_apply_menu(g: &mut GameState, conn: ConnId) {
 fn disp_extradesc_menu(g: &mut GameState, conn: ConnId) {
     let (kw, desc, has_next) = match with_state(conn, |s| {
         let idx = s.cur_desc;
-        let (k, d) = s.obj.extra_descriptions.get(idx).cloned().unwrap_or_default();
+        let (k, d) = s
+            .obj
+            .extra_descriptions
+            .get(idx)
+            .cloned()
+            .unwrap_or_default();
         let next = idx + 1 < s.obj.extra_descriptions.len();
         (
-            if k.is_empty() { "<NONE>".to_string() } else { k },
-            if d.is_empty() { "<NONE>".to_string() } else { d },
+            if k.is_empty() {
+                "<NONE>".to_string()
+            } else {
+                k
+            },
+            if d.is_empty() {
+                "<NONE>".to_string()
+            } else {
+                d
+            },
             next,
         )
     }) {
@@ -512,7 +582,12 @@ fn disp_extradesc_menu(g: &mut GameState, conn: ConnId) {
          {grn}3{nrm}) Goto next description: {next}\r\n\
          {grn}0{nrm}) Quit\r\n\
          Enter choice : ",
-        grn = GRN, nrm = NRM, yel = YEL, kw = kw, desc = desc, next = next_str,
+        grn = GRN,
+        nrm = NRM,
+        yel = YEL,
+        kw = kw,
+        desc = desc,
+        next = next_str,
     );
     send(g, conn, &body);
     let _ = with_state(conn, |s| s.mode = OeditMode::ExtradescMenu);
@@ -613,18 +688,36 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         OeditMode::MainMenu => parse_main_menu(g, conn, arg),
 
         OeditMode::Namelist => {
-            let v = if arg.is_empty() { "undefined".to_string() } else { arg.to_string() };
-            with_state(conn, |s| { s.obj.name = v; });
+            let v = if arg.is_empty() {
+                "undefined".to_string()
+            } else {
+                arg.to_string()
+            };
+            with_state(conn, |s| {
+                s.obj.name = v;
+            });
             commit_and_menu(g, conn);
         }
         OeditMode::ShortDesc => {
-            let v = if arg.is_empty() { "undefined".to_string() } else { arg.to_string() };
-            with_state(conn, |s| { s.obj.short_description = v; });
+            let v = if arg.is_empty() {
+                "undefined".to_string()
+            } else {
+                arg.to_string()
+            };
+            with_state(conn, |s| {
+                s.obj.short_description = v;
+            });
             commit_and_menu(g, conn);
         }
         OeditMode::LongDesc => {
-            let v = if arg.is_empty() { "undefined".to_string() } else { arg.to_string() };
-            with_state(conn, |s| { s.obj.description = v; });
+            let v = if arg.is_empty() {
+                "undefined".to_string()
+            } else {
+                arg.to_string()
+            };
+            with_state(conn, |s| {
+                s.obj.description = v;
+            });
             commit_and_menu(g, conn);
         }
         OeditMode::ActDesc => {
@@ -790,7 +883,11 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
 
         OeditMode::ExtradescKey => {
-            let v = if arg.is_empty() { "undefined".to_string() } else { arg.to_string() };
+            let v = if arg.is_empty() {
+                "undefined".to_string()
+            } else {
+                arg.to_string()
+            };
             with_state(conn, |s| {
                 let idx = s.cur_desc;
                 if let Some(ed) = s.obj.extra_descriptions.get_mut(idx) {
@@ -814,6 +911,25 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             }
         }
         OeditMode::ExtradescMenu => parse_extradesc_menu(g, conn, arg),
+        OeditMode::Script(mut script_mode) => {
+            let vnum = with_state(conn, |s| s.obj.vnum).unwrap_or(0);
+            let keep = olc::dg_script_edit_parse(
+                g,
+                conn,
+                crate::dg_handler::OBJ_TRIGGER,
+                vnum,
+                &mut script_mode,
+                arg,
+            );
+            if keep {
+                let _ = with_state(conn, |s| {
+                    s.mode = OeditMode::Script(script_mode);
+                    s.modified = true;
+                });
+            } else {
+                disp_menu(g, conn);
+            }
+        }
     }
 }
 
@@ -828,21 +944,50 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, arg: &str) {
                 finish(g, conn);
             }
         }
-        Some('1') => { send(g, conn, "Enter namelist : "); set_mode(conn, OeditMode::Namelist); }
-        Some('2') => { send(g, conn, "Enter short desc : "); set_mode(conn, OeditMode::ShortDesc); }
-        Some('3') => { send(g, conn, "Enter long desc :-\r\n| "); set_mode(conn, OeditMode::LongDesc); }
+        Some('1') => {
+            send(g, conn, "Enter namelist : ");
+            set_mode(conn, OeditMode::Namelist);
+        }
+        Some('2') => {
+            send(g, conn, "Enter short desc : ");
+            set_mode(conn, OeditMode::ShortDesc);
+        }
+        Some('3') => {
+            send(g, conn, "Enter long desc :-\r\n| ");
+            set_mode(conn, OeditMode::LongDesc);
+        }
         Some('4') => {
-            let seed = with_state(conn, |s| s.obj.action_description.clone().unwrap_or_default())
-                .unwrap_or_default();
+            let seed = with_state(conn, |s| {
+                s.obj.action_description.clone().unwrap_or_default()
+            })
+            .unwrap_or_default();
             begin_text(g, conn, &seed, OeditMode::ActDesc);
         }
         Some('5') => disp_type_menu(g, conn),
-        Some('6') => { disp_extra_menu(g, conn); set_mode(conn, OeditMode::Extras); }
-        Some('7') => { disp_wear_menu(g, conn); set_mode(conn, OeditMode::Wear); }
-        Some('8') => { send(g, conn, "Enter weight : "); set_mode(conn, OeditMode::Weight); }
-        Some('9') => { send(g, conn, "Enter cost : "); set_mode(conn, OeditMode::Cost); }
-        Some('a') => { send(g, conn, "Enter cost per day : "); set_mode(conn, OeditMode::CostPerDay); }
-        Some('b') => { send(g, conn, "Enter timer : "); set_mode(conn, OeditMode::Timer); }
+        Some('6') => {
+            disp_extra_menu(g, conn);
+            set_mode(conn, OeditMode::Extras);
+        }
+        Some('7') => {
+            disp_wear_menu(g, conn);
+            set_mode(conn, OeditMode::Wear);
+        }
+        Some('8') => {
+            send(g, conn, "Enter weight : ");
+            set_mode(conn, OeditMode::Weight);
+        }
+        Some('9') => {
+            send(g, conn, "Enter cost : ");
+            set_mode(conn, OeditMode::Cost);
+        }
+        Some('a') => {
+            send(g, conn, "Enter cost per day : ");
+            set_mode(conn, OeditMode::CostPerDay);
+        }
+        Some('b') => {
+            send(g, conn, "Enter timer : ");
+            set_mode(conn, OeditMode::Timer);
+        }
         Some('c') => {
             with_state(conn, |s| s.obj.values = [0; 4]);
             disp_val1_menu(g, conn);
@@ -851,16 +996,27 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, arg: &str) {
         Some('e') => {
             with_state(conn, |s| {
                 if s.obj.extra_descriptions.is_empty() {
-                    s.obj.extra_descriptions.push((String::new(), String::new()));
+                    s.obj
+                        .extra_descriptions
+                        .push((String::new(), String::new()));
                 }
                 s.cur_desc = 0;
             });
             disp_extradesc_menu(g, conn);
         }
-        Some('f') => { send(g, conn, "Enter numerator : "); set_mode(conn, OeditMode::Durability); }
-        Some('g') => { send(g, conn, "Enter denominator : "); set_mode(conn, OeditMode::Durability2); }
+        Some('f') => {
+            send(g, conn, "Enter numerator : ");
+            set_mode(conn, OeditMode::Durability);
+        }
+        Some('g') => {
+            send(g, conn, "Enter denominator : ");
+            set_mode(conn, OeditMode::Durability2);
+        }
         Some('h') => {
-            let level = conn_char(g, conn).and_then(|c| g.get_char(c)).map(|c| c.player.level).unwrap_or(0);
+            let level = conn_char(g, conn)
+                .and_then(|c| g.get_char(c))
+                .map(|c| c.player.level)
+                .unwrap_or(0);
             if level < LVL_GRGOD {
                 send(g, conn, "Your level isn't high enough to do that...\r\n");
             } else {
@@ -868,8 +1024,19 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, arg: &str) {
                 set_mode(conn, OeditMode::PermAffects);
             }
         }
-        Some('k') => { send(g, conn, "Enter Intended Class For Object : "); set_mode(conn, OeditMode::Class); }
-        Some('l') => { send(g, conn, "Enter Minimum Level For Object : "); set_mode(conn, OeditMode::Level); }
+        Some('k') => {
+            send(g, conn, "Enter Intended Class For Object : ");
+            set_mode(conn, OeditMode::Class);
+        }
+        Some('l') => {
+            send(g, conn, "Enter Minimum Level For Object : ");
+            set_mode(conn, OeditMode::Level);
+        }
+        Some('s') => {
+            let vnum = with_state(conn, |s| s.obj.vnum).unwrap_or(0);
+            olc::dg_script_menu(g, conn, crate::dg_handler::OBJ_TRIGGER, vnum);
+            set_mode(conn, OeditMode::Script(olc::DgScriptEditMode::Main));
+        }
         _ => disp_menu(g, conn),
     }
 }
@@ -957,7 +1124,11 @@ fn parse_extradesc_menu(g: &mut GameState, conn: ConnId, arg: &str) {
         2 => {
             let seed = with_state(conn, |s| {
                 let idx = s.cur_desc;
-                s.obj.extra_descriptions.get(idx).map(|e| e.1.clone()).unwrap_or_default()
+                s.obj
+                    .extra_descriptions
+                    .get(idx)
+                    .map(|e| e.1.clone())
+                    .unwrap_or_default()
             })
             .unwrap_or_default();
             begin_text(g, conn, &seed, OeditMode::ExtradescDescription);
@@ -966,7 +1137,9 @@ fn parse_extradesc_menu(g: &mut GameState, conn: ConnId, arg: &str) {
             let (complete, at_end) = with_state(conn, |s| {
                 let idx = s.cur_desc;
                 let cur = s.obj.extra_descriptions.get(idx);
-                let complete = cur.map(|e| !e.0.is_empty() && !e.1.is_empty()).unwrap_or(false);
+                let complete = cur
+                    .map(|e| !e.0.is_empty() && !e.1.is_empty())
+                    .unwrap_or(false);
                 let at_end = idx + 1 >= s.obj.extra_descriptions.len();
                 (complete, at_end)
             })
@@ -974,7 +1147,9 @@ fn parse_extradesc_menu(g: &mut GameState, conn: ConnId, arg: &str) {
             if complete {
                 with_state(conn, |s| {
                     if at_end {
-                        s.obj.extra_descriptions.push((String::new(), String::new()));
+                        s.obj
+                            .extra_descriptions
+                            .push((String::new(), String::new()));
                     }
                     s.cur_desc += 1;
                 });
@@ -1015,24 +1190,41 @@ fn autoset_applies(g: &mut GameState, conn: ConnId) {
         [5, 1, 5, 2, 3],
         [2, 5, 2, 2, 5],
     ];
-    let (level, class, name) = match with_state(conn, |s| (s.obj.level, s.obj.obj_class, s.obj.short_description.clone())) {
+    let (level, class, name) = match with_state(conn, |s| {
+        (
+            s.obj.level,
+            s.obj.obj_class,
+            s.obj.short_description.clone(),
+        )
+    }) {
         Some(v) => v,
         None => return,
     };
     let _ = name;
     if level == 0 {
-        send(g, conn, "Object's minimum level must be set before you can do this.\r\n");
+        send(
+            g,
+            conn,
+            "Object's minimum level must be set before you can do this.\r\n",
+        );
         return;
     }
     let class_name = if class == CLASS_UNDEFINED {
         "Generic Character".to_string()
     } else {
-        PC_CLASS_TYPES.get(class as usize).copied().unwrap_or("Generic Character").to_string()
+        PC_CLASS_TYPES
+            .get(class as usize)
+            .copied()
+            .unwrap_or("Generic Character")
+            .to_string()
     };
     send(
         g,
         conn,
-        &format!("Setting object's standard applies based off of a level {} {}.\r\n", level, class_name),
+        &format!(
+            "Setting object's standard applies based off of a level {} {}.\r\n",
+            level, class_name
+        ),
     );
     let row = STRENGTHS[(class + 1) as usize];
     // CLASS_APPMODNUM(num) = 750 * strength * level / 5 / 100 / NUM_WEARS
@@ -1075,7 +1267,9 @@ fn save_internally(g: &mut GameState, conn: ConnId) {
         min_level: edit.level,
         bitvector: edit.bitvector,
         action_description: edit.action_description.clone().unwrap_or_default(),
-        affects: edit.affects.iter()
+        affects: edit
+            .affects
+            .iter()
             .filter(|(loc, _)| *loc != crate::flags::APPLY_NONE)
             .map(|&(location, modifier)| crate::object::ObjectAffect { location, modifier })
             .collect(),
@@ -1115,7 +1309,11 @@ fn save_internally(g: &mut GameState, conn: ConnId) {
         }
     }
 
-    let zone_number = g.zones.get(znum).map(|z| z.number).unwrap_or(edit.vnum / 100);
+    let zone_number = g
+        .zones
+        .get(znum)
+        .map(|z| z.number)
+        .unwrap_or(edit.vnum / 100);
     olc::olc_add_to_save_list(zone_number, olc::OLC_SAVE_OBJ);
 }
 
@@ -1168,11 +1366,23 @@ pub fn oedit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
             None => continue,
         };
         out.push_str(&format!("#{}\n", vnum));
-        out.push_str(if proto.name.is_empty() { "undefined" } else { &proto.name });
+        out.push_str(if proto.name.is_empty() {
+            "undefined"
+        } else {
+            &proto.name
+        });
         out.push_str("~\n");
-        out.push_str(if proto.short_desc.is_empty() { "undefined" } else { &proto.short_desc });
+        out.push_str(if proto.short_desc.is_empty() {
+            "undefined"
+        } else {
+            &proto.short_desc
+        });
         out.push_str("~\n");
-        out.push_str(if proto.description.is_empty() { "undefined" } else { &proto.description });
+        out.push_str(if proto.description.is_empty() {
+            "undefined"
+        } else {
+            &proto.description
+        });
         out.push_str("~\n");
         // action description (4th tilde string; C strip_string'd, empty if none).
         out.push_str(&olc::strip_cr(&proto.action_description));

@@ -9,6 +9,11 @@ now has the full command table, most major subsystems, crypt-compatible
 password verification, and an 83-column `player_main` mapping. The remaining
 risks are mostly runtime fidelity and on-disk persistence compatibility.
 
+The latest tracker-backed parity pass resolved the previously open high-risk
+runtime/editor items for complex alias queue timing, creation nanny/do_start,
+central OLC save dispatch, DG attachment editing and room `T` saves, social and
+wizhelp policy, hostname ban gates, and raw-kill/deathblow side effects.
+
 ## Summary
 
 ### Generally compatible
@@ -75,12 +80,6 @@ World grammar coverage is broad:
 
 Known builder/world gaps:
 
-- Room saves currently drop room `T` trigger attachment lines even though room
-  loading reads them (#89).
-- The C DG attachment-list editor in redit/oedit/medit is not exposed yet (#89).
-- Central `olc save` does not dispatch every editor's disk writer; some editor
-  modules save correctly through their own flow but not through the generic
-  save command (#88).
 - Several OLC text editors implement only a subset of the C string-editor slash
   commands.
 - Mobile prototype special-procedure bindings from OLC are not represented as a
@@ -91,32 +90,32 @@ Known builder/world gaps:
 The Rust port is no longer an early basic-command prototype. Current
 parity gaps are more specific:
 
-- Character creation skips several C nanny states: newbie prompt, deity,
-  hometown, stat reroll/accept, and creation-time `do_start_init` (#87).
-- Complex alias expansion can bypass C `WAIT_STATE` behavior by executing
-  expanded commands immediately instead of queueing descriptor input (#86).
-- Some command display/gating details differ: `wizhelp` does not filter by GCMD
-  bits, social minimum level is not enforced, and `socials` omits the static
-  `insult` social (#90).
-- Ban enforcement does not yet match C's hostname, `BAN_NEW`, and `BAN_SELECT`
-  checks (#91).
+- `slist` still emits no spell rows.
+- Some `APPLY_*` locations are narrower than C, especially latent fields like
+  charisma, age, weight, and height.
+- Save currently writes an empty `host` value instead of the descriptor host.
+- Played-time accounting appears narrower than C's `played + now - logon`
+  update path.
+- C's defensive clamps for obviously corrupted gold/bank values are not fully
+  mirrored.
+- Some offline reporting utilities are not fully SQL-backed yet, including
+  autowiz enumeration and parts of clan roster reporting.
 
 ## Combat and Gameplay Fidelity Gaps
 
 Known correctness gaps from the latest parity pass:
 
-- `deathblow` and immortal raw-kill paths route through normal damage instead
-  of matching C's side-effect differences (#92).
-- `slist` still emits no spell rows.
-- Some `APPLY_*` locations are narrower than C, especially latent fields like
-  charisma, age, weight, and height.
+- No open combat-specific tracker item is currently known from the latest
+  parity pass. Continue using the C build as the oracle for exact damage text,
+  death side effects, and equipment durability edge cases.
 
 ## Safe Operating Guidance
 
 1. Keep the C source as the oracle for behavior fixes.
 2. Back up SQL and `lib/` runtime data before any Rust production run.
-3. Treat world source files as mostly shareable, but avoid using Rust OLC to
-   save rooms with trigger attachments until room `T` preservation is fixed.
+3. Treat world source files as mostly shareable, but continue comparing Rust
+   OLC output against the C build when touching editor text commands or mobile
+   special-procedure assignments.
 4. Treat runtime persistence files as Rust-only after Rust writes them, unless a
    migration tool is added.
 5. Use `MUD_MOCK_DB=true` for local development unless testing SQL behavior.

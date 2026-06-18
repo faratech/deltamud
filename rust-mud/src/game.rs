@@ -3,9 +3,10 @@
 // &mut GameState, drives the heartbeat, and flushes each descriptor's output
 // buffer to its writer task. This is the only place async meets the world.
 
+use crate::character::Abilities;
 use crate::combat;
-use crate::connection::{render_color, ConState, Descriptor, GameMessage};
-use crate::interpreter::command_interpreter;
+use crate::connection::{render_color, ConState, Descriptor, GameMessage, QueuedInput};
+use crate::interpreter::run_command;
 use crate::metrics::Metrics;
 use crate::state::GameState;
 use crate::types::*;
@@ -45,6 +46,18 @@ const TELOPT_MSSP: u8 = 70; // Mud Server Status Protocol
 // `MSSP_VAR <name> MSSP_VAL <value>` inside the IAC SB MSSP ... IAC SE frame.
 const MSSP_VAR: u8 = 1;
 const MSSP_VAL: u8 = 2;
+
+const PLR_SITEOK: i64 = 1 << 7;
+const NEWBIE_STAT_EXPLANATION: &str = "\r\nHere is a brief explanation of each ability:\r\n\
+[&YStr&n] - Strength determines how hard you hit your opponents in a fight.\r\n\r\n\
+[&YInt&n] - Intelligence determines how well you hit your opponents in a fight,\r\n\
+        and also the amount of magic points for spells (clerics and mages).\r\n\r\n\
+[&YWis&n] - Wisdom determines how well you hit your opponents in a fight,\r\n\
+        and also the amount of magic spells you can learn (clerics and mages).\r\n\r\n\
+[&YDex&n] - Dexterity determines how well you fight in a battle, and also\r\n\
+        how cunning and sneaky you are.\r\n\r\n\
+[&YCon&n] - Constitution determines how much health you have.\r\n\r\n\
+[&YCha&n] - Charisma determines how good you are with people :)\r\n\r\n";
 
 /// Wrap a payload in an `IAC SB <opt> ... IAC SE` telnet subnegotiation frame.
 /// 0xFF (IAC) bytes inside JSON/MSSP payloads are vanishingly unlikely (ASCII
@@ -109,7 +122,7 @@ fn dispatch_command_isolated(
     context: &str,
 ) -> bool {
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        command_interpreter(state, ch, input);
+        run_command(state, ch, input);
     }));
     match res {
         Ok(()) => true,
@@ -406,7 +419,7 @@ impl Game {
                 // descriptor's WAIT_STATE lag (d.wait) expires, and sends the
                 // prompt after the command actually runs.
                 if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
-                    d.input_queue.push_back(input);
+                    d.input_queue.push_back(QueuedInput::raw(input));
                 }
                 return;
             }
@@ -439,18 +452,40 @@ impl Game {
             if !ready {
                 continue;
             }
-            let input = match self.state.descriptors.get_mut(&cid) {
+            let queued = match self.state.descriptors.get_mut(&cid) {
                 Some(d) => {
                     d.wait = 1;
                     d.input_queue.pop_front()
                 }
                 None => None,
             };
-            let input = match input {
+            let queued = match queued {
                 Some(i) => i,
                 None => continue,
             };
             if let Some(ch) = self.state.descriptors.get(&cid).and_then(|d| d.character) {
+                let mut input = queued.line;
+                if !queued.aliased {
+                    match crate::alias::alias_expand(&self.state, ch, &input) {
+                        Some(crate::alias::AliasExpansion::Simple(line)) => {
+                            input = line;
+                        }
+                        Some(crate::alias::AliasExpansion::Complex(lines)) => {
+                            if let Some(d) = self.state.descriptors.get_mut(&cid) {
+                                for line in lines.into_iter().rev() {
+                                    d.input_queue.push_front(QueuedInput::aliased(line));
+                                }
+                                input = match d.input_queue.pop_front() {
+                                    Some(q) => q.line,
+                                    None => continue,
+                                };
+                            } else {
+                                continue;
+                            }
+                        }
+                        None => {}
+                    }
+                }
                 self.metrics.inc_commands();
                 dispatch_command_isolated(&mut self.state, ch, &input, "input-queue");
             }
@@ -489,6 +524,23 @@ impl Game {
             ConState::ConfirmName => {
                 let yes = input.eq_ignore_ascii_case("y") || input.eq_ignore_ascii_case("yes");
                 if yes {
+                    let host = self.descriptor_host(conn_id);
+                    let banned = crate::ban::isbanned(&host);
+                    if banned >= crate::ban::BanType::New {
+                        self.out(
+                            conn_id,
+                            "Sorry, new characters are not allowed from your site!\r\n",
+                        );
+                        warn!(
+                            "Request for new char {} denied from [{}] (siteban)",
+                            self.descriptor_name(conn_id),
+                            host
+                        );
+                        if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                            d.state = ConState::Close;
+                        }
+                        return;
+                    }
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                         d.state = ConState::GetNewPassword;
                     }
@@ -505,6 +557,23 @@ impl Game {
                     .await
                     .unwrap_or(false);
                 if ok {
+                    let host = self.descriptor_host(conn_id);
+                    let banned = crate::ban::isbanned(&host);
+                    if banned >= crate::ban::BanType::Select {
+                        if let Ok(ch) = self.db.load_player(&name).await {
+                            if ch.act_flags & PLR_SITEOK == 0 {
+                                self.out(
+                                    conn_id,
+                                    "Sorry, this char has not been cleared for login from your site!\r\n",
+                                );
+                                warn!("Connection attempt for {} denied from {}", name, host);
+                                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                                    d.state = ConState::Close;
+                                }
+                                return;
+                            }
+                        }
+                    }
                     self.enter_game(conn_id, false).await;
                 } else {
                     self.out(conn_id, "Wrong password.\r\n");
@@ -533,7 +602,7 @@ impl Game {
                     .unwrap_or(false);
                 if matches {
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
-                        d.state = ConState::GetSex;
+                        d.state = ConState::GetNewbie;
                     }
                 } else {
                     self.out(conn_id, "Passwords don't match.\r\n");
@@ -541,6 +610,19 @@ impl Game {
                         d.temp_password = None;
                         d.state = ConState::GetNewPassword;
                     }
+                }
+            }
+            ConState::GetNewbie => {
+                match input.chars().next().map(|c| c.to_ascii_lowercase()) {
+                    Some('y') => self.pending.entry(conn_id).or_default().newbie = 1,
+                    Some('n') => self.pending.entry(conn_id).or_default().newbie = 0,
+                    _ => {
+                        self.out(conn_id, "Please type Yes or No: ");
+                        return;
+                    }
+                }
+                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    d.state = ConState::GetSex;
                 }
             }
             ConState::GetSex => {
@@ -553,53 +635,124 @@ impl Game {
                     Some(s) => {
                         self.set_temp_sex(conn_id, s);
                         if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
-                            d.state = ConState::GetClass;
-                        }
-                    }
-                    None => self.out(conn_id, "That's not a sex.\r\n"),
-                }
-            }
-            ConState::GetClass => {
-                let class = match input.to_lowercase().chars().next() {
-                    Some('w') => Some(Class::Warrior),
-                    Some('c') => Some(Class::Cleric),
-                    Some('t') => Some(Class::Thief),
-                    Some('m') => Some(Class::MagicUser),
-                    Some('a') => Some(Class::Artisan),
-                    _ => None,
-                };
-                match class {
-                    Some(c) => {
-                        self.set_temp_class(conn_id, c);
-                        if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                             d.state = ConState::GetRace;
                         }
                     }
-                    None => self.out(conn_id, "That's not a class.\r\n"),
+                    None => self.out(conn_id, "That is not a sex..\r\n"),
                 }
             }
             ConState::GetRace => {
-                let race = match input.to_lowercase().chars().next() {
-                    Some('h') => Some(Race::Human),
-                    Some('e') => Some(Race::Elf),
-                    Some('d') => Some(Race::Dwarf),
-                    Some('g') => Some(Race::Gnome),
-                    _ => None,
-                };
-                match race {
-                    Some(r) => {
-                        self.set_temp_race(conn_id, r);
-                        self.create_and_enter(conn_id).await;
+                if input
+                    .get(..4)
+                    .map(|s| s.eq_ignore_ascii_case("help"))
+                    .unwrap_or(false)
+                {
+                    let race_letter = input.chars().nth(5).unwrap_or(' ');
+                    let race = crate::races::parse_race(race_letter);
+                    if race == crate::races::RACE_UNDEFINED {
+                        self.out(conn_id, "\r\nThat's not a race.\r\n");
+                    } else {
+                        let avg = |stat| {
+                            (crate::races::get_race_min(race, stat)
+                                + crate::races::get_race_max(race, stat))
+                                / 2
+                        };
+                        self.out(
+                            conn_id,
+                            &format!(
+                                "\r\nAt 11 as the universal statistic average, your race averages the following abilities:\r\n\
+Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
+                                avg(1),
+                                avg(2),
+                                avg(3),
+                                avg(4),
+                                avg(5),
+                                avg(6)
+                            ),
+                        );
                     }
-                    None => self.out(conn_id, "That's not a race.\r\n"),
+                    return;
+                }
+
+                let parsed = input
+                    .chars()
+                    .next()
+                    .map(crate::races::parse_race)
+                    .unwrap_or(crate::races::RACE_UNDEFINED);
+                if parsed == crate::races::RACE_UNDEFINED {
+                    self.out(conn_id, "\r\nThat's not a race.\r\n");
+                } else {
+                    self.set_temp_race(conn_id, Race::from_u8(parsed as u8), parsed);
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.state = ConState::GetDeity;
+                    }
                 }
             }
+            ConState::GetDeity => {
+                let parsed = input
+                    .chars()
+                    .next()
+                    .map(crate::deity::parse_deity)
+                    .unwrap_or(crate::deity::DEITY_UNDEFINED);
+                if parsed == crate::deity::DEITY_UNDEFINED {
+                    self.out(conn_id, "\r\nThat's not a deity.\r\n");
+                } else {
+                    self.pending.entry(conn_id).or_default().deity = parsed as u8;
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.state = ConState::GetClass;
+                    }
+                }
+            }
+            ConState::GetClass => {
+                let parsed = input
+                    .chars()
+                    .next()
+                    .map(crate::class::parse_class)
+                    .unwrap_or(crate::class::CLASS_UNDEFINED);
+                if parsed == crate::class::CLASS_UNDEFINED {
+                    self.out(conn_id, "\r\nThat's not a class.\r\n");
+                } else {
+                    self.set_temp_class(conn_id, Class::from_u8(parsed as u8));
+                    let newbie = self.pending.get(&conn_id).map(|p| p.newbie).unwrap_or(1);
+                    if newbie == 0 {
+                        if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                            d.state = ConState::GetHometown;
+                        }
+                    } else {
+                        self.pending.entry(conn_id).or_default().hometown = 1;
+                        self.out(
+                            conn_id,
+                            "\r\nYour hometown has been set to the capital city of Anacreon.\r\n\r\n",
+                        );
+                        self.begin_stat_roll(conn_id, true);
+                    }
+                }
+            }
+            ConState::GetHometown => {
+                let parsed = input
+                    .chars()
+                    .next()
+                    .map(crate::class::parse_town)
+                    .unwrap_or(-1);
+                if parsed < 0 {
+                    self.out(conn_id, "\r\nThat's not a town.\r\n");
+                } else {
+                    self.pending.entry(conn_id).or_default().hometown = parsed as RoomVnum;
+                    self.begin_stat_roll(conn_id, false);
+                }
+            }
+            ConState::RollStats => match input.chars().next().map(|c| c.to_ascii_lowercase()) {
+                Some('y') => {
+                    self.create_and_enter(conn_id).await;
+                }
+                _ => self.begin_stat_roll(conn_id, false),
+            },
             _ => {}
         }
 
         // If this input was a password entry and we have now transitioned OUT of
         // the password flow (login success -> Playing, login fail -> Close, or
-        // new-password confirmed -> GetSex), tell the client the server WONT echo
+        // new-password confirmed -> GetNewbie), tell the client the server WONT echo
         // so normal local echo resumes. Staying within the password flow
         // (GetNewPassword -> ConfirmPassword, or a retry) keeps echo suppressed.
         if is_password_state(state) {
@@ -611,17 +764,41 @@ impl Game {
         }
     }
 
-    // Pending creation choices are stashed on the descriptor via a scratch
-    // Character; simplest is to keep them in temp fields. We store them in a
-    // small side map keyed by conn_id.
+    // Pending creation choices are held between C nanny states until stat
+    // acceptance finalizes the new player.
     fn set_temp_sex(&mut self, conn_id: ConnId, s: Gender) {
         self.pending.entry(conn_id).or_default().sex = s;
     }
     fn set_temp_class(&mut self, conn_id: ConnId, c: Class) {
         self.pending.entry(conn_id).or_default().class = c;
     }
-    fn set_temp_race(&mut self, conn_id: ConnId, r: Race) {
-        self.pending.entry(conn_id).or_default().race = r;
+    fn set_temp_race(&mut self, conn_id: ConnId, r: Race, race_index: i32) {
+        let pending = self.pending.entry(conn_id).or_default();
+        pending.race = r;
+        pending.race_index = race_index;
+    }
+
+    fn begin_stat_roll(&mut self, conn_id: ConnId, explain: bool) {
+        let (class, race_index) = {
+            let pending = self.pending.entry(conn_id).or_default();
+            (pending.class, pending.race_index)
+        };
+        let rolled = crate::class::roll_abilities_for(&mut self.state, class, race_index);
+        self.pending.entry(conn_id).or_default().rolled = rolled;
+        if explain {
+            self.out(conn_id, NEWBIE_STAT_EXPLANATION);
+        }
+        if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+            d.state = ConState::RollStats;
+        }
+    }
+
+    fn descriptor_host(&self, conn_id: ConnId) -> String {
+        self.state
+            .descriptors
+            .get(&conn_id)
+            .map(|d| d.host.clone())
+            .unwrap_or_default()
     }
 
     async fn create_and_enter(&mut self, conn_id: ConnId) {
@@ -639,6 +816,41 @@ impl Game {
         let mut ch =
             crate::character::Character::new_player(name.clone(), choices.class, choices.race);
         ch.player.sex = choices.sex;
+        ch.player.deity = choices.deity;
+        ch.player.hometown = choices.hometown;
+        ch.newbie = choices.newbie;
+        ch.real_abils = if choices.rolled.str > 0 {
+            choices.rolled
+        } else {
+            crate::class::roll_abilities_for(&mut self.state, choices.class, choices.race_index)
+        };
+        ch.aff_abils = ch.real_abils;
+        ch.clan = -1;
+        ch.clan_rank = -1;
+        ch.tloadroom = -1;
+        ch.mapx = -1;
+        ch.mapy = -1;
+        ch.prf_flags |= crate::flags::PRF_NOLOOKSTACK
+            | crate::flags::PRF_DISPHP
+            | crate::flags::PRF_DISPMANA
+            | crate::flags::PRF_DISPMOVE
+            | crate::flags::PRF_DISPEXP;
+        ch.prf2_flags |= crate::flags::PRF2_DISPMOB;
+
+        let temp_id = self.state.create_char(ch);
+        crate::class::do_start_init(&mut self.state, temp_id);
+        let mut ch = match self.state.get_char(temp_id).cloned() {
+            Some(ch) => ch,
+            None => {
+                self.out(conn_id, "Couldn't create your character. Try later.\r\n");
+                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    d.state = ConState::Close;
+                }
+                return;
+            }
+        };
+        self.state.extract_char(temp_id);
+
         match self.db.create_player(&ch, &pass).await {
             Ok(idnum) => {
                 // The in-memory char MUST take the assigned idnum, or the
@@ -1340,16 +1552,31 @@ impl Game {
             ConState::GetOldPassword => "Password: ".to_string(),
             ConState::GetNewPassword => "Give me a password for your character: ".to_string(),
             ConState::ConfirmPassword => "Please retype password: ".to_string(),
+            ConState::GetNewbie => {
+                "Are you completely new to MUDing &c(&YY&c/&YN&c)&n? ".to_string()
+            }
             ConState::GetSex => "\r\nWhat is your sex (M/F)? ".to_string(),
+            ConState::GetRace => format!(
+                "{}\r\nTo see a race's average statistics type help <race letter>.\r\nRace: ",
+                crate::races::RACE_MENU
+            ),
+            ConState::GetDeity => format!("{}\r\nDeity: ", crate::deity::DEITY_MENU),
             ConState::GetClass => {
-                "\r\nSelect a class:\r\n  [W]arrior [C]leric [T]hief [M]agic-user [A]rtisan\r\nClass: "
-                    .to_string()
+                format!("{}\r\nClass: ", crate::class::CLASS_MENU)
             }
-            ConState::GetRace => {
-                "\r\nSelect a race:\r\n  [H]uman [E]lf [D]warf [G]nome\r\nRace: ".to_string()
-            }
+            ConState::GetHometown => format!("{}\r\nTown: ", crate::class::TOWN_MENU),
+            ConState::RollStats => self
+                .pending
+                .get(&conn_id)
+                .map(|p| stat_roll_prompt(p.rolled))
+                .unwrap_or_default(),
             ConState::Playing => {
-                if let Some(cid) = self.state.descriptors.get(&conn_id).and_then(|d| d.character) {
+                if let Some(cid) = self
+                    .state
+                    .descriptors
+                    .get(&conn_id)
+                    .and_then(|d| d.character)
+                {
                     if let Some(c) = self.state.get_char(cid) {
                         format!(
                             "&g{}H &c{}M &y{}V&n> ",
@@ -1543,6 +1770,11 @@ struct PendingChoices {
     sex: Gender,
     class: Class,
     race: Race,
+    race_index: i32,
+    newbie: u8,
+    deity: u8,
+    hometown: RoomVnum,
+    rolled: Abilities,
 }
 impl Default for PendingChoices {
     fn default() -> Self {
@@ -1550,8 +1782,21 @@ impl Default for PendingChoices {
             sex: Gender::Neutral,
             class: Class::Warrior,
             race: Race::Human,
+            race_index: crate::races::RACE_HUMAN,
+            newbie: 1,
+            deity: crate::deity::DEITY_AETOS as u8,
+            hometown: 1,
+            rolled: Abilities::default(),
         }
     }
+}
+
+fn stat_roll_prompt(abils: Abilities) -> String {
+    format!(
+        "\r\nStr: {} Int: {} Wis: {} Dex: {} Con: {} Cha: {}\r\n\
+Are these values acceptable? (Y/&YN&n): ",
+        abils.str, abils.intel, abils.wis, abils.dex, abils.con, abils.cha
+    )
 }
 
 fn normalize_name(s: &str) -> String {
@@ -1566,4 +1811,290 @@ fn valid_name(name: &str) -> bool {
     // C: MAX_NAME_LENGTH == 20 (structs.h) — the player-name field is 20+1, and
     // the nanny name-entry path caps names at MAX_NAME_LENGTH, not 16 (BUG #16).
     name.len() >= 2 && name.len() <= 20 && name.chars().all(|c| c.is_ascii_alphabetic())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::mock_database::MockDatabase;
+    use crate::DatabaseInterface;
+    use std::sync::Arc;
+    use std::sync::{Mutex, OnceLock};
+
+    fn test_game(db: Arc<MockDatabase>) -> Game {
+        let db_trait: Arc<dyn DatabaseInterface> = db;
+        Game::new(GameState::new(Config::default()), db_trait)
+    }
+
+    fn attach_descriptor(game: &mut Game, conn: ConnId) {
+        attach_descriptor_host(game, conn, "example.test");
+    }
+
+    fn attach_descriptor_host(game: &mut Game, conn: ConnId, host: &str) {
+        game.state
+            .descriptors
+            .insert(conn, Descriptor::new(conn, host.to_string()));
+    }
+
+    fn descriptor_state(game: &Game, conn: ConnId) -> ConState {
+        game.state.descriptors.get(&conn).unwrap().state
+    }
+
+    fn ban_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    fn temp_ban_lib(name: &str, badsites: &str) -> String {
+        let path =
+            std::env::temp_dir().join(format!("deltamud-ban-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(path.join("etc")).unwrap();
+        std::fs::create_dir_all(path.join("misc")).unwrap();
+        std::fs::write(path.join("etc/badsites"), badsites).unwrap();
+        std::fs::write(path.join("misc/xnames"), "").unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    #[tokio::test]
+    async fn creation_walks_c_nanny_choice_sequence() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        let conn = ConnId(1);
+        attach_descriptor(&mut game, conn);
+
+        game.nanny(conn, "Alice".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::ConfirmName);
+        game.nanny(conn, "y".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::GetNewPassword);
+        game.nanny(conn, "secret".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::ConfirmPassword);
+        game.nanny(conn, "secret".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::GetNewbie);
+        game.nanny(conn, "n".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::GetSex);
+        game.nanny(conn, "f".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::GetRace);
+        game.nanny(conn, "a".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::GetDeity);
+        game.nanny(conn, "b".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::GetClass);
+        game.nanny(conn, "c".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::GetHometown);
+        game.nanny(conn, "b".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::RollStats);
+
+        let pending = game.pending.get(&conn).unwrap();
+        assert_eq!(pending.newbie, 0);
+        assert_eq!(pending.sex, Gender::Female);
+        assert_eq!(pending.race_index, crate::races::RACE_HUMAN);
+        assert_eq!(pending.deity, crate::deity::DEITY_CORGUS as u8);
+        assert_eq!(pending.class, Class::Warrior);
+        assert_eq!(pending.hometown, 2);
+        assert!(pending.rolled.str > 0);
+        assert!(pending.rolled.con > 0);
+    }
+
+    #[tokio::test]
+    async fn accepted_creation_stats_are_started_and_saved() {
+        let db = Arc::new(MockDatabase::new());
+        let seed = crate::character::Character::new_player(
+            "Seed".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        db.create_player(&seed, "seedpass").await.unwrap();
+
+        let mut game = test_game(db.clone());
+        let conn = ConnId(2);
+        attach_descriptor(&mut game, conn);
+
+        game.nanny(conn, "Bob".to_string()).await;
+        game.nanny(conn, "y".to_string()).await;
+        game.nanny(conn, "secret".to_string()).await;
+        game.nanny(conn, "secret".to_string()).await;
+        game.nanny(conn, "y".to_string()).await;
+        game.nanny(conn, "m".to_string()).await;
+        game.nanny(conn, "d".to_string()).await;
+        game.nanny(conn, "c".to_string()).await;
+        game.nanny(conn, "b".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::RollStats);
+        let accepted = game.pending.get(&conn).unwrap().rolled;
+
+        game.nanny(conn, "y".to_string()).await;
+
+        let saved = db.load_player("Bob").await.unwrap();
+        assert_eq!(saved.idnum, 2);
+        assert_eq!(saved.player.level, 1);
+        assert_eq!(saved.trust, 1);
+        assert_eq!(saved.points.exp, 1);
+        assert_eq!(saved.player.sex, Gender::Male);
+        assert_eq!(saved.race_index_for_test(), crate::races::RACE_DWARF);
+        assert_eq!(saved.player.deity, crate::deity::DEITY_LYTHERN as u8);
+        assert_eq!(saved.player.class, Class::Thief);
+        assert_eq!(saved.player.hometown, 1);
+        assert_eq!(saved.newbie, 1);
+        assert_eq!(saved.clan, -1);
+        assert_eq!(saved.clan_rank, -1);
+        assert_eq!(saved.tloadroom, -1);
+        assert_eq!(saved.real_abils.str, accepted.str);
+        assert_eq!(saved.aff_abils.dex, accepted.dex);
+        assert_eq!(saved.points.hit, saved.points.max_hit);
+        assert_eq!(saved.points.mana, saved.points.max_mana);
+        assert_eq!(saved.points.move_points, saved.points.max_move);
+        assert_eq!(saved.conditions[THIRST], 24);
+        assert_eq!(saved.conditions[FULL], 24);
+        assert_eq!(saved.conditions[DRUNK], 0);
+        assert!(saved.prf_flags & crate::flags::PRF_DISPHP != 0);
+        assert!(saved.prf_flags & crate::flags::PRF_DISPMANA != 0);
+        assert!(saved.prf_flags & crate::flags::PRF_DISPMOVE != 0);
+        assert!(saved.prf_flags & crate::flags::PRF_DISPEXP != 0);
+        assert!(saved.prf_flags & crate::flags::PRF_NOLOOKSTACK != 0);
+        assert!(saved.prf2_flags & crate::flags::PRF2_DISPMOB != 0);
+    }
+
+    #[tokio::test]
+    async fn first_created_character_still_bootstraps_implementor() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        let conn = ConnId(3);
+        attach_descriptor(&mut game, conn);
+
+        game.nanny(conn, "First".to_string()).await;
+        game.nanny(conn, "y".to_string()).await;
+        game.nanny(conn, "secret".to_string()).await;
+        game.nanny(conn, "secret".to_string()).await;
+        game.nanny(conn, "y".to_string()).await;
+        game.nanny(conn, "m".to_string()).await;
+        game.nanny(conn, "a".to_string()).await;
+        game.nanny(conn, "a".to_string()).await;
+        game.nanny(conn, "c".to_string()).await;
+        game.nanny(conn, "y".to_string()).await;
+
+        let saved = db.load_player("First").await.unwrap();
+        assert_eq!(saved.idnum, 1);
+        assert_eq!(saved.player.level, LVL_IMPL);
+        assert_eq!(saved.player.title.as_deref(), Some("the Implementor"));
+        assert_ne!(
+            saved.godcmds1 | saved.godcmds2 | saved.godcmds3 | saved.godcmds4,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn ban_new_blocks_new_character_confirmation_by_host() {
+        let _guard = ban_test_lock();
+        let lib = temp_ban_lib("new", "new *.blocked.test 0 Root\n");
+        crate::ban::boot_ban(&lib);
+
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        let conn = ConnId(5);
+        attach_descriptor_host(&mut game, conn, "sub.blocked.test");
+
+        game.nanny(conn, "Denied".to_string()).await;
+        game.nanny(conn, "y".to_string()).await;
+
+        assert_eq!(descriptor_state(&game, conn), ConState::Close);
+        assert!(game
+            .state
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("new characters are not allowed"));
+        let empty = temp_ban_lib("empty-new", "");
+        crate::ban::boot_ban(&empty);
+    }
+
+    #[tokio::test]
+    async fn ban_select_blocks_login_without_siteok_after_password() {
+        let _guard = ban_test_lock();
+        let lib = temp_ban_lib("select", "select blocked.test 0 Root\n");
+        crate::ban::boot_ban(&lib);
+
+        let db = Arc::new(MockDatabase::new());
+        let ch = crate::character::Character::new_player(
+            "Blocked".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        db.create_player(&ch, "secret").await.unwrap();
+        let mut game = test_game(db);
+        let conn = ConnId(6);
+        attach_descriptor_host(&mut game, conn, "blocked.test");
+
+        game.nanny(conn, "Blocked".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::GetOldPassword);
+        game.nanny(conn, "secret".to_string()).await;
+
+        assert_eq!(descriptor_state(&game, conn), ConState::Close);
+        assert!(game
+            .state
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("has not been cleared for login"));
+        let empty = temp_ban_lib("empty-select", "");
+        crate::ban::boot_ban(&empty);
+    }
+
+    #[test]
+    fn complex_alias_expands_through_descriptor_queue_one_pulse_at_a_time() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        let conn = ConnId(4);
+        let mut ch = crate::character::Character::new_player(
+            "Aliaser".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        ch.idnum = 44;
+        ch.desc = Some(conn);
+        let cid = game.state.create_char(ch);
+
+        crate::alias::set_aliases(
+            44,
+            vec![crate::alias::AliasEntry {
+                alias: "combo".to_string(),
+                replacement: "bogus-one;bogus-two".to_string(),
+                atype: 1,
+            }],
+        );
+
+        let mut d = Descriptor::new(conn, "example.test".to_string());
+        d.state = ConState::Playing;
+        d.character = Some(cid);
+        d.input_queue
+            .push_back(QueuedInput::raw("combo".to_string()));
+        game.state.descriptors.insert(conn, d);
+
+        game.process_input_queues();
+        let queued = &game.state.descriptors.get(&conn).unwrap().input_queue;
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued.front().unwrap().line, "bogus-two");
+        assert!(queued.front().unwrap().aliased);
+
+        game.process_input_queues();
+        assert!(game
+            .state
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .input_queue
+            .is_empty());
+        crate::alias::clear_aliases(44);
+    }
+
+    trait RaceIndexForTest {
+        fn race_index_for_test(&self) -> i32;
+    }
+
+    impl RaceIndexForTest for crate::character::Character {
+        fn race_index_for_test(&self) -> i32 {
+            self.player.race as u8 as i32
+        }
+    }
 }

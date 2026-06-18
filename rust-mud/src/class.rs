@@ -36,6 +36,7 @@
 // hold a borrow across a mutation. Self-contained tables, no GameState held
 // across mutation. Output strings track the C byte-for-byte.
 
+use crate::character::Abilities;
 use crate::state::GameState;
 use crate::types::*;
 
@@ -670,12 +671,23 @@ pub fn invalid_class(class: Class, obj_extra_flags: i64) -> bool {
 /// races beyond the stat_table degrade to a 0 window via get_race_min/max,
 /// exactly as the C bounds guard would.
 pub fn roll_real_abils(g: &mut GameState, ch: CharId) {
-    use crate::races::{get_race_max, get_race_min};
-
     let (class, race) = match g.get_char(ch) {
         Some(c) => (c.player.class, c.player.race as u8 as i32),
         None => return,
     };
+
+    let rolled = roll_abilities_for(g, class, race);
+    if let Some(c) = g.get_char_mut(ch) {
+        c.real_abils = rolled;
+        c.aff_abils = c.real_abils;
+    }
+}
+
+/// Roll a standalone ability block using the same class/race weighting as the C
+/// `roll_real_abils`. Character creation uses this before the character is
+/// persisted so the player can accept/reroll the stats first.
+pub fn roll_abilities_for(g: &mut GameState, class: Class, race: i32) -> Abilities {
+    use crate::races::{get_race_max, get_race_min};
 
     // Class-weighted +number(2,3) on the two primary stats.
     let (mut sa, mut ia, mut wa, mut da, mut ca) = (0i32, 0i32, 0i32, 0i32, 0i32);
@@ -720,15 +732,14 @@ pub fn roll_real_abils(g: &mut GameState, ch: CharId) {
     // 18-strength percentile add.
     let str_add = if str_v == 18 { g.rng.number(0, 100) } else { 0 };
 
-    if let Some(c) = g.get_char_mut(ch) {
-        c.real_abils.str_add = str_add as i8;
-        c.real_abils.str = str_v as i8;
-        c.real_abils.intel = int_v as i8;
-        c.real_abils.wis = wis_v as i8;
-        c.real_abils.dex = dex_v as i8;
-        c.real_abils.con = con_v as i8;
-        c.real_abils.cha = cha_v as i8;
-        c.aff_abils = c.real_abils;
+    Abilities {
+        str: str_v as i8,
+        str_add: str_add as i8,
+        intel: int_v as i8,
+        wis: wis_v as i8,
+        dex: dex_v as i8,
+        con: con_v as i8,
+        cha: cha_v as i8,
     }
 }
 

@@ -40,7 +40,6 @@ const XNAME_FILE_REL: &str = "misc/xnames";
 // MAX_INVALID_NAMES (ban.c) — guard rail mirrored for parity logging only.
 const MAX_INVALID_NAMES: usize = 200;
 
-
 // ---------------------------------------------------------------------------
 // BanType — the four ban severities (db.h BAN_NOT/BAN_NEW/BAN_SELECT/BAN_ALL),
 // ordered so the numeric value is the C `type` int and `Ord` mirrors C's
@@ -145,8 +144,20 @@ fn wildmatch(mask: &str, string: &str) -> bool {
     // The C code indexes mask[mpos]/string[spos] and compares strlen-pos-1
     // against 0; out-of-range reads in the original land on the NUL terminator.
     // We treat any read at/after the slice end as 0 ('\0').
-    let mc = |i: usize| -> u8 { if i < mlen { m[i] } else { 0 } };
-    let sc = |i: usize| -> u8 { if i < slen { s[i] } else { 0 } };
+    let mc = |i: usize| -> u8 {
+        if i < mlen {
+            m[i]
+        } else {
+            0
+        }
+    };
+    let sc = |i: usize| -> u8 {
+        if i < slen {
+            s[i]
+        } else {
+            0
+        }
+    };
 
     loop {
         // strlen(string)-spos-1==0  <=>  spos == slen-1 (last char), and the

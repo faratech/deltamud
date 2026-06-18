@@ -47,7 +47,11 @@ pub fn load_messages(lib_path: &str) {
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("combat message file {} not read: {} -- skill messages disabled", path, e);
+            log::warn!(
+                "combat message file {} not read: {} -- skill messages disabled",
+                path,
+                e
+            );
             let _ = FIGHT_MESSAGES.set(Vec::new());
             return;
         }
@@ -81,15 +85,34 @@ pub fn load_messages(lib_path: &str) {
 
         if let Some(at) = a_type {
             let set = MessageSet {
-                die: MsgType { attacker: f[0].take(), victim: f[1].take(), room: f[2].take() },
-                miss: MsgType { attacker: f[3].take(), victim: f[4].take(), room: f[5].take() },
-                hit: MsgType { attacker: f[6].take(), victim: f[7].take(), room: f[8].take() },
-                god: MsgType { attacker: f[9].take(), victim: f[10].take(), room: f[11].take() },
+                die: MsgType {
+                    attacker: f[0].take(),
+                    victim: f[1].take(),
+                    room: f[2].take(),
+                },
+                miss: MsgType {
+                    attacker: f[3].take(),
+                    victim: f[4].take(),
+                    room: f[5].take(),
+                },
+                hit: MsgType {
+                    attacker: f[6].take(),
+                    victim: f[7].take(),
+                    room: f[8].take(),
+                },
+                god: MsgType {
+                    attacker: f[9].take(),
+                    victim: f[10].take(),
+                    room: f[11].take(),
+                },
             };
             if let Some(ml) = table.iter_mut().find(|m| m.a_type == at) {
                 ml.messages.push(set);
             } else {
-                table.push(MessageList { a_type: at, messages: vec![set] });
+                table.push(MessageList {
+                    a_type: at,
+                    messages: vec![set],
+                });
             }
         }
 
@@ -105,7 +128,11 @@ pub fn load_messages(lib_path: &str) {
     let types = table.len();
     let total: usize = table.iter().map(|m| m.messages.len()).sum();
     let _ = FIGHT_MESSAGES.set(table);
-    log::info!("   {} attack-message type(s), {} message(s) loaded.", types, total);
+    log::info!(
+        "   {} attack-message type(s), {} message(s) loaded.",
+        types,
+        total
+    );
 }
 
 /// Resolve a record's name to its attack-type number. A weapon type matches an
@@ -130,8 +157,17 @@ fn resolve_atype(name: &str) -> Option<i32> {
 /// `attacktype` to attacker / victim / room, branching on god-victim / death /
 /// hit / miss. Returns true iff a message existed, so the weapon path can fall
 /// back to dam_message when it doesn't.
-pub fn skill_message(g: &mut GameState, dam: i32, ch: CharId, vict: CharId, attacktype: i32) -> bool {
-    let nmsgs = match FIGHT_MESSAGES.get().and_then(|t| t.iter().find(|m| m.a_type == attacktype)) {
+pub fn skill_message(
+    g: &mut GameState,
+    dam: i32,
+    ch: CharId,
+    vict: CharId,
+    attacktype: i32,
+) -> bool {
+    let nmsgs = match FIGHT_MESSAGES
+        .get()
+        .and_then(|t| t.iter().find(|m| m.a_type == attacktype))
+    {
         Some(ml) if !ml.messages.is_empty() => ml.messages.len(),
         _ => return false,
     };
@@ -139,7 +175,12 @@ pub fn skill_message(g: &mut GameState, dam: i32, ch: CharId, vict: CharId, atta
     // hold no borrow of the table across the act() calls.
     let nr = g.rng.dice(1, nmsgs as i32);
     let set = {
-        let ml = FIGHT_MESSAGES.get().unwrap().iter().find(|m| m.a_type == attacktype).unwrap();
+        let ml = FIGHT_MESSAGES
+            .get()
+            .unwrap()
+            .iter()
+            .find(|m| m.a_type == attacktype)
+            .unwrap();
         ml.messages[(nr - 1).clamp(0, nmsgs as i32 - 1) as usize].clone()
     };
 

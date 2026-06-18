@@ -33,16 +33,44 @@ use std::sync::{Mutex, OnceLock};
 // Index == bit position; trailing "\n" terminates (matches sprintbit usage).
 // ---------------------------------------------------------------------------
 const TRIG_TYPES: &[&str] = &[
-    "Global", "Random", "Command", "Speech", "Act", "Death", "Greet", "Greet-All", "Entry",
-    "Receive", "Fight", "HitPrcnt", "Bribe", "Load", "Memory", "\n",
+    "Global",
+    "Random",
+    "Command",
+    "Speech",
+    "Act",
+    "Death",
+    "Greet",
+    "Greet-All",
+    "Entry",
+    "Receive",
+    "Fight",
+    "HitPrcnt",
+    "Bribe",
+    "Load",
+    "Memory",
+    "\n",
 ];
 const OTRIG_TYPES: &[&str] = &[
     "Global", "Random", "Command", "Fight", "UNUSED", "Timer", "Get", "Drop", "Give", "Wear",
     "UNUSED", "Remove", "UNUSED", "Load", "UNUSED", "\n",
 ];
 const WTRIG_TYPES: &[&str] = &[
-    "Global", "Random", "Command", "Speech", "UNUSED", "Zone Reset", "Enter", "Drop", "UNUSED",
-    "UNUSED", "UNUSED", "UNUSED", "UNUSED", "UNUSED", "UNUSED", "\n",
+    "Global",
+    "Random",
+    "Command",
+    "Speech",
+    "UNUSED",
+    "Zone Reset",
+    "Enter",
+    "Drop",
+    "UNUSED",
+    "UNUSED",
+    "UNUSED",
+    "UNUSED",
+    "UNUSED",
+    "UNUSED",
+    "UNUSED",
+    "\n",
 ];
 
 // dg_olc.h: NUM_TRIG_TYPE_FLAGS 15, MAX_CMD_LENGTH 16384.
@@ -75,8 +103,8 @@ enum Mode {
 /// and OLC_VAL(d) (the dirty flag).
 struct TrigEditState {
     mode: Mode,
-    vnum: i32,    // OLC_NUM
-    znum: usize,  // OLC_ZNUM (index into g.zones)
+    vnum: i32,   // OLC_NUM
+    znum: usize, // OLC_ZNUM (index into g.zones)
     // scratch trigger (OLC_TRIG): the prototype we're editing.
     name: String,
     attach_type: i32,
@@ -213,7 +241,12 @@ pub fn do_trigedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
     let _ = buf2;
     let number: i32;
-    if !buf1.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    if !buf1
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
         // C: only "save" is special for a non-digit arg (strn_cmp("save",buf1,4)).
         // Triggers autosave, so the save path just tells the builder there's
         // nothing to do; anything else is the "Yikes!" rejection.
@@ -455,14 +488,24 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             return;
         }
         Mode::ConfirmSaveString => {
-            match line.trim_start().chars().next().map(|c| c.to_ascii_lowercase()) {
+            match line
+                .trim_start()
+                .chars()
+                .next()
+                .map(|c| c.to_ascii_lowercase())
+            {
                 Some('y') => {
                     save(g, conn);
                     let cname = conn_char(g, conn)
                         .and_then(|c| g.get_char(c))
                         .map(|c| c.player.name.clone())
                         .unwrap_or_default();
-                    let vnum = states().lock().unwrap().get(&conn).map(|s| s.vnum).unwrap_or(0);
+                    let vnum = states()
+                        .lock()
+                        .unwrap()
+                        .get(&conn)
+                        .map(|s| s.vnum)
+                        .unwrap_or(0);
                     mudlog(g, &format!("OLC: {} edits trigger {}", cname, vnum));
                     cleanup(g, conn);
                 }
@@ -483,7 +526,11 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         Mode::Name => {
             let arg = line.trim();
             if let Some(st) = states().lock().unwrap().get_mut(&conn) {
-                st.name = if arg.is_empty() { "undefined".to_string() } else { arg.to_string() };
+                st.name = if arg.is_empty() {
+                    "undefined".to_string()
+                } else {
+                    arg.to_string()
+                };
                 st.val += 1;
             }
         }
@@ -533,10 +580,19 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
 }
 
 fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
-    let c = line.trim_start().chars().next().map(|c| c.to_ascii_lowercase());
+    let c = line
+        .trim_start()
+        .chars()
+        .next()
+        .map(|c| c.to_ascii_lowercase());
     match c {
         Some('q') => {
-            let val = states().lock().unwrap().get(&conn).map(|s| s.val).unwrap_or(0);
+            let val = states()
+                .lock()
+                .unwrap()
+                .get(&conn)
+                .map(|s| s.val)
+                .unwrap_or(0);
             if val != 0 {
                 let ttype = states()
                     .lock()
@@ -545,11 +601,7 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
                     .map(|s| s.trigger_type)
                     .unwrap_or(0);
                 if ttype == 0 {
-                    send(
-                        g,
-                        conn,
-                        "Invalid Trigger Type! Answer a to abort quit!\r\n",
-                    );
+                    send(g, conn, "Invalid Trigger Type! Answer a to abort quit!\r\n");
                 }
                 send(
                     g,
@@ -589,7 +641,11 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
                 "Enter trigger commands: (/s saves /h for help)\r\n\r\n",
             );
             // Echo the current buffer (C sends OLC_STORAGE then dups to backstr).
-            let storage = states().lock().unwrap().get(&conn).map(|s| s.storage.clone());
+            let storage = states()
+                .lock()
+                .unwrap()
+                .get(&conn)
+                .map(|s| s.storage.clone());
             if let Some(s) = storage {
                 if !s.is_empty() {
                     send(g, conn, &s);
@@ -680,7 +736,12 @@ fn commands_input(g: &mut GameState, conn: ConnId, line: &str) {
 
     // Append the line to the buffer (only if it was not a command).
     if !action {
-        let mut buf = states().lock().unwrap().get(&conn).map(|s| s.storage.clone()).unwrap_or_default();
+        let mut buf = states()
+            .lock()
+            .unwrap()
+            .get(&conn)
+            .map(|s| s.storage.clone())
+            .unwrap_or_default();
         let mut append = str_in.clone();
         if buf.is_empty() {
             if append.len() > MAX_CMD_LENGTH {
@@ -752,17 +813,24 @@ fn commands_input(g: &mut GameState, conn: ConnId, line: &str) {
 }
 
 fn buffer_nonempty(conn: ConnId) -> bool {
-    states().lock().unwrap().get(&conn).map(|s| !s.storage.is_empty()).unwrap_or(false)
+    states()
+        .lock()
+        .unwrap()
+        .get(&conn)
+        .map(|s| !s.storage.is_empty())
+        .unwrap_or(false)
 }
 
 // Split the flat storage into logical lines (the cmdlist_element chain). Lines
 // are CRLF-separated; a trailing empty segment is dropped.
 fn buffer_lines(conn: ConnId) -> Vec<String> {
-    let buf = states().lock().unwrap().get(&conn).map(|s| s.storage.clone()).unwrap_or_default();
-    let mut v: Vec<String> = buf
-        .split("\r\n")
-        .map(|l| l.to_string())
-        .collect();
+    let buf = states()
+        .lock()
+        .unwrap()
+        .get(&conn)
+        .map(|s| s.storage.clone())
+        .unwrap_or_default();
+    let mut v: Vec<String> = buf.split("\r\n").map(|l| l.to_string()).collect();
     // A buffer that ends in CRLF leaves a trailing empty element; drop it.
     if v.last().map(|l| l.is_empty()).unwrap_or(false) {
         v.pop();
@@ -800,7 +868,10 @@ fn parse_action_help(g: &mut GameState, conn: ConnId) {
 
 fn parse_action_list(g: &mut GameState, conn: ConnId, args: &str, numbered: bool) {
     let lines = buffer_lines(conn);
-    let parts: Vec<i32> = args.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+    let parts: Vec<i32> = args
+        .split_whitespace()
+        .filter_map(|s| s.parse().ok())
+        .collect();
     let (mut start, end): (usize, usize) = match parts.len() {
         0 => (1, lines.len()),
         1 => (parts[0].max(1) as usize, parts[0].max(1) as usize),
@@ -884,7 +955,12 @@ fn parse_action_replace(g: &mut GameState, conn: ConnId, args: &str) {
             return;
         }
     };
-    let mut buf = states().lock().unwrap().get(&conn).map(|s| s.storage.clone()).unwrap_or_default();
+    let mut buf = states()
+        .lock()
+        .unwrap()
+        .get(&conn)
+        .map(|s| s.storage.clone())
+        .unwrap_or_default();
     if let Some(pos) = buf.find(&a) {
         buf.replace_range(pos..pos + a.len(), &b);
         if let Some(st) = states().lock().unwrap().get_mut(&conn) {
@@ -1007,7 +1083,11 @@ fn save(g: &mut GameState, conn: ConnId) {
     for p in &zone_protos {
         text.push_str(&format!("#{}\n", p.vnum));
         let bit_buf = sprintbits(p.trigger_type);
-        let pname = if p.name.is_empty() { "unknown trigger" } else { &p.name };
+        let pname = if p.name.is_empty() {
+            "unknown trigger"
+        } else {
+            &p.name
+        };
         text.push_str(&format!(
             "{}~\n{} {} {}\n{}~\n",
             pname, p.attach_type, bit_buf, p.narg, p.arglist

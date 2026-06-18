@@ -40,7 +40,8 @@ use crate::flags::*;
 use crate::object::ObjectType;
 use crate::spell_parser::{
     cast_spell, find_skill_num, skill_name, spell_info, SPELL_BLINDNESS, SPELL_CURE_BLIND,
-    SPELL_HEAL, SPELL_POISON, SPELL_REGEN_MANA, SPELL_REMOVE_CURSE, SPELL_REMOVE_POISON, SPELL_SLEEP,
+    SPELL_HEAL, SPELL_POISON, SPELL_REGEN_MANA, SPELL_REMOVE_CURSE, SPELL_REMOVE_POISON,
+    SPELL_SLEEP,
 };
 use crate::state::GameState;
 use crate::types::*;
@@ -90,11 +91,15 @@ fn get_level(g: &GameState, ch: CharId) -> i32 {
 }
 
 fn get_class(g: &GameState, ch: CharId) -> Class {
-    g.get_char(ch).map(|c| c.player.class).unwrap_or(Class::Warrior)
+    g.get_char(ch)
+        .map(|c| c.player.class)
+        .unwrap_or(Class::Warrior)
 }
 
 fn get_name(g: &GameState, ch: CharId) -> String {
-    g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default()
+    g.get_char(ch)
+        .map(|c| c.player.name.clone())
+        .unwrap_or_default()
 }
 
 fn in_room(g: &GameState, ch: CharId) -> Option<RoomRnum> {
@@ -103,11 +108,15 @@ fn in_room(g: &GameState, ch: CharId) -> Option<RoomRnum> {
 
 fn awake(g: &GameState, ch: CharId) -> bool {
     // AWAKE(ch): GET_POS(ch) > POS_SLEEPING.
-    g.get_char(ch).map(|c| c.position > Position::Sleeping).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.position > Position::Sleeping)
+        .unwrap_or(false)
 }
 
 fn position(g: &GameState, ch: CharId) -> Position {
-    g.get_char(ch).map(|c| c.position).unwrap_or(Position::Standing)
+    g.get_char(ch)
+        .map(|c| c.position)
+        .unwrap_or(Position::Standing)
 }
 
 fn fighting(g: &GameState, ch: CharId) -> Option<CharId> {
@@ -123,7 +132,9 @@ fn get_gold(g: &GameState, ch: CharId) -> i32 {
 }
 
 fn get_int(g: &GameState, ch: CharId) -> i32 {
-    g.get_char(ch).map(|c| c.aff_abils.intel as i32).unwrap_or(13)
+    g.get_char(ch)
+        .map(|c| c.aff_abils.intel as i32)
+        .unwrap_or(13)
 }
 
 fn room_vnum(g: &GameState, rnum: RoomRnum) -> RoomVnum {
@@ -131,7 +142,9 @@ fn room_vnum(g: &GameState, rnum: RoomRnum) -> RoomVnum {
 }
 
 fn plr_flag(g: &GameState, ch: CharId, bit: i64) -> bool {
-    g.get_char(ch).map(|c| !c.is_npc && c.act_flags & bit != 0).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| !c.is_npc && c.act_flags & bit != 0)
+        .unwrap_or(false)
 }
 
 /// CMD_IS(name): the command word the interpreter dispatched matches `name`.
@@ -244,7 +257,10 @@ fn list_skills(g: &mut GameState, ch: CharId) {
             if practices == 1 { "" } else { "s" }
         )
     };
-    buf.push_str(&format!("You know of the following {}s:\r\n", splskl(class)));
+    buf.push_str(&format!(
+        "You know of the following {}s:\r\n",
+        splskl(class)
+    ));
 
     // Build the (name, skill_num) list of everything this class can know at its
     // level, then sort by name (the spell_sort_info alphabetisation).
@@ -264,7 +280,10 @@ fn list_skills(g: &mut GameState, ch: CharId) {
     rows.sort_by(|a, b| a.0.cmp(b.0));
 
     for (name, num) in rows {
-        let pct = g.get_char(ch).map(|c| c.skill(num as u16) as i32).unwrap_or(0);
+        let pct = g
+            .get_char(ch)
+            .map(|c| c.skill(num as u16) as i32)
+            .unwrap_or(0);
         buf.push_str(&format!("{:<20} {}\r\n", name, how_good(pct)));
     }
 
@@ -297,12 +316,18 @@ pub fn guild(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, arg: &str) -
     let skill_num = find_skill_num(argument);
 
     if skill_num < 1 || level < spell_info(skill_num).min_level[cls] {
-        g.send_to_char(ch, &format!("You do not know of that {}.\r\n", splskl(class)));
+        g.send_to_char(
+            ch,
+            &format!("You do not know of that {}.\r\n", splskl(class)),
+        );
         return true;
     }
 
     let learned = crate::class::prac_params(0, class); // LEARNED_LEVEL
-    let cur = g.get_char(ch).map(|c| c.skill(skill_num as u16) as i32).unwrap_or(0);
+    let cur = g
+        .get_char(ch)
+        .map(|c| c.skill(skill_num as u16) as i32)
+        .unwrap_or(0);
     if cur >= learned {
         g.send_to_char(ch, "You are already learned in that area.\r\n");
         return true;
@@ -366,7 +391,10 @@ pub fn guild_guard(g: &mut GameState, ch: CharId, me: CharId, cmd: &str, _arg: &
     };
 
     // IS_AFFECTED(guard, AFF_BLIND) -> the guard can't see to block.
-    let guard_blind = g.get_char(me).map(|c| c.affect_flags & AFF_BLIND != 0).unwrap_or(false);
+    let guard_blind = g
+        .get_char(me)
+        .map(|c| c.affect_flags & AFF_BLIND != 0)
+        .unwrap_or(false);
     if guard_blind {
         return false;
     }
@@ -390,7 +418,15 @@ pub fn guild_guard(g: &mut GameState, ch: CharId, me: CharId, cmd: &str, _arg: &
     }
 
     g.send_to_char(ch, "The guard humiliates you, and blocks your way.\r\n");
-    act(g, "The guard humiliates $n, and blocks $s way.", false, ch, None, ActArg::None, To::Room);
+    act(
+        g,
+        "The guard humiliates $n, and blocks $s way.",
+        false,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
     true
 }
 
@@ -414,7 +450,15 @@ pub fn dump(g: &mut GameState, ch: CharId, _me: RoomRnum, cmd: &str, arg: &str) 
             Some(o) => o,
             None => break,
         };
-        act(g, "$p vanishes in a puff of smoke!", false, ch, Some(k), ActArg::None, To::Room);
+        act(
+            g,
+            "$p vanishes in a puff of smoke!",
+            false,
+            ch,
+            Some(k),
+            ActArg::None,
+            To::Room,
+        );
         g.obj_from_anywhere(k);
         g.extract_obj(k);
     }
@@ -434,7 +478,15 @@ pub fn dump(g: &mut GameState, ch: CharId, _me: RoomRnum, cmd: &str, arg: &str) 
             Some(o) => o,
             None => break,
         };
-        act(g, "$p vanishes in a puff of smoke!", false, ch, Some(k), ActArg::None, To::Room);
+        act(
+            g,
+            "$p vanishes in a puff of smoke!",
+            false,
+            ch,
+            Some(k),
+            ActArg::None,
+            To::Room,
+        );
         let cost = g.get_obj(k).map(|o| o.cost).unwrap_or(0);
         value += 1.max(50.min(cost / 10));
         g.obj_from_anywhere(k);
@@ -442,8 +494,24 @@ pub fn dump(g: &mut GameState, ch: CharId, _me: RoomRnum, cmd: &str, arg: &str) 
     }
 
     if value > 0 && get_level(g, ch) < LVL_IMMORT as i32 {
-        act(g, "You are awarded for being a good citizen.", false, ch, None, ActArg::None, To::Char);
-        act(g, "$n has been awarded for being a good citizen.", true, ch, None, ActArg::None, To::Room);
+        act(
+            g,
+            "You are awarded for being a good citizen.",
+            false,
+            ch,
+            None,
+            ActArg::None,
+            To::Char,
+        );
+        act(
+            g,
+            "$n has been awarded for being a good citizen.",
+            true,
+            ch,
+            None,
+            ActArg::None,
+            To::Room,
+        );
 
         if get_level(g, ch) < 3 {
             crate::limits::gain_exp(g, ch, value as i64);
@@ -481,7 +549,10 @@ pub fn pet_shops(g: &mut GameState, ch: CharId, _me: RoomRnum, cmd: &str, arg: &
 
     if cmd_is(cmd, "list") {
         g.send_to_char(ch, "Available pets are:\r\n");
-        let pets = g.room_opt(pet_room).map(|r| r.people.clone()).unwrap_or_default();
+        let pets = g
+            .room_opt(pet_room)
+            .map(|r| r.people.clone())
+            .unwrap_or_default();
         for pet in pets {
             let price = pet_price(g, pet);
             let name = get_name(g, pet);
@@ -549,7 +620,15 @@ pub fn pet_shops(g: &mut GameState, ch: CharId, _me: RoomRnum, cmd: &str, arg: &
         crate::dg_triggers::load_mtrigger(g, newpet);
 
         g.send_to_char(ch, "May you enjoy your pet.\r\n");
-        act(g, "$n buys $N as a pet.", false, ch, None, ActArg::Char(newpet), To::Room);
+        act(
+            g,
+            "$n buys $N as a pet.",
+            false,
+            ch,
+            None,
+            ActArg::Char(newpet),
+            To::Room,
+        );
         return true;
     }
 
@@ -567,7 +646,10 @@ fn find_char_in_room(g: &GameState, name: &str, rnum: RoomRnum) -> Option<CharId
     }
     let people = g.room_opt(rnum)?.people.clone();
     for cid in people {
-        let names = g.get_char(cid).map(|c| c.player.name.clone()).unwrap_or_default();
+        let names = g
+            .get_char(cid)
+            .map(|c| c.player.name.clone())
+            .unwrap_or_default();
         if crate::handler::isname(&kw, &names) {
             count -= 1;
             if count == 0 {
@@ -593,11 +675,35 @@ fn add_follower(g: &mut GameState, ch: CharId, leader: CharId) {
             l.followers.push(ch);
         }
     }
-    act(g, "You now follow $N.", false, ch, None, ActArg::Char(leader), To::Char);
+    act(
+        g,
+        "You now follow $N.",
+        false,
+        ch,
+        None,
+        ActArg::Char(leader),
+        To::Char,
+    );
     if g.can_see(leader, ch) {
-        act(g, "$n starts following you.", true, ch, None, ActArg::Char(leader), To::Vict);
+        act(
+            g,
+            "$n starts following you.",
+            true,
+            ch,
+            None,
+            ActArg::Char(leader),
+            To::Vict,
+        );
     }
-    act(g, "$n starts to follow $N.", true, ch, None, ActArg::Char(leader), To::NotVict);
+    act(
+        g,
+        "$n starts to follow $N.",
+        true,
+        ch,
+        None,
+        ActArg::Char(leader),
+        To::NotVict,
+    );
 }
 
 // ===========================================================================
@@ -622,8 +728,24 @@ pub fn snake(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &str) 
     }
     let level = get_level(g, ch);
     if number(g, 0, 42 - level) == 0 {
-        act(g, "$n bites $N!", true, ch, None, ActArg::Char(vict), To::NotVict);
-        act(g, "$n bites you!", true, ch, None, ActArg::Char(vict), To::Vict);
+        act(
+            g,
+            "$n bites $N!",
+            true,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::NotVict,
+        );
+        act(
+            g,
+            "$n bites you!",
+            true,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Vict,
+        );
         crate::magic::call_magic(g, ch, Some(vict), None, SPELL_POISON, level);
         return true;
     }
@@ -645,8 +767,24 @@ fn npc_steal(g: &mut GameState, ch: CharId, victim: CharId) {
     }
     let level = get_level(g, ch);
     if awake(g, victim) && number(g, 0, level) == 0 {
-        act(g, "You discover that $n has $s hands in your wallet.", false, ch, None, ActArg::Char(victim), To::Vict);
-        act(g, "$n tries to steal gold from $N.", true, ch, None, ActArg::Char(victim), To::NotVict);
+        act(
+            g,
+            "You discover that $n has $s hands in your wallet.",
+            false,
+            ch,
+            None,
+            ActArg::Char(victim),
+            To::Vict,
+        );
+        act(
+            g,
+            "$n tries to steal gold from $N.",
+            true,
+            ch,
+            None,
+            ActArg::Char(victim),
+            To::NotVict,
+        );
     } else {
         // Steal some gold coins.
         let vgold = get_gold(g, victim);
@@ -675,7 +813,10 @@ pub fn thief(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &str) 
         Some(r) => r,
         None => return false,
     };
-    let people = g.room_opt(rnum).map(|r| r.people.clone()).unwrap_or_default();
+    let people = g
+        .room_opt(rnum)
+        .map(|r| r.people.clone())
+        .unwrap_or_default();
     for cons in people {
         let target_ok = !is_npc(g, cons) && get_level(g, cons) < LVL_IMMORT as i32;
         if target_ok && number(g, 0, 4) == 0 {
@@ -702,7 +843,10 @@ pub fn magic_user(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &
     };
 
     // Pseudo-randomly choose someone in the room who is fighting me.
-    let people = g.room_opt(rnum).map(|r| r.people.clone()).unwrap_or_default();
+    let people = g
+        .room_opt(rnum)
+        .map(|r| r.people.clone())
+        .unwrap_or_default();
     let mut vict: Option<CharId> = None;
     for cand in people {
         if fighting(g, cand) == Some(ch) && number(g, 0, 4) == 0 {
@@ -730,7 +874,10 @@ pub fn magic_user(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &
     }
 
     // Self-heal when between 5% and 50% health, on a level-weighted roll.
-    let (hit, max_hit) = g.get_char(ch).map(|c| (c.points.hit, c.points.max_hit)).unwrap_or((1, 1));
+    let (hit, max_hit) = g
+        .get_char(ch)
+        .map(|c| (c.points.hit, c.points.max_hit))
+        .unwrap_or((1, 1));
     if max_hit > 0 {
         let ratio = hit as f32 / max_hit as f32;
         if ratio > 0.05 && ratio < 0.5 {
@@ -762,12 +909,23 @@ pub fn cityguard(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &s
         Some(r) => r,
         None => return false,
     };
-    let people = g.room_opt(rnum).map(|r| r.people.clone()).unwrap_or_default();
+    let people = g
+        .room_opt(rnum)
+        .map(|r| r.people.clone())
+        .unwrap_or_default();
 
     // PLAYER KILLERS first.
     for tch in people.iter().copied() {
         if !is_npc(g, tch) && g.can_see(ch, tch) && plr_flag(g, tch, PLR_KILLER) {
-            act(g, "$n screams 'HEY!!!  You're one of those PLAYER KILLERS!!!!!!'", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n screams 'HEY!!!  You're one of those PLAYER KILLERS!!!!!!'",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             crate::combat::hit(g, ch, tch);
             return true;
         }
@@ -776,7 +934,15 @@ pub fn cityguard(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &s
     // PLAYER THIEVES next.
     for tch in people.iter().copied() {
         if !is_npc(g, tch) && g.can_see(ch, tch) && plr_flag(g, tch, PLR_THIEF) {
-            act(g, "$n screams 'HEY!!!  You're one of those PLAYER THIEVES!!!!!!'", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n screams 'HEY!!!  You're one of those PLAYER THIEVES!!!!!!'",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             crate::combat::hit(g, ch, tch);
             return true;
         }
@@ -804,7 +970,15 @@ pub fn cityguard(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &s
         // The protected party is the one `evil` is fighting; aid them if good.
         if let Some(target) = fighting(g, evil) {
             if alignment(g, target) >= 0 {
-                act(g, "$n screams 'PROTECT THE INNOCENT!  BANZAI!  CHARGE!  ARARARAGGGHH!'", false, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n screams 'PROTECT THE INNOCENT!  BANZAI!  CHARGE!  ARARARAGGGHH!'",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 crate::combat::hit(g, ch, evil);
                 return true;
             }
@@ -830,7 +1004,11 @@ struct MayorState {
     index: usize,
 }
 
-static MAYOR: Mutex<MayorState> = Mutex::new(MayorState { moving: false, open: true, index: 0 });
+static MAYOR: Mutex<MayorState> = Mutex::new(MayorState {
+    moving: false,
+    open: true,
+    index: 0,
+});
 
 const OPEN_PATH: &[u8] = b"W3a3003b33000c111d0d111Oe333333Oe22c222112212111a1S.";
 const CLOSE_PATH: &[u8] = b"W3a3003b33000c111d0d111CE333333CE22c222112212111a1S.";
@@ -886,32 +1064,96 @@ pub fn mayor(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &str) 
             if let Some(c) = g.get_char_mut(ch) {
                 c.position = Position::Standing;
             }
-            act(g, "$n awakens and groans loudly.", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n awakens and groans loudly.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
         }
         b'S' => {
             if let Some(c) = g.get_char_mut(ch) {
                 c.position = Position::Sleeping;
             }
-            act(g, "$n lies down and instantly falls asleep.", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n lies down and instantly falls asleep.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
         }
         b'a' => {
-            act(g, "$n says 'Hello, Honey!'", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n says 'Hello, Honey!'",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             act(g, "$n smirks.", false, ch, None, ActArg::None, To::Room);
         }
         b'b' => {
-            act(g, "$n says 'What a view!  I must get something done about that dump!'", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n says 'What a view!  I must get something done about that dump!'",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
         }
         b'c' => {
-            act(g, "$n says 'Vandals!  Youngsters nowadays have no respect for anything!'", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n says 'Vandals!  Youngsters nowadays have no respect for anything!'",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
         }
         b'd' => {
-            act(g, "$n says 'Good day, citizens!'", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n says 'Good day, citizens!'",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
         }
         b'e' => {
-            act(g, "$n says 'I hereby declare the markets open!'", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n says 'I hereby declare the markets open!'",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
         }
         b'E' => {
-            act(g, "$n says 'I hereby declare Anacreon closed!'", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n says 'I hereby declare Anacreon closed!'",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
         }
         b'O' => {
             crate::cmd_movement::do_gen_door(g, ch, "gate", SCMD_UNLOCK);
@@ -952,14 +1194,25 @@ pub fn fido(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &str) -
         None => return false,
     };
 
-    let contents = g.room_opt(rnum).map(|r| r.contents.clone()).unwrap_or_default();
+    let contents = g
+        .room_opt(rnum)
+        .map(|r| r.contents.clone())
+        .unwrap_or_default();
     for i in contents {
         let is_corpse = g
             .get_obj(i)
             .map(|o| o.obj_type == ObjectType::Container && o.values[CONTAINER_CORPSE_VAL] != 0)
             .unwrap_or(false);
         if is_corpse {
-            act(g, "$n savagely devours a corpse.", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n savagely devours a corpse.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             // Spill the corpse's contents onto the floor, then eat the corpse.
             let inner = g.get_obj(i).map(|o| o.contains.clone()).unwrap_or_default();
             for temp in inner {
@@ -988,7 +1241,10 @@ pub fn janitor(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &str
         None => return false,
     };
 
-    let contents = g.room_opt(rnum).map(|r| r.contents.clone()).unwrap_or_default();
+    let contents = g
+        .room_opt(rnum)
+        .map(|r| r.contents.clone())
+        .unwrap_or_default();
     for i in contents {
         let (takeable, is_drinkcon, cost) = match g.get_obj(i) {
             Some(o) => (
@@ -1005,7 +1261,15 @@ pub fn janitor(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &str
         if !is_drinkcon && cost >= 15 {
             continue;
         }
-        act(g, "$n picks up some trash.", false, ch, None, ActArg::None, To::Room);
+        act(
+            g,
+            "$n picks up some trash.",
+            false,
+            ch,
+            None,
+            ActArg::None,
+            To::Room,
+        );
         g.obj_from_anywhere(i);
         g.obj_to_char(i, ch);
         return true;
@@ -1056,7 +1320,10 @@ pub fn puff(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &str) -
             true
         }
         6 => {
-            say(g, "We all agree that your theory is crazy, but is it crazy enough?");
+            say(
+                g,
+                "We all agree that your theory is crazy, but is it crazy enough?",
+            );
             true
         }
         7 => {
@@ -1068,7 +1335,10 @@ pub fn puff(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &str) -
             true
         }
         9 => {
-            say(g, "I have an existential map; it has 'you are here' written all over it");
+            say(
+                g,
+                "I have an existential map; it has 'you are here' written all over it",
+            );
             true
         }
         _ => false,
@@ -1099,74 +1369,229 @@ pub fn librarian(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &s
     // effect is "emote on a low roll while anyone is present"; `vict` (the wink
     // target) is whichever person the body is currently on. We iterate the people
     // list and roll per-person, exactly matching the C control flow.
-    let people = g.room_opt(rnum).map(|r| r.people.clone()).unwrap_or_default();
+    let people = g
+        .room_opt(rnum)
+        .map(|r| r.people.clone())
+        .unwrap_or_default();
     for vict in people {
         match number(g, 0, 72) {
             0 => {
-                act(g, "$n says, 'I sell books from all over the land, why not buy one?'", false, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n says, 'I sell books from all over the land, why not buy one?'",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 return true;
             }
             1 => {
-                act(g, "$n turns a page in the book she's reading.", false, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n turns a page in the book she's reading.",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 return true;
             }
             2 => {
-                act(g, "$n drinks a glass of wine.", false, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n drinks a glass of wine.",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 return true;
             }
             3 => {
-                act(g, "$n says, 'I'm reading a book about ancient Midgaard.'", false, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n says, 'I'm reading a book about ancient Midgaard.'",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 return true;
             }
             4 => {
-                act(g, "$n says, 'Thanks for being quiet in the library.'", false, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n says, 'Thanks for being quiet in the library.'",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 return true;
             }
             5 => {
-                act(g, "$n winks at $N suggestively.", true, ch, None, ActArg::Char(vict), To::Room);
+                act(
+                    g,
+                    "$n winks at $N suggestively.",
+                    true,
+                    ch,
+                    None,
+                    ActArg::Char(vict),
+                    To::Room,
+                );
                 return true;
             }
             6 => {
-                act(g, "$n starts sorting new books.", false, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n starts sorting new books.",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 return true;
             }
             7 => {
-                act(g, "$n points at the sign on the wall.", false, ch, None, ActArg::None, To::Room);
-                act(g, "$n says, 'If you're looking for books just type: list'", false, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n points at the sign on the wall.",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
+                act(
+                    g,
+                    "$n says, 'If you're looking for books just type: list'",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 return true;
             }
             8 => {
-                act(g, "$n says, 'I need a vacation. I'd love to see Jhaden'", false, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n says, 'I need a vacation. I'd love to see Jhaden'",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 return true;
             }
             9 => {
-                act(g, "$n puts several books on a shelf.", false, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n puts several books on a shelf.",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 return true;
             }
             10 => {
-                act(g, "$n snickers softly.", false, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n snickers softly.",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 return true;
             }
             11 => {
-                act(g, "$n says, 'I wish people like you would write books.'", false, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n says, 'I wish people like you would write books.'",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 return true;
             }
             12 => {
-                act(g, "$n says, 'I once met AJ Trfiante here long ago.'", false, ch, None, ActArg::None, To::Room);
-                act(g, "$n says, 'It was at the debute of his restraunt'", false, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n says, 'I once met AJ Trfiante here long ago.'",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
+                act(
+                    g,
+                    "$n says, 'It was at the debute of his restraunt'",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 return true;
             }
             13 => {
-                act(g, "$n seems to be getting tired.", false, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n seems to be getting tired.",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 return true;
             }
             14 => {
-                act(g, "$n leaves to a back room.", false, ch, None, ActArg::None, To::Room);
-                act(g, "$n returns with a new pile of books.", false, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n leaves to a back room.",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
+                act(
+                    g,
+                    "$n returns with a new pile of books.",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 return true;
             }
             15 => {
-                act(g, "$n says, 'I love to read. It makes you smart, you know.'", false, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n says, 'I love to read. It makes you smart, you know.'",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 return true;
             }
             _ => {
@@ -1203,12 +1628,18 @@ pub fn temple_healer(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg
         Some(r) => r,
         None => return false,
     };
-    let people = g.room_opt(rnum).map(|r| r.people.clone()).unwrap_or_default();
+    let people = g
+        .room_opt(rnum)
+        .map(|r| r.people.clone())
+        .unwrap_or_default();
 
     // Poison: cure the (last) poisoned person in the room.
     let mut hitme: Option<CharId> = None;
     for vict in people.iter().copied() {
-        if g.get_char(vict).map(|c| c.affect_flags & AFF_POISON != 0).unwrap_or(false) {
+        if g.get_char(vict)
+            .map(|c| c.affect_flags & AFF_POISON != 0)
+            .unwrap_or(false)
+        {
             hitme = Some(vict);
         }
     }
@@ -1220,7 +1651,10 @@ pub fn temple_healer(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg
     // Curse: remove the (last) cursed person's curse.
     hitme = None;
     for vict in people.iter().copied() {
-        if g.get_char(vict).map(|c| c.affect_flags & AFF_CURSE != 0).unwrap_or(false) {
+        if g.get_char(vict)
+            .map(|c| c.affect_flags & AFF_CURSE != 0)
+            .unwrap_or(false)
+        {
             hitme = Some(vict);
         }
     }
@@ -1232,7 +1666,10 @@ pub fn temple_healer(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg
     // Blindness: cure the (last) blind person.
     hitme = None;
     for vict in people.iter().copied() {
-        if g.get_char(vict).map(|c| c.affect_flags & AFF_BLIND != 0).unwrap_or(false) {
+        if g.get_char(vict)
+            .map(|c| c.affect_flags & AFF_BLIND != 0)
+            .unwrap_or(false)
+        {
             hitme = Some(vict);
         }
     }
@@ -1245,7 +1682,10 @@ pub fn temple_healer(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg
     hitme = None;
     let mut temp2: f32 = 1.0;
     for vict in people.iter().copied() {
-        let (hit, maxhit) = g.get_char(vict).map(|c| (c.points.hit, c.points.max_hit)).unwrap_or((0, 0));
+        let (hit, maxhit) = g
+            .get_char(vict)
+            .map(|c| (c.points.hit, c.points.max_hit))
+            .unwrap_or((0, 0));
         if maxhit == 0 {
             continue;
         }
@@ -1263,7 +1703,13 @@ pub fn temple_healer(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg
 }
 
 /// SPECIAL(temple_mana_regenerator). Periodic-pulse only (cmd must be empty).
-pub fn temple_mana_regenerator(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &str) -> bool {
+pub fn temple_mana_regenerator(
+    g: &mut GameState,
+    ch: CharId,
+    _me: CharId,
+    cmd: &str,
+    _arg: &str,
+) -> bool {
     if !cmd.is_empty() {
         return false;
     }
@@ -1274,13 +1720,19 @@ pub fn temple_mana_regenerator(g: &mut GameState, ch: CharId, _me: CharId, cmd: 
         Some(r) => r,
         None => return false,
     };
-    let people = g.room_opt(rnum).map(|r| r.people.clone()).unwrap_or_default();
+    let people = g
+        .room_opt(rnum)
+        .map(|r| r.people.clone())
+        .unwrap_or_default();
 
     // Regen the lowest MANA/MAX_MANA character (ratio < 1.0).
     let mut hitme: Option<CharId> = None;
     let mut temp2: f32 = 1.0;
     for vict in people {
-        let (mana, maxmana) = g.get_char(vict).map(|c| (c.points.mana, c.points.max_mana)).unwrap_or((0, 0));
+        let (mana, maxmana) = g
+            .get_char(vict)
+            .map(|c| (c.points.mana, c.points.max_mana))
+            .unwrap_or((0, 0));
         if maxmana == 0 {
             continue;
         }
@@ -1332,7 +1784,10 @@ pub fn portal(g: &mut GameState, ch: CharId, me: ObjId, cmd: &str, arg: &str) ->
         Some(r) => r,
         None => return false,
     };
-    let contents = g.room_opt(rnum).map(|r| r.contents.clone()).unwrap_or_default();
+    let contents = g
+        .room_opt(rnum)
+        .map(|r| r.contents.clone())
+        .unwrap_or_default();
     let port = match g.get_obj_in_list_vis(ch, &obj_name, &contents) {
         Some(p) => p,
         None => return false,
@@ -1349,7 +1804,10 @@ pub fn portal(g: &mut GameState, ch: CharId, me: ObjId, cmd: &str, arg: &str) ->
     let dest_rnum = dest as RoomRnum;
 
     // Water-sector boat requirement (no-mount path only — see header note).
-    let here_water = g.room_opt(rnum).map(|r| r.sector_type == crate::room::SectorType::WaterNoSwim).unwrap_or(false);
+    let here_water = g
+        .room_opt(rnum)
+        .map(|r| r.sector_type == crate::room::SectorType::WaterNoSwim)
+        .unwrap_or(false);
     let there_water = g
         .rooms
         .get(dest_rnum)
@@ -1360,12 +1818,36 @@ pub fn portal(g: &mut GameState, ch: CharId, me: ObjId, cmd: &str, arg: &str) ->
         return true;
     }
 
-    act(g, "$n enters $p, and vanishes!", false, ch, Some(port), ActArg::None, To::Room);
-    act(g, "You enter $p, and you are transported elsewhere.", false, ch, Some(port), ActArg::None, To::Char);
+    act(
+        g,
+        "$n enters $p, and vanishes!",
+        false,
+        ch,
+        Some(port),
+        ActArg::None,
+        To::Room,
+    );
+    act(
+        g,
+        "You enter $p, and you are transported elsewhere.",
+        false,
+        ch,
+        Some(port),
+        ActArg::None,
+        To::Char,
+    );
     g.char_from_room(ch);
     g.char_to_room(ch, dest_rnum);
     crate::cmd_informative::look_at_room(g, ch, false);
-    act(g, "$n appears from the glowing portal!", false, ch, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n appears from the glowing portal!",
+        false,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
     true
 }
 
@@ -1405,7 +1887,10 @@ pub fn tent(g: &mut GameState, ch: CharId, me: ObjId, cmd: &str, _arg: &str) -> 
     };
 
     // for (obj=ch->carrying; obj; ...) if (obj==me) { ... }
-    let carrying = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let carrying = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     if !carrying.contains(&me) {
         g.send_to_char(ch, "You carry nothing to setup camp with.\r\n");
         return true;
@@ -1417,7 +1902,15 @@ pub fn tent(g: &mut GameState, ch: CharId, me: ObjId, cmd: &str, _arg: &str) -> 
         c.mapy = mapy;
     }
     g.send_to_char(ch, "\r\nYou setup camp and safely fall asleep...\r\n");
-    act(g, "$n sets up camp and leaves the game.", false, ch, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n sets up camp and leaves the game.",
+        false,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
 
     // write_aliases(ch) — alias persistence is handled by the regular save path;
     // Crash_rentsave(ch, 0) banks the inventory at zero cost.
@@ -1509,7 +2002,9 @@ pub fn register_mob_specs(mut assign: impl FnMut(MobVnum, crate::spec_assign::Sp
         assign(v, guild as crate::spec_assign::SpecFn);
     }
     // --- Stock Midgaard guild guards. ---
-    for &v in &[3025, 3026, 3027, 3028, 5400, 5401, 5402, 5403, 5405, 5407, 5409] {
+    for &v in &[
+        3025, 3026, 3027, 3028, 5400, 5401, 5402, 5403, 5405, 5407, 5409,
+    ] {
         assign(v, guild_guard as crate::spec_assign::SpecFn);
     }
     // --- Stock Midgaard cityguards. ---

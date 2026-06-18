@@ -86,7 +86,12 @@ fn ensure_loaded(lib_path: &str) {
 /// Read text/help/help.hlp into the in-memory table (inverse of save). Mirrors
 /// db.c load_help: keyword line, body lines until a '#', min_level = tail.
 fn load_help_file(lib_path: &str) -> Vec<HelpEntry> {
-    let path = format!("{}/{}/{}", lib_path.trim_end_matches('/'), HLP_REL_DIR, HELP_FILE);
+    let path = format!(
+        "{}/{}/{}",
+        lib_path.trim_end_matches('/'),
+        HLP_REL_DIR,
+        HELP_FILE
+    );
     let raw = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -248,11 +253,16 @@ pub fn do_hedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
 
     // "save" — flush the whole help table to disk (do_olc save path for HEDIT).
-    if buf1.eq_ignore_ascii_case("save") || (buf1.len() <= 4 && "save".starts_with(&buf1.to_lowercase())) {
+    if buf1.eq_ignore_ascii_case("save")
+        || (buf1.len() <= 4 && "save".starts_with(&buf1.to_lowercase()))
+    {
         // Match strn_cmp("save", buf1, 4): a prefix of "save" of length up to 4.
         if "save".starts_with(&buf1.to_lowercase()) && !buf1.is_empty() {
             g.send_to_char(ch, "Saving all help entries.\r\n");
-            let name = g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default();
+            let name = g
+                .get_char(ch)
+                .map(|c| c.player.name.clone())
+                .unwrap_or_default();
             log::info!("OLC: {} saves help entries.", name);
             hedit_save_to_disk(&lib_path);
             return;
@@ -262,10 +272,18 @@ pub fn do_hedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     // Guard: is this entry already being edited by someone?
     let rnum = find_help_rnum(&buf1);
     let editing_keyword = rnum
-        .and_then(|r| help_table().lock().ok().and_then(|t| t.get(r).map(|e| e.keywords.clone())))
+        .and_then(|r| {
+            help_table()
+                .lock()
+                .ok()
+                .and_then(|t| t.get(r).map(|e| e.keywords.clone()))
+        })
         .unwrap_or_else(|| buf1.clone());
     if hedit_keyword_busy(&editing_keyword, conn) {
-        g.send_to_char(ch, "Help files are already being editted by someone else.\r\n");
+        g.send_to_char(
+            ch,
+            "Help files are already being editted by someone else.\r\n",
+        );
         return;
     }
 
@@ -331,7 +349,11 @@ fn hedit_keyword_busy(keyword: &str, exclude: ConnId) -> bool {
 fn hedit_disp_menu(g: &mut GameState, conn: ConnId) {
     let (keywords, entry, min_level) = match with_state(conn, |st| {
         st.mode = HeditMode::MainMenu;
-        (st.help.keywords.clone(), st.help.entry.clone(), st.help.min_level)
+        (
+            st.help.keywords.clone(),
+            st.help.entry.clone(),
+            st.help.min_level,
+        )
     }) {
         Some(v) => v,
         None => return,
@@ -376,29 +398,29 @@ pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
     };
 
     match mode {
-        HeditMode::ConfirmSave => {
-            match arg.chars().next() {
-                Some('y') | Some('Y') => {
-                    hedit_save_internally(g, conn);
-                    let (name, kw) = (
-                        g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default(),
-                        with_state(conn, |st| st.help.keywords.clone()).unwrap_or_default(),
-                    );
-                    log::info!("OLC: {} edits help for {}.", name, kw);
-                    g.send_to_char(ch, "Help entry saved to memory.\r\n");
-                    cleanup(conn);
-                }
-                Some('n') | Some('N') => {
-                    cleanup(conn);
-                }
-                _ => {
-                    g.send_to_char(
-                        ch,
-                        "Invalid choice!\r\nDo you wish to save this help entry internally? : ",
-                    );
-                }
+        HeditMode::ConfirmSave => match arg.chars().next() {
+            Some('y') | Some('Y') => {
+                hedit_save_internally(g, conn);
+                let (name, kw) = (
+                    g.get_char(ch)
+                        .map(|c| c.player.name.clone())
+                        .unwrap_or_default(),
+                    with_state(conn, |st| st.help.keywords.clone()).unwrap_or_default(),
+                );
+                log::info!("OLC: {} edits help for {}.", name, kw);
+                g.send_to_char(ch, "Help entry saved to memory.\r\n");
+                cleanup(conn);
             }
-        }
+            Some('n') | Some('N') => {
+                cleanup(conn);
+            }
+            _ => {
+                g.send_to_char(
+                    ch,
+                    "Invalid choice!\r\nDo you wish to save this help entry internally? : ",
+                );
+            }
+        },
 
         HeditMode::MainMenu => match arg.chars().next() {
             Some('q') | Some('Q') => {
@@ -444,7 +466,11 @@ pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             if new_kw.len() > MAX_HELP_KEYWORDS {
                 new_kw.truncate(MAX_HELP_KEYWORDS - 1);
             }
-            let kw = if new_kw.is_empty() { "UNDEFINED".to_string() } else { new_kw };
+            let kw = if new_kw.is_empty() {
+                "UNDEFINED".to_string()
+            } else {
+                new_kw
+            };
             with_state(conn, |st| {
                 st.help.keywords = kw;
                 st.changed = true;
@@ -610,8 +636,16 @@ fn hedit_save_to_disk(lib_path: &str) {
     let mut out = String::new();
     for help in guard.iter() {
         // strip_string(entry): remove every '\r', leaving bare '\n' line breaks.
-        let stripped = strip_string(if help.entry.is_empty() { "Empty" } else { &help.entry });
-        let kw = if help.keywords.is_empty() { "UNDEFINED" } else { &help.keywords };
+        let stripped = strip_string(if help.entry.is_empty() {
+            "Empty"
+        } else {
+            &help.entry
+        });
+        let kw = if help.keywords.is_empty() {
+            "UNDEFINED"
+        } else {
+            &help.keywords
+        };
         // fprintf(fp, "%s\n%s\n#%d\n", keywords, entry, min_level).
         // The stripped entry already ends in '\n' (every line had "\r\n" ->
         // "\n"); C then adds one more '\n', giving a blank separator line, then

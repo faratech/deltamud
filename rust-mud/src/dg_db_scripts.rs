@@ -87,7 +87,12 @@ pub fn asciiflag_conv(flag: &str) -> i64 {
 
 /// real_trigger(vnum): vnum -> rnum, or -1.
 pub fn real_trigger(vnum: i32) -> i32 {
-    vnum_map().lock().unwrap().get(&vnum).map(|&r| r as i32).unwrap_or(-1)
+    vnum_map()
+        .lock()
+        .unwrap()
+        .get(&vnum)
+        .map(|&r| r as i32)
+        .unwrap_or(-1)
 }
 
 pub fn top_of_trigt() -> usize {
@@ -322,13 +327,95 @@ fn record_proto(kind: i32, entity_vnum: i32, trig_vnum: i32) -> bool {
         ));
         return false;
     }
+    let mut guard = proto_scripts().lock().unwrap();
+    let list = guard.entry((kind, entity_vnum)).or_default();
+    if !list.contains(&trig_vnum) {
+        list.push(trig_vnum);
+    }
+    true
+}
+
+/// Persistently add a prototype trigger binding. Unlike `add_trigger`, this
+/// updates the proto-script table that OLC save paths write as `T <vnum>`.
+pub fn add_proto_trigger(kind: i32, entity_vnum: i32, trig_vnum: i32) -> bool {
+    record_proto(kind, entity_vnum, trig_vnum)
+}
+
+/// Insert a prototype trigger binding at a 1-based script-editor position.
+/// Out-of-range positions append, matching the C editor's "999" append path.
+pub fn insert_proto_trigger(kind: i32, entity_vnum: i32, trig_vnum: i32, pos: usize) -> bool {
+    if real_trigger(trig_vnum) < 0 {
+        crate::dg_scripts::script_log(&format!(
+            "trigger #{} non-existant, for entity #{}",
+            trig_vnum, entity_vnum
+        ));
+        return false;
+    }
+    let mut guard = proto_scripts().lock().unwrap();
+    let list = guard.entry((kind, entity_vnum)).or_default();
+    if list.contains(&trig_vnum) {
+        return true;
+    }
+    let idx = pos.saturating_sub(1).min(list.len());
+    list.insert(idx, trig_vnum);
+    true
+}
+
+/// Remove one named/numbered prototype trigger binding.
+pub fn remove_proto_trigger(kind: i32, entity_vnum: i32, name: &str) -> bool {
+    let mut guard = proto_scripts().lock().unwrap();
+    let Some(list) = guard.get_mut(&(kind, entity_vnum)) else {
+        return false;
+    };
+    let before = list.len();
+    if let Ok(vnum) = name.parse::<i32>() {
+        list.retain(|&v| v != vnum);
+    } else {
+        list.retain(|&v| {
+            let rn = real_trigger(v);
+            if rn < 0 {
+                return true;
+            }
+            trig_proto(rn as usize)
+                .map(|p| !p.name.eq_ignore_ascii_case(name))
+                .unwrap_or(true)
+        });
+    }
+    let changed = list.len() != before;
+    if list.is_empty() {
+        guard.remove(&(kind, entity_vnum));
+    }
+    changed
+}
+
+/// Remove a prototype trigger binding by the C script editor's 1-based list
+/// position.
+pub fn remove_proto_trigger_at(kind: i32, entity_vnum: i32, pos: usize) -> bool {
+    if pos == 0 {
+        return false;
+    }
+    let mut guard = proto_scripts().lock().unwrap();
+    let Some(list) = guard.get_mut(&(kind, entity_vnum)) else {
+        return false;
+    };
+    let idx = pos - 1;
+    if idx >= list.len() {
+        return false;
+    }
+    list.remove(idx);
+    if list.is_empty() {
+        guard.remove(&(kind, entity_vnum));
+    }
+    true
+}
+
+/// Remove all prototype trigger bindings for an entity.
+pub fn clear_proto_triggers(kind: i32, entity_vnum: i32) -> bool {
     proto_scripts()
         .lock()
         .unwrap()
-        .entry((kind, entity_vnum))
-        .or_default()
-        .push(trig_vnum);
-    true
+        .remove(&(kind, entity_vnum))
+        .is_some()
 }
 
 /// Convenience for the file_loader: parse a raw `T <vnum>` line (mob/wld) or an
@@ -389,8 +476,12 @@ pub fn assign_triggers(key: ScriptKey, entity_vnum: i32) {
 /// boot since rooms are not created per-instance). Iterates the live rooms and
 /// assigns whatever proto bindings exist for their vnum.
 pub fn assign_room_triggers(g: &mut GameState) {
-    let rooms: Vec<(RoomRnum, RoomVnum)> =
-        g.rooms.iter().enumerate().map(|(rn, r)| (rn, r.number)).collect();
+    let rooms: Vec<(RoomRnum, RoomVnum)> = g
+        .rooms
+        .iter()
+        .enumerate()
+        .map(|(rn, r)| (rn, r.number))
+        .collect();
     for (rnum, vnum) in rooms {
         // Only assign if this room has proto bindings, to avoid creating empty
         // script containers (matches C only CREATE()ing on first trigger).
@@ -427,7 +518,9 @@ mod conformance {
 
     #[test]
     fn boots_all_trg_prototypes() {
-        let _lock = crate::dg_handler::DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _lock = crate::dg_handler::DG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         boot_triggers(&trg_dir());
         // 38 distinct trigger prototypes ship in lib/world/trg.
         assert_eq!(top_of_trigt(), 38, "expected 38 trigger prototypes");

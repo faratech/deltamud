@@ -96,7 +96,8 @@ pub fn find_first_step(g: &GameState, src: RoomRnum, target: RoomRnum) -> i32 {
     // FIFO of (room, first-step-direction). The C linked-list queue stores the
     // ORIGINATING direction on every node, so the answer is simply the saved
     // direction of whichever node first equals the target.
-    let mut queue: std::collections::VecDeque<(RoomRnum, usize)> = std::collections::VecDeque::new();
+    let mut queue: std::collections::VecDeque<(RoomRnum, usize)> =
+        std::collections::VecDeque::new();
 
     // First, enqueue the first steps, recording which direction we're going.
     for curr_dir in 0..NUM_OF_DIRS {
@@ -172,7 +173,11 @@ fn hmhr(g: &GameState, cid: CharId) -> &'static str {
 /// skill-roll chance of pointing the wrong (but walkable) way.
 pub fn do_track(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     // Must know the skill.
-    if g.get_char(ch).map(|c| c.skill(SKILL_TRACK as u16)).unwrap_or(0) == 0 {
+    if g.get_char(ch)
+        .map(|c| c.skill(SKILL_TRACK as u16))
+        .unwrap_or(0)
+        == 0
+    {
         g.send_to_char(ch, "You have no idea how.\r\n");
         return;
     }
@@ -192,7 +197,10 @@ pub fn do_track(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     };
 
     // AFF_NOTRACK targets leave no trail.
-    if g.get_char(vict).map(|c| c.affect_flags & AFF_NOTRACK != 0).unwrap_or(false) {
+    if g.get_char(vict)
+        .map(|c| c.affect_flags & AFF_NOTRACK != 0)
+        .unwrap_or(false)
+    {
         g.send_to_char(ch, "You sense no trail.\r\n");
         return;
     }
@@ -215,14 +223,20 @@ pub fn do_track(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         BFS_ERROR => g.send_to_char(ch, "Hmm.. something seems to be wrong.\r\n"),
         BFS_ALREADY_THERE => g.send_to_char(ch, "You're already in the same room!!\r\n"),
         BFS_NO_PATH => {
-            let buf = format!("You can't sense a trail to {} from here.\r\n", hmhr(g, vict));
+            let buf = format!(
+                "You can't sense a trail to {} from here.\r\n",
+                hmhr(g, vict)
+            );
             g.send_to_char(ch, &buf);
         }
         _ => {
             // 101% is a guaranteed failure; on a failed roll, stumble onto a
             // random *walkable* direction instead of the true one.
             let num = g.rng.number(0, 101);
-            let skill = g.get_char(ch).map(|c| c.skill(SKILL_TRACK as u16) as i32).unwrap_or(0);
+            let skill = g
+                .get_char(ch)
+                .map(|c| c.skill(SKILL_TRACK as u16) as i32)
+                .unwrap_or(0);
             if skill < num {
                 // do { dir = number(0, NUM_OF_DIRS-1); } while (!CAN_GO(ch,dir));
                 // Guard against a room with no walkable exits at all so the loop
@@ -334,7 +348,12 @@ mod tests {
     fn can_go_allows_non_map_room_with_default_mapmv() {
         let mut g = GameState::new(Config::default());
         let src = g.add_room(Room::new(100, 0, "Start".to_string(), "Start.".to_string()));
-        let dest = g.add_room(Room::new(101, 0, "Normal".to_string(), "Normal.".to_string()));
+        let dest = g.add_room(Room::new(
+            101,
+            0,
+            "Normal".to_string(),
+            "Normal.".to_string(),
+        ));
         g.room_mut(src).exits[EAST] = Some(open_exit(101));
         let ch = add_char(&mut g, src);
 
@@ -381,7 +400,12 @@ mod tests {
         let mut g = GameState::new(Config::default());
         let src = g.add_room(Room::new(100, 0, "Start".to_string(), "Start.".to_string()));
         let mid = g.add_room(Room::new(101, 0, "Wall".to_string(), "Wall.".to_string()));
-        let target = g.add_room(Room::new(102, 0, "Target".to_string(), "Target.".to_string()));
+        let target = g.add_room(Room::new(
+            102,
+            0,
+            "Target".to_string(),
+            "Target.".to_string(),
+        ));
         {
             let room = g.room_mut(mid);
             room.map_x = Some(1);

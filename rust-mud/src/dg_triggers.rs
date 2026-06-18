@@ -69,13 +69,17 @@ fn is_set(flags: i64, bit: i64) -> bool {
 /// AFF_FLAGGED(ch, AFF_CHARM).
 #[inline]
 fn charmed(g: &GameState, ch: CharId) -> bool {
-    g.get_char(ch).map(|c| c.affect_flags & AFF_CHARM != 0).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.affect_flags & AFF_CHARM != 0)
+        .unwrap_or(false)
 }
 
 /// AWAKE(ch): position > SLEEPING.
 #[inline]
 fn awake(g: &GameState, ch: CharId) -> bool {
-    g.get_char(ch).map(|c| c.position > Position::Sleeping).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.position > Position::Sleeping)
+        .unwrap_or(false)
 }
 
 /// FIGHTING(ch).
@@ -400,7 +404,8 @@ pub fn speech_mtrigger(g: &mut GameState, actor: CharId, str_: &str) {
     let people = g.room(rnum).people.clone();
     for ch in people {
         let key = ScriptKey::Mob(ch);
-        if !(dh::script_check(key, MTRIG_SPEECH) && awake(g, ch) && !charmed(g, ch) && actor != ch) {
+        if !(dh::script_check(key, MTRIG_SPEECH) && awake(g, ch) && !charmed(g, ch) && actor != ch)
+        {
             continue;
         }
         for t in dh::trigger_ids(key) {
@@ -695,7 +700,10 @@ pub fn command_otrigger(g: &mut GameState, actor: CharId, cmd: &str, argument: &
         }
     }
     // Carried inventory.
-    let carrying: Vec<ObjId> = g.get_char(actor).map(|c| c.carrying.clone()).unwrap_or_default();
+    let carrying: Vec<ObjId> = g
+        .get_char(actor)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     for oid in carrying {
         if cmd_otrig(g, oid, actor, cmd, argument, OCMD_INVEN) {
             return true;

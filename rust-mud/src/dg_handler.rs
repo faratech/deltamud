@@ -133,11 +133,11 @@ pub struct TrigVar {
 /// Live trigger instance (trig_data). Created by reading a prototype.
 #[derive(Debug, Clone)]
 pub struct TrigData {
-    pub nr: usize,           // trig_index rnum
-    pub vnum: i32,           // trigger vnum (GET_TRIG_VNUM)
-    pub attach_type: i32,    // MOB/OBJ/WLD intent
+    pub nr: usize,        // trig_index rnum
+    pub vnum: i32,        // trigger vnum (GET_TRIG_VNUM)
+    pub attach_type: i32, // MOB/OBJ/WLD intent
     pub name: String,
-    pub trigger_type: i64,   // bitvector
+    pub trigger_type: i64, // bitvector
     pub narg: i32,
     pub arglist: String,
     pub cmdlist: Vec<String>, // one entry per script line (cmdlist_element)
@@ -153,7 +153,9 @@ pub struct TrigData {
 
 impl TrigData {
     pub fn get_var(&self, name: &str) -> Option<&TrigVar> {
-        self.var_list.iter().find(|v| v.name.eq_ignore_ascii_case(name))
+        self.var_list
+            .iter()
+            .find(|v| v.name.eq_ignore_ascii_case(name))
     }
 }
 
@@ -169,7 +171,7 @@ pub struct ScriptData {
 /// script_memory entry (remembered actor + optional command).
 #[derive(Debug, Clone)]
 pub struct ScriptMemory {
-    pub id: i64,            // GET_ID of who to remember
+    pub id: i64, // GET_ID of who to remember
     pub cmd: Option<String>,
 }
 
@@ -221,7 +223,12 @@ pub fn has_script(key: ScriptKey) -> bool {
 }
 
 pub fn script_types(key: ScriptKey) -> i64 {
-    scripts().lock().unwrap().get(&key).map(|s| s.types).unwrap_or(0)
+    scripts()
+        .lock()
+        .unwrap()
+        .get(&key)
+        .map(|s| s.types)
+        .unwrap_or(0)
 }
 
 /// Snapshot the attached trigger ids for an entity (TRIGGERS(sc) walk).
@@ -235,7 +242,12 @@ pub fn trigger_ids(key: ScriptKey) -> Vec<TrigId> {
 }
 
 pub fn get_context(key: ScriptKey) -> i64 {
-    scripts().lock().unwrap().get(&key).map(|s| s.context).unwrap_or(0)
+    scripts()
+        .lock()
+        .unwrap()
+        .get(&key)
+        .map(|s| s.context)
+        .unwrap_or(0)
 }
 pub fn set_context(key: ScriptKey, ctx: i64) {
     if let Some(sc) = scripts().lock().unwrap().get_mut(&key) {
@@ -281,7 +293,8 @@ pub fn add_global_var(key: ScriptKey, name: &str, value: &str, context: i64) {
 pub fn remove_global_var(key: ScriptKey, name: &str) -> bool {
     if let Some(sc) = scripts().lock().unwrap().get_mut(&key) {
         let before = sc.global_vars.len();
-        sc.global_vars.retain(|v| !v.name.eq_ignore_ascii_case(name));
+        sc.global_vars
+            .retain(|v| !v.name.eq_ignore_ascii_case(name));
         return sc.global_vars.len() != before;
     }
     false
@@ -379,7 +392,12 @@ pub fn remove_trigger(key: ScriptKey, name: &str) -> bool {
         let (n, rest) = name.split_at(dot);
         let rest = &rest[1..];
         (n.parse().unwrap_or(0), rest.to_string(), true)
-    } else if name.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    } else if name
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
         (name.parse().unwrap_or(0), String::new(), false)
     } else {
         (0, name.to_string(), true)
@@ -451,7 +469,12 @@ pub fn forget(ch: CharId, id: i64) {
 }
 
 pub fn memory_for(ch: CharId) -> Vec<ScriptMemory> {
-    memory().lock().unwrap().get(&ch).cloned().unwrap_or_default()
+    memory()
+        .lock()
+        .unwrap()
+        .get(&ch)
+        .cloned()
+        .unwrap_or_default()
 }
 
 pub fn extract_script_mem(ch: CharId) {

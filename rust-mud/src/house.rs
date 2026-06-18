@@ -36,7 +36,7 @@
 
 use crate::act::{act, ActArg, To};
 use crate::interpreter::{half_chop, is_abbrev, one_argument, search_block};
-use crate::object::{Object, ObjectAffect, ObjectType, ExtraFlags, WearFlags};
+use crate::object::{ExtraFlags, Object, ObjectAffect, ObjectType, WearFlags};
 use crate::room::RoomFlags;
 use crate::state::GameState;
 use crate::types::*;
@@ -69,7 +69,8 @@ const ITEM_NORENT: u64 = 1 << 2;
 
 const NRM_INVIS: u8 = LVL_IMMORT; // mudlog visibility floor.
 
-const HCONTROL_FORMAT: &str = "Usage: hcontrol build <house vnum> <exit direction> <player name>\r\n\
+const HCONTROL_FORMAT: &str =
+    "Usage: hcontrol build <house vnum> <exit direction> <player name>\r\n\
 \x20      hcontrol destroy <house vnum>\r\n\
 \x20      hcontrol update <house vnum> <exit direction> [player name]\r\n\
 \x20      hcontrol pay <house vnum>\r\n\
@@ -86,9 +87,9 @@ struct HouseControlRec {
     vnum: RoomVnum,
     atrium: RoomVnum,
     exit_num: i32,
-    built_on: i64,     // unix time
-    mode: i32,         // HOUSE_PRIVATE / HOUSE_OPEN
-    owner: i64,        // idnum of owner (-1 for HCRSH/open rooms)
+    built_on: i64,      // unix time
+    mode: i32,          // HOUSE_PRIVATE / HOUSE_OPEN
+    owner: i64,         // idnum of owner (-1 for HCRSH/open rooms)
     owner_name: String, // cached name for offline rendering
     guests: Vec<i64>,
     guest_names: Vec<String>,
@@ -131,7 +132,11 @@ fn house_filename(lib: &str, vnum: RoomVnum) -> Option<std::path::PathBuf> {
     if vnum < 0 {
         return None;
     }
-    Some(std::path::Path::new(lib).join("house").join(format!("{}.house", vnum)))
+    Some(
+        std::path::Path::new(lib)
+            .join("house")
+            .join(format!("{}.house", vnum)),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -237,7 +242,9 @@ fn room_flag_remove(g: &mut GameState, rnum: RoomRnum, bits: u32) {
     }
 }
 fn room_flag_isset(g: &GameState, rnum: RoomRnum, bits: u32) -> bool {
-    g.room_opt(rnum).map(|r| r.room_flags.bits() & bits != 0).unwrap_or(false)
+    g.room_opt(rnum)
+        .map(|r| r.room_flags.bits() & bits != 0)
+        .unwrap_or(false)
 }
 
 /// TOROOM(room, dir): destination vnum of an exit, or NOWHERE.
@@ -306,7 +313,11 @@ fn house_save_control(g: &GameState) {
         ));
         out.push_str(&format!(
             "O {}\n",
-            if h.owner_name.is_empty() { "*" } else { h.owner_name.as_str() }
+            if h.owner_name.is_empty() {
+                "*"
+            } else {
+                h.owner_name.as_str()
+            }
         ));
         out.push_str(&format!("G {}", h.guests.len()));
         for (idx, &gid) in h.guests.iter().enumerate() {
@@ -371,8 +382,11 @@ fn parse_control_file(text: &str) -> Vec<HouseControlRec> {
                     };
                     if let Ok(gid) = idpart.parse::<i64>() {
                         rec.guests.push(gid);
-                        rec.guest_names
-                            .push(if namepart == "*" { String::new() } else { namepart.to_lowercase() });
+                        rec.guest_names.push(if namepart == "*" {
+                            String::new()
+                        } else {
+                            namepart.to_lowercase()
+                        });
                     }
                 }
             }
@@ -643,7 +657,10 @@ fn parse_obj_line(g: &mut GameState, line: &str) -> Option<(ObjId, usize, bool)>
         if idx + 1 < nums.len() {
             let loc: i32 = nums[idx].parse().unwrap_or(0);
             let modi: i32 = nums[idx + 1].parse().unwrap_or(0);
-            affects.push(ObjectAffect { location: loc, modifier: modi });
+            affects.push(ObjectAffect {
+                location: loc,
+                modifier: modi,
+            });
             idx += 2;
         }
     }
@@ -748,7 +765,12 @@ fn hcontrol_list_houses(g: &mut GameState, ch: CharId, showguests: bool) {
 
         buf.push_str(&format!(
             "{:7} {:7}  {:<10}    {:2}    {:<12} {}\r\n",
-            h.vnum, h.atrium, built_on, h.guests.len(), own_name, last_pay
+            h.vnum,
+            h.atrium,
+            built_on,
+            h.guests.len(),
+            own_name,
+            last_pay
         ));
 
         if !h.guests.is_empty() && showguests {
@@ -779,7 +801,12 @@ fn hcontrol_list_houses_guests(g: &mut GameState, ch: CharId) {
         } else {
             "HCRSH".to_string()
         };
-        buf.push_str(&format!("{:7} {:<12} {:2} ", h.vnum, own_name, h.guests.len()));
+        buf.push_str(&format!(
+            "{:7} {:<12} {:2} ",
+            h.vnum,
+            own_name,
+            h.guests.len()
+        ));
 
         if !h.guests.is_empty() {
             let mut count = 0;
@@ -838,7 +865,13 @@ fn hcontrol_build_house(g: &mut GameState, ch: CharId, arg: &str) {
         }
     };
     if toroom(g, real_house, exit_num) == NOWHERE {
-        g.send_to_char(ch, &format!("There is no exit {} from room {}.\r\n", DIR_NAMES[exit_num], virt_house));
+        g.send_to_char(
+            ch,
+            &format!(
+                "There is no exit {} from room {}.\r\n",
+                DIR_NAMES[exit_num], virt_house
+            ),
+        );
         return;
     }
 
@@ -991,7 +1024,10 @@ fn hcontrol_pay_house(g: &mut GameState, ch: CharId, arg: &str) {
         }
     };
 
-    let name = g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default();
+    let name = g
+        .get_char(ch)
+        .map(|c| c.player.name.clone())
+        .unwrap_or_default();
     let invis = g.get_char(ch).map(|c| c.invis_level as u8).unwrap_or(0);
     let msg = format!("Payment for house {} collected by {}.", arg.trim(), name);
     mudlog(g, &msg, LVL_IMMORT.max(invis));
@@ -1041,7 +1077,13 @@ fn hcontrol_update_house(g: &mut GameState, ch: CharId, arg: &str) {
         }
     };
     if toroom(g, real_house, exit_num) == NOWHERE {
-        g.send_to_char(ch, &format!("There is no exit {} from room {}.\r\n", DIR_NAMES[exit_num], virt_house));
+        g.send_to_char(
+            ch,
+            &format!(
+                "There is no exit {} from room {}.\r\n",
+                DIR_NAMES[exit_num], virt_house
+            ),
+        );
         return;
     }
 
@@ -1213,9 +1255,7 @@ pub fn do_house(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 fn is_unrentable(g: &GameState, oid: ObjId) -> bool {
     match g.get_obj(oid) {
         Some(o) => {
-            o.obj_type == ObjectType::Key
-                || (o.extra_flags.bits() & ITEM_NORENT) != 0
-                || o.rent < 0
+            o.obj_type == ObjectType::Key || (o.extra_flags.bits() & ITEM_NORENT) != 0 || o.rent < 0
         }
         None => false,
     }
@@ -1227,9 +1267,20 @@ fn report_unbedables(g: &mut GameState, ch: CharId, oid: ObjId) -> i32 {
     let mut count = 0;
     if is_unrentable(g, oid) {
         count += 1;
-        act(g, "You cannot go to bed with $p.", false, ch, Some(oid), ActArg::None, To::Char);
+        act(
+            g,
+            "You cannot go to bed with $p.",
+            false,
+            ch,
+            Some(oid),
+            ActArg::None,
+            To::Char,
+        );
     }
-    let contains = g.get_obj(oid).map(|o| o.contains.clone()).unwrap_or_default();
+    let contains = g
+        .get_obj(oid)
+        .map(|o| o.contains.clone())
+        .unwrap_or_default();
     for c in contains {
         count += report_unbedables(g, ch, c);
     }
@@ -1263,7 +1314,10 @@ pub fn do_bed(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
 
     // Report (and refuse on) any unbedable items in inventory or equipment.
     let mut nobed = 0;
-    let carrying = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let carrying = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     for o in carrying {
         nobed += report_unbedables(g, ch, o);
     }
@@ -1287,7 +1341,15 @@ pub fn do_bed(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
     // Crash_rentsave(ch, 0): the async player-save layer owns rent persistence;
     // requesting the descriptor close (below) drives save_char + extract exactly
     // like the do_quit port. Announce departure first.
-    act(g, "$n has quit the game. (bed)", true, ch, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n has quit the game. (bed)",
+        true,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
 
     // Close every other socket bound to this same player (anti-dupe), then this
     // one — the loop performs save_char + extract_char on close.

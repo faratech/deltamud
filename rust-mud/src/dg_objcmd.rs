@@ -212,7 +212,11 @@ fn visible_target(g: &GameState, cid: CharId) -> bool {
 fn get_char_by_obj(g: &GameState, obj: ObjId, name: &str) -> Option<CharId> {
     if let Some(id) = parse_uid(name) {
         let cid = find_char_by_id(g, id)?;
-        return if visible_target(g, cid) { Some(cid) } else { None };
+        return if visible_target(g, cid) {
+            Some(cid)
+        } else {
+            None
+        };
     }
 
     // Carrier / wearer first.
@@ -251,7 +255,10 @@ fn get_obj_by_obj(g: &GameState, obj: ObjId, name: &str) -> Option<ObjId> {
     }
 
     // Its own contents.
-    let contains = g.get_obj(obj).map(|o| o.contains.clone()).unwrap_or_default();
+    let contains = g
+        .get_obj(obj)
+        .map(|o| o.contains.clone())
+        .unwrap_or_default();
     if let Some(o) = obj_in_list(g, name, &contains) {
         return Some(o);
     }
@@ -277,7 +284,10 @@ fn get_obj_by_obj(g: &GameState, obj: ObjId, name: &str) -> Option<ObjId> {
             }
         }
         Some(ObjLoc::Carried(cid)) => {
-            let carrying = g.get_char(cid).map(|c| c.carrying.clone()).unwrap_or_default();
+            let carrying = g
+                .get_char(cid)
+                .map(|c| c.carrying.clone())
+                .unwrap_or_default();
             if let Some(o) = obj_in_list(g, name, &carrying) {
                 return Some(o);
             }
@@ -306,13 +316,18 @@ fn get_obj_by_obj(g: &GameState, obj: ObjId, name: &str) -> Option<ObjId> {
 
 fn obj_in_list(g: &GameState, name: &str, list: &[ObjId]) -> Option<ObjId> {
     if let Some(id) = parse_uid(name) {
-        return list.iter().copied().find(|&o| find_obj_by_id(g, id) == Some(o));
+        return list
+            .iter()
+            .copied()
+            .find(|&o| find_obj_by_id(g, id) == Some(o));
     }
     list.iter().copied().find(|&o| name_matches_obj(g, o, name))
 }
 
 fn name_matches_obj(g: &GameState, oid: ObjId, name: &str) -> bool {
-    g.get_obj(oid).map(|o| crate::handler::isname(name, &o.name)).unwrap_or(false)
+    g.get_obj(oid)
+        .map(|o| crate::handler::isname(name, &o.name))
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -452,7 +467,12 @@ fn do_otimer(g: &mut GameState, obj: ObjId, argument: &str) {
     let (arg, _) = one_arg(argument);
     if arg.is_empty() {
         obj_log(g, obj, "otimer: missing argument");
-    } else if !arg.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    } else if !arg
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
         obj_log(g, obj, "otimer: bad argument");
     } else if let Some(o) = g.get_obj_mut(obj) {
         o.timer = atoi(&arg);
@@ -467,7 +487,12 @@ fn do_otransform(g: &mut GameState, obj: ObjId, argument: &str) {
         obj_log(g, obj, "otransform: missing argument");
         return;
     }
-    if !arg.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    if !arg
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
         obj_log(g, obj, "otransform: bad argument");
         return;
     }
@@ -783,7 +808,11 @@ type ObjFn = fn(&mut GameState, ObjId, &str, i32);
 struct ObjCmd(&'static str, ObjFn, i32);
 const OBJ_CMDS: &[ObjCmd] = &[
     ObjCmd("oecho", |g, o, a, _| do_oecho(g, o, a), 0),
-    ObjCmd("oechoaround", |g, o, a, sc| do_osend(g, o, a, sc), SCMD_OECHOAROUND),
+    ObjCmd(
+        "oechoaround",
+        |g, o, a, sc| do_osend(g, o, a, sc),
+        SCMD_OECHOAROUND,
+    ),
     ObjCmd("oexp", |g, o, a, _| do_oexp(g, o, a), 0),
     ObjCmd("oforce", |g, o, a, _| do_oforce(g, o, a), 0),
     ObjCmd("oload", |g, o, a, _| do_dgoload(g, o, a), 0),
@@ -819,22 +848,66 @@ pub(crate) fn apply_script_damage(g: &mut GameState, ch: CharId, dam: i32, kille
     }
     update_pos(g, ch);
 
-    let pos = g.get_char(ch).map(|c| c.position).unwrap_or(Position::Standing);
+    let pos = g
+        .get_char(ch)
+        .map(|c| c.position)
+        .unwrap_or(Position::Standing);
     match pos {
         Position::MortallyWounded => {
-            act(g, "$n is mortally wounded, and will die soon, if not aided.", true, ch, None, ActArg::None, To::Room);
-            g.send_to_char(ch, "You are mortally wounded, and will die soon, if not aided.\r\n");
+            act(
+                g,
+                "$n is mortally wounded, and will die soon, if not aided.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            g.send_to_char(
+                ch,
+                "You are mortally wounded, and will die soon, if not aided.\r\n",
+            );
         }
         Position::Incapacitated => {
-            act(g, "$n is incapacitated and will slowly die, if not aided.", true, ch, None, ActArg::None, To::Room);
-            g.send_to_char(ch, "You are incapacitated an will slowly die, if not aided.\r\n");
+            act(
+                g,
+                "$n is incapacitated and will slowly die, if not aided.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            g.send_to_char(
+                ch,
+                "You are incapacitated an will slowly die, if not aided.\r\n",
+            );
         }
         Position::Stunned => {
-            act(g, "$n is stunned, but will probably regain consciousness again.", true, ch, None, ActArg::None, To::Room);
-            g.send_to_char(ch, "You're stunned, but will probably regain consciousness again.\r\n");
+            act(
+                g,
+                "$n is stunned, but will probably regain consciousness again.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            g.send_to_char(
+                ch,
+                "You're stunned, but will probably regain consciousness again.\r\n",
+            );
         }
         Position::Dead => {
-            act(g, "$n is dead!  R.I.P.", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n is dead!  R.I.P.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             g.send_to_char(ch, "You are dead!  Sorry...\r\n");
         }
         _ => {
@@ -844,7 +917,15 @@ pub(crate) fn apply_script_damage(g: &mut GameState, ch: CharId, dam: i32, kille
                 .map(|c| (c.points.hit, c.points.max_hit))
                 .unwrap_or((0, 0));
             if dam > (max_hit >> 2) {
-                act(g, "That really did HURT!", false, ch, None, ActArg::None, To::Char);
+                act(
+                    g,
+                    "That really did HURT!",
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Char,
+                );
             }
             if hit < (max_hit >> 2) {
                 g.send_to_char(
@@ -855,12 +936,18 @@ pub(crate) fn apply_script_damage(g: &mut GameState, ch: CharId, dam: i32, kille
         }
     }
 
-    if g.get_char(ch).map(|c| c.position == Position::Dead).unwrap_or(false) {
+    if g.get_char(ch)
+        .map(|c| c.position == Position::Dead)
+        .unwrap_or(false)
+    {
         // mudlog the kill for PCs (best-effort; the C log line attributes the
         // object owner). NPC bodies are extracted; PCs respawn (env_die path).
         let is_pc = g.get_char(ch).map(|c| !c.is_npc).unwrap_or(false);
         if is_pc {
-            let who = g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default();
+            let who = g
+                .get_char(ch)
+                .map(|c| c.player.name.clone())
+                .unwrap_or_default();
             let killer_name = killer
                 .and_then(|k| g.get_char(k).map(|c| c.player.name.clone()))
                 .unwrap_or_else(|| "a trap".to_string());
@@ -934,15 +1021,25 @@ fn script_die(g: &mut GameState, ch: CharId) {
 
     let rnum = g.get_char(ch).and_then(|c| c.in_room);
     if let Some(rnum) = rnum {
-        let name = g.get_char(ch).map(|c| c.display_for_others()).unwrap_or_default();
+        let name = g
+            .get_char(ch)
+            .map(|c| c.display_for_others())
+            .unwrap_or_default();
         let corpse = make_corpse(g, &name);
-        let carried = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+        let carried = g
+            .get_char(ch)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         for oid in carried {
             g.obj_from_anywhere(oid);
             g.obj_to_obj(oid, corpse);
         }
         let worn: Vec<usize> = (0..NUM_WEARS)
-            .filter(|&p| g.get_char(ch).map(|c| c.equipment[p].is_some()).unwrap_or(false))
+            .filter(|&p| {
+                g.get_char(ch)
+                    .map(|c| c.equipment[p].is_some())
+                    .unwrap_or(false)
+            })
             .collect();
         for p in worn {
             if let Some(oid) = g.unequip_char(ch, p) {
@@ -966,7 +1063,11 @@ fn script_die(g: &mut GameState, ch: CharId) {
 /// the limits.rs / combat.rs corpse so all deaths look the same).
 fn make_corpse(g: &mut GameState, who: &str) -> ObjId {
     use crate::object::Object;
-    let mut obj = Object::new(NOTHING, format!("corpse {}", who), format!("the corpse of {}", who));
+    let mut obj = Object::new(
+        NOTHING,
+        format!("corpse {}", who),
+        format!("the corpse of {}", who),
+    );
     obj.description = format!("The corpse of {} is lying here.", who);
     obj.obj_type = ObjectType::Container;
     obj.timer = 60;
@@ -978,7 +1079,10 @@ fn make_corpse(g: &mut GameState, who: &str) -> ObjId {
 /// respawn_pc: send a slain PC home at 1 HP (Tier-0 death handling).
 fn respawn_pc(g: &mut GameState, victim: CharId) {
     g.char_from_room(victim);
-    let home = g.get_char(victim).map(|c| c.player.hometown).unwrap_or(3001);
+    let home = g
+        .get_char(victim)
+        .map(|c| c.player.hometown)
+        .unwrap_or(3001);
     let rnum = g.real_room(home).or_else(|| g.real_room(3001)).unwrap_or(0);
     if let Some(c) = g.get_char_mut(victim) {
         c.points.hit = 1;
@@ -990,5 +1094,7 @@ fn respawn_pc(g: &mut GameState, victim: CharId) {
 
 /// GET_LEVEL(ch) >= LVL_IMMORT (immortals are spared script damage / forces).
 fn is_immortal(g: &GameState, ch: CharId) -> bool {
-    g.get_char(ch).map(|c| c.player.level >= LVL_IMMORT).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.player.level >= LVL_IMMORT)
+        .unwrap_or(false)
 }

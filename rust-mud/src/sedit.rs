@@ -43,8 +43,15 @@ const NUM_ITEM_TYPES: usize = 29; // olc.h NUM_ITEM_TYPES (matches ITEM_TYPES le
 
 // shop bit names (shop_bits[]) and trade-with names (trade_letters[]).
 const SHOP_BITS: [&str; NUM_SHOP_FLAGS] = ["WILL_FIGHT", "USES_BANK"];
-const TRADE_LETTERS: [&str; NUM_TRADERS] =
-    ["Good", "Evil", "Neutral", "Magic User", "Cleric", "Thief", "Warrior"];
+const TRADE_LETTERS: [&str; NUM_TRADERS] = [
+    "Good",
+    "Evil",
+    "Neutral",
+    "Magic User",
+    "Cleric",
+    "Thief",
+    "Warrior",
+];
 
 const SHP_REL_DIR: &str = "world/shp";
 
@@ -243,7 +250,12 @@ fn shop_busy(vnum: i32, exclude: ConnId) -> bool {
 // ---------------------------------------------------------------------------
 
 fn shp_path(lib_path: &str, zone: i32) -> String {
-    format!("{}/{}/{}.shp", lib_path.trim_end_matches('/'), SHP_REL_DIR, zone)
+    format!(
+        "{}/{}/{}.shp",
+        lib_path.trim_end_matches('/'),
+        SHP_REL_DIR,
+        zone
+    )
 }
 
 /// Load every shop in `<lib>/world/shp/<zone>.shp` into editable structs.
@@ -263,7 +275,10 @@ fn load_zone_shops(lib_path: &str, zone: i32) -> Vec<Shop> {
 fn find_shop_zone(lib_path: &str, vnum: i32) -> Option<i32> {
     // Primary: the conventional zone == vnum/100 file.
     let zone = vnum / 100;
-    if load_zone_shops(lib_path, zone).iter().any(|s| s.vnum == vnum) {
+    if load_zone_shops(lib_path, zone)
+        .iter()
+        .any(|s| s.vnum == vnum)
+    {
         return Some(zone);
     }
     // Fallback: scan the shp index for any file that contains this shop.
@@ -294,7 +309,10 @@ struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     fn new(s: &'a str) -> Self {
-        Reader { lines: s.lines().collect(), pos: 0 }
+        Reader {
+            lines: s.lines().collect(),
+            pos: 0,
+        }
     }
     fn get_line(&mut self) -> Option<&'a str> {
         while self.pos < self.lines.len() {
@@ -369,7 +387,12 @@ fn r_int(r: &mut Reader) -> i32 {
 }
 fn r_float(r: &mut Reader) -> f32 {
     r.get_line()
-        .and_then(|l| l.trim().split_whitespace().next().and_then(|t| t.parse::<f32>().ok()))
+        .and_then(|l| {
+            l.trim()
+                .split_whitespace()
+                .next()
+                .and_then(|t| t.parse::<f32>().ok())
+        })
         .unwrap_or(0.0)
 }
 fn r_int_list(r: &mut Reader) -> Vec<i32> {
@@ -432,11 +455,18 @@ fn r_type_list(r: &mut Reader) -> Vec<ShopBuyData> {
             }
         }
         let kw = rest.trim();
-        let kw = if kw.is_empty() { None } else { Some(kw.to_string()) };
+        let kw = if kw.is_empty() {
+            None
+        } else {
+            Some(kw.to_string())
+        };
         if num < 0 {
             break;
         }
-        out.push(ShopBuyData { type_: num, keywords: kw });
+        out.push(ShopBuyData {
+            type_: num,
+            keywords: kw,
+        });
     }
     out
 }
@@ -511,7 +541,10 @@ fn sedit_save_to_disk(lib_path: &str, zone: i32, shops: &[Shop]) {
             out.push_str(&format!("{}\n", p));
         }
         // Rates: "-1\n%.2f\n%.2f\n".
-        out.push_str(&format!("-1\n{:.2}\n{:.2}\n", shop.profit_buy, shop.profit_sell));
+        out.push_str(&format!(
+            "-1\n{:.2}\n{:.2}\n",
+            shop.profit_buy, shop.profit_sell
+        ));
 
         // Trade types + namelists. C: do { j++; print "%d%s\n" } while != -1,
         // i.e. each entry then the -1 terminator with no keyword.
@@ -527,7 +560,11 @@ fn sedit_save_to_disk(lib_path: &str, zone: i32, shops: &[Shop]) {
         // 7 messages, each '~'-terminated. C emits in this order with "Ke?!"
         // fallbacks for empties.
         let msg = |s: &str, fallback: &str| -> String {
-            if s.is_empty() { fallback.to_string() } else { s.to_string() }
+            if s.is_empty() {
+                fallback.to_string()
+            } else {
+                s.to_string()
+            }
         };
         out.push_str(&format!("{}~\n", msg(&shop.no_such_item1, "%s Ke?!")));
         out.push_str(&format!("{}~\n", msg(&shop.no_such_item2, "%s Ke?!")));
@@ -566,6 +603,20 @@ fn sedit_save_to_disk(lib_path: &str, zone: i32, shops: &[Shop]) {
     let _ = std::fs::rename(&tmp, &final_path);
 }
 
+/// Central OLC save dispatcher entry. The live shop table is private to
+/// shop.rs, so this path preserves the current zone shop file by reading it and
+/// rewriting it through the canonical C-shaped renderer.
+pub fn sedit_save_zone_to_disk(g: &mut GameState, zone_rnum: usize) {
+    let zone = match g.zones.get(zone_rnum) {
+        Some(z) => z.number,
+        None => return,
+    };
+    let lib_path = g.config.lib_path.clone();
+    let shops = load_zone_shops(&lib_path, zone);
+    sedit_save_to_disk(&lib_path, zone, &shops);
+    crate::olc::olc_remove_from_save_list(zone, crate::olc::OLC_SAVE_SHOP);
+}
+
 // ---------------------------------------------------------------------------
 // Command entry: do_sedit (the sedit.c-relevant slice of olc.c do_olc).
 // ---------------------------------------------------------------------------
@@ -590,7 +641,12 @@ pub fn do_sedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
 
     // "save <zone>" — write that zone's .shp file (do_olc SEDIT save path).
-    if !buf1.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    if !buf1
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
         if "save".starts_with(&buf1.to_lowercase()) {
             if buf2.is_empty() {
                 g.send_to_char(ch, "Save which zone?\r\n");
@@ -602,7 +658,10 @@ pub fn do_sedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 return;
             }
             g.send_to_char(ch, &format!("Saving all shops in zone {}.\r\n", zone));
-            let name = g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default();
+            let name = g
+                .get_char(ch)
+                .map(|c| c.player.name.clone())
+                .unwrap_or_default();
             log::info!("OLC: {} saves shop info for zone {}.", name, zone);
             let shops = load_zone_shops(&lib_path, zone);
             sedit_save_to_disk(&lib_path, zone, &shops);
@@ -619,14 +678,19 @@ pub fn do_sedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
 
     if shop_busy(vnum, conn) {
-        g.send_to_char(ch, "That shop is currently being edited by someone else.\r\n");
+        g.send_to_char(
+            ch,
+            "That shop is currently being edited by someone else.\r\n",
+        );
         return;
     }
 
     // Determine the zone and whether the shop exists.
     let (zone, existing) = match find_shop_zone(&lib_path, vnum) {
         Some(z) => {
-            let shop = load_zone_shops(&lib_path, z).into_iter().find(|s| s.vnum == vnum);
+            let shop = load_zone_shops(&lib_path, z)
+                .into_iter()
+                .find(|s| s.vnum == vnum);
             (z, shop)
         }
         None => (vnum / 100, None),
@@ -757,7 +821,11 @@ fn sedit_disp_menu(g: &mut GameState, conn: ConnId) {
 &gQ&n) Quit\r\n\
 Enter Choice : ",
         st.vnum,
-        if shop.keeper == NOBODY { -1 } else { shop.keeper },
+        if shop.keeper == NOBODY {
+            -1
+        } else {
+            shop.keeper
+        },
         keeper_disp,
         shop.open1,
         shop.close1,
@@ -792,7 +860,12 @@ fn sedit_products_menu(g: &mut GameState, conn: ConnId) {
     };
     let mut out = String::from("\x1b[H\x1b[J##     VNUM     Product\r\n");
     for (i, &p) in prods.iter().enumerate() {
-        out.push_str(&format!("{:2} - [&c{:5}&n] - &y{}&n\r\n", i, p, product_short(g, p)));
+        out.push_str(&format!(
+            "{:2} - [&c{:5}&n] - &y{}&n\r\n",
+            i,
+            p,
+            product_short(g, p)
+        ));
     }
     out.push_str(
         "\r\n&gA&n) Add a new product.\r\n&gD&n) Delete a product.\r\n&gQ&n) Quit\r\nEnter choice : ",
@@ -814,7 +887,12 @@ fn sedit_rooms_menu(g: &mut GameState, conn: ConnId) {
     };
     let mut out = String::from("\x1b[H\x1b[J##     VNUM     Room\r\n\r\n");
     for (i, &room) in rooms.iter().enumerate() {
-        out.push_str(&format!("{:2} - [&c{:5}&n] - &y{}&n\r\n", i, room, room_name(g, room)));
+        out.push_str(&format!(
+            "{:2} - [&c{:5}&n] - &y{}&n\r\n",
+            i,
+            room,
+            room_name(g, room)
+        ));
     }
     out.push_str(
         "\r\n&gA&n) Add a new room.\r\n&gD&n) Delete a room.\r\n&gC&n) Compact Display.\r\n\
@@ -990,7 +1068,11 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         let first = trimmed.as_bytes().first().copied();
         let is_num = match first {
             Some(b) if b.is_ascii_digit() => true,
-            Some(b'-') => trimmed.as_bytes().get(1).map(|c| c.is_ascii_digit()).unwrap_or(false),
+            Some(b'-') => trimmed
+                .as_bytes()
+                .get(1)
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false),
             _ => false,
         };
         if !is_num {
@@ -1006,17 +1088,16 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     g.send_to_char(ch, "Saving shop to memory.\r\n");
                     sedit_save_internally(g, conn);
                     let (name, vnum) = (
-                        g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default(),
+                        g.get_char(ch)
+                            .map(|c| c.player.name.clone())
+                            .unwrap_or_default(),
                         with_state(conn, |st| st.vnum).unwrap_or(0),
                     );
                     log::info!("OLC: {} edits shop {}", name, vnum);
                     cleanup(conn);
                 }
                 Some('n') | Some('N') => cleanup(conn),
-                _ => g.send_to_char(
-                    ch,
-                    "Invalid choice!\r\nDo you wish to save the shop? : ",
-                ),
+                _ => g.send_to_char(ch, "Invalid choice!\r\nDo you wish to save the shop? : "),
             }
             return;
         }
@@ -1148,47 +1229,43 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             }
         }
 
-        SeditMode::ProductsMenu => {
-            match trimmed.chars().next() {
-                Some('a') | Some('A') => {
-                    g.send_to_char(ch, "\r\nEnter new product virtual number : ");
-                    with_state(conn, |st| st.mode = SeditMode::NewProduct);
-                    return;
-                }
-                Some('d') | Some('D') => {
-                    g.send_to_char(ch, "\r\nDelete which product? : ");
-                    with_state(conn, |st| st.mode = SeditMode::DeleteProduct);
-                    return;
-                }
-                Some('q') | Some('Q') => {}
-                _ => {}
+        SeditMode::ProductsMenu => match trimmed.chars().next() {
+            Some('a') | Some('A') => {
+                g.send_to_char(ch, "\r\nEnter new product virtual number : ");
+                with_state(conn, |st| st.mode = SeditMode::NewProduct);
+                return;
             }
-        }
+            Some('d') | Some('D') => {
+                g.send_to_char(ch, "\r\nDelete which product? : ");
+                with_state(conn, |st| st.mode = SeditMode::DeleteProduct);
+                return;
+            }
+            Some('q') | Some('Q') => {}
+            _ => {}
+        },
 
-        SeditMode::RoomsMenu => {
-            match trimmed.chars().next() {
-                Some('a') | Some('A') => {
-                    g.send_to_char(ch, "\r\nEnter new room virtual number : ");
-                    with_state(conn, |st| st.mode = SeditMode::NewRoom);
-                    return;
-                }
-                Some('c') | Some('C') => {
-                    sedit_compact_rooms_menu(g, conn);
-                    return;
-                }
-                Some('l') | Some('L') => {
-                    sedit_rooms_menu(g, conn);
-                    return;
-                }
-                Some('d') | Some('D') => {
-                    g.send_to_char(ch, "\r\nDelete which room? : ");
-                    with_state(conn, |st| st.mode = SeditMode::DeleteRoom);
-                    return;
-                }
-                Some('q') | Some('Q') => {}
-                _ => {}
+        SeditMode::RoomsMenu => match trimmed.chars().next() {
+            Some('a') | Some('A') => {
+                g.send_to_char(ch, "\r\nEnter new room virtual number : ");
+                with_state(conn, |st| st.mode = SeditMode::NewRoom);
+                return;
             }
-        }
+            Some('c') | Some('C') => {
+                sedit_compact_rooms_menu(g, conn);
+                return;
+            }
+            Some('l') | Some('L') => {
+                sedit_rooms_menu(g, conn);
+                return;
+            }
+            Some('d') | Some('D') => {
+                g.send_to_char(ch, "\r\nDelete which room? : ");
+                with_state(conn, |st| st.mode = SeditMode::DeleteRoom);
+                return;
+            }
+            Some('q') | Some('Q') => {}
+            _ => {}
+        },
 
         // ---- String edits -------------------------------------------------
         SeditMode::NoItem1 => {
@@ -1214,9 +1291,16 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
         SeditMode::Namelist => {
             // The keyword line for a previously chosen trade type.
-            let kw = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+            let kw = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
             with_state(conn, |st| {
-                let entry = ShopBuyData { type_: st.pending_type, keywords: kw };
+                let entry = ShopBuyData {
+                    type_: st.pending_type,
+                    keywords: kw,
+                };
                 st.shop.type_.push(entry);
             });
             sedit_namelist_menu(g, conn);
@@ -1260,7 +1344,10 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             with_state(conn, |st| st.shop.profit_sell = v);
         }
         SeditMode::TypeMenu => {
-            let v = trimmed.parse::<i32>().unwrap_or(0).clamp(0, NUM_ITEM_TYPES as i32 - 1);
+            let v = trimmed
+                .parse::<i32>()
+                .unwrap_or(0)
+                .clamp(0, NUM_ITEM_TYPES as i32 - 1);
             with_state(conn, |st| {
                 st.pending_type = v;
                 st.mode = SeditMode::Namelist;
@@ -1327,7 +1414,10 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             return;
         }
         SeditMode::ShopFlags => {
-            let i = trimmed.parse::<i32>().unwrap_or(0).clamp(0, NUM_SHOP_FLAGS as i32);
+            let i = trimmed
+                .parse::<i32>()
+                .unwrap_or(0)
+                .clamp(0, NUM_SHOP_FLAGS as i32);
             if i > 0 {
                 with_state(conn, |st| st.shop.bitvector ^= 1 << (i - 1));
                 sedit_shop_flags_menu(g, conn);
@@ -1335,7 +1425,10 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             }
         }
         SeditMode::NoTrade => {
-            let i = trimmed.parse::<i32>().unwrap_or(0).clamp(0, NUM_TRADERS as i32);
+            let i = trimmed
+                .parse::<i32>()
+                .unwrap_or(0)
+                .clamp(0, NUM_TRADERS as i32);
             if i > 0 {
                 with_state(conn, |st| st.shop.with_who ^= 1 << (i - 1));
                 sedit_no_trade_menu(g, conn);

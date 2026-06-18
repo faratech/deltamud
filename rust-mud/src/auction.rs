@@ -126,7 +126,9 @@ fn is_npc(g: &GameState, id: CharId) -> bool {
 }
 
 fn prf_flagged(g: &GameState, id: CharId, flag: i64) -> bool {
-    g.get_char(id).map(|c| c.prf_flags & flag != 0).unwrap_or(false)
+    g.get_char(id)
+        .map(|c| c.prf_flags & flag != 0)
+        .unwrap_or(false)
 }
 
 fn get_idnum(g: &GameState, id: CharId) -> i64 {
@@ -142,7 +144,9 @@ fn get_level(g: &GameState, id: CharId) -> u8 {
 }
 
 fn get_name(g: &GameState, id: CharId) -> String {
-    g.get_char(id).map(|c| c.player.name.clone()).unwrap_or_default()
+    g.get_char(id)
+        .map(|c| c.player.name.clone())
+        .unwrap_or_default()
 }
 
 /// obj->short_description, with the "something" fallback C guards against.
@@ -432,11 +436,27 @@ pub fn auction_update(g: &mut GameState) {
             if let Some(c) = g.get_char_mut(sid) {
                 c.points.gold += bid as i32;
             }
-            act(g, "Congrats! You have sold $p!", false, sid, Some(oid), ActArg::None, To::Char);
+            act(
+                g,
+                "Congrats! You have sold $p!",
+                false,
+                sid,
+                Some(oid),
+                ActArg::None,
+                To::Char,
+            );
         }
         // Hand the object to the winner (the bidder is here by definition).
         g.obj_to_char(oid, bidder);
-        act(g, "Congrats! You now have $p!", false, bidder, Some(oid), ActArg::None, To::Char);
+        act(
+            g,
+            "Congrats! You now have $p!",
+            false,
+            bidder,
+            Some(oid),
+            ActArg::None,
+            To::Char,
+        );
 
         auction_reset();
     }
@@ -496,7 +516,10 @@ pub fn do_bid(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     }
     // Below the minimum where there is no bidder yet.
     if bid < cur_bid && bidder_id < 0 {
-        g.send_to_char(ch, &format!("The minimum is currently {} coins.\r\n", cur_bid));
+        g.send_to_char(
+            ch,
+            &format!("The minimum is currently {} coins.\r\n", cur_bid),
+        );
         return;
     }
     // Below the 5%-over threshold where there IS a bidder, or a zero bid.
@@ -513,7 +536,10 @@ pub fn do_bid(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     }
     // Not enough gold on hand.
     if (get_gold(g, ch) as i64) < bid {
-        g.send_to_char(ch, &format!("You have only {} coins on hand.\r\n", get_gold(g, ch)));
+        g.send_to_char(
+            ch,
+            &format!("You have only {} coins on hand.\r\n", get_gold(g, ch)),
+        );
         return;
     }
 
@@ -545,10 +571,7 @@ pub fn do_bid(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     };
     let s = coin_s(bid);
     let plain = format!("{} bids {} coin{} on {}.", bname, bid, s, short);
-    let color = format!(
-        "&W{}&m bids &W{}&m coin{} on &W{}&m.",
-        bname, bid, s, short
-    );
+    let color = format!("&W{}&m bids &W{}&m coin{} on &W{}&m.", bname, bid, s, short);
     auction_output(g, &color, &plain);
 }
 
@@ -601,7 +624,10 @@ pub fn do_auction(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     }
 
     // Find the item in the seller's inventory.
-    let carrying = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let carrying = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     let obj = match g.get_obj_in_list_vis(ch, &arg1, &carrying) {
         Some(o) => o,
         None => {

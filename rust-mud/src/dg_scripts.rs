@@ -20,9 +20,9 @@
 
 use crate::dg_event::{add_event, WaitEvent};
 use crate::dg_handler::{
-    self, add_var_in, remove_var_in, ScriptKey, TrigId, MAX_SCRIPT_DEPTH, MOB_TRIGGER, MTRIG_GLOBAL,
-    MTRIG_RANDOM, OBJ_TRIGGER, OTRIG_RANDOM, ROOM_ID_BASE, TRIG_NEW, TRIG_RESTART, WLD_TRIGGER,
-    WTRIG_GLOBAL, WTRIG_RANDOM,
+    self, add_var_in, remove_var_in, ScriptKey, TrigId, MAX_SCRIPT_DEPTH, MOB_TRIGGER,
+    MTRIG_GLOBAL, MTRIG_RANDOM, OBJ_TRIGGER, OTRIG_RANDOM, ROOM_ID_BASE, TRIG_NEW, TRIG_RESTART,
+    WLD_TRIGGER, WTRIG_GLOBAL, WTRIG_RANDOM,
 };
 use crate::object::ObjLoc;
 use crate::state::GameState;
@@ -139,20 +139,22 @@ fn get_char(g: &GameState, name: &str) -> Option<CharId> {
     if let Some(id) = parse_uid(name) {
         return find_char_by_uid(g, id);
     }
-    g.chars
-        .keys()
-        .copied()
-        .find(|&c| g.get_char(c).map(|x| crate::handler::isname(name, &x.player.name)).unwrap_or(false))
+    g.chars.keys().copied().find(|&c| {
+        g.get_char(c)
+            .map(|x| crate::handler::isname(name, &x.player.name))
+            .unwrap_or(false)
+    })
 }
 
 fn get_obj(g: &GameState, name: &str) -> Option<ObjId> {
     if let Some(id) = parse_uid(name) {
         return find_obj_by_uid(g, id);
     }
-    g.objs
-        .keys()
-        .copied()
-        .find(|&o| g.get_obj(o).map(|x| crate::handler::isname(name, &x.name)).unwrap_or(false))
+    g.objs.keys().copied().find(|&o| {
+        g.get_obj(o)
+            .map(|x| crate::handler::isname(name, &x.name))
+            .unwrap_or(false)
+    })
 }
 
 /// get_room(name): UID, else a room vnum string.
@@ -169,32 +171,40 @@ fn get_char_room(g: &GameState, name: &str, rnum: RoomRnum) -> Option<CharId> {
         return find_char_by_uid(g, id);
     }
     let room = g.rooms.get(rnum)?;
-    room.people
-        .iter()
-        .copied()
-        .find(|&c| g.get_char(c).map(|x| crate::handler::isname(name, &x.player.name)).unwrap_or(false))
+    room.people.iter().copied().find(|&c| {
+        g.get_char(c)
+            .map(|x| crate::handler::isname(name, &x.player.name))
+            .unwrap_or(false)
+    })
 }
 
 fn get_obj_in_list(g: &GameState, name: &str, list: &[ObjId]) -> Option<ObjId> {
     if let Some(id) = parse_uid(name) {
         return list.iter().copied().find(|&o| obj_id(o) == id);
     }
-    list.iter()
-        .copied()
-        .find(|&o| g.get_obj(o).map(|x| crate::handler::isname(name, &x.name)).unwrap_or(false))
+    list.iter().copied().find(|&o| {
+        g.get_obj(o)
+            .map(|x| crate::handler::isname(name, &x.name))
+            .unwrap_or(false)
+    })
 }
 
 fn get_object_in_equip(g: &GameState, ch: CharId, name: &str) -> Option<ObjId> {
     let c = g.get_char(ch)?;
     if let Some(id) = parse_uid(name) {
-        return c.equipment.iter().flatten().copied().find(|&o| obj_id(o) == id);
+        return c
+            .equipment
+            .iter()
+            .flatten()
+            .copied()
+            .find(|&o| obj_id(o) == id);
     }
     let (_n, kw) = crate::handler::get_number(name);
-    c.equipment
-        .iter()
-        .flatten()
-        .copied()
-        .find(|&o| g.get_obj(o).map(|x| crate::handler::isname(&kw, &x.name)).unwrap_or(false))
+    c.equipment.iter().flatten().copied().find(|&o| {
+        g.get_obj(o)
+            .map(|x| crate::handler::isname(&kw, &x.name))
+            .unwrap_or(false)
+    })
 }
 
 fn obj_room(g: &GameState, o: ObjId) -> Option<RoomRnum> {
@@ -316,10 +326,8 @@ fn find_replacement(
     let key = go.key();
 
     // Look up var in trigger-local vars, then script globals (context-honoured).
-    let local_val = dg_handler::with_trig(trig, |t| {
-        t.get_var(var).map(|v| v.value.clone())
-    })
-    .flatten();
+    let local_val =
+        dg_handler::with_trig(trig, |t| t.get_var(var).map(|v| v.value.clone())).flatten();
     let var_value = local_val.or_else(|| dg_handler::get_global_var(key, var));
 
     // No field: return the var's plain value, or "self"/"" specials.
@@ -359,7 +367,9 @@ fn find_replacement(
     };
 
     match resolved {
-        Resolved::Char(c) => resolve_char_field(g, go, trig, c, field, subfield, var_value.as_deref()),
+        Resolved::Char(c) => {
+            resolve_char_field(g, go, trig, c, field, subfield, var_value.as_deref())
+        }
         Resolved::Obj(o) => resolve_obj_field(g, trig, o, field, var_value.as_deref()),
         Resolved::Room(r) => resolve_room_field(g, trig, r, field, var_value.as_deref()),
         Resolved::None => String::new(),
@@ -373,7 +383,10 @@ fn resolve_named(g: &GameState, go: GoRef, name: &str) -> Resolved {
             if let Some(o) = get_object_in_equip(g, ch, name) {
                 return Resolved::Obj(o);
             }
-            let carry = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+            let carry = g
+                .get_char(ch)
+                .map(|c| c.carrying.clone())
+                .unwrap_or_default();
             if let Some(o) = get_obj_in_list(g, name, &carry) {
                 return Resolved::Obj(o);
             }
@@ -431,7 +444,10 @@ fn get_char_by_obj(g: &GameState, obj: ObjId, name: &str) -> Option<CharId> {
     if let Some(o) = g.get_obj(obj) {
         match o.loc {
             ObjLoc::Carried(c) | ObjLoc::Worn(c, _) => {
-                if g.get_char(c).map(|x| crate::handler::isname(name, &x.player.name)).unwrap_or(false) {
+                if g.get_char(c)
+                    .map(|x| crate::handler::isname(name, &x.player.name))
+                    .unwrap_or(false)
+                {
                     return Some(c);
                 }
             }
@@ -455,7 +471,11 @@ fn get_obj_by_obj(g: &GameState, obj: ObjId, name: &str) -> Option<ObjId> {
                 if obj_id(parent) == id {
                     return Some(parent);
                 }
-            } else if g.get_obj(parent).map(|p| crate::handler::isname(name, &p.name)).unwrap_or(false) {
+            } else if g
+                .get_obj(parent)
+                .map(|p| crate::handler::isname(name, &p.name))
+                .unwrap_or(false)
+            {
                 return Some(parent);
             }
         }
@@ -465,7 +485,10 @@ fn get_obj_by_obj(g: &GameState, obj: ObjId, name: &str) -> Option<ObjId> {
             }
         }
         ObjLoc::Carried(c) => {
-            let carry = g.get_char(c).map(|x| x.carrying.clone()).unwrap_or_default();
+            let carry = g
+                .get_char(c)
+                .map(|x| x.carrying.clone())
+                .unwrap_or_default();
             if let Some(found) = get_obj_in_list(g, name, &carry) {
                 return Some(found);
             }
@@ -486,12 +509,11 @@ fn get_char_by_room(g: &GameState, room: RoomRnum, name: &str) -> Option<CharId>
         return find_char_by_uid(g, id);
     }
     if let Some(r) = g.rooms.get(room) {
-        if let Some(c) = r
-            .people
-            .iter()
-            .copied()
-            .find(|&c| g.get_char(c).map(|x| crate::handler::isname(name, &x.player.name)).unwrap_or(false))
-        {
+        if let Some(c) = r.people.iter().copied().find(|&c| {
+            g.get_char(c)
+                .map(|x| crate::handler::isname(name, &x.player.name))
+                .unwrap_or(false)
+        }) {
             return Some(c);
         }
     }
@@ -517,7 +539,9 @@ fn resolve_random(g: &GameState, go: GoRef, field: &str) -> String {
             GoRef::Obj(o) => (obj_room(g, o), None),
             GoRef::Room(r) => (Some(r), None),
         };
-        let Some(rnum) = rnum else { return String::new() };
+        let Some(rnum) = rnum else {
+            return String::new();
+        };
         let people: Vec<CharId> = g
             .rooms
             .get(rnum)
@@ -760,7 +784,8 @@ fn resolve_room_field(
 }
 
 fn log_unknown(trig: TrigId, kind: &str, field: &str) {
-    let (name, vnum) = dg_handler::with_trig(trig, |t| (t.name.clone(), t.vnum)).unwrap_or_default();
+    let (name, vnum) =
+        dg_handler::with_trig(trig, |t| (t.name.clone(), t.vnum)).unwrap_or_default();
     script_log(&format!(
         "Trigger: {}, VNum {}. unknown {} field: '{}'",
         name, vnum, kind, field
@@ -1276,12 +1301,11 @@ fn process_remote(g: &GameState, go: GoRef, trig: TrigId, cmd: &str) {
     let ctx = dg_handler::get_context(go.key());
     // find local var, then context-global.
     let vd = dg_handler::with_trig(trig, |t| {
-        t.get_var(&var).map(|v| (v.name.clone(), v.value.clone(), v.context))
+        t.get_var(&var)
+            .map(|v| (v.name.clone(), v.value.clone(), v.context))
     })
     .flatten()
-    .or_else(|| {
-        dg_handler::get_global_var(go.key(), &var).map(|v| (var.clone(), v, ctx))
-    });
+    .or_else(|| dg_handler::get_global_var(go.key(), &var).map(|v| (var.clone(), v, ctx)));
     let Some((name, value, vctx)) = vd else {
         log_cmd_err(trig, "remote", "local var not found");
         return;
@@ -1404,8 +1428,12 @@ fn wait_until_delay_from(pulse: u64, current_mud_min: i64, hr: i64, min: i64) ->
 }
 
 fn log_cmd_err(trig: TrigId, what: &str, cmd: &str) {
-    let (name, vnum) = dg_handler::with_trig(trig, |t| (t.name.clone(), t.vnum)).unwrap_or_default();
-    script_log(&format!("Trigger: {}, VNum {}. {}: '{}'", name, vnum, what, cmd));
+    let (name, vnum) =
+        dg_handler::with_trig(trig, |t| (t.name.clone(), t.vnum)).unwrap_or_default();
+    script_log(&format!(
+        "Trigger: {}, VNum {}. {}: '{}'",
+        name, vnum, what, cmd
+    ));
 }
 
 // ---- small arg helpers mirroring two_arguments/any_one_arg --------------
@@ -1874,7 +1902,12 @@ mod vm_tests {
         let lock = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         dg_handler::boot_handler();
         let mut g = GameState::new(Config::default());
-        let rn = g.add_room(Room::new(3001, 0, "Test Room".into(), "A test room.".into()));
+        let rn = g.add_room(Room::new(
+            3001,
+            0,
+            "Test Room".into(),
+            "A test room.".into(),
+        ));
         let mut mob = Character::new_npc(2001);
         mob.player.name = "kobold guard".into();
         mob.short_desc = Some("a kobold guard".into());
@@ -1976,11 +2009,4 @@ mod vm_tests {
         let s = var_subst(&g, GoRef::Mob(CharId(1)), trig, "value=%random.0%");
         assert_eq!(s, "value=0");
     }
-
-
-
-
-
-
-
 }

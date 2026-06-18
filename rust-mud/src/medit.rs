@@ -58,8 +58,8 @@ const MAX_MOB_DESC: usize = 512;
 /// `attack_hit_text[].singular` — bare-hand attack verbs (fight.c). Index is the
 /// attack type stored in the espec `BareHandAttack:` line.
 const ATTACK_HIT_TEXT: [&str; NUM_ATTACK_TYPES] = [
-    "hit", "sting", "whip", "slash", "bite", "bludgeon", "crush", "pound",
-    "claw", "maul", "thrash", "pierce", "blast", "punch", "stab",
+    "hit", "sting", "whip", "slash", "bite", "bludgeon", "crush", "pound", "claw", "maul",
+    "thrash", "pierce", "blast", "punch", "stab",
 ];
 
 // ---------------------------------------------------------------------------
@@ -83,6 +83,7 @@ enum Mode {
     Attack,
     NpcFlags,
     AffFlags,
+    Script(olc::DgScriptEditMode),
     // Numerical responses.
     Level,
     Alignment,
@@ -106,10 +107,20 @@ impl Mode {
     fn is_numeric(self) -> bool {
         matches!(
             self,
-            Mode::Level | Mode::Alignment | Mode::Defense | Mode::MDefense
-                | Mode::Power | Mode::MPower | Mode::Technique | Mode::Exp
-                | Mode::NumDamDice | Mode::SizeDamDice | Mode::NumHpDice
-                | Mode::SizeHpDice | Mode::AddHp | Mode::Gold
+            Mode::Level
+                | Mode::Alignment
+                | Mode::Defense
+                | Mode::MDefense
+                | Mode::Power
+                | Mode::MPower
+                | Mode::Technique
+                | Mode::Exp
+                | Mode::NumDamDice
+                | Mode::SizeDamDice
+                | Mode::NumHpDice
+                | Mode::SizeHpDice
+                | Mode::AddHp
+                | Mode::Gold
         )
     }
 }
@@ -161,8 +172,8 @@ struct MeditState {
     zone_number: i32,
     mob: EditMob,
     mode: Mode,
-    changed: bool,         // OLC_VAL — has anything been edited?
-    ddesc_buf: String,     // accumulates the multi-line description
+    changed: bool,     // OLC_VAL — has anything been edited?
+    ddesc_buf: String, // accumulates the multi-line description
 }
 
 fn states() -> &'static Mutex<HashMap<ConnId, MeditState>> {
@@ -208,7 +219,10 @@ pub fn do_medit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
     let arg = arg.trim();
     // Accept an optional leading "new" keyword (CircleMUD: `medit new <vnum>`).
-    let vnum_tok = if let Some(rest) = arg.strip_prefix("new ").or_else(|| arg.strip_prefix("New ")) {
+    let vnum_tok = if let Some(rest) = arg
+        .strip_prefix("new ")
+        .or_else(|| arg.strip_prefix("New "))
+    {
         rest.trim()
     } else {
         arg
@@ -462,6 +476,7 @@ fn disp_menu(g: &mut GameState, conn: ConnId) {
          &gM&n) Attack    : &y{atk}\r\n\
          &gN&n) NPC Flags : &c{npc}\r\n\
          &gO&n) AFF Flags : &c{aff}\r\n\
+         &gS&n) Script    : &c{script}\r\n\
          &gQ&n) Quit\r\n\
          Enter choice : ",
         pos = position_name(m.position),
@@ -469,6 +484,14 @@ fn disp_menu(g: &mut GameState, conn: ConnId) {
         atk = attack_name(m.attack_type),
         npc = npc_flags,
         aff = aff_flags,
+        script =
+            if crate::dg_db_scripts::proto_trigger_vnums(crate::dg_handler::MOB_TRIGGER, st.vnum)
+                .is_empty()
+            {
+                "Not Set."
+            } else {
+                "Set."
+            },
     );
     send(g, conn, &buf2);
 
@@ -562,7 +585,10 @@ fn disp_aff_flags(g: &mut GameState, conn: ConnId) {
 // ===========================================================================
 
 fn gender_name(i: i32) -> &'static str {
-    GENDERS.get(i.clamp(0, (NUM_GENDERS - 1) as i32) as usize).copied().unwrap_or("Neutral")
+    GENDERS
+        .get(i.clamp(0, (NUM_GENDERS - 1) as i32) as usize)
+        .copied()
+        .unwrap_or("Neutral")
 }
 
 fn position_name(i: i32) -> &'static str {
@@ -571,7 +597,10 @@ fn position_name(i: i32) -> &'static str {
 }
 
 fn attack_name(i: i32) -> &'static str {
-    ATTACK_HIT_TEXT.get(i.clamp(0, (NUM_ATTACK_TYPES - 1) as i32) as usize).copied().unwrap_or("hit")
+    ATTACK_HIT_TEXT
+        .get(i.clamp(0, (NUM_ATTACK_TYPES - 1) as i32) as usize)
+        .copied()
+        .unwrap_or("hit")
 }
 
 /// CircleMUD `sprintbit`: render a flag bitvector as space-separated names from
@@ -580,7 +609,11 @@ fn sprintbit(bits: i64, names: &[&str], out: &mut String) {
     out.clear();
     for i in 0..64 {
         if bits & (1 << i) != 0 {
-            let name = names.get(i).copied().filter(|n| *n != "\n").unwrap_or("UNDEF");
+            let name = names
+                .get(i)
+                .copied()
+                .filter(|n| *n != "\n")
+                .unwrap_or("UNDEF");
             out.push_str(name);
             out.push(' ');
         }
@@ -641,7 +674,11 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
     if mode.is_numeric() {
         let t = line.trim();
         let numeric = !t.is_empty()
-            && (t.bytes().next().map(|b| b.is_ascii_digit()).unwrap_or(false)
+            && (t
+                .bytes()
+                .next()
+                .map(|b| b.is_ascii_digit())
+                .unwrap_or(false)
                 || (t.starts_with('-') && t.len() > 1 && t.as_bytes()[1].is_ascii_digit()));
         if !numeric {
             send(g, conn, "Field must be numerical, try again : ");
@@ -653,17 +690,29 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         Mode::ConfirmSave => parse_confirm_save(g, conn, line),
         Mode::MainMenu => parse_main_menu(g, conn, line),
         Mode::Alias => {
-            let v = if line.trim().is_empty() { "undefined".to_string() } else { line.trim().to_string() };
+            let v = if line.trim().is_empty() {
+                "undefined".to_string()
+            } else {
+                line.trim().to_string()
+            };
             with_mob(conn, |m| m.alias = v);
             after_edit(g, conn);
         }
         Mode::ShortDesc => {
-            let v = if line.trim().is_empty() { "undefined".to_string() } else { line.trim().to_string() };
+            let v = if line.trim().is_empty() {
+                "undefined".to_string()
+            } else {
+                line.trim().to_string()
+            };
             with_mob(conn, |m| m.short_desc = v);
             after_edit(g, conn);
         }
         Mode::LongDesc => {
-            let v = if line.trim().is_empty() { "undefined".to_string() } else { line.trim().to_string() };
+            let v = if line.trim().is_empty() {
+                "undefined".to_string()
+            } else {
+                line.trim().to_string()
+            };
             with_mob(conn, |m| m.long_desc = v);
             after_edit(g, conn);
         }
@@ -709,6 +758,30 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             }
             disp_aff_flags(g, conn);
         }
+        Mode::Script(mut script_mode) => {
+            let vnum = states()
+                .lock()
+                .unwrap()
+                .get(&conn)
+                .map(|s| s.vnum)
+                .unwrap_or(0);
+            let keep = olc::dg_script_edit_parse(
+                g,
+                conn,
+                crate::dg_handler::MOB_TRIGGER,
+                vnum,
+                &mut script_mode,
+                line.trim(),
+            );
+            if keep {
+                if let Some(s) = states().lock().unwrap().get_mut(&conn) {
+                    s.mode = Mode::Script(script_mode);
+                    s.changed = true;
+                }
+            } else {
+                disp_menu(g, conn);
+            }
+        }
         // Numerical responses (ranges mirror medit.c exactly).
         Mode::Level => {
             let n = atoi(line).clamp(1, 100);
@@ -746,7 +819,14 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
 }
 
 /// Apply a clamped numeric edit then return to the main menu, marking changed.
-fn num_set<F: FnOnce(&mut EditMob, i32)>(g: &mut GameState, conn: ConnId, line: &str, lo: i32, hi: i32, f: F) {
+fn num_set<F: FnOnce(&mut EditMob, i32)>(
+    g: &mut GameState,
+    conn: ConnId,
+    line: &str,
+    lo: i32,
+    hi: i32,
+    f: F,
+) {
     let n = atoi(line).clamp(lo, hi);
     with_mob(conn, |m| f(m, n));
     after_edit(g, conn);
@@ -773,45 +853,137 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
     let c = line.trim().chars().next().unwrap_or('\0');
     match c {
         'q' | 'Q' => {
-            let changed = states().lock().unwrap().get(&conn).map(|s| s.changed).unwrap_or(false);
+            let changed = states()
+                .lock()
+                .unwrap()
+                .get(&conn)
+                .map(|s| s.changed)
+                .unwrap_or(false);
             if changed {
-                send(g, conn, "Do you wish to save the changes to the mobile? (y/n) : ");
+                send(
+                    g,
+                    conn,
+                    "Do you wish to save the changes to the mobile? (y/n) : ",
+                );
                 set_mode(conn, Mode::ConfirmSave);
             } else {
                 send(g, conn, "No changes made.\r\n");
                 finish(g, conn);
             }
         }
-        '1' => { set_mode(conn, Mode::Sex); disp_sex(g, conn); }
-        '2' => { set_mode(conn, Mode::Alias); send(g, conn, "\r\nEnter new text :\r\n] "); }
-        '3' => { set_mode(conn, Mode::ShortDesc); send(g, conn, "\r\nEnter new text :\r\n] "); }
-        '4' => { set_mode(conn, Mode::LongDesc); send(g, conn, "\r\nEnter new text :\r\n] "); }
+        '1' => {
+            set_mode(conn, Mode::Sex);
+            disp_sex(g, conn);
+        }
+        '2' => {
+            set_mode(conn, Mode::Alias);
+            send(g, conn, "\r\nEnter new text :\r\n] ");
+        }
+        '3' => {
+            set_mode(conn, Mode::ShortDesc);
+            send(g, conn, "\r\nEnter new text :\r\n] ");
+        }
+        '4' => {
+            set_mode(conn, Mode::LongDesc);
+            send(g, conn, "\r\nEnter new text :\r\n] ");
+        }
         '5' => {
             set_mode(conn, Mode::DDesc);
             if let Some(s) = states().lock().unwrap().get_mut(&conn) {
                 s.ddesc_buf.clear();
             }
-            send(g, conn, "Enter mob description: (terminate with a '@' on a blank line)\r\n\r\n");
+            send(
+                g,
+                conn,
+                "Enter mob description: (terminate with a '@' on a blank line)\r\n\r\n",
+            );
         }
-        '6' => { set_mode(conn, Mode::Level); send(g, conn, "\r\nEnter new value : "); }
-        '7' => { set_mode(conn, Mode::Alignment); send(g, conn, "\r\nEnter new value : "); }
-        '8' => { set_mode(conn, Mode::Defense); send(g, conn, "\r\nEnter new value : "); }
-        '9' => { set_mode(conn, Mode::MDefense); send(g, conn, "\r\nEnter new value : "); }
-        'a' | 'A' => { set_mode(conn, Mode::Power); send(g, conn, "\r\nEnter new value : "); }
-        'b' | 'B' => { set_mode(conn, Mode::MPower); send(g, conn, "\r\nEnter new value : "); }
-        'c' | 'C' => { set_mode(conn, Mode::Technique); send(g, conn, "\r\nEnter new value : "); }
-        'd' | 'D' => { set_mode(conn, Mode::Exp); send(g, conn, "\r\nEnter new value : "); }
-        'e' | 'E' => { set_mode(conn, Mode::NumDamDice); send(g, conn, "\r\nEnter new value : "); }
-        'f' | 'F' => { set_mode(conn, Mode::SizeDamDice); send(g, conn, "\r\nEnter new value : "); }
-        'g' | 'G' => { set_mode(conn, Mode::NumHpDice); send(g, conn, "\r\nEnter new value : "); }
-        'h' | 'H' => { set_mode(conn, Mode::SizeHpDice); send(g, conn, "\r\nEnter new value : "); }
-        'i' | 'I' => { set_mode(conn, Mode::AddHp); send(g, conn, "\r\nEnter new value : "); }
-        'j' | 'J' => { set_mode(conn, Mode::Gold); send(g, conn, "\r\nEnter new value : "); }
-        'k' | 'K' => { set_mode(conn, Mode::Position); disp_positions(g, conn); }
-        'l' | 'L' => { set_mode(conn, Mode::DefaultPos); disp_positions(g, conn); }
-        'm' | 'M' => { set_mode(conn, Mode::Attack); disp_attack_types(g, conn); }
-        'n' | 'N' => { set_mode(conn, Mode::NpcFlags); disp_mob_flags(g, conn); }
-        'o' | 'O' => { set_mode(conn, Mode::AffFlags); disp_aff_flags(g, conn); }
+        '6' => {
+            set_mode(conn, Mode::Level);
+            send(g, conn, "\r\nEnter new value : ");
+        }
+        '7' => {
+            set_mode(conn, Mode::Alignment);
+            send(g, conn, "\r\nEnter new value : ");
+        }
+        '8' => {
+            set_mode(conn, Mode::Defense);
+            send(g, conn, "\r\nEnter new value : ");
+        }
+        '9' => {
+            set_mode(conn, Mode::MDefense);
+            send(g, conn, "\r\nEnter new value : ");
+        }
+        'a' | 'A' => {
+            set_mode(conn, Mode::Power);
+            send(g, conn, "\r\nEnter new value : ");
+        }
+        'b' | 'B' => {
+            set_mode(conn, Mode::MPower);
+            send(g, conn, "\r\nEnter new value : ");
+        }
+        'c' | 'C' => {
+            set_mode(conn, Mode::Technique);
+            send(g, conn, "\r\nEnter new value : ");
+        }
+        'd' | 'D' => {
+            set_mode(conn, Mode::Exp);
+            send(g, conn, "\r\nEnter new value : ");
+        }
+        'e' | 'E' => {
+            set_mode(conn, Mode::NumDamDice);
+            send(g, conn, "\r\nEnter new value : ");
+        }
+        'f' | 'F' => {
+            set_mode(conn, Mode::SizeDamDice);
+            send(g, conn, "\r\nEnter new value : ");
+        }
+        'g' | 'G' => {
+            set_mode(conn, Mode::NumHpDice);
+            send(g, conn, "\r\nEnter new value : ");
+        }
+        'h' | 'H' => {
+            set_mode(conn, Mode::SizeHpDice);
+            send(g, conn, "\r\nEnter new value : ");
+        }
+        'i' | 'I' => {
+            set_mode(conn, Mode::AddHp);
+            send(g, conn, "\r\nEnter new value : ");
+        }
+        'j' | 'J' => {
+            set_mode(conn, Mode::Gold);
+            send(g, conn, "\r\nEnter new value : ");
+        }
+        'k' | 'K' => {
+            set_mode(conn, Mode::Position);
+            disp_positions(g, conn);
+        }
+        'l' | 'L' => {
+            set_mode(conn, Mode::DefaultPos);
+            disp_positions(g, conn);
+        }
+        'm' | 'M' => {
+            set_mode(conn, Mode::Attack);
+            disp_attack_types(g, conn);
+        }
+        'n' | 'N' => {
+            set_mode(conn, Mode::NpcFlags);
+            disp_mob_flags(g, conn);
+        }
+        'o' | 'O' => {
+            set_mode(conn, Mode::AffFlags);
+            disp_aff_flags(g, conn);
+        }
+        's' | 'S' => {
+            let vnum = states()
+                .lock()
+                .unwrap()
+                .get(&conn)
+                .map(|s| s.vnum)
+                .unwrap_or(0);
+            olc::dg_script_menu(g, conn, crate::dg_handler::MOB_TRIGGER, vnum);
+            set_mode(conn, Mode::Script(olc::DgScriptEditMode::Main));
+        }
         _ => disp_menu(g, conn),
     }
 }
@@ -848,7 +1020,12 @@ fn finish(g: &mut GameState, conn: ConnId) {
 fn ddesc_input(g: &mut GameState, conn: ConnId, line: &str) {
     if line.trim() == "@" {
         // Commit the gathered buffer into the mob description.
-        let buf = states().lock().unwrap().get(&conn).map(|s| s.ddesc_buf.clone()).unwrap_or_default();
+        let buf = states()
+            .lock()
+            .unwrap()
+            .get(&conn)
+            .map(|s| s.ddesc_buf.clone())
+            .unwrap_or_default();
         let mut text = buf;
         if !text.ends_with('\n') {
             text.push('\n');
@@ -1012,18 +1189,75 @@ fn save_to_disk(g: &mut GameState, conn: ConnId) {
         let _ = std::fs::create_dir_all(parent);
     }
     if std::fs::write(&path, out.as_bytes()).is_err() {
-        send(g, conn, "Warning: could not write the mob file to disk.\r\n");
+        send(
+            g,
+            conn,
+            "Warning: could not write the mob file to disk.\r\n",
+        );
     }
+}
+
+/// medit_save_to_disk(zone): central OLC save dispatcher entry. Rewrites every
+/// mobile prototype in the zone using the same extended block renderer as the
+/// editor save path.
+pub fn medit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
+    let (zone_number, zone_lo, zone_top) = match g.zones.get(zone_rnum) {
+        Some(z) => (z.number, z.number * 100, z.top),
+        None => return,
+    };
+    let path = mob_file_path(g, zone_number);
+    let mut vnums: Vec<MobVnum> = g
+        .mob_protos
+        .keys()
+        .copied()
+        .filter(|v| *v >= zone_lo && *v <= zone_top)
+        .collect();
+    vnums.sort_unstable();
+
+    let mut out = String::new();
+    for v in vnums {
+        if let Some(proto) = g.mob_protos.get(&v) {
+            let mob = seed_from_proto(g, proto, v);
+            out.push_str(&format!("#{}\n", v));
+            out.push_str(&render_mob_block(&mob));
+            for tv in crate::dg_db_scripts::proto_trigger_vnums(0, v) {
+                out.push_str(&format!("T {}\n", tv));
+            }
+        }
+    }
+    out.push_str("$\n");
+
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, out.as_bytes());
+    crate::olc::olc_remove_from_save_list(zone_number, crate::olc::OLC_SAVE_MOB);
 }
 
 /// Render one mob's body block (everything after the `#vnum` line, up to but
 /// not including the next `#`/`$`) in DeltaMUD extended `X`-format. Mirrors
 /// medit_save_to_disk's fprintf sequence exactly.
 fn render_mob_block(m: &EditMob) -> String {
-    let ldesc = strip_string(if m.long_desc.is_empty() { "undefined" } else { &m.long_desc });
-    let ddesc = strip_string(if m.description.is_empty() { "undefined" } else { &m.description });
-    let alias = if m.alias.is_empty() { "undefined" } else { &m.alias };
-    let sdesc = if m.short_desc.is_empty() { "undefined" } else { &m.short_desc };
+    let ldesc = strip_string(if m.long_desc.is_empty() {
+        "undefined"
+    } else {
+        &m.long_desc
+    });
+    let ddesc = strip_string(if m.description.is_empty() {
+        "undefined"
+    } else {
+        &m.description
+    });
+    let alias = if m.alias.is_empty() {
+        "undefined"
+    } else {
+        &m.alias
+    };
+    let sdesc = if m.short_desc.is_empty() {
+        "undefined"
+    } else {
+        &m.short_desc
+    };
 
     let mut s = String::new();
     s.push_str(&format!("{}~\n", alias));
@@ -1031,13 +1265,25 @@ fn render_mob_block(m: &EditMob) -> String {
     s.push_str(&format!("{}~\n", ldesc));
     s.push_str(&format!("{}~\n", ddesc));
     // Flag line: MOB_FLAGS AFF_FLAGS ALIGNMENT E
-    s.push_str(&format!("{} {} {} E\n", m.mob_flags, m.aff_flags, m.alignment));
+    s.push_str(&format!(
+        "{} {} {} E\n",
+        m.mob_flags, m.aff_flags, m.alignment
+    ));
     // X-line: X<level> <power> <mpower> <defense> <mdefense> <technique>
     //         <hit>d<mana>+<move> <ndd>d<sdd>
     s.push_str(&format!(
         "X{} {} {} {} {} {} {}d{}+{} {}d{}\n",
-        m.level, m.power, m.mpower, m.defense, m.mdefense, m.technique,
-        m.hit, m.mana, m.movep, m.num_dam_dice, m.size_dam_dice
+        m.level,
+        m.power,
+        m.mpower,
+        m.defense,
+        m.mdefense,
+        m.technique,
+        m.hit,
+        m.mana,
+        m.movep,
+        m.num_dam_dice,
+        m.size_dam_dice
     ));
     // Gold + exp.
     s.push_str(&format!("{} {}\n", m.gold, m.exp));
@@ -1199,7 +1445,10 @@ fn read_disk_mob(path: &std::path::Path, vnum: MobVnum) -> Option<DiskMobExt> {
         cha: MOB_DEFAULT_STAT,
     };
 
-    if let Some(rest) = stats_line.strip_prefix('X').or_else(|| stats_line.strip_prefix('x')) {
+    if let Some(rest) = stats_line
+        .strip_prefix('X')
+        .or_else(|| stats_line.strip_prefix('x'))
+    {
         // X<level> <power> <mpower> <defense> <mdefense> <technique> <hit>d<mana>+<move> <ndd>d<sdd>
         let toks: Vec<&str> = rest.split_whitespace().collect();
         let n = |k: usize| toks.get(k).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);

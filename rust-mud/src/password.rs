@@ -133,7 +133,8 @@ fn sha256_hex(plain: &str) -> String {
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
 fn is_lower_hex(s: &str) -> bool {
-    s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 // ===========================================================================
@@ -142,8 +143,7 @@ fn is_lower_hex(s: &str) -> bool {
 
 /// The crypt base-64 alphabet used by glibc for salts (`./0-9A-Za-z`), and by
 /// the C `generate_salt()` (which lists it as A-Za-z0-9./ — same 64 chars).
-const SALT_CHARS: &[u8; 64] =
-    b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const SALT_CHARS: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 /// Generate a 16-char random salt. C uses `rand()` seeded once from
 /// `time(NULL) ^ getpid()`; we use a lazily-seeded xorshift so the module has
@@ -174,7 +174,9 @@ fn next_rand() -> u64 {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0x9E3779B97F4A7C15);
-            x = nanos ^ 0xD1B54A32D192ED03 ^ (std::process::id() as u64).wrapping_mul(0x2545F491_4F6CDD1D);
+            x = nanos
+                ^ 0xD1B54A32D192ED03
+                ^ (std::process::id() as u64).wrapping_mul(0x2545F491_4F6CDD1D);
             if x == 0 {
                 x = 0x9E3779B97F4A7C15;
             }
@@ -373,8 +375,7 @@ fn produce_sequence(digest: &[u8], len: usize, out_len: usize) -> Vec<u8> {
 }
 
 /// crypt's base-64 alphabet (note: NOT the standard MIME order).
-const CRYPT_B64: &[u8; 64] =
-    b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const CRYPT_B64: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 /// Sentinel meaning "literal zero byte" in a b64 group (glibc passes 0 for the
 /// missing high byte of the final 2-byte group).
@@ -388,7 +389,11 @@ const ZERO: usize = usize::MAX;
 fn b64_from_24bit(buf: &[u8], calls: &[(usize, usize, usize, u8)]) -> String {
     let mut out = String::new();
     let fetch = |idx: usize| -> u32 {
-        if idx == ZERO { 0 } else { buf[idx] as u32 }
+        if idx == ZERO {
+            0
+        } else {
+            buf[idx] as u32
+        }
     };
     for &(b2, b1, b0, n) in calls {
         let mut w = (fetch(b2) << 16) | (fetch(b1) << 8) | fetch(b0);
@@ -465,8 +470,16 @@ fn is_des_hash(s: &str) -> bool {
 /// Compute the 13-char DES crypt of `key` under the 2-char `salt`.
 fn des_crypt(key: &[u8], salt: &str) -> String {
     let salt_bytes = salt.as_bytes();
-    let c0 = if salt_bytes.is_empty() { b'.' } else { salt_bytes[0] };
-    let c1 = if salt_bytes.len() < 2 { b'.' } else { salt_bytes[1] };
+    let c0 = if salt_bytes.is_empty() {
+        b'.'
+    } else {
+        salt_bytes[0]
+    };
+    let c1 = if salt_bytes.len() < 2 {
+        b'.'
+    } else {
+        salt_bytes[1]
+    };
 
     // Build the 56-bit key schedule input from the (up to 8) low-7-bit chars,
     // each shifted left by one (DES ignores the low bit / parity bit).
@@ -532,16 +545,16 @@ fn a64_to_int(c: u8) -> u64 {
 
 // Initial permutation.
 const IP: [u8; 64] = [
-    58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4, 62, 54, 46, 38, 30, 22, 14, 6, 64,
-    56, 48, 40, 32, 24, 16, 8, 57, 49, 41, 33, 25, 17, 9, 1, 59, 51, 43, 35, 27, 19, 11, 3, 61, 53,
-    45, 37, 29, 21, 13, 5, 63, 55, 47, 39, 31, 23, 15, 7,
+    58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4, 62, 54, 46, 38, 30, 22, 14, 6,
+    64, 56, 48, 40, 32, 24, 16, 8, 57, 49, 41, 33, 25, 17, 9, 1, 59, 51, 43, 35, 27, 19, 11, 3, 61,
+    53, 45, 37, 29, 21, 13, 5, 63, 55, 47, 39, 31, 23, 15, 7,
 ];
 
 // Final permutation (inverse of IP).
 const FP: [u8; 64] = [
-    40, 8, 48, 16, 56, 24, 64, 32, 39, 7, 47, 15, 55, 23, 63, 31, 38, 6, 46, 14, 54, 22, 62, 30, 37,
-    5, 45, 13, 53, 21, 61, 29, 36, 4, 44, 12, 52, 20, 60, 28, 35, 3, 43, 11, 51, 19, 59, 27, 34, 2,
-    42, 10, 50, 18, 58, 26, 33, 1, 41, 9, 49, 17, 57, 25,
+    40, 8, 48, 16, 56, 24, 64, 32, 39, 7, 47, 15, 55, 23, 63, 31, 38, 6, 46, 14, 54, 22, 62, 30,
+    37, 5, 45, 13, 53, 21, 61, 29, 36, 4, 44, 12, 52, 20, 60, 28, 35, 3, 43, 11, 51, 19, 59, 27,
+    34, 2, 42, 10, 50, 18, 58, 26, 33, 1, 41, 9, 49, 17, 57, 25,
 ];
 
 // Expansion (32 -> 48).
@@ -552,8 +565,8 @@ const E: [u8; 48] = [
 
 // Permutation P after S-boxes.
 const P: [u8; 32] = [
-    16, 7, 20, 21, 29, 12, 28, 17, 1, 15, 23, 26, 5, 18, 31, 10, 2, 8, 24, 14, 32, 27, 3, 9, 19, 13,
-    30, 6, 22, 11, 4, 25,
+    16, 7, 20, 21, 29, 12, 28, 17, 1, 15, 23, 26, 5, 18, 31, 10, 2, 8, 24, 14, 32, 27, 3, 9, 19,
+    13, 30, 6, 22, 11, 4, 25,
 ];
 
 // Permuted choice 1 (64 -> 56).
@@ -576,8 +589,8 @@ const SHIFTS: [u8; 16] = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1];
 const SBOX: [[u8; 64]; 8] = [
     [
         14, 4, 13, 1, 2, 15, 11, 8, 3, 10, 6, 12, 5, 9, 0, 7, 0, 15, 7, 4, 14, 2, 13, 1, 10, 6, 12,
-        11, 9, 5, 3, 8, 4, 1, 14, 8, 13, 6, 2, 11, 15, 12, 9, 7, 3, 10, 5, 0, 15, 12, 8, 2, 4, 9, 1,
-        7, 5, 11, 3, 14, 10, 0, 6, 13,
+        11, 9, 5, 3, 8, 4, 1, 14, 8, 13, 6, 2, 11, 15, 12, 9, 7, 3, 10, 5, 0, 15, 12, 8, 2, 4, 9,
+        1, 7, 5, 11, 3, 14, 10, 0, 6, 13,
     ],
     [
         15, 1, 8, 14, 6, 11, 3, 4, 9, 7, 2, 13, 12, 0, 5, 10, 3, 13, 4, 7, 15, 2, 8, 14, 12, 0, 1,
@@ -585,9 +598,9 @@ const SBOX: [[u8; 64]; 8] = [
         4, 2, 11, 6, 7, 12, 0, 5, 14, 9,
     ],
     [
-        10, 0, 9, 14, 6, 3, 15, 5, 1, 13, 12, 7, 11, 4, 2, 8, 13, 7, 0, 9, 3, 4, 6, 10, 2, 8, 5, 14,
-        12, 11, 15, 1, 13, 6, 4, 9, 8, 15, 3, 0, 11, 1, 2, 12, 5, 10, 14, 7, 1, 10, 13, 0, 6, 9, 8,
-        7, 4, 15, 14, 3, 11, 5, 2, 12,
+        10, 0, 9, 14, 6, 3, 15, 5, 1, 13, 12, 7, 11, 4, 2, 8, 13, 7, 0, 9, 3, 4, 6, 10, 2, 8, 5,
+        14, 12, 11, 15, 1, 13, 6, 4, 9, 8, 15, 3, 0, 11, 1, 2, 12, 5, 10, 14, 7, 1, 10, 13, 0, 6,
+        9, 8, 7, 4, 15, 14, 3, 11, 5, 2, 12,
     ],
     [
         7, 13, 14, 3, 0, 6, 9, 10, 1, 2, 8, 5, 11, 12, 4, 15, 13, 8, 11, 5, 6, 15, 0, 3, 4, 7, 2,
@@ -637,7 +650,7 @@ fn permute(input: u64, table: &[u8]) -> u64 {
 fn des_set_key(keyblock: &[u8; 8]) -> [u64; 16] {
     let key = u64::from_be_bytes(*keyblock);
     let permuted = permute(key, &PC1); // 56 bits
-    // Split into C (left 28) and D (right 28).
+                                       // Split into C (left 28) and D (right 28).
     let mut c = (permuted >> 28) & 0x0fff_ffff;
     let mut d = permuted & 0x0fff_ffff;
     let mut subkeys = [0u64; 16];
@@ -757,18 +770,14 @@ mod tests {
     fn sha256_crypt_known_vector() {
         // Drepper $5$ test vector.
         let stored = "$5$saltstring$5B8vYYiY.CVt1RlTTf8KbXBH3hsxY/GNooZaBBGWEc5";
-        assert_eq!(
-            sha_crypt(b"Hello world!", stored).as_deref(),
-            Some(stored)
-        );
+        assert_eq!(sha_crypt(b"Hello world!", stored).as_deref(), Some(stored));
         assert!(check_password(stored, "Hello world!"));
         assert!(!check_password(stored, "Hello world?"));
     }
 
     #[test]
     fn sha256_crypt_rounds_vector() {
-        let stored =
-            "$5$rounds=10000$saltstringsaltst$3xv.VbSHBb41AL9AvLeujZkZRBAwqFMz2.opqey6IcA";
+        let stored = "$5$rounds=10000$saltstringsaltst$3xv.VbSHBb41AL9AvLeujZkZRBAwqFMz2.opqey6IcA";
         assert_eq!(sha_crypt(b"Hello world!", stored).as_deref(), Some(stored));
         assert!(check_password(stored, "Hello world!"));
     }

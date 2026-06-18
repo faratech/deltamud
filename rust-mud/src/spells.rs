@@ -276,12 +276,14 @@ pub fn spell_recall(
     if is_npc(g, victim) {
         return;
     }
-    if g
-        .get_char(victim)
+    if g.get_char(victim)
         .map(|c| c.riding.is_some() || c.ridden_by.is_some())
         .unwrap_or(false)
     {
-        g.send_to_char(ch, "The spell fails because your victim is atop a mount.\r\n");
+        g.send_to_char(
+            ch,
+            "The spell fails because your victim is atop a mount.\r\n",
+        );
         return;
     }
 
@@ -392,7 +394,11 @@ pub fn spell_summon(
     if is_npc(g, victim) {
         let mob_vnum = g.get_char(victim).map(|c| c.nr).unwrap_or(NOBODY);
         if let Some(zone) = crate::olc::real_zone(g, mob_vnum) {
-            if g.zones.get(zone).map(|z| z.status_mode == 0).unwrap_or(false) {
+            if g.zones
+                .get(zone)
+                .map(|z| z.status_mode == 0)
+                .unwrap_or(false)
+            {
                 g.send_to_char(ch, "You failed.\r\n");
                 return;
             }
@@ -699,17 +705,7 @@ pub fn spell_identify(
 ) {
     if let Some(obj) = obj {
         g.send_to_char(ch, "You feel informed:\r\n");
-        let (
-            short,
-            otype,
-            weight,
-            cost,
-            rent,
-            bitvector,
-            extra_flags,
-            curr_slots,
-            total_slots,
-        ) = g
+        let (short, otype, weight, cost, rent, bitvector, extra_flags, curr_slots, total_slots) = g
             .get_obj(obj)
             .map(|o| {
                 (
@@ -1647,7 +1643,10 @@ mod tests {
 
     fn lock_test_houses() -> MutexGuard<'static, ()> {
         static TEST_HOUSES_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        TEST_HOUSES_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        TEST_HOUSES_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap()
     }
 
     fn add_portal_proto(g: &mut GameState) {

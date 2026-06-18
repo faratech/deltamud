@@ -60,7 +60,14 @@ struct RawCmd {
 
 impl RawCmd {
     fn blank() -> Self {
-        RawCmd { command: 'N', if_flag: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0 }
+        RawCmd {
+            command: 'N',
+            if_flag: 0,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+        }
     }
 }
 
@@ -163,7 +170,11 @@ pub fn do_zedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
     let arg = arg.trim();
     let room_vnum: RoomVnum = if arg.is_empty() {
-        match g.get_char(ch).and_then(|c| c.in_room).map(|r| g.rooms[r].number) {
+        match g
+            .get_char(ch)
+            .and_then(|c| c.in_room)
+            .map(|r| g.rooms[r].number)
+        {
             Some(v) => v,
             None => {
                 send(g, conn, "You are not in a room with a vnum.\r\n");
@@ -174,7 +185,11 @@ pub fn do_zedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         match arg.parse() {
             Ok(v) => v,
             Err(_) => {
-                send(g, conn, "Specify a room VNUM to edit (or omit to edit this room).\r\n");
+                send(
+                    g,
+                    conn,
+                    "Specify a room VNUM to edit (or omit to edit this room).\r\n",
+                );
                 return;
             }
         }
@@ -235,7 +250,10 @@ pub fn do_zedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     // fidelity incl. if_flag/arg4), falling back to the in-memory simplified
     // ResetCmd list if the file is unreadable.
     let all = read_disk_cmds(&path).unwrap_or_else(|| cmds_from_memory(g, zone_index));
-    let cmds: Vec<RawCmd> = all.into_iter().filter(|c| cmd_room(c) == Some(room_vnum)).collect();
+    let cmds: Vec<RawCmd> = all
+        .into_iter()
+        .filter(|c| cmd_room(c) == Some(room_vnum))
+        .collect();
 
     let st = ZeditState {
         room_vnum,
@@ -321,9 +339,21 @@ fn disp_menu(g: &mut GameState, conn: ConnId) {
         1 => "Reset only when no players are in zone.",
         _ => "Normal reset.",
     };
-    let approve = if st.hdr.status_mode != 0 { "Approved for mortals." } else { "Closed to mortals." };
-    let builders = if st.hdr.builders.is_empty() { "<NONE!>" } else { &st.hdr.builders };
-    let name = if st.hdr.name.is_empty() { "<NONE!>" } else { &st.hdr.name };
+    let approve = if st.hdr.status_mode != 0 {
+        "Approved for mortals."
+    } else {
+        "Closed to mortals."
+    };
+    let builders = if st.hdr.builders.is_empty() {
+        "<NONE!>"
+    } else {
+        &st.hdr.builders
+    };
+    let name = if st.hdr.name.is_empty() {
+        "<NONE!>"
+    } else {
+        &st.hdr.name
+    };
 
     let mut buf = format!(
         "Room number: &c{room}&n\t\tRoom zone: &c{zone}\r\n\
@@ -500,7 +530,11 @@ fn disp_arg2(g: &mut GameState, conn: ConnId) {
     let cmd = cur_cmd_letter(conn);
     match cmd {
         'M' | 'O' | 'E' | 'P' | 'G' => {
-            send(g, conn, "Input the maximum number that can exist on the mud : ");
+            send(
+                g,
+                conn,
+                "Input the maximum number that can exist on the mud : ",
+            );
         }
         'D' => {
             let mut out = String::new();
@@ -532,7 +566,13 @@ fn disp_arg3(g: &mut GameState, conn: ConnId) {
                 } else {
                     ""
                 };
-                out.push_str(&format!("{:>2}) {:<26.26} {:>2}) {:<26.26}\r\n", i, EQUIPMENT_TYPES[i], i + 1, next));
+                out.push_str(&format!(
+                    "{:>2}) {:<26.26} {:>2}) {:<26.26}\r\n",
+                    i,
+                    EQUIPMENT_TYPES[i],
+                    i + 1,
+                    next
+                ));
                 if i + 1 < EQUIPMENT_TYPES.len() && EQUIPMENT_TYPES[i + 1] != "\n" {
                     i += 2;
                 } else {
@@ -548,7 +588,11 @@ fn disp_arg3(g: &mut GameState, conn: ConnId) {
             conn,
             "0)  Door open\r\n1)  Door closed\r\n2)  Door locked\r\nEnter state of the door : ",
         ),
-        'G' => send(g, conn, "Give the percentage chance that this event should happen: "),
+        'G' => send(
+            g,
+            conn,
+            "Give the percentage chance that this event should happen: ",
+        ),
         _ => {}
     }
     set_mode(conn, Mode::Arg3);
@@ -558,7 +602,11 @@ fn disp_arg4(g: &mut GameState, conn: ConnId) {
     let cmd = cur_cmd_letter(conn);
     match cmd {
         'E' | 'M' | 'O' | 'P' => {
-            send(g, conn, "Give the percentage chance that this event should happen: ");
+            send(
+                g,
+                conn,
+                "Give the percentage chance that this event should happen: ",
+            );
             set_mode(conn, Mode::Arg4);
         }
         _ => {}
@@ -570,10 +618,16 @@ fn disp_arg4(g: &mut GameState, conn: ConnId) {
 // ===========================================================================
 
 fn mob_short(g: &GameState, vnum: i32) -> String {
-    g.mob_protos.get(&vnum).map(|p| p.short_desc.clone()).unwrap_or_else(|| "<UNDEF>".to_string())
+    g.mob_protos
+        .get(&vnum)
+        .map(|p| p.short_desc.clone())
+        .unwrap_or_else(|| "<UNDEF>".to_string())
 }
 fn obj_short(g: &GameState, vnum: i32) -> String {
-    g.obj_protos.get(&vnum).map(|p| p.short_desc.clone()).unwrap_or_else(|| "<UNDEF>".to_string())
+    g.obj_protos
+        .get(&vnum)
+        .map(|p| p.short_desc.clone())
+        .unwrap_or_else(|| "<UNDEF>".to_string())
 }
 fn dir_name(i: i32) -> &'static str {
     if i >= 0 && (i as usize) < NUM_OF_DIRS {
@@ -614,12 +668,20 @@ fn set_mode(conn: ConnId, mode: Mode) {
 }
 
 fn state_room(conn: ConnId) -> RoomVnum {
-    states().lock().unwrap().get(&conn).map(|s| s.room_vnum).unwrap_or(0)
+    states()
+        .lock()
+        .unwrap()
+        .get(&conn)
+        .map(|s| s.room_vnum)
+        .unwrap_or(0)
 }
 
 fn cur_cmd_letter(conn: ConnId) -> char {
     let g = states().lock().unwrap();
-    g.get(&conn).and_then(|s| s.cmds.get(s.cur)).map(|c| c.command).unwrap_or('\0')
+    g.get(&conn)
+        .and_then(|s| s.cmds.get(s.cur))
+        .map(|c| c.command)
+        .unwrap_or('\0')
 }
 
 fn with_cur<F: FnOnce(&mut RawCmd)>(conn: ConnId, f: F) {
@@ -685,7 +747,12 @@ pub fn zedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
 // ---- Main menu ------------------------------------------------------------
 
 fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
-    let level = states().lock().unwrap().get(&conn).map(|s| s.level_of_editor).unwrap_or(0);
+    let level = states()
+        .lock()
+        .unwrap()
+        .get(&conn)
+        .map(|s| s.level_of_editor)
+        .unwrap_or(0);
     match line.trim().chars().next().unwrap_or('\0') {
         'q' | 'Q' => {
             let (cmds_changed, header_changed) = states()
@@ -695,7 +762,11 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
                 .map(|s| (s.hdr.cmds_changed, s.hdr.header_changed))
                 .unwrap_or((false, false));
             if cmds_changed || header_changed {
-                send(g, conn, "Do you wish to save the changes to the zone info? (y/n) : ");
+                send(
+                    g,
+                    conn,
+                    "Do you wish to save the changes to the zone info? (y/n) : ",
+                );
                 set_mode(conn, Mode::ConfirmSave);
             } else {
                 send(g, conn, "No changes made.\r\n");
@@ -703,7 +774,11 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
             }
         }
         'n' | 'N' => {
-            send(g, conn, "What number in the list should the new command be? : ");
+            send(
+                g,
+                conn,
+                "What number in the list should the new command be? : ",
+            );
             set_mode(conn, Mode::NewEntry);
         }
         'e' | 'E' => {
@@ -749,7 +824,11 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
         }
         'b' | 'B' => {
             if level < LVL_IMPL {
-                send(g, conn, "Only Implementors can modify the builder list.\r\n");
+                send(
+                    g,
+                    conn,
+                    "Only Implementors can modify the builder list.\r\n",
+                );
                 disp_menu(g, conn);
             } else {
                 send(g, conn, "Enter new zone builders : ");
@@ -843,16 +922,30 @@ fn start_change_command(conn: ConnId, pos: usize) -> bool {
 // ---- Command type / if-flag ----------------------------------------------
 
 fn parse_command_type(g: &mut GameState, conn: ConnId, line: &str) {
-    let c = line.trim().chars().next().unwrap_or('\0').to_ascii_uppercase();
+    let c = line
+        .trim()
+        .chars()
+        .next()
+        .unwrap_or('\0')
+        .to_ascii_uppercase();
     if c == '\0' || !"MOPEDGR".contains(c) {
         send(g, conn, "Invalid choice, try again : ");
         return;
     }
     with_cur(conn, |cmd| cmd.command = c);
     // If there is a previous command in the list, offer the if-flag chaining.
-    let cur = states().lock().unwrap().get(&conn).map(|s| s.cur).unwrap_or(0);
+    let cur = states()
+        .lock()
+        .unwrap()
+        .get(&conn)
+        .map(|s| s.cur)
+        .unwrap_or(0);
     if cur > 0 {
-        send(g, conn, "Is this command dependent on the success of the previous one? (y/n)\r\n");
+        send(
+            g,
+            conn,
+            "Is this command dependent on the success of the previous one? (y/n)\r\n",
+        );
         set_mode(conn, Mode::IfFlag);
     } else {
         with_cur(conn, |cmd| cmd.if_flag = 0);
@@ -886,7 +979,10 @@ fn parse_arg1(g: &mut GameState, conn: ConnId, line: &str) {
     match cmd {
         'M' => {
             if g.mob_protos.contains_key(&vnum) {
-                if !ch.map(|id| can_edit_vnum_zone(g, id, vnum)).unwrap_or(false) {
+                if !ch
+                    .map(|id| can_edit_vnum_zone(g, id, vnum))
+                    .unwrap_or(false)
+                {
                     send(g, conn, "You do not have permission to edit this zone.\r\n");
                     return;
                 }
@@ -898,7 +994,10 @@ fn parse_arg1(g: &mut GameState, conn: ConnId, line: &str) {
         }
         'O' | 'P' | 'E' | 'G' => {
             if g.obj_protos.contains_key(&vnum) {
-                if !ch.map(|id| can_edit_vnum_zone(g, id, vnum)).unwrap_or(false) {
+                if !ch
+                    .map(|id| can_edit_vnum_zone(g, id, vnum))
+                    .unwrap_or(false)
+                {
                     send(g, conn, "You do not have permission to edit this zone.\r\n");
                     return;
                 }
@@ -1286,15 +1385,29 @@ fn save_to_disk(g: &mut GameState, conn: ConnId) {
     };
     let all = splice_room_cmds(&st.cmds, survivors);
 
-    let name = if st.hdr.name.is_empty() { "undefined" } else { &st.hdr.name };
-    let builders = if st.hdr.builders.is_empty() { "<NONE!>" } else { &st.hdr.builders };
+    let name = if st.hdr.name.is_empty() {
+        "undefined"
+    } else {
+        &st.hdr.name
+    };
+    let builders = if st.hdr.builders.is_empty() {
+        "<NONE!>"
+    } else {
+        &st.hdr.builders
+    };
 
     let mut out = String::new();
     out.push_str(&format!("#{}\n", st.zone_number));
     out.push_str(&format!("{}~\n", name));
     out.push_str(&format!("{}~\n", builders));
-    out.push_str(&format!("{} {} {}\n", st.hdr.top, st.hdr.lifespan, st.hdr.reset_mode));
-    out.push_str(&format!("{} {} {}\n", st.hdr.lvl1, st.hdr.lvl2, st.hdr.status_mode));
+    out.push_str(&format!(
+        "{} {} {}\n",
+        st.hdr.top, st.hdr.lifespan, st.hdr.reset_mode
+    ));
+    out.push_str(&format!(
+        "{} {} {}\n",
+        st.hdr.lvl1, st.hdr.lvl2, st.hdr.status_mode
+    ));
 
     for c in &all {
         if c.command == '*' || c.command == 'N' || c.command == 'S' {
@@ -1314,8 +1427,64 @@ fn save_to_disk(g: &mut GameState, conn: ConnId) {
         let _ = std::fs::create_dir_all(parent);
     }
     if std::fs::write(&path, out.as_bytes()).is_err() {
-        send(g, conn, "Warning: could not write the zone file to disk.\r\n");
+        send(
+            g,
+            conn,
+            "Warning: could not write the zone file to disk.\r\n",
+        );
     }
+}
+
+/// zedit_save_to_disk(zone): central OLC save dispatcher entry. Writes the
+/// current in-memory zone header/reset list to `<zone>.zon`.
+pub fn zedit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
+    let z = match g.zones.get(zone_rnum) {
+        Some(z) => z.clone(),
+        None => return,
+    };
+    let all = cmds_from_memory(g, zone_rnum);
+    let path = zon_file_path(g, z.number);
+
+    let name = if z.name.is_empty() {
+        "undefined"
+    } else {
+        &z.name
+    };
+    let builders = if z.builders.is_empty() {
+        "<NONE!>"
+    } else {
+        &z.builders
+    };
+
+    let mut out = String::new();
+    out.push_str(&format!("#{}\n", z.number));
+    out.push_str(&format!("{}~\n", name));
+    out.push_str(&format!("{}~\n", builders));
+    out.push_str(&format!("{} {} {}\n", z.top, z.lifespan, z.reset_mode));
+    out.push_str(&format!(
+        "{} {} {}\n",
+        z.min_level, z.max_level, z.status_mode
+    ));
+
+    for c in &all {
+        if c.command == '*' || c.command == 'N' || c.command == 'S' {
+            continue;
+        }
+        if !"MOGEPRD".contains(c.command) {
+            continue;
+        }
+        out.push_str(&format!(
+            "{} {} {} {} {} {}\n",
+            c.command, c.if_flag, c.arg1, c.arg2, c.arg3, c.arg4
+        ));
+    }
+    out.push_str("S\n$\n");
+
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, out.as_bytes());
+    olc::olc_remove_from_save_list(z.number, olc::OLC_SAVE_ZONE);
 }
 
 /// Splice the edited room's reset commands back into the surviving (other-room)
@@ -1329,7 +1498,11 @@ fn save_to_disk(g: &mut GameState, conn: ConnId) {
 /// instead reorders the file and breaks the load->save round-trip.) 'N' is the
 /// freshly-created-blank sentinel and is never written.
 fn splice_room_cmds(edited: &[RawCmd], survivors: Vec<RawCmd>) -> Vec<RawCmd> {
-    let mut all: Vec<RawCmd> = edited.iter().filter(|c| c.command != 'N').copied().collect();
+    let mut all: Vec<RawCmd> = edited
+        .iter()
+        .filter(|c| c.command != 'N')
+        .copied()
+        .collect();
     all.extend(survivors);
     all
 }
@@ -1339,13 +1512,51 @@ fn splice_room_cmds(edited: &[RawCmd], survivors: Vec<RawCmd>) -> Vec<RawCmd> {
 fn raw_to_reset(c: &RawCmd) -> Option<ResetCmd> {
     let if_flag = c.if_flag != 0;
     match c.command {
-        'M' => Some(ResetCmd::LoadMob { if_flag, mob_vnum: c.arg1, max_count: c.arg2, room_vnum: c.arg3, load_chance: c.arg4 }),
-        'O' => Some(ResetCmd::LoadObjInRoom { if_flag, obj_vnum: c.arg1, max_count: c.arg2, room_vnum: c.arg3, load_chance: c.arg4 }),
-        'G' => Some(ResetCmd::GiveObjToMob { if_flag, obj_vnum: c.arg1, max_count: c.arg2, load_chance: c.arg3 }),
-        'E' => Some(ResetCmd::EquipMob { if_flag, obj_vnum: c.arg1, max_count: c.arg2, wear_pos: c.arg3.max(0) as usize, load_chance: c.arg4 }),
-        'P' => Some(ResetCmd::PutObjInObj { if_flag, obj_vnum: c.arg1, max_count: c.arg2, container_vnum: c.arg3, load_chance: c.arg4 }),
-        'R' => Some(ResetCmd::RemoveObj { if_flag, room_vnum: c.arg1, obj_vnum: c.arg2 }),
-        'D' => Some(ResetCmd::Door { if_flag, room_vnum: c.arg1, direction: c.arg2.max(0) as usize, state: c.arg3 }),
+        'M' => Some(ResetCmd::LoadMob {
+            if_flag,
+            mob_vnum: c.arg1,
+            max_count: c.arg2,
+            room_vnum: c.arg3,
+            load_chance: c.arg4,
+        }),
+        'O' => Some(ResetCmd::LoadObjInRoom {
+            if_flag,
+            obj_vnum: c.arg1,
+            max_count: c.arg2,
+            room_vnum: c.arg3,
+            load_chance: c.arg4,
+        }),
+        'G' => Some(ResetCmd::GiveObjToMob {
+            if_flag,
+            obj_vnum: c.arg1,
+            max_count: c.arg2,
+            load_chance: c.arg3,
+        }),
+        'E' => Some(ResetCmd::EquipMob {
+            if_flag,
+            obj_vnum: c.arg1,
+            max_count: c.arg2,
+            wear_pos: c.arg3.max(0) as usize,
+            load_chance: c.arg4,
+        }),
+        'P' => Some(ResetCmd::PutObjInObj {
+            if_flag,
+            obj_vnum: c.arg1,
+            max_count: c.arg2,
+            container_vnum: c.arg3,
+            load_chance: c.arg4,
+        }),
+        'R' => Some(ResetCmd::RemoveObj {
+            if_flag,
+            room_vnum: c.arg1,
+            obj_vnum: c.arg2,
+        }),
+        'D' => Some(ResetCmd::Door {
+            if_flag,
+            room_vnum: c.arg1,
+            direction: c.arg2.max(0) as usize,
+            state: c.arg3,
+        }),
         _ => None,
     }
 }
@@ -1361,26 +1572,99 @@ fn cmds_from_memory(g: &GameState, zone_index: usize) -> Vec<RawCmd> {
     z.reset_commands
         .iter()
         .map(|rc| match rc {
-            ResetCmd::LoadMob { if_flag, mob_vnum, max_count, room_vnum, load_chance } => RawCmd {
-                command: 'M', if_flag: *if_flag as i32, arg1: *mob_vnum, arg2: *max_count, arg3: *room_vnum, arg4: *load_chance,
+            ResetCmd::LoadMob {
+                if_flag,
+                mob_vnum,
+                max_count,
+                room_vnum,
+                load_chance,
+            } => RawCmd {
+                command: 'M',
+                if_flag: *if_flag as i32,
+                arg1: *mob_vnum,
+                arg2: *max_count,
+                arg3: *room_vnum,
+                arg4: *load_chance,
             },
-            ResetCmd::LoadObjInRoom { if_flag, obj_vnum, max_count, room_vnum, load_chance } => RawCmd {
-                command: 'O', if_flag: *if_flag as i32, arg1: *obj_vnum, arg2: *max_count, arg3: *room_vnum, arg4: *load_chance,
+            ResetCmd::LoadObjInRoom {
+                if_flag,
+                obj_vnum,
+                max_count,
+                room_vnum,
+                load_chance,
+            } => RawCmd {
+                command: 'O',
+                if_flag: *if_flag as i32,
+                arg1: *obj_vnum,
+                arg2: *max_count,
+                arg3: *room_vnum,
+                arg4: *load_chance,
             },
-            ResetCmd::GiveObjToMob { if_flag, obj_vnum, max_count, load_chance } => RawCmd {
-                command: 'G', if_flag: *if_flag as i32, arg1: *obj_vnum, arg2: *max_count, arg3: *load_chance, arg4: 0,
+            ResetCmd::GiveObjToMob {
+                if_flag,
+                obj_vnum,
+                max_count,
+                load_chance,
+            } => RawCmd {
+                command: 'G',
+                if_flag: *if_flag as i32,
+                arg1: *obj_vnum,
+                arg2: *max_count,
+                arg3: *load_chance,
+                arg4: 0,
             },
-            ResetCmd::EquipMob { if_flag, obj_vnum, max_count, wear_pos, load_chance } => RawCmd {
-                command: 'E', if_flag: *if_flag as i32, arg1: *obj_vnum, arg2: *max_count, arg3: *wear_pos as i32, arg4: *load_chance,
+            ResetCmd::EquipMob {
+                if_flag,
+                obj_vnum,
+                max_count,
+                wear_pos,
+                load_chance,
+            } => RawCmd {
+                command: 'E',
+                if_flag: *if_flag as i32,
+                arg1: *obj_vnum,
+                arg2: *max_count,
+                arg3: *wear_pos as i32,
+                arg4: *load_chance,
             },
-            ResetCmd::PutObjInObj { if_flag, obj_vnum, max_count, container_vnum, load_chance } => RawCmd {
-                command: 'P', if_flag: *if_flag as i32, arg1: *obj_vnum, arg2: *max_count, arg3: *container_vnum, arg4: *load_chance,
+            ResetCmd::PutObjInObj {
+                if_flag,
+                obj_vnum,
+                max_count,
+                container_vnum,
+                load_chance,
+            } => RawCmd {
+                command: 'P',
+                if_flag: *if_flag as i32,
+                arg1: *obj_vnum,
+                arg2: *max_count,
+                arg3: *container_vnum,
+                arg4: *load_chance,
             },
-            ResetCmd::RemoveObj { if_flag, room_vnum, obj_vnum } => RawCmd {
-                command: 'R', if_flag: *if_flag as i32, arg1: *room_vnum, arg2: *obj_vnum, arg3: -1, arg4: 0,
+            ResetCmd::RemoveObj {
+                if_flag,
+                room_vnum,
+                obj_vnum,
+            } => RawCmd {
+                command: 'R',
+                if_flag: *if_flag as i32,
+                arg1: *room_vnum,
+                arg2: *obj_vnum,
+                arg3: -1,
+                arg4: 0,
             },
-            ResetCmd::Door { if_flag, room_vnum, direction, state } => RawCmd {
-                command: 'D', if_flag: *if_flag as i32, arg1: *room_vnum, arg2: *direction as i32, arg3: *state, arg4: 0,
+            ResetCmd::Door {
+                if_flag,
+                room_vnum,
+                direction,
+                state,
+            } => RawCmd {
+                command: 'D',
+                if_flag: *if_flag as i32,
+                arg1: *room_vnum,
+                arg2: *direction as i32,
+                arg3: *state,
+                arg4: 0,
             },
         })
         .collect()
@@ -1457,7 +1741,11 @@ fn read_disk_header(path: &std::path::Path) -> Option<DiskHeader> {
     // "top lifespan reset_mode".
     let hl: Vec<i32> = lines
         .get(i)
-        .map(|l| l.split_whitespace().filter_map(|t| t.parse().ok()).collect())
+        .map(|l| {
+            l.split_whitespace()
+                .filter_map(|t| t.parse().ok())
+                .collect()
+        })
         .unwrap_or_default();
     i += 1;
     let top = *hl.first().unwrap_or(&0);
@@ -1476,7 +1764,16 @@ fn read_disk_header(path: &std::path::Path) -> Option<DiskHeader> {
         }
     }
 
-    Some(DiskHeader { name, builders, top, lifespan, reset_mode, lvl1, lvl2, status_mode })
+    Some(DiskHeader {
+        name,
+        builders,
+        top,
+        lifespan,
+        reset_mode,
+        lvl1,
+        lvl2,
+        status_mode,
+    })
 }
 
 /// Parse a `.zon` file's reset-command lines into RawCmds. Returns None if the
@@ -1559,7 +1856,10 @@ fn read_disk_cmds(path: &std::path::Path) -> Option<Vec<RawCmd>> {
 // ===========================================================================
 
 fn starts_digit(s: &str) -> bool {
-    s.bytes().next().map(|b| b.is_ascii_digit()).unwrap_or(false)
+    s.bytes()
+        .next()
+        .map(|b| b.is_ascii_digit())
+        .unwrap_or(false)
 }
 
 fn atoi(s: &str) -> i32 {

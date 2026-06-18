@@ -2724,14 +2724,13 @@ mod tests {
         g.char_to_room(observer, entrance);
 
         assert!(crate::arena::arenaentrancemaster(
-            &mut g,
-            observer,
-            master,
-            "arena",
-            "observer",
+            &mut g, observer, master, "arena", "observer",
         ));
         assert_eq!(g.get_char(observer).unwrap().in_room, Some(observer_room));
-        assert_eq!(crate::arena::arena_stat(observer), crate::arena::ARENA_OBSERVER);
+        assert_eq!(
+            crate::arena::arena_stat(observer),
+            crate::arena::ARENA_OBSERVER
+        );
         assert_eq!(crate::arena::arena_observing(observer), Some(combatant));
 
         assert!(perform_move(&mut g, observer, NORTH as i32, false));
@@ -2766,7 +2765,12 @@ mod tests {
     fn locked_door_game() -> (GameState, CharId, RoomRnum, RoomRnum) {
         let mut g = GameState::new(Config::default());
         let from = g.add_room(Room::new(100, 0, "Hall".to_string(), "A hall.".to_string()));
-        let to = g.add_room(Room::new(101, 0, "Vault".to_string(), "A vault.".to_string()));
+        let to = g.add_room(Room::new(
+            101,
+            0,
+            "Vault".to_string(),
+            "A vault.".to_string(),
+        ));
         g.rooms[from].exits[EAST] = Some(Exit {
             description: None,
             keyword: Some("gate".to_string()),
@@ -2921,7 +2925,10 @@ mod tests {
             "{}",
             out
         );
-        assert_eq!(g.rooms[to].exits[WEST].as_ref().unwrap().exit_info & EX_LOCKED, 0);
+        assert_eq!(
+            g.rooms[to].exits[WEST].as_ref().unwrap().exit_info & EX_LOCKED,
+            0
+        );
     }
 
     #[test]

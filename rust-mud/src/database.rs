@@ -17,7 +17,9 @@ pub struct Database {
 
 impl Database {
     pub fn new(database_url: &str) -> Result<Self> {
-        Ok(Database { pool: Pool::new(database_url) })
+        Ok(Database {
+            pool: Pool::new(database_url),
+        })
     }
 
     pub async fn init_tables(&self) -> Result<()> {
@@ -111,7 +113,8 @@ impl Database {
         let idnum = self.next_idnum().await?;
         let mut stored = ch.clone();
         stored.idnum = idnum;
-        self.write_player_main(&stored, &crate::password::hash_password(password)).await?;
+        self.write_player_main(&stored, &crate::password::hash_password(password))
+            .await?;
         self.write_skills(&stored).await?;
         self.write_affects(&stored).await?;
         Ok(idnum)
@@ -155,7 +158,10 @@ impl Database {
     pub async fn list_players(&self) -> Result<Vec<crate::state::PlayerIndex>> {
         let mut conn = self.pool.get_conn().await?;
         let rows: Vec<Row> = conn
-            .exec("SELECT idnum,name,level,last_logon,host FROM player_main", ())
+            .exec(
+                "SELECT idnum,name,level,last_logon,host FROM player_main",
+                (),
+            )
             .await?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
@@ -164,7 +170,13 @@ impl Database {
             let level: u8 = row.get(2).unwrap_or(1);
             let last_logon: i64 = row.get(3).unwrap_or(0);
             let host: String = row.get(4).unwrap_or_default();
-            out.push(crate::state::PlayerIndex { idnum, name, level, last_logon, host });
+            out.push(crate::state::PlayerIndex {
+                idnum,
+                name,
+                level,
+                last_logon,
+                host,
+            });
         }
         Ok(out)
     }
@@ -248,7 +260,10 @@ impl Database {
             .collect::<Vec<_>>()
             .join(",");
         let placeholders = vec!["?"; cols.len()].join(",");
-        let sql = format!("REPLACE INTO player_main ({}) VALUES ({})", collist, placeholders);
+        let sql = format!(
+            "REPLACE INTO player_main ({}) VALUES ({})",
+            collist, placeholders
+        );
 
         let mut conn = self.pool.get_conn().await?;
         conn.exec_drop(sql, values).await?;

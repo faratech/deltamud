@@ -183,8 +183,10 @@ impl TelnetFilter {
                         // Client agreeing to a WILL we never sent, or turning an
                         // option off: nothing more to do for GMCP/MSSP.
                         (WILL, TELOPT_GMCP) | (WILL, TELOPT_MSSP) => {}
-                        (DONT, TELOPT_GMCP) | (DONT, TELOPT_MSSP)
-                        | (WONT, TELOPT_GMCP) | (WONT, TELOPT_MSSP) => {}
+                        (DONT, TELOPT_GMCP)
+                        | (DONT, TELOPT_MSSP)
+                        | (WONT, TELOPT_GMCP)
+                        | (WONT, TELOPT_MSSP) => {}
                         (DO, _) => reply.extend_from_slice(&[IAC, WONT, b]),
                         (WILL, _) => reply.extend_from_slice(&[IAC, DONT, b]),
                         _ => {} // WONT / DONT for unsupported options: nothing to send.
@@ -235,9 +237,13 @@ pub enum ConState {
     ConfirmName, // "Did I get that right (Y/N)?"
     GetNewPassword,
     ConfirmPassword,
+    GetNewbie,
     GetSex,
-    GetClass,
     GetRace,
+    GetDeity,
+    GetClass,
+    GetHometown,
+    RollStats,
     ReadMotd,
     Menu,
     Playing,
@@ -249,6 +255,32 @@ pub enum ConState {
 #[derive(Debug, Clone)]
 pub enum InputContext {
     StringEdit { buffer: String, max_len: usize },
+}
+
+/// One queued gameplay line plus the C `aliased` marker. Complex aliases push
+/// their expanded commands back onto the descriptor queue with `aliased=true`
+/// so the heartbeat dispatches them in normal order without recursively
+/// expanding aliases again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedInput {
+    pub line: String,
+    pub aliased: bool,
+}
+
+impl QueuedInput {
+    pub fn raw(line: String) -> Self {
+        QueuedInput {
+            line,
+            aliased: false,
+        }
+    }
+
+    pub fn aliased(line: String) -> Self {
+        QueuedInput {
+            line,
+            aliased: true,
+        }
+    }
 }
 
 pub struct Descriptor {
@@ -276,8 +308,9 @@ pub struct Descriptor {
     /// and only pulls the next queued command when it reaches <= 0. WAIT_STATE
     /// sets it from combat skills/casting to impose command lag.
     pub wait: i32,
-    /// Queued raw input lines awaiting the wait gate (C `d->input`).
-    pub input_queue: std::collections::VecDeque<String>,
+    /// Queued input lines awaiting the wait gate (C `d->input`), with the
+    /// per-line `aliased` bit used to prevent recursive alias expansion.
+    pub input_queue: std::collections::VecDeque<QueuedInput>,
     // Scratch during login / char creation.
     pub temp_name: Option<String>,
     pub temp_password: Option<String>,

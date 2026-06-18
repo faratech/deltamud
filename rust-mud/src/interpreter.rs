@@ -88,30 +88,6 @@ pub fn search_block(arg: &str, list: &[&str]) -> Option<usize> {
 
 /// The central dispatcher (CircleMUD command_interpreter).
 pub fn command_interpreter(g: &mut GameState, ch: CharId, input: &str) {
-    dispatch_with_alias(g, ch, input, 0);
-}
-
-/// Alias-aware entry: expand a leading alias (C perform_alias) before
-/// dispatching, then run the real interpreter on the (possibly multi-command)
-/// result. `depth` bounds alias recursion so a self-referential alias cannot
-/// loop forever; the C input-queue model is naturally bounded per-pulse.
-fn dispatch_with_alias(g: &mut GameState, ch: CharId, input: &str, depth: u32) {
-    if depth < 16 {
-        if let Some(expanded) = crate::alias::alias_replace(g, ch, input) {
-            // A COMPLEX alias may expand to several ';'-separated commands,
-            // returned joined by '\n'; run each in order (Rust analogue of C
-            // pushing them onto the front of the input queue). A SIMPLE alias
-            // yields a single line. Each expanded command is itself alias-
-            // checked (depth-bounded) to mirror queue re-entry.
-            for line in expanded.split('\n') {
-                if !g.char_exists(ch) {
-                    return;
-                }
-                dispatch_with_alias(g, ch, line, depth + 1);
-            }
-            return;
-        }
-    }
     run_command(g, ch, input);
 }
 
@@ -137,7 +113,7 @@ pub fn position_refusal_msg(pos: Position) -> &'static str {
 
 /// The central dispatcher body (CircleMUD command_interpreter proper), run on
 /// input that has already passed alias expansion.
-fn run_command(g: &mut GameState, ch: CharId, input: &str) {
+pub(crate) fn run_command(g: &mut GameState, ch: CharId, input: &str) {
     if !crate::handler::check_perm_duration(g, ch, AFF_HIDE) {
         if let Some(c) = g.get_char_mut(ch) {
             c.affect_flags &= !AFF_HIDE;
@@ -241,7 +217,14 @@ fn run_command(g: &mut GameState, ch: CharId, input: &str) {
             // table (C splices them in via create_command_list()); try them
             // before giving up.
             if let Some(name) = crate::cmd_social::find_social(&arg) {
-                crate::cmd_social::do_action_named(g, ch, &name, line);
+                let allowed = crate::cmd_social::social_min_level(&name)
+                    .map(|min| level as i32 >= min)
+                    .unwrap_or(false);
+                if allowed {
+                    crate::cmd_social::do_action_named(g, ch, &name, line);
+                } else {
+                    g.send_to_char(ch, "Huh?!?\r\n");
+                }
             } else {
                 g.send_to_char(ch, "Huh?!?\r\n");
             }

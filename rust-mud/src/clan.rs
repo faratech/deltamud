@@ -138,7 +138,10 @@ fn table() -> &'static Mutex<ClanTable> {
     // If boot_clans was never called (e.g. a unit test), install an empty
     // table with the default lib path so the commands still operate.
     CLANS.get_or_init(|| {
-        Mutex::new(ClanTable { clans: Vec::new(), lib_path: "lib".to_string() })
+        Mutex::new(ClanTable {
+            clans: Vec::new(),
+            lib_path: "lib".to_string(),
+        })
     })
 }
 
@@ -176,7 +179,10 @@ pub fn boot_clans(lib_path: &str) {
         Ok(bytes) => match decode_clans(&bytes) {
             Some(v) => v,
             None => {
-                eprintln!("SYSERR: clans.dat at '{}' is corrupt; starting empty.", path);
+                eprintln!(
+                    "SYSERR: clans.dat at '{}' is corrupt; starting empty.",
+                    path
+                );
                 Vec::new()
             }
         },
@@ -187,7 +193,10 @@ pub fn boot_clans(lib_path: &str) {
         }
     };
 
-    let new_table = ClanTable { clans, lib_path: lib_path.to_string() };
+    let new_table = ClanTable {
+        clans,
+        lib_path: lib_path.to_string(),
+    };
 
     // Install (or, on a double-boot, replace the contents of) the static.
     match CLANS.get() {
@@ -336,7 +345,9 @@ impl<'a> Cursor<'a> {
 // ---------------------------------------------------------------------------
 
 fn get_name(g: &GameState, id: CharId) -> String {
-    g.get_char(id).map(|c| c.player.name.clone()).unwrap_or_default()
+    g.get_char(id)
+        .map(|c| c.player.name.clone())
+        .unwrap_or_default()
 }
 fn get_level(g: &GameState, id: CharId) -> Level {
     g.get_char(id).map(|c| c.player.level).unwrap_or(0)
@@ -348,10 +359,14 @@ fn get_clan_rank(g: &GameState, id: CharId) -> i32 {
     g.get_char(id).map(|c| c.clan_rank).unwrap_or(-1)
 }
 fn prf2(g: &GameState, id: CharId, flag: i64) -> bool {
-    g.get_char(id).map(|c| c.prf2_flags & flag != 0).unwrap_or(false)
+    g.get_char(id)
+        .map(|c| c.prf2_flags & flag != 0)
+        .unwrap_or(false)
 }
 fn plr_flagged(g: &GameState, id: CharId, flag: i64) -> bool {
-    g.get_char(id).map(|c| !c.is_npc && c.act_flags & flag != 0).unwrap_or(false)
+    g.get_char(id)
+        .map(|c| !c.is_npc && c.act_flags & flag != 0)
+        .unwrap_or(false)
 }
 fn has_desc(g: &GameState, id: CharId) -> bool {
     g.get_char(id).map(|c| c.desc.is_some()).unwrap_or(false)
@@ -373,7 +388,12 @@ fn cap(s: &str) -> String {
 /// The connected-player set in a stable order — the analogue of walking
 /// `descriptor_list` for clan who / csay / global lookups.
 fn connected_players(g: &GameState) -> Vec<CharId> {
-    let mut v: Vec<CharId> = g.players_by_name.values().copied().filter(|&id| has_desc(g, id)).collect();
+    let mut v: Vec<CharId> = g
+        .players_by_name
+        .values()
+        .copied()
+        .filter(|&id| has_desc(g, id))
+        .collect();
     v.sort_by_key(|c| c.0);
     v
 }
@@ -533,7 +553,10 @@ fn clan_create(g: &mut GameState, ch: CharId, arg: &str) {
         return;
     }
     if get_level(g, leader) >= LVL_IMMORT {
-        g.send_to_char(ch, "You cannot set an immortal as the leader of a clan.\r\n");
+        g.send_to_char(
+            ch,
+            "You cannot set an immortal as the leader of a clan.\r\n",
+        );
         return;
     }
     if get_clan(g, leader) >= 0 && get_clan_rank(g, leader) > 0 {
@@ -584,7 +607,10 @@ fn find_clan(arg: &str) -> Option<i32> {
     }
     let target = cap(arg);
     let t = table().lock().unwrap();
-    t.clans.iter().position(|c| cap(&c.name) == target).map(|i| i as i32)
+    t.clans
+        .iter()
+        .position(|c| cap(&c.name) == target)
+        .map(|i| i as i32)
 }
 
 // ---------------------------------------------------------------------------
@@ -718,7 +744,10 @@ fn set_priv(g: &mut GameState, ch: CharId, arg: &str) {
     }
     let ranks = with_clan(cl, |c| c.ranks).unwrap_or(0);
     if rank != ranks {
-        g.send_to_char(ch, "You have to be the highest rank of a clan to set privileges.\r\n");
+        g.send_to_char(
+            ch,
+            "You have to be the highest rank of a clan to set privileges.\r\n",
+        );
         return;
     }
 
@@ -1010,8 +1039,14 @@ fn clan_enlist(g: &mut GameState, ch: CharId, arg: &str) {
     let clan_name = with_clan(cl, |c| c.name.clone()).unwrap_or_default();
     let ch_name = get_name(g, ch);
     let vic_name = get_name(g, victim);
-    g.send_to_char(victim, &format!("{} has enlisted you into {}!\r\n", ch_name, clan_name));
-    g.send_to_char(ch, &format!("{} has been enlisted into your clan!\r\n", vic_name));
+    g.send_to_char(
+        victim,
+        &format!("{} has enlisted you into {}!\r\n", ch_name, clan_name),
+    );
+    g.send_to_char(
+        ch,
+        &format!("{} has been enlisted into your clan!\r\n", vic_name),
+    );
     {
         let mut t = table().lock().unwrap();
         if let Some(c) = t.clans.get_mut(cl as usize) {
@@ -1065,8 +1100,14 @@ fn clan_expel(g: &mut GameState, ch: CharId, arg: &str) {
         v.clan = -1;
         v.clan_rank = -1;
     }
-    g.send_to_char(victim, &format!("{} has expelled you from {}.\r\n", ch_name, clan_name));
-    g.send_to_char(ch, &format!("You have expelled {} from the clan.\r\n", vic_name));
+    g.send_to_char(
+        victim,
+        &format!("{} has expelled you from {}.\r\n", ch_name, clan_name),
+    );
+    g.send_to_char(
+        ch,
+        &format!("You have expelled {} from the clan.\r\n", vic_name),
+    );
     {
         let mut t = table().lock().unwrap();
         if let Some(c) = t.clans.get_mut(cl as usize) {
@@ -1088,7 +1129,11 @@ fn clan_list(g: &mut GameState, ch: CharId) {
     );
     let rows: Vec<(i32, String, String)> = {
         let t = table().lock().unwrap();
-        t.clans.iter().enumerate().map(|(i, c)| (i as i32, c.name.clone(), c.leader.clone())).collect()
+        t.clans
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i as i32, c.name.clone(), c.leader.clone()))
+            .collect()
     };
     for (i, name, leader) in rows {
         g.send_to_char(ch, &format!("{:<6} {:<32} {}\r\n", i, name, leader));
@@ -1129,7 +1174,10 @@ fn clan_promote(g: &mut GameState, ch: CharId, arg: &str) {
     };
 
     if get_clan(g, victim) != cl {
-        g.send_to_char(ch, "Who are you to do that!?  They aren't in your clan!\r\n");
+        g.send_to_char(
+            ch,
+            "Who are you to do that!?  They aren't in your clan!\r\n",
+        );
         return;
     }
     if ch == victim {
@@ -1143,7 +1191,10 @@ fn clan_promote(g: &mut GameState, ch: CharId, arg: &str) {
     }
     let vclan_ranks = with_clan(get_clan(g, victim), |c| c.ranks).unwrap_or(0);
     if vrank == vclan_ranks {
-        g.send_to_char(ch, "That would exceed the current ranks.  Don't do that.\r\n");
+        g.send_to_char(
+            ch,
+            "That would exceed the current ranks.  Don't do that.\r\n",
+        );
         return;
     }
 
@@ -1151,10 +1202,14 @@ fn clan_promote(g: &mut GameState, ch: CharId, arg: &str) {
     if let Some(v) = g.get_char_mut(victim) {
         v.clan_rank = new_rank;
     }
-    let label = with_clan(cl, |c| c.rank_label(new_rank).to_string()).unwrap_or_else(|| "N/A".to_string());
+    let label =
+        with_clan(cl, |c| c.rank_label(new_rank).to_string()).unwrap_or_else(|| "N/A".to_string());
     let ch_name = get_name(g, ch);
     let vic_name = get_name(g, victim);
-    g.send_to_char(victim, &format!("{} has promoted you to {}!\r\n", ch_name, label));
+    g.send_to_char(
+        victim,
+        &format!("{} has promoted you to {}!\r\n", ch_name, label),
+    );
     g.send_to_char(ch, &format!("You promote {} to {}.\r\n", vic_name, label));
 }
 
@@ -1191,7 +1246,10 @@ fn clan_demote(g: &mut GameState, ch: CharId, arg: &str) {
     };
 
     if get_clan(g, victim) != cl {
-        g.send_to_char(ch, "Who are you to do that!?  They aren't in your clan!\r\n");
+        g.send_to_char(
+            ch,
+            "Who are you to do that!?  They aren't in your clan!\r\n",
+        );
         return;
     }
     if ch == victim {
@@ -1204,7 +1262,10 @@ fn clan_demote(g: &mut GameState, ch: CharId, arg: &str) {
         return;
     }
     if vrank == 1 {
-        g.send_to_char(ch, "They are level 1, the only thing left to do is expel them.\r\n");
+        g.send_to_char(
+            ch,
+            "They are level 1, the only thing left to do is expel them.\r\n",
+        );
         return;
     }
 
@@ -1212,10 +1273,14 @@ fn clan_demote(g: &mut GameState, ch: CharId, arg: &str) {
     if let Some(v) = g.get_char_mut(victim) {
         v.clan_rank = new_rank;
     }
-    let label = with_clan(cl, |c| c.rank_label(new_rank).to_string()).unwrap_or_else(|| "N/A".to_string());
+    let label =
+        with_clan(cl, |c| c.rank_label(new_rank).to_string()).unwrap_or_else(|| "N/A".to_string());
     let ch_name = get_name(g, ch);
     let vic_name = get_name(g, victim);
-    g.send_to_char(victim, &format!("{} has demoted you to {}.\r\n", ch_name, label));
+    g.send_to_char(
+        victim,
+        &format!("{} has demoted you to {}.\r\n", ch_name, label),
+    );
     g.send_to_char(ch, &format!("You demote {} to {}.\r\n", vic_name, label));
 }
 
@@ -1243,7 +1308,10 @@ fn clan_who_title(g: &mut GameState, ch: CharId, arg: &str) {
         return;
     }
     if arg2.len() > 15 {
-        g.send_to_char(ch, "A clan's who title may not be more than 15 characters.\r\n");
+        g.send_to_char(
+            ch,
+            "A clan's who title may not be more than 15 characters.\r\n",
+        );
         return;
     }
     {
@@ -1373,12 +1441,23 @@ fn clan_who(g: &mut GameState, ch: CharId) {
         if get_clan(g, d) == num && get_clan_rank(g, d) > 0 && g.can_see(ch, d) {
             count += 1;
             let (lvl, class_abbr, name) = match g.get_char(d) {
-                Some(c) => (c.player.level, c.class_abbrev().to_string(), c.player.name.clone()),
+                Some(c) => (
+                    c.player.level,
+                    c.class_abbrev().to_string(),
+                    c.player.name.clone(),
+                ),
                 None => continue,
             };
             let drank = get_clan_rank(g, d);
-            let label = with_clan(num, |c| c.rank_label(drank).to_string()).unwrap_or_else(|| "N/A".to_string());
-            g.send_to_char(ch, &format!("{}. [{:2} {} {}] {}\r\n", count, lvl, class_abbr, label, name));
+            let label = with_clan(num, |c| c.rank_label(drank).to_string())
+                .unwrap_or_else(|| "N/A".to_string());
+            g.send_to_char(
+                ch,
+                &format!(
+                    "{}. [{:2} {} {}] {}\r\n",
+                    count, lvl, class_abbr, label, name
+                ),
+            );
         }
     }
     g.send_to_char(ch, "~~~~~~~~~~~~~~~~~~~~~\r\n");
@@ -1417,15 +1496,23 @@ fn clan_roster(g: &mut GameState, ch: CharId) {
         if get_clan(g, d) == num && get_clan_rank(g, d) > 0 {
             any = true;
             let (lvl, class_abbr, name) = match g.get_char(d) {
-                Some(c) => (c.player.level, c.class_abbrev().to_string(), c.player.name.clone()),
+                Some(c) => (
+                    c.player.level,
+                    c.class_abbrev().to_string(),
+                    c.player.name.clone(),
+                ),
                 None => continue,
             };
             if name.eq_ignore_ascii_case(&leader_name) {
                 shown_leader = true;
             }
             let drank = get_clan_rank(g, d);
-            let label = with_clan(num, |c| c.rank_label(drank).to_string()).unwrap_or_else(|| "N/A".to_string());
-            g.send_to_char(ch, &format!("[ {} {} ] {} - {}\r\n", lvl, class_abbr, name, label));
+            let label = with_clan(num, |c| c.rank_label(drank).to_string())
+                .unwrap_or_else(|| "N/A".to_string());
+            g.send_to_char(
+                ch,
+                &format!("[ {} {} ] {} - {}\r\n", lvl, class_abbr, name, label),
+            );
         }
     }
     // Owner offline: pull their canonical name + level from the index so the
@@ -1437,7 +1524,10 @@ fn clan_roster(g: &mut GameState, ch: CharId) {
                 let label = with_clan(num, |c| c.rank_label(c.ranks).to_string())
                     .unwrap_or_else(|| "N/A".to_string());
                 any = true;
-                g.send_to_char(ch, &format!("[ {} {} ] {} - {} (offline)\r\n", lvl, "---", name, label));
+                g.send_to_char(
+                    ch,
+                    &format!("[ {} {} ] {} - {} (offline)\r\n", lvl, "---", name, label),
+                );
             }
         }
     }
@@ -1521,7 +1611,13 @@ fn set_clanroom(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, "Invalid room number!\r\n");
         return;
     }
-    g.send_to_char(ch, &format!("Clan number {}'s clan room is set to {}.\r\n", num, room_vnum));
+    g.send_to_char(
+        ch,
+        &format!(
+            "Clan number {}'s clan room is set to {}.\r\n",
+            num, room_vnum
+        ),
+    );
     {
         let mut t = table().lock().unwrap();
         if let Some(c) = t.clans.get_mut(num as usize) {
@@ -1549,7 +1645,10 @@ fn in_clan_room(g: &GameState, ch: CharId, clan_idx: i32) -> bool {
     let here_is_clan_room = g.real_room(clan_room_vnum) == Some(rnum);
     let flagged = g
         .room_opt(rnum)
-        .map(|r| r.room_flags.bits() & ROOM_CLAN_ROOM_BIT != 0 || r.room_flags.contains(RoomFlags::NO_CLAN))
+        .map(|r| {
+            r.room_flags.bits() & ROOM_CLAN_ROOM_BIT != 0
+                || r.room_flags.contains(RoomFlags::NO_CLAN)
+        })
         .unwrap_or(false);
     // C requires BOTH the room match AND the ROOM_CLAN_ROOM flag. RoomFlags in
     // this port does not yet carry the 1<<19 bit, so we test the raw bits()
@@ -1594,8 +1693,22 @@ fn do_clan_withdraw(g: &mut GameState, ch: CharId, arg: &str) {
         c.points.gold += amount;
     }
     save_clans();
-    g.send_to_char(ch, &format!("You withdraw {} gold coins from your clan bank account.\r\n", amount));
-    act(g, "$n makes a clan withdrawal.", true, ch, None, ActArg::None, To::Room);
+    g.send_to_char(
+        ch,
+        &format!(
+            "You withdraw {} gold coins from your clan bank account.\r\n",
+            amount
+        ),
+    );
+    act(
+        g,
+        "$n makes a clan withdrawal.",
+        true,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
 }
 
 fn do_clan_deposit(g: &mut GameState, ch: CharId, arg: &str) {
@@ -1629,8 +1742,22 @@ fn do_clan_deposit(g: &mut GameState, ch: CharId, arg: &str) {
         c.points.gold -= amount;
     }
     save_clans();
-    g.send_to_char(ch, &format!("You deposit {} gold coins into your clan bank account.\r\n", amount));
-    act(g, "$n makes a clan deposit.", true, ch, None, ActArg::None, To::Room);
+    g.send_to_char(
+        ch,
+        &format!(
+            "You deposit {} gold coins into your clan bank account.\r\n",
+            amount
+        ),
+    );
+    act(
+        g,
+        "$n makes a clan deposit.",
+        true,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1888,7 +2015,10 @@ mod tests {
 
             assert_eq!(g.offline_ops.len(), 1, "{command}");
             assert_eq!(g.offline_ops[0].target, "offline");
-            assert_eq!(g.offline_ops[0].command, format!("clan {} offline", command));
+            assert_eq!(
+                g.offline_ops[0].command,
+                format!("clan {} offline", command)
+            );
         }
         let _ = std::fs::remove_dir_all(lib);
     }

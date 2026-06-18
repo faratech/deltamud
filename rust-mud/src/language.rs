@@ -64,32 +64,140 @@ struct DrunkRule {
 /// is the inclusive upper bound passed to `number(0, n)`, so each `replacement`
 /// slice has exactly `number_of_rep + 1` entries (matching the C initializers).
 static DRUNK: [DrunkRule; 26] = [
-    DrunkRule { min_drunk_level: 3, number_of_rep: 10, replacement: &["a", "a", "a", "A", "aa", "ah", "Ah", "ao", "aw", "oa", "ahhhh"] }, // A
-    DrunkRule { min_drunk_level: 8, number_of_rep: 5, replacement: &["b", "b", "b", "B", "B", "vb"] },                                     // B
-    DrunkRule { min_drunk_level: 3, number_of_rep: 5, replacement: &["c", "c", "C", "cj", "sj", "zj"] },                                   // C
-    DrunkRule { min_drunk_level: 5, number_of_rep: 2, replacement: &["d", "d", "D"] },                                                     // D
-    DrunkRule { min_drunk_level: 3, number_of_rep: 3, replacement: &["e", "e", "eh", "E"] },                                              // E
-    DrunkRule { min_drunk_level: 4, number_of_rep: 5, replacement: &["f", "f", "ff", "fff", "fFf", "F"] },                                 // F
-    DrunkRule { min_drunk_level: 8, number_of_rep: 2, replacement: &["g", "g", "G"] },                                                     // G
-    DrunkRule { min_drunk_level: 9, number_of_rep: 6, replacement: &["h", "h", "hh", "hhh", "Hhh", "HhH", "H"] },                          // H
-    DrunkRule { min_drunk_level: 7, number_of_rep: 6, replacement: &["i", "i", "Iii", "ii", "iI", "Ii", "I"] },                           // I
-    DrunkRule { min_drunk_level: 9, number_of_rep: 5, replacement: &["j", "j", "jj", "Jj", "jJ", "J"] },                                   // J
-    DrunkRule { min_drunk_level: 7, number_of_rep: 2, replacement: &["k", "k", "K"] },                                                     // K
-    DrunkRule { min_drunk_level: 3, number_of_rep: 2, replacement: &["l", "l", "L"] },                                                     // L
-    DrunkRule { min_drunk_level: 5, number_of_rep: 8, replacement: &["m", "m", "mm", "mmm", "mmmm", "mmmmm", "MmM", "mM", "M"] },          // M
-    DrunkRule { min_drunk_level: 6, number_of_rep: 6, replacement: &["n", "n", "nn", "Nn", "nnn", "nNn", "N"] },                          // N
-    DrunkRule { min_drunk_level: 3, number_of_rep: 6, replacement: &["o", "o", "ooo", "ao", "aOoo", "Ooo", "ooOo"] },                      // O
-    DrunkRule { min_drunk_level: 3, number_of_rep: 2, replacement: &["p", "p", "P"] },                                                     // P
-    DrunkRule { min_drunk_level: 5, number_of_rep: 5, replacement: &["q", "q", "Q", "ku", "ququ", "kukeleku"] },                           // Q
-    DrunkRule { min_drunk_level: 4, number_of_rep: 2, replacement: &["r", "r", "R"] },                                                     // R
-    DrunkRule { min_drunk_level: 2, number_of_rep: 5, replacement: &["s", "ss", "zzZzssZ", "ZSssS", "sSzzsss", "sSss"] },                  // S
-    DrunkRule { min_drunk_level: 5, number_of_rep: 2, replacement: &["t", "t", "T"] },                                                     // T
-    DrunkRule { min_drunk_level: 3, number_of_rep: 6, replacement: &["u", "u", "uh", "Uh", "Uhuhhuh", "uhU", "uhhu"] },                    // U
-    DrunkRule { min_drunk_level: 4, number_of_rep: 2, replacement: &["v", "v", "V"] },                                                     // V
-    DrunkRule { min_drunk_level: 4, number_of_rep: 2, replacement: &["w", "w", "W"] },                                                     // W
-    DrunkRule { min_drunk_level: 5, number_of_rep: 6, replacement: &["x", "x", "X", "ks", "iks", "kz", "xz"] },                            // X
-    DrunkRule { min_drunk_level: 3, number_of_rep: 2, replacement: &["y", "y", "Y"] },                                                     // Y
-    DrunkRule { min_drunk_level: 2, number_of_rep: 9, replacement: &["z", "z", "ZzzZz", "Zzz", "Zsszzsz", "szz", "sZZz", "ZSz", "zZ", "Z"] }, // Z
+    DrunkRule {
+        min_drunk_level: 3,
+        number_of_rep: 10,
+        replacement: &[
+            "a", "a", "a", "A", "aa", "ah", "Ah", "ao", "aw", "oa", "ahhhh",
+        ],
+    }, // A
+    DrunkRule {
+        min_drunk_level: 8,
+        number_of_rep: 5,
+        replacement: &["b", "b", "b", "B", "B", "vb"],
+    }, // B
+    DrunkRule {
+        min_drunk_level: 3,
+        number_of_rep: 5,
+        replacement: &["c", "c", "C", "cj", "sj", "zj"],
+    }, // C
+    DrunkRule {
+        min_drunk_level: 5,
+        number_of_rep: 2,
+        replacement: &["d", "d", "D"],
+    }, // D
+    DrunkRule {
+        min_drunk_level: 3,
+        number_of_rep: 3,
+        replacement: &["e", "e", "eh", "E"],
+    }, // E
+    DrunkRule {
+        min_drunk_level: 4,
+        number_of_rep: 5,
+        replacement: &["f", "f", "ff", "fff", "fFf", "F"],
+    }, // F
+    DrunkRule {
+        min_drunk_level: 8,
+        number_of_rep: 2,
+        replacement: &["g", "g", "G"],
+    }, // G
+    DrunkRule {
+        min_drunk_level: 9,
+        number_of_rep: 6,
+        replacement: &["h", "h", "hh", "hhh", "Hhh", "HhH", "H"],
+    }, // H
+    DrunkRule {
+        min_drunk_level: 7,
+        number_of_rep: 6,
+        replacement: &["i", "i", "Iii", "ii", "iI", "Ii", "I"],
+    }, // I
+    DrunkRule {
+        min_drunk_level: 9,
+        number_of_rep: 5,
+        replacement: &["j", "j", "jj", "Jj", "jJ", "J"],
+    }, // J
+    DrunkRule {
+        min_drunk_level: 7,
+        number_of_rep: 2,
+        replacement: &["k", "k", "K"],
+    }, // K
+    DrunkRule {
+        min_drunk_level: 3,
+        number_of_rep: 2,
+        replacement: &["l", "l", "L"],
+    }, // L
+    DrunkRule {
+        min_drunk_level: 5,
+        number_of_rep: 8,
+        replacement: &["m", "m", "mm", "mmm", "mmmm", "mmmmm", "MmM", "mM", "M"],
+    }, // M
+    DrunkRule {
+        min_drunk_level: 6,
+        number_of_rep: 6,
+        replacement: &["n", "n", "nn", "Nn", "nnn", "nNn", "N"],
+    }, // N
+    DrunkRule {
+        min_drunk_level: 3,
+        number_of_rep: 6,
+        replacement: &["o", "o", "ooo", "ao", "aOoo", "Ooo", "ooOo"],
+    }, // O
+    DrunkRule {
+        min_drunk_level: 3,
+        number_of_rep: 2,
+        replacement: &["p", "p", "P"],
+    }, // P
+    DrunkRule {
+        min_drunk_level: 5,
+        number_of_rep: 5,
+        replacement: &["q", "q", "Q", "ku", "ququ", "kukeleku"],
+    }, // Q
+    DrunkRule {
+        min_drunk_level: 4,
+        number_of_rep: 2,
+        replacement: &["r", "r", "R"],
+    }, // R
+    DrunkRule {
+        min_drunk_level: 2,
+        number_of_rep: 5,
+        replacement: &["s", "ss", "zzZzssZ", "ZSssS", "sSzzsss", "sSss"],
+    }, // S
+    DrunkRule {
+        min_drunk_level: 5,
+        number_of_rep: 2,
+        replacement: &["t", "t", "T"],
+    }, // T
+    DrunkRule {
+        min_drunk_level: 3,
+        number_of_rep: 6,
+        replacement: &["u", "u", "uh", "Uh", "Uhuhhuh", "uhU", "uhhu"],
+    }, // U
+    DrunkRule {
+        min_drunk_level: 4,
+        number_of_rep: 2,
+        replacement: &["v", "v", "V"],
+    }, // V
+    DrunkRule {
+        min_drunk_level: 4,
+        number_of_rep: 2,
+        replacement: &["w", "w", "W"],
+    }, // W
+    DrunkRule {
+        min_drunk_level: 5,
+        number_of_rep: 6,
+        replacement: &["x", "x", "X", "ks", "iks", "kz", "xz"],
+    }, // X
+    DrunkRule {
+        min_drunk_level: 3,
+        number_of_rep: 2,
+        replacement: &["y", "y", "Y"],
+    }, // Y
+    DrunkRule {
+        min_drunk_level: 2,
+        number_of_rep: 9,
+        replacement: &[
+            "z", "z", "ZzzZz", "Zzz", "Zsszzsz", "szz", "sZZz", "ZSz", "zZ", "Z",
+        ],
+    }, // Z
 ];
 
 /// `makedrunk(string, ch)` — garble `text` for a speaker whose DRUNK condition

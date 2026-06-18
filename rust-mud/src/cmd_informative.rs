@@ -3101,8 +3101,16 @@ pub fn do_commands(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
     let want_socials = subcmd == 1;
     let want_wiz = subcmd == 2;
 
-    let vict_level = g.get_char(vict).map(|c| c.player.level).unwrap_or(1);
-    let vict_npc = g.get_char(vict).map(|c| c.is_npc).unwrap_or(false);
+    let (vict_level, vict_npc, vict_gcmds) = g
+        .get_char(vict)
+        .map(|c| {
+            (
+                c.player.level,
+                c.is_npc,
+                [c.godcmds1, c.godcmds2, c.godcmds3, c.godcmds4],
+            )
+        })
+        .unwrap_or((1, false, [0; 4]));
 
     let mut buf = format!(
         "The following {}{} are available to {}:\r\n",
@@ -3113,10 +3121,18 @@ pub fn do_commands(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
 
     if want_socials {
         let mut no = 1;
-        for name in crate::cmd_social::social_commands_for_level(vict_level) {
-            if vict_npc {
-                continue;
-            }
+        if vict_npc {
+            buf.push_str("\r\n");
+            g.send_to_char(ch, &buf);
+            return;
+        }
+        let mut names = crate::cmd_social::social_commands_for_level(vict_level);
+        // C marks the static `insult` command as TYPE_SOCIAL after building the
+        // merged command list, so it appears under `socials` and not `commands`.
+        names.push("insult".to_string());
+        names.sort();
+        names.dedup();
+        for name in names {
             buf.push_str(&format!("&g{:<11}&n", name));
             if no % 7 == 0 {
                 buf.push_str("\r\n");
@@ -3129,30 +3145,43 @@ pub fn do_commands(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
     }
 
     // Build a sorted command-name list from CMD_INFO (skipping RESERVED + "\n").
-    let mut entries: Vec<(&'static str, u8, bool)> = Vec::new(); // (name, min_level, is_wizcmd)
+    let mut entries: Vec<crate::command_table::CommandDef> = Vec::new();
     for e in CMD_INFO {
         if e.name == "RESERVED" || e.name == "\n" {
             continue;
         }
-        let is_wiz = e.min_level >= LVL_IMMORT;
-        entries.push((e.name, e.min_level, is_wiz));
+        // `insult` is a static command but C reclassifies it as TYPE_SOCIAL.
+        if e.name == "insult" {
+            continue;
+        }
+        entries.push(*e);
     }
-    entries.sort_by(|a, b| a.0.cmp(b.0));
+    entries.sort_by(|a, b| a.name.cmp(b.name));
 
     let mut no = 1;
-    for (name, min_level, is_wiz) in entries {
+    for e in entries {
+        let is_wiz = e.min_level >= LVL_IMMORT;
         let want_type_ok = if want_wiz { is_wiz } else { !is_wiz };
         if !want_type_ok {
             continue;
         }
-        if vict_level < min_level && vict_level < LVL_GOD {
+        if vict_level < e.min_level && vict_level < LVL_GOD {
             continue;
         }
         if vict_npc {
             continue;
         }
+        if want_wiz {
+            if e.godcmd_set == 0 {
+                continue;
+            }
+            let bits = vict_gcmds[(e.godcmd_set - 1) as usize];
+            if e.godcmd & bits == 0 {
+                continue;
+            }
+        }
         let color = if want_wiz { "&Y" } else { "&g" };
-        buf.push_str(&format!("{}{:<11}&n", color, name));
+        buf.push_str(&format!("{}{:<11}&n", color, e.name));
         if no % 7 == 0 {
             buf.push_str("\r\n");
         }
@@ -3640,6 +3669,33 @@ mod tests {
         assert!(out.contains("The following socials are available to you:"));
         assert!(out.contains("accuse"));
         assert!(out.contains("applaud"));
+        assert!(out.contains("insult"));
+        assert!(!out.contains("snowball"));
+    }
+
+    #[test]
+    fn social_min_level_is_enforced_at_dispatch() {
+        crate::cmd_social::boot_socials(Some("../lib/misc/socials"));
+        let mut g = GameState::new(Config::default());
+        let ch = connected_player(&mut g, ConnId(1), "Reader", 1);
+
+        crate::interpreter::run_command(&mut g, ch, "snowball");
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("Huh?!?"));
+    }
+
+    #[test]
+    fn wizhelp_filters_by_god_command_bits() {
+        let mut g = GameState::new(Config::default());
+        let ch = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+
+        do_commands(&mut g, ch, "", 2);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("The following privileged commands are available to you:"));
+        assert!(!out.contains("goto"));
+        assert!(!out.contains("shutdown"));
     }
 
     #[test]

@@ -3552,7 +3552,10 @@ pub fn do_email(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     if let Some(target) = g.find_player_by_name(&farg) {
         known_player = true;
         if let Some(c) = g.get_char(target) {
-            email = c.email.clone().or_else(|| read_extra_email(&g.config.lib_path, c.get_name()));
+            email = c
+                .email
+                .clone()
+                .or_else(|| read_extra_email(&g.config.lib_path, c.get_name()));
         }
     } else if let Some(id) = g.get_id_by_name(&farg) {
         known_player = true;
@@ -3626,8 +3629,10 @@ fn extra_data_filename(lib: &str, name: &str) -> Option<std::path::PathBuf> {
 fn read_extra_email(lib: &str, name: &str) -> Option<String> {
     let path = extra_data_filename(lib, name)?;
     let data = std::fs::read_to_string(path).ok()?;
-    data.lines()
-        .find_map(|line| line.strip_prefix("EMAIL ").map(|s| s.trim_end_matches('\r').to_string()))
+    data.lines().find_map(|line| {
+        line.strip_prefix("EMAIL ")
+            .map(|s| s.trim_end_matches('\r').to_string())
+    })
 }
 
 fn write_extra_email(lib: &str, name: &str, email: Option<&str>) {
@@ -3905,13 +3910,12 @@ mod tests {
         do_recall(&mut g, ch, "19", 0);
         assert_eq!(g.get_char(ch).unwrap().recall_level, 19);
         do_recall(&mut g, ch, "", 0);
-        assert!(
-            g.descriptors
-                .get(&conn)
-                .unwrap()
-                .outbuf
-                .contains("Your current recall level is 19 hit points.\r\n")
-        );
+        assert!(g
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("Your current recall level is 19 hit points.\r\n"));
 
         do_retreat(&mut g, ch, "17", 0);
         assert_eq!(g.get_char(ch).unwrap().retreat_level, 17);

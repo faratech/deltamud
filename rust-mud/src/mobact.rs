@@ -114,12 +114,16 @@ fn plr_flagged(g: &GameState, ch: CharId, flag: i64) -> bool {
 
 /// PRF_FLAGGED(ch, flag) — preference test.
 fn prf_flagged(g: &GameState, ch: CharId, flag: i64) -> bool {
-    g.get_char(ch).map(|c| c.prf_flags & flag != 0).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.prf_flags & flag != 0)
+        .unwrap_or(false)
 }
 
 /// AWAKE(ch): position above Sleeping.
 fn awake(g: &GameState, ch: CharId) -> bool {
-    g.get_char(ch).map(|c| c.position > Position::Sleeping).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.position > Position::Sleeping)
+        .unwrap_or(false)
 }
 
 fn fighting(g: &GameState, ch: CharId) -> Option<CharId> {
@@ -155,7 +159,9 @@ fn is_neutral(g: &GameState, ch: CharId) -> bool {
 }
 
 fn get_name(g: &GameState, ch: CharId) -> String {
-    g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default()
+    g.get_char(ch)
+        .map(|c| c.player.name.clone())
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -167,8 +173,8 @@ fn get_name(g: &GameState, ch: CharId) -> String {
 /// identical to the table in cmd_item.rs (kept local to avoid a cross-module
 /// private dependency).
 const STR_APP_CARRY_W: [i32; 31] = [
-    0, 3, 3, 10, 25, 55, 80, 90, 100, 100, 115, 115, 140, 140, 170, 170, 195,
-    220, 255, 640, 700, 810, 970, 1130, 1440, 1750, 280, 305, 330, 380, 480,
+    0, 3, 3, 10, 25, 55, 80, 90, 100, 100, 115, 115, 140, 140, 170, 170, 195, 220, 255, 640, 700,
+    810, 970, 1130, 1440, 1750, 280, 305, 330, 380, 480,
 ];
 
 fn strength_apply_index(g: &GameState, ch: CharId) -> usize {
@@ -214,8 +220,14 @@ fn can_see_obj(g: &GameState, ch: CharId, oid: ObjId) -> bool {
         Some(o) => o,
         None => return false,
     };
-    if obj.extra_flags.contains(crate::object::ExtraFlags::INVISIBLE) {
-        let detect = g.get_char(ch).map(|c| c.affect_flags & AFF_DETECT_INVIS != 0).unwrap_or(false);
+    if obj
+        .extra_flags
+        .contains(crate::object::ExtraFlags::INVISIBLE)
+    {
+        let detect = g
+            .get_char(ch)
+            .map(|c| c.affect_flags & AFF_DETECT_INVIS != 0)
+            .unwrap_or(false);
         return detect;
     }
     true
@@ -330,16 +342,10 @@ pub fn mobile_activity(g: &mut GameState) {
         if mob_flagged(g, ch, MOB_PCHELPER_GOOD) && fighting(g, ch).is_none() {
             pchelper_good(g, ch);
         }
-        if g.char_exists(ch)
-            && mob_flagged(g, ch, MOB_PCHELPER_NEUT)
-            && fighting(g, ch).is_none()
-        {
+        if g.char_exists(ch) && mob_flagged(g, ch, MOB_PCHELPER_NEUT) && fighting(g, ch).is_none() {
             pchelper_neut(g, ch);
         }
-        if g.char_exists(ch)
-            && mob_flagged(g, ch, MOB_PCHELPER_EVIL)
-            && fighting(g, ch).is_none()
-        {
+        if g.char_exists(ch) && mob_flagged(g, ch, MOB_PCHELPER_EVIL) && fighting(g, ch).is_none() {
             pchelper_evil(g, ch);
         }
     }
@@ -377,7 +383,15 @@ fn scavenge(g: &mut GameState, ch: CharId) {
     if let Some(oid) = best {
         g.obj_from_anywhere(oid);
         g.obj_to_char(oid, ch);
-        act(g, "$n gets $p.", false, ch, Some(oid), ActArg::None, To::Room);
+        act(
+            g,
+            "$n gets $p.",
+            false,
+            ch,
+            Some(oid),
+            ActArg::None,
+            To::Room,
+        );
     }
 }
 
@@ -550,7 +564,15 @@ fn helper_assist(g: &mut GameState, ch: CharId) {
         if is_npc(g, target) || ch == target {
             continue;
         }
-        act(g, "$n jumps to the aid of $N!", false, ch, None, ActArg::Char(vict), To::Room);
+        act(
+            g,
+            "$n jumps to the aid of $N!",
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Room,
+        );
         hit(g, ch, target);
         return; // C: found = TRUE
     }
@@ -590,10 +612,42 @@ fn pchelper_good(g: &mut GameState, ch: CharId) {
         let befriend = if reverse_att { vfight } else { vict };
         let target = if reverse_att { vict } else { vfight };
 
-        act(g, "$n flashes you a brave smile.", false, ch, None, ActArg::Char(befriend), To::Vict);
-        act(g, "$n exclaims, 'BANZAII!!!'", false, ch, None, ActArg::None, To::Room);
-        act(g, "$n jumps to your aid!", false, ch, None, ActArg::Char(befriend), To::Vict);
-        act(g, "$n jumps to the aid of $N!", false, ch, None, ActArg::Char(befriend), To::NotVict);
+        act(
+            g,
+            "$n flashes you a brave smile.",
+            false,
+            ch,
+            None,
+            ActArg::Char(befriend),
+            To::Vict,
+        );
+        act(
+            g,
+            "$n exclaims, 'BANZAII!!!'",
+            false,
+            ch,
+            None,
+            ActArg::None,
+            To::Room,
+        );
+        act(
+            g,
+            "$n jumps to your aid!",
+            false,
+            ch,
+            None,
+            ActArg::Char(befriend),
+            To::Vict,
+        );
+        act(
+            g,
+            "$n jumps to the aid of $N!",
+            false,
+            ch,
+            None,
+            ActArg::Char(befriend),
+            To::NotVict,
+        );
         hit(g, ch, target);
         return; // C `break`
     }
@@ -618,8 +672,24 @@ fn pchelper_neut(g: &mut GameState, ch: CharId) {
         if is_npc(g, vict) || !is_neutral(g, vict) {
             continue;
         }
-        act(g, "$n jumps to your aid!", false, ch, None, ActArg::Char(vict), To::Vict);
-        act(g, "$n jumps to the aid of $N!", false, ch, None, ActArg::Char(vict), To::NotVict);
+        act(
+            g,
+            "$n jumps to your aid!",
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Vict,
+        );
+        act(
+            g,
+            "$n jumps to the aid of $N!",
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::NotVict,
+        );
         hit(g, ch, vfight);
         return; // C `break`
     }
@@ -658,8 +728,24 @@ fn pchelper_evil(g: &mut GameState, ch: CharId) {
 
         let target = if reverse_att { vict } else { vfight };
 
-        act(g, "$n snarls viciously at you!", false, ch, None, ActArg::Char(target), To::Vict);
-        act(g, "$n snarls viciously at $N!", false, ch, None, ActArg::Char(target), To::NotVict);
+        act(
+            g,
+            "$n snarls viciously at you!",
+            false,
+            ch,
+            None,
+            ActArg::Char(target),
+            To::Vict,
+        );
+        act(
+            g,
+            "$n snarls viciously at $N!",
+            false,
+            ch,
+            None,
+            ActArg::Char(target),
+            To::NotVict,
+        );
         hit(g, ch, target);
         return; // C `break`
     }
@@ -717,8 +803,7 @@ pub fn combat_mob_spec_pulse(g: &mut GameState, ch: CharId) {
         return;
     }
     let vnum = c.nr;
-    if crate::spec_assign::get_mob_spec(vnum).is_some() || crate::shop::is_shop_keeper_vnum(vnum)
-    {
+    if crate::spec_assign::get_mob_spec(vnum).is_some() || crate::shop::is_shop_keeper_vnum(vnum) {
         let _ = call_mob_spec(g, ch);
     }
 }

@@ -74,13 +74,19 @@ fn is_npc(g: &GameState, ch: CharId) -> bool {
     g.get_char(ch).map(|c| c.is_npc).unwrap_or(false)
 }
 fn is_affected(g: &GameState, ch: CharId, bit: i64) -> bool {
-    g.get_char(ch).map(|c| c.affect_flags & bit != 0).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.affect_flags & bit != 0)
+        .unwrap_or(false)
 }
 fn mob_flagged(g: &GameState, ch: CharId, flag: i64) -> bool {
-    g.get_char(ch).map(|c| c.is_npc && c.act_flags & flag != 0).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.is_npc && c.act_flags & flag != 0)
+        .unwrap_or(false)
 }
 fn affected_by_spell(g: &GameState, ch: CharId, spell: i32) -> bool {
-    g.get_char(ch).map(|c| c.affected.iter().any(|a| a.spell_type == spell)).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.affected.iter().any(|a| a.spell_type == spell))
+        .unwrap_or(false)
 }
 
 /// mag_savingthrow(ch, victim) (magic.c): does the victim avoid the spell?
@@ -99,7 +105,12 @@ fn affect_join(g: &mut GameState, victim: CharId, mut af: Affect, add_dur: bool,
     let spell = af.spell_type;
     if let Some(c) = g.get_char_mut(victim) {
         // Find an existing affect of the same spell with the same location.
-        if let Some(existing) = c.affected.iter().find(|a| a.spell_type == spell && a.location == af.location).cloned() {
+        if let Some(existing) = c
+            .affected
+            .iter()
+            .find(|a| a.spell_type == spell && a.location == af.location)
+            .cloned()
+        {
             if add_dur {
                 af.duration += existing.duration;
             }
@@ -107,7 +118,8 @@ fn affect_join(g: &mut GameState, victim: CharId, mut af: Affect, add_dur: bool,
                 af.modifier += existing.modifier;
             }
             // Remove the matching prior affect (same spell + location).
-            c.affected.retain(|a| !(a.spell_type == spell && a.location == af.location));
+            c.affected
+                .retain(|a| !(a.spell_type == spell && a.location == af.location));
         }
         c.affected.push(af);
     }
@@ -186,13 +198,35 @@ pub fn call_magic(
         let nomagic = g.room(r).room_flags.bits() & ROOM_NOMAGIC != 0;
         if nomagic && caster_level < LVL_IMPL as i32 {
             g.send_to_char(caster, "Your magic fizzles out and dies.\r\n");
-            act(g, "$n's magic fizzles out and dies.", false, caster, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n's magic fizzles out and dies.",
+                false,
+                caster,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             return 0;
         }
         let peaceful = g.room(r).room_flags.contains(RoomFlags::PEACEFUL);
-        if caster_level < LVL_IMPL as i32 && peaceful && (si.violent || si.routines & MAG_DAMAGE != 0) {
-            g.send_to_char(caster, "A flash of white light fills the room, dispelling your violent magic!\r\n");
-            act(g, "White light from no particular source suddenly fills the room, then vanishes.", false, caster, None, ActArg::None, To::Room);
+        if caster_level < LVL_IMPL as i32
+            && peaceful
+            && (si.violent || si.routines & MAG_DAMAGE != 0)
+        {
+            g.send_to_char(
+                caster,
+                "A flash of white light fills the room, dispelling your violent magic!\r\n",
+            );
+            act(
+                g,
+                "White light from no particular source suddenly fills the room, then vanishes.",
+                false,
+                caster,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             return 0;
         }
     }
@@ -255,7 +289,13 @@ pub fn call_magic(
 // ===========================================================================
 // mag_damage (magic.c)
 // ===========================================================================
-pub fn mag_damage(g: &mut GameState, level: i32, ch: CharId, victim: Option<CharId>, spellnum: i32) {
+pub fn mag_damage(
+    g: &mut GameState,
+    level: i32,
+    ch: CharId,
+    victim: Option<CharId>,
+    spellnum: i32,
+) {
     let victim = match victim {
         Some(v) => v,
         None => return,
@@ -298,11 +338,22 @@ struct AfSlot {
 }
 impl AfSlot {
     fn blank() -> Self {
-        AfSlot { location: APPLY_NONE_I, modifier: 0, duration: 0, bitvector: 0 }
+        AfSlot {
+            location: APPLY_NONE_I,
+            modifier: 0,
+            duration: 0,
+            bitvector: 0,
+        }
     }
 }
 
-pub fn mag_affects(g: &mut GameState, level: i32, ch: CharId, victim: Option<CharId>, spellnum: i32) {
+pub fn mag_affects(
+    g: &mut GameState,
+    level: i32,
+    ch: CharId,
+    victim: Option<CharId>,
+    spellnum: i32,
+) {
     let victim = match victim {
         Some(v) => v,
         None => return,
@@ -312,7 +363,11 @@ pub fn mag_affects(g: &mut GameState, level: i32, ch: CharId, victim: Option<Cha
     }
 
     let mut af: [AfSlot; MAX_SPELL_AFFECTS] = [
-        AfSlot::blank(), AfSlot::blank(), AfSlot::blank(), AfSlot::blank(), AfSlot::blank(),
+        AfSlot::blank(),
+        AfSlot::blank(),
+        AfSlot::blank(),
+        AfSlot::blank(),
+        AfSlot::blank(),
     ];
     let mut accum_affect = false;
     let mut accum_duration = false;
@@ -446,8 +501,19 @@ pub fn mag_affects(g: &mut GameState, level: i32, ch: CharId, victim: Option<Cha
             }
             af[0].duration = 4 + (ch_level >> 2);
             af[0].bitvector = AFF_SLEEP;
-            if g.get_char(victim).map(|c| c.position > Position::Sleeping).unwrap_or(false) {
-                act(g, "$n goes to sleep.", true, victim, None, ActArg::None, To::Room);
+            if g.get_char(victim)
+                .map(|c| c.position > Position::Sleeping)
+                .unwrap_or(false)
+            {
+                act(
+                    g,
+                    "$n goes to sleep.",
+                    true,
+                    victim,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
                 if let Some(c) = g.get_char_mut(victim) {
                     c.position = Position::Sleeping;
                 }
@@ -548,7 +614,13 @@ fn spell_affect_msg(_spellnum: i32) -> Option<&'static str> {
 // ===========================================================================
 // mag_points (magic.c)
 // ===========================================================================
-pub fn mag_points(g: &mut GameState, level: i32, _ch: CharId, victim: Option<CharId>, spellnum: i32) {
+pub fn mag_points(
+    g: &mut GameState,
+    level: i32,
+    _ch: CharId,
+    victim: Option<CharId>,
+    spellnum: i32,
+) {
     let victim = match victim {
         Some(v) => v,
         None => return,
@@ -588,7 +660,13 @@ pub fn mag_points(g: &mut GameState, level: i32, _ch: CharId, victim: Option<Cha
 // ===========================================================================
 // mag_unaffects (magic.c)
 // ===========================================================================
-pub fn mag_unaffects(g: &mut GameState, _level: i32, ch: CharId, victim: Option<CharId>, spellnum: i32) {
+pub fn mag_unaffects(
+    g: &mut GameState,
+    _level: i32,
+    ch: CharId,
+    victim: Option<CharId>,
+    spellnum: i32,
+) {
     let victim = match victim {
         Some(v) => v,
         None => return,
@@ -605,14 +683,22 @@ pub fn mag_unaffects(g: &mut GameState, _level: i32, ch: CharId, victim: Option<
                 }
                 return;
             }
-            (SPELL_BLINDNESS, Some("Your vision returns!"), Some("There's a momentary gleam in $n's eyes."))
+            (
+                SPELL_BLINDNESS,
+                Some("Your vision returns!"),
+                Some("There's a momentary gleam in $n's eyes."),
+            )
         }
         SPELL_REMOVE_POISON => {
             if crate::handler::check_perm_duration(g, ch, AFF_POISON) {
                 g.send_to_char(ch, NOEFFECT);
                 return;
             }
-            (SPELL_POISON, Some("A warm feeling runs through your body!"), Some("$n looks better."))
+            (
+                SPELL_POISON,
+                Some("A warm feeling runs through your body!"),
+                Some("$n looks better."),
+            )
         }
         SPELL_REMOVE_CURSE => {
             if crate::handler::check_perm_duration(g, ch, AFF_CURSE) {
@@ -641,7 +727,13 @@ pub fn mag_unaffects(g: &mut GameState, _level: i32, ch: CharId, victim: Option<
 // ===========================================================================
 // mag_alter_objs (magic.c)
 // ===========================================================================
-pub fn mag_alter_objs(g: &mut GameState, _level: i32, ch: CharId, obj: Option<ObjId>, spellnum: i32) {
+pub fn mag_alter_objs(
+    g: &mut GameState,
+    _level: i32,
+    ch: CharId,
+    obj: Option<ObjId>,
+    spellnum: i32,
+) {
     let obj = match obj {
         Some(o) => o,
         None => return,
@@ -684,8 +776,10 @@ pub fn mag_alter_objs(g: &mut GameState, _level: i32, ch: CharId, obj: Option<Ob
             }
         }
         SPELL_POISON => {
-            if matches!(otype, ObjectType::LiqContainer | ObjectType::Fountain | ObjectType::Food)
-                && g.get_obj(obj).map(|o| o.values[3] == 0).unwrap_or(false)
+            if matches!(
+                otype,
+                ObjectType::LiqContainer | ObjectType::Fountain | ObjectType::Food
+            ) && g.get_obj(obj).map(|o| o.values[3] == 0).unwrap_or(false)
             {
                 if let Some(o) = g.get_obj_mut(obj) {
                     o.values[3] = 1;
@@ -705,8 +799,10 @@ pub fn mag_alter_objs(g: &mut GameState, _level: i32, ch: CharId, obj: Option<Ob
             }
         }
         SPELL_REMOVE_POISON => {
-            if matches!(otype, ObjectType::LiqContainer | ObjectType::Fountain | ObjectType::Food)
-                && g.get_obj(obj).map(|o| o.values[3] != 0).unwrap_or(false)
+            if matches!(
+                otype,
+                ObjectType::LiqContainer | ObjectType::Fountain | ObjectType::Food
+            ) && g.get_obj(obj).map(|o| o.values[3] != 0).unwrap_or(false)
             {
                 if let Some(o) = g.get_obj_mut(obj) {
                     o.values[3] = 0;
@@ -750,8 +846,24 @@ pub fn mag_creations(g: &mut GameState, _level: i32, ch: CharId, spellnum: i32) 
         }
     };
     g.obj_to_char(tobj, ch);
-    act(g, "$n creates $p.", false, ch, Some(tobj), ActArg::None, To::Room);
-    act(g, "You create $p.", false, ch, Some(tobj), ActArg::None, To::Char);
+    act(
+        g,
+        "$n creates $p.",
+        false,
+        ch,
+        Some(tobj),
+        ActArg::None,
+        To::Room,
+    );
+    act(
+        g,
+        "You create $p.",
+        false,
+        ch,
+        Some(tobj),
+        ActArg::None,
+        To::Char,
+    );
 }
 
 // ===========================================================================
@@ -802,7 +914,15 @@ pub fn mag_summons(g: &mut GameState, _level: i32, ch: CharId, obj: Option<ObjId
                 .map(|o| o.obj_type == ObjectType::Container && o.values[3] == 1)
                 .unwrap_or(false);
             if !is_corpse {
-                act(g, SUMMON_FAIL_MSGS[7], false, ch, None, ActArg::None, To::Char);
+                act(
+                    g,
+                    SUMMON_FAIL_MSGS[7],
+                    false,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Char,
+                );
                 return;
             }
             (11, MOB_ZOMBIE, 10, true)
@@ -823,7 +943,10 @@ pub fn mag_summons(g: &mut GameState, _level: i32, ch: CharId, obj: Option<ObjId
     let mob = match g.load_mobile(mob_num) {
         Some(m) => m,
         None => {
-            g.send_to_char(ch, "You don't quite remember how to make that creature.\r\n");
+            g.send_to_char(
+                ch,
+                "You don't quite remember how to make that creature.\r\n",
+            );
             return;
         }
     };
@@ -838,18 +961,32 @@ pub fn mag_summons(g: &mut GameState, _level: i32, ch: CharId, obj: Option<ObjId
         m.affect_flags |= AFF_CHARM;
     }
     if spellnum == SPELL_CLONE {
-        let name = g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default();
+        let name = g
+            .get_char(ch)
+            .map(|c| c.player.name.clone())
+            .unwrap_or_default();
         if let Some(m) = g.get_char_mut(mob) {
             m.player.name = name.clone();
             m.short_desc = Some(name);
         }
     }
-    act(g, SUMMON_MSGS[msg], false, ch, None, ActArg::Char(mob), To::Room);
+    act(
+        g,
+        SUMMON_MSGS[msg],
+        false,
+        ch,
+        None,
+        ActArg::Char(mob),
+        To::Room,
+    );
     add_follower(g, mob, ch);
 
     if handle_corpse {
         if let Some(corpse) = obj {
-            let contents = g.get_obj(corpse).map(|o| o.contains.clone()).unwrap_or_default();
+            let contents = g
+                .get_obj(corpse)
+                .map(|o| o.contains.clone())
+                .unwrap_or_default();
             for c in contents {
                 g.obj_from_anywhere(c);
                 g.obj_to_char(c, mob);
@@ -930,7 +1067,10 @@ pub fn mag_groups(g: &mut GameState, level: i32, ch: CharId, spellnum: i32) {
     }
     let k = g.get_char(ch).and_then(|c| c.master).unwrap_or(ch);
     let ch_room = g.get_char(ch).and_then(|c| c.in_room);
-    let followers = g.get_char(k).map(|c| c.followers.clone()).unwrap_or_default();
+    let followers = g
+        .get_char(k)
+        .map(|c| c.followers.clone())
+        .unwrap_or_default();
 
     for tch in followers {
         if g.get_char(tch).and_then(|c| c.in_room) != ch_room {
@@ -972,11 +1112,35 @@ fn add_follower(g: &mut GameState, ch: CharId, leader: CharId) {
             l.followers.push(ch);
         }
     }
-    act(g, "You now follow $N.", false, ch, None, ActArg::Char(leader), To::Char);
+    act(
+        g,
+        "You now follow $N.",
+        false,
+        ch,
+        None,
+        ActArg::Char(leader),
+        To::Char,
+    );
     if g.can_see(leader, ch) {
-        act(g, "$n starts following you.", true, ch, None, ActArg::Char(leader), To::Vict);
+        act(
+            g,
+            "$n starts following you.",
+            true,
+            ch,
+            None,
+            ActArg::Char(leader),
+            To::Vict,
+        );
     }
-    act(g, "$n starts to follow $N.", true, ch, None, ActArg::Char(leader), To::NotVict);
+    act(
+        g,
+        "$n starts to follow $N.",
+        true,
+        ch,
+        None,
+        ActArg::Char(leader),
+        To::NotVict,
+    );
 }
 
 // pk_allowed (config) — DeltaMUD ships with player-killing disabled by default.

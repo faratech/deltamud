@@ -11,15 +11,12 @@
 // then mutate / send. do_alias talks only to the actor via send_to_char (the C
 // uses no act() broadcasts here, so neither do we).
 //
-// Two entry points are exposed for the command interpreter:
+// Two entry points are exposed for the command path:
 //   * do_alias(g, ch, arg, subcmd) — the `alias` command (list / add / remove).
-//   * alias_replace(g, ch, input) -> Option<String> — the expansion hook
-//     (perform_alias). Returns Some(expanded) when the first word matched an
-//     alias, else None. For a COMPLEX alias the returned string may contain
-//     several `;`-separated commands, joined by '\n'; the wiring in
-//     command_interpreter splits on '\n' and dispatches each in order (this is
-//     the Rust analogue of C pushing the expanded commands onto the front of
-//     the descriptor input queue).
+//   * alias_expand(g, ch, input) -> Option<AliasExpansion> — the expansion hook
+//     (perform_alias). SIMPLE aliases replace the current command; COMPLEX
+//     aliases return the commands to push onto the descriptor input queue with
+//     the C `aliased` marker.
 
 use crate::state::GameState;
 use crate::types::*;
@@ -50,6 +47,15 @@ pub struct AliasEntry {
     pub alias: String,
     pub replacement: String,
     pub atype: i32,
+}
+
+/// Result of C perform_alias().
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AliasExpansion {
+    /// ALIAS_SIMPLE: replace the current command line and dispatch it now.
+    Simple(String),
+    /// ALIAS_COMPLEX: push these commands to the front of the descriptor queue.
+    Complex(Vec<String>),
 }
 
 /// Per-player alias lists, keyed by Character.idnum (the persistent player id;
@@ -214,10 +220,7 @@ fn delete_doubledollar(s: &str) -> String {
 /// C perform_complex_alias(): substitute $1..$9 / $* / $$ in `a.replacement`
 /// using the whitespace tokens of `orig` (the line after the alias word), and
 /// split the result on ALIAS_SEP_CHAR (';') into one or more commands.
-///
-/// Returns the commands joined by '\n' (the Rust stand-in for the C input
-/// queue: the caller splits on '\n' and dispatches each in order).
-fn perform_complex_alias(orig: &str, a: &AliasEntry) -> String {
+fn perform_complex_alias(orig: &str, a: &AliasEntry) -> Vec<String> {
     // First, parse the original string into up to NUM_TOKENS whitespace tokens
     // (C: strtok on " "). $0 is unused; $1 maps to tokens[0].
     let tokens: Vec<&str> = orig.split_whitespace().take(NUM_TOKENS).collect();
@@ -270,7 +273,7 @@ fn perform_complex_alias(orig: &str, a: &AliasEntry) -> String {
     truncate_to(&mut buf, MAX_INPUT_LENGTH - 1);
     commands.push(buf);
 
-    commands.join("\n")
+    commands
 }
 
 /// Truncate `s` to at most `max` chars without splitting a UTF-8 boundary
@@ -283,7 +286,7 @@ fn truncate_to(s: &mut String, max: usize) {
 }
 
 // ---------------------------------------------------------------------------
-// alias_replace (C perform_alias): the expansion hook.
+// alias_expand (C perform_alias): the expansion hook.
 // ---------------------------------------------------------------------------
 
 /// C perform_alias(): given the raw input line, expand a matching alias.
@@ -291,11 +294,9 @@ fn truncate_to(s: &mut String, max: usize) {
 /// Returns:
 ///   * None  — the first word is not an alias (or the actor is an NPC / has no
 ///     aliases). The caller dispatches `input` unchanged.
-///   * Some(s) — `input`'s leading alias was replaced. For an ALIAS_SIMPLE the
-///     replacement string is returned verbatim (C strcpy(orig, a->replacement),
-///     which discards the rest of the line). For an ALIAS_COMPLEX the returned
-///     string holds the `$`-expanded, `;`-split commands joined by '\n'.
-pub fn alias_replace(g: &GameState, ch: CharId, input: &str) -> Option<String> {
+///   * Some(Simple) — ALIAS_SIMPLE replaced the current command.
+///   * Some(Complex) — ALIAS_COMPLEX should be queued at the descriptor front.
+pub fn alias_expand(g: &GameState, ch: CharId, input: &str) -> Option<AliasExpansion> {
     let idnum = match g.get_char(ch) {
         // Mobs never have aliases (C: GET_ALIASES on an NPC is NULL).
         Some(c) if !c.is_npc => c.idnum,
@@ -317,9 +318,20 @@ pub fn alias_replace(g: &GameState, ch: CharId, input: &str) -> Option<String> {
     };
 
     if matched.atype == ALIAS_SIMPLE {
-        Some(matched.replacement.clone())
+        Some(AliasExpansion::Simple(matched.replacement.clone()))
     } else {
-        Some(perform_complex_alias(rest, &matched))
+        Some(AliasExpansion::Complex(perform_complex_alias(
+            rest, &matched,
+        )))
+    }
+}
+
+/// Compatibility helper for older direct tests/callers. Complex aliases are
+/// flattened with newlines, matching the previous Rust representation.
+pub fn alias_replace(g: &GameState, ch: CharId, input: &str) -> Option<String> {
+    match alias_expand(g, ch, input)? {
+        AliasExpansion::Simple(s) => Some(s),
+        AliasExpansion::Complex(lines) => Some(lines.join("\n")),
     }
 }
 

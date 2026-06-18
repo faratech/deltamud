@@ -36,7 +36,11 @@ impl crate::DatabaseInterface for MockDatabase {
     }
 
     async fn player_exists(&self, name: &str) -> Result<bool> {
-        Ok(self.players.lock().unwrap().contains_key(&name.to_lowercase()))
+        Ok(self
+            .players
+            .lock()
+            .unwrap()
+            .contains_key(&name.to_lowercase()))
     }
 
     async fn create_player(&self, character: &Character, password: &str) -> Result<i64> {

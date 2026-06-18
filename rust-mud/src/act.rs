@@ -25,7 +25,9 @@ pub enum To {
 }
 
 fn sex_of(g: &GameState, cid: CharId) -> Gender {
-    g.get_char(cid).map(|c| c.player.sex).unwrap_or(Gender::Neutral)
+    g.get_char(cid)
+        .map(|c| c.player.sex)
+        .unwrap_or(Gender::Neutral)
 }
 
 fn hssh(g: &GameState, cid: CharId) -> &'static str {
@@ -55,7 +57,9 @@ fn pers(g: &GameState, viewer: CharId, cid: CharId) -> String {
     if g.can_see(viewer, cid) {
         if let Some(ch) = g.get_char(cid) {
             return if ch.is_npc {
-                ch.short_desc.clone().unwrap_or_else(|| ch.player.name.clone())
+                ch.short_desc
+                    .clone()
+                    .unwrap_or_else(|| ch.player.name.clone())
             } else {
                 ch.player.name.clone()
             };
@@ -94,8 +98,17 @@ fn sana(g: &GameState, oid: ObjId) -> String {
         .get_obj(oid)
         .map(|o| o.short_description.clone())
         .unwrap_or_default();
-    let first = short.trim_start().chars().next().unwrap_or('x').to_ascii_lowercase();
-    if "aeiou".contains(first) { "an".to_string() } else { "a".to_string() }
+    let first = short
+        .trim_start()
+        .chars()
+        .next()
+        .unwrap_or('x')
+        .to_ascii_lowercase();
+    if "aeiou".contains(first) {
+        "an".to_string()
+    } else {
+        "a".to_string()
+    }
 }
 
 /// Render the message for one viewer (CircleMUD perform_act + CAP + CRLF).
