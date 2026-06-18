@@ -2,13 +2,28 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-`rust-mud/` is a from-scratch Rust reimplementation of DeltaMUD (a CircleMUD 3.0 derivative). It is a **functionally 1:1 port** of the C MUD plus a layer of modern improvements. ~83 modules / ~75k lines.
+`rust-mud/` is a from-scratch Rust reimplementation of DeltaMUD (a CircleMUD 3.0 derivative). It is a broad, near-complete Rust port with a layer of modern improvements, but it is **not exact C feature parity yet**. ~83 modules / ~75k lines.
 
-> **The `README.md` in this directory is stale** — it describes an early `Arc<RwLock<>>` "30+ commands" design that was rejected and fully replaced. Trust this file and the code, not the README.
+For high-level status, read `README.md`. For operational compatibility caveats, read `COMPATIBILITY.md`. This file is the detailed agent/developer guide.
 
 ## The C source is the oracle
 
-`/web/deltamud/src/*.c` (and `*.h`) is the **read-only authoritative reference**. The Rust port matches its output strings, world-file grammar, numeric formulas, and DB schema. When porting or fixing behavior, read the corresponding C function first and match it; never invent behavior not in the C. The C MUD still builds and boots (`/web/deltamud/bin/circle`) as a live comparison oracle.
+`/web/deltamud/src/*.c` (and `*.h`) is the **read-only authoritative reference**. The Rust port aims to match its output strings, world-file grammar, numeric formulas, and DB schema, with the current exceptions listed below. When porting or fixing behavior, read the corresponding C function first and match it; never invent behavior not in the C. The C MUD still builds and boots (`/web/deltamud/bin/circle`) as a live comparison oracle.
+
+## Current parity snapshot
+
+The command surface is substantially ported: the Rust `CMD_INFO` table matches the C command table order, and real command handlers are wired rather than falling through to the generic unimplemented path. The major subsystems also exist: 83-column SQL player persistence, world loaders, DG VM and command sets, OLC editors, copyover, telnet/IAC filtering, GMCP/MSSP, shops, clans, boards, mail, houses, quest, auction, arena, combat, magic, and special procedures.
+
+Known remaining parity work is mostly integration and fidelity detail, not whole missing systems:
+
+- **Editor/message pipeline:** the shared string editor return value is not honored by `game.rs`, and mail/board composition bypasses completion hooks. `write` note authoring validates and prompts but does not enter the object text editor.
+- **Persistence compatibility:** SQL `player_main` is broad and current, but rent/crash object files, houses, boards, clans, and mail use Rust text formats rather than C raw on-disk records. Do not share live C persistence files with Rust without a migration/compatibility pass.
+- **Character creation:** the Rust nanny path skips C states for newbie prompts, deity, hometown, stat reroll/accept, and creation-time `do_start_init`.
+- **Combat and flags:** `MOB_WIMPY` is currently bit-shifted incorrectly; sanctuary damage ordering differs; core damage lacks the low-level PC-vs-PC guard; `deathblow` and immortal raw-kill semantics route through normal damage; shopkeeper damage protection exists but is not wired; armor `value[0]` AC/defense is not applied by generic equip; normal `wear` does not call `wear_otrigger`.
+- **Command semantics:** complex aliases execute immediately instead of being queued through descriptor wait, aliases are not persisted, social minimum level is not enforced, `wizhelp` ignores per-command GCMD bits, and `socials` omits the static `insult` social.
+- **OLC/DG authoring:** trigger prototype editing is strong, but redit/oedit/medit do not expose the C DG attachment-list editor, room saves drop room `T` trigger attachments, and central `olc save` does not dispatch every editor's disk writer.
+- **Runtime/admin policy:** `-q` currently behaves like no-specials even though C uses only `-s` for that; `MUD_NO_SPECIALS`/`-s` can be bypassed by lazy spec assignment; ban enforcement misses C hostname, `BAN_NEW`, and `BAN_SELECT` paths.
+- **Other fidelity gaps:** `slist` emits no spell rows, several `APPLY_*` locations are narrower than C, autowiz/clan offline reporting are not fully SQL-backed, and some OLC text editors do not support the full C `/a /c /d /e /f /i /h /l /n /r /s` command set.
 
 ## Build / run / test
 
@@ -27,7 +42,7 @@ MUD_MOCK_DB=true MUD_PORT=4000 MUD_LIB_PATH=/web/deltamud/lib ./target/release/d
 Key env vars (read in `config.rs` + `main.rs`):
 - `MUD_MOCK_DB=true` — use the in-memory `MockDatabase` (default for dev; round-trips full player state within one run). Unset / `false` → real MySQL via `DATABASE_URL` (default `mysql://root:password@localhost/deltamud`).
 - `MUD_LIB_PATH` — the world/data dir (use `/web/deltamud/lib`, the shared C lib).
-- `MUD_PORT` (default 4000), `MUD_RNG_SEED=<n>` (pins the Lehmer PRNG for golden tests — same seed ⇒ identical zone prime / combat), `MUD_NO_SPECIALS` (or argv `-s`/`-q`).
+- `MUD_PORT` (default 4000), `MUD_RNG_SEED=<n>` (pins the Lehmer PRNG for golden tests — same seed => identical zone prime / combat), `MUD_NO_SPECIALS` (or argv `-s`; `-q` currently aliases this in Rust but diverges from C and should not be used for parity checks).
 - `MUD_METRICS_PORT=<port>` — enables a Prometheus `/metrics` + `/health` HTTP endpoint. **Never use 9200/9201 — this box's Elasticsearch owns them; use e.g. 19595.**
 - `MUD_MAX_CONN` (default 256), `MUD_CONN_BURST`/`MUD_CONN_WINDOW_MS` (per-IP rate limit).
 
@@ -58,11 +73,11 @@ Gotchas that waste time:
 
 **Heartbeat cadence** (`game.rs::heartbeat_inner`, pulses at 10 Hz): `perform_violence` (PULSE_VIOLENCE), `mobile_activity` (PULSE_MOBILE), `zone_update`, `dg_event::process_events` (every pulse), `script_trigger_check` (130), `point_update`+weather (750 = one MUD hour), `weather_activity` (300), `quest_update`+`blood_update` (600), `crash_save_all` (750).
 
-**Subsystem map** (find by name; each `.c`→`.rs` is a faithful port):
+**Subsystem map** (find by name; each port is intended to track the C oracle, with current gaps listed above):
 - `act()` message engine (`act.rs`, from comm.c `perform_act`): `$n/$N/$m/$s/$e/$o/$p` substitution + per-recipient visibility.
 - DG Scripts VM: `dg_scripts.rs` (`script_driver`, depth guard 10 + while-loop guard 30), `dg_handler.rs`/`dg_event.rs`/`dg_db_scripts.rs`, `dg_{mob,obj,wld}cmd.rs`, fire-hooks in `dg_triggers.rs`. **Triggers must boot before the world** (`main.rs` calls `boot_dg_scripts` before `load_world`).
-- OLC: `olc.rs` + `redit/oedit/medit/zedit/sedit/aedit/hedit/trigedit.rs` (nested-input editors; per-conn state in module-static `OnceLock<Mutex<...>>` keyed by `ConnId`).
-- Persistence: `database.rs` (real 83-column `player_main` + `player_affects`/`player_skills`), `database_compat.rs` (the column↔Character mapping), `mock_database.rs`, `objsave.rs` (rent/crash object files), `password.rs` (crypt-compatible).
+- OLC: `olc.rs` + `redit/oedit/medit/zedit/sedit/aedit/hedit/trigedit.rs` (nested-input editors; per-conn state in module-static `OnceLock<Mutex<...>>` keyed by `ConnId`; explicit save paths and DG attachment editors still need parity work).
+- Persistence: `database.rs` (real 83-column `player_main` + `player_affects`/`player_skills`), `database_compat.rs` (the column<->Character mapping), `mock_database.rs`, `objsave.rs` (Rust-format rent/crash object files, not C binary compatible), `password.rs` (crypt-compatible).
 - Spec procs (`spec_procs.rs`/`spec_assign.rs`), combat (`combat.rs`: DeltaMUD's `chance()`/`dam_multi()` from utils.c, not stock THAC0), magic (`magic.rs`/`spell_parser.rs`/`spells.rs`), economy (`shop/clan/boards/mail/house/quest/auction`).
 
 ## Things that are NOT obvious

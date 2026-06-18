@@ -1,6 +1,6 @@
 # DeltaMUD — Rust Edition
 
-A complete, behavior-faithful **1:1 reimplementation of DeltaMUD** (a CircleMUD 3.0 derivative) in Rust, plus a layer of modern improvements. The C source at `/web/deltamud/src` is the authoritative reference; this port matches its output strings, world-file formats, numeric formulas, and database schema, while replacing the C pointer-graph with an idiomatic single-owner design.
+A broad Rust reimplementation of DeltaMUD (a CircleMUD 3.0 derivative), plus a layer of modern improvements. The C source at `/web/deltamud/src` is the authoritative reference; this port is intended to match its output strings, world-file formats, numeric formulas, and database schema while replacing the C pointer graph with an idiomatic single-owner design. It is not exact C feature parity yet; see `COMPATIBILITY.md` for the current gap list.
 
 ~83 modules / ~75k lines. Builds clean and boots against the original `lib/` world files.
 
@@ -8,15 +8,17 @@ A complete, behavior-faithful **1:1 reimplementation of DeltaMUD** (a CircleMUD 
 
 ## What's implemented
 
-The full DeltaMUD feature set is ported and live — **all 232 commands**, every subsystem:
+The Rust port has the broad DeltaMUD feature surface in place, including the static command table and major subsystems:
 
 - **World**: rooms/objects/mobiles/zones/shops loaders (incl. `E` extra-descriptions, `A` applies, room `O` special exits, mob `X`-stats + espec, DG `T` triggers), zone resets with load-chance gating.
 - **Gameplay**: combat (DeltaMUD `chance()`/`dam_multi()` from `utils.c` — not stock THAC0 — plus avoid/parry/dodge/riposte), magic/skills (spell_parser/magic/spells), classes/races/deities/languages, regen, affects, conditions, `WAIT_STATE` command lag.
 - **Content & economy**: shops, clans, boards, mail, houses, quests, auction, arena, the castle/special procedures.
 - **DG Scripts**: full VM (`script_driver` with depth + loop guards), mob/obj/wld trigger command sets, and fire-hooks (greet/command/speech/death/load/timer/random).
-- **OLC**: redit / oedit / medit / zedit / sedit / aedit / hedit / trigedit, with byte-faithful save-to-disk.
-- **Persistence**: 83-column `player_main` + `player_affects` + `player_skills` (MySQL), object rent/crash files, crypt-compatible passwords; offline-player immortal ops via an async bridge.
+- **OLC**: redit / oedit / medit / zedit / sedit / aedit / hedit / trigedit, with many save-to-disk paths implemented and remaining caveats tracked in `COMPATIBILITY.md`.
+- **Persistence**: 83-column `player_main` + `player_affects` + `player_skills` (MySQL), Rust-format object rent/crash files, crypt-compatible passwords; offline-player immortal ops via an async bridge.
 - **Immortal tooling**: the full `act.wizard` command set, god-command (GCMD) permission bits, `can_edit_zone`, autowiz, on-disk syslog, the player-index table.
+
+Known remaining C-parity gaps are tracked in `COMPATIBILITY.md`. The highest-risk areas are C runtime persistence-file compatibility, shared string-editor flows, character creation, combat edge cases, alias persistence/timing, OLC/DG attachment saves, and some admin policy details.
 
 ### Modern improvements over the C version
 - **Idiomatic Rust core**: a single-owner `GameState` (id-indexed `IndexMap`/`Vec` arenas, `Copy` ids instead of locked pointers) — deadlock-free, with async (Tokio) only at the socket edge. No `Arc<RwLock>` entity graph.
@@ -55,7 +57,7 @@ Connect with any telnet/MUD client: `telnet <host> 4000` (or `nc` for scripts). 
 | `DATABASE_URL` | `mysql://root:password@localhost/deltamud` | Used when not mocking. Tables auto-create. |
 | `MUD_METRICS_PORT` | *(off)* | Enables `/metrics` + `/health`. **Avoid 9200/9201** — Elasticsearch on this host owns them; use e.g. `19595`. |
 | `MUD_RNG_SEED` | *(clock)* | Pins the Lehmer PRNG for reproducible/golden runs. |
-| `MUD_NO_SPECIALS` / `-s` / `-q` | off | Skip special-procedure assignment (C's `-s` flag). |
+| `MUD_NO_SPECIALS` / `-s` | off | Skip special-procedure assignment (C's `-s` flag). Rust currently also treats `-q` this way, which is a known C-parity bug. |
 | `MUD_MAX_CONN` | `256` | Concurrent-connection cap; `MUD_CONN_BURST`/`MUD_CONN_WINDOW_MS` add per-IP rate limiting. |
 | `RUST_LOG` | `info` | Log level. |
 
@@ -70,7 +72,7 @@ Connect with any telnet/MUD client: `telnet <host> 4000` (or `nc` for scripts). 
 cargo test                 # unit tests (DG-script parsing, password vectors, ...)
 cargo test <substring>     # a single test
 ```
-A 3-player concurrent soak script lives at `/tmp/soak.py <port>` (expects 0 panics). World files are 100% compatible with the C MUD, so the C build (`/web/deltamud/bin/circle`) can be run side-by-side as a comparison oracle.
+A 3-player concurrent soak script lives at `/tmp/soak.py <port>` (expects 0 panics). World source files are broadly compatible with the C MUD, but some Rust OLC save paths still have known gaps; use the C build (`/web/deltamud/bin/circle`) side-by-side as the comparison oracle when proving exact parity.
 
 ## Architecture (in brief)
 
