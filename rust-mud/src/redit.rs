@@ -23,6 +23,8 @@ use std::sync::OnceLock;
 // EX_HIDDEN — DeltaMUD adds a hidden flag past the standard CircleMUD set.
 // (structs.h: EX_PICKPROOF = 1<<3, EX_HIDDEN = 1<<4.)
 const EX_HIDDEN: i32 = 1 << 4;
+const MAX_ROOM_DESC: usize = 1024;
+const MAX_MESSAGE_LENGTH: usize = 4096;
 
 // NUM_ROOM_FLAGS / NUM_ROOM_SECTORS — count of real entries (excluding the
 // trailing "\n" sentinel) in the constants tables.
@@ -450,13 +452,9 @@ fn text_bufs() -> &'static Mutex<HashMap<ConnId, String>> {
 }
 
 fn begin_text(g: &mut GameState, conn: ConnId, seed: &str, mode: ReditMode) {
-    text_bufs().lock().unwrap().insert(conn, String::new());
+    text_bufs().lock().unwrap().insert(conn, seed.to_string());
     let _ = with_state(conn, |s| s.mode = mode);
-    send(
-        g,
-        conn,
-        "Enter text (terminate with '/s' on its own line, '/a' to abort):\r\n",
-    );
+    send(g, conn, "Enter text: (/s saves /h for help)\r\n\r\n");
     if !seed.is_empty() {
         send(g, conn, seed);
         if !seed.ends_with('\n') {
@@ -467,9 +465,14 @@ fn begin_text(g: &mut GameState, conn: ConnId, seed: &str, mode: ReditMode) {
 
 /// Feed one line to the active text sub-editor. Returns Some(Some(text)) on
 /// save, Some(None) on abort, None while still collecting.
-fn text_input(conn: ConnId, line: &str) -> Option<Option<String>> {
+fn text_input(
+    g: &mut GameState,
+    conn: ConnId,
+    mode: ReditMode,
+    line: &str,
+) -> Option<Option<String>> {
     let trimmed = line.trim_end_matches(['\r', '\n']);
-    if trimmed == "/s" || trimmed == "~" {
+    if trimmed == "~" {
         return Some(Some(
             text_bufs()
                 .lock()
@@ -478,15 +481,24 @@ fn text_input(conn: ConnId, line: &str) -> Option<Option<String>> {
                 .unwrap_or_default(),
         ));
     }
-    if trimmed == "/a" {
-        text_bufs().lock().unwrap().remove(&conn);
-        return Some(None);
+    let max = match mode {
+        ReditMode::Desc => MAX_ROOM_DESC,
+        ReditMode::ExitDescription | ReditMode::ExtradescDescription => MAX_MESSAGE_LENGTH,
+        _ => MAX_MESSAGE_LENGTH,
+    };
+    let mut buf = text_bufs()
+        .lock()
+        .unwrap()
+        .remove(&conn)
+        .unwrap_or_default();
+    match crate::modify::editor_buffer_input(g, conn, &mut buf, max, line) {
+        crate::modify::BufferEditorResult::Continue => {
+            text_bufs().lock().unwrap().insert(conn, buf);
+            None
+        }
+        crate::modify::BufferEditorResult::Save => Some(Some(buf)),
+        crate::modify::BufferEditorResult::Abort => Some(None),
     }
-    let mut bufs = text_bufs().lock().unwrap();
-    let buf = bufs.entry(conn).or_default();
-    buf.push_str(trimmed);
-    buf.push_str("\r\n");
-    None
 }
 
 // ===========================================================================
@@ -534,7 +546,7 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
 
         ReditMode::Desc => {
-            if let Some(result) = text_input(conn, line) {
+            if let Some(result) = text_input(g, conn, mode, line) {
                 if let Some(text) = result {
                     with_state(conn, |s| {
                         s.room.description = if text.is_empty() {
@@ -599,7 +611,7 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
 
         ReditMode::ExitDescription => {
-            if let Some(result) = text_input(conn, line) {
+            if let Some(result) = text_input(g, conn, mode, line) {
                 if let Some(text) = result {
                     with_state(conn, |s| {
                         if let Some(e) = s.room.exits[s.cur_exit].as_mut() {
@@ -687,7 +699,7 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
 
         ReditMode::ExtradescDescription => {
-            if let Some(result) = text_input(conn, line) {
+            if let Some(result) = text_input(g, conn, mode, line) {
                 if let Some(text) = result {
                     with_state(conn, |s| {
                         let idx = s.cur_desc;

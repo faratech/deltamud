@@ -112,7 +112,8 @@ struct TrigEditState {
     narg: i32,
     arglist: String,
     storage: String, // OLC_STORAGE: cmdlist as "line\r\nline\r\n..."
-    val: i32,        // OLC_VAL: has-changed flag
+    back_storage: Option<String>,
+    val: i32, // OLC_VAL: has-changed flag
 }
 
 static EDIT_STATES: OnceLock<Mutex<HashMap<ConnId, TrigEditState>>> = OnceLock::new();
@@ -346,6 +347,7 @@ fn setup_existing(rnum: usize, vnum: i32, znum: usize) -> TrigEditState {
         narg: proto.narg,
         arglist: proto.arglist,
         storage,
+        back_storage: None,
         val: 0,
     }
 }
@@ -362,6 +364,7 @@ fn setup_new(vnum: i32, znum: usize) -> TrigEditState {
         narg: 100,
         arglist: String::new(),
         storage: "say My trigger commandlist is not complete!\r\n".to_string(),
+        back_storage: None,
         val: 0,
     }
 }
@@ -652,6 +655,7 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
                 }
             }
             if let Some(st) = states().lock().unwrap().get_mut(&conn) {
+                st.back_storage = Some(st.storage.clone());
                 st.val = 1;
             }
         }
@@ -669,147 +673,37 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
 // ---------------------------------------------------------------------------
 
 fn commands_input(g: &mut GameState, conn: ConnId, line: &str) {
-    // delete_doubledollar: "$$" -> "$".
-    let str_in = line.replace("$$", "$");
+    let mut buf = states()
+        .lock()
+        .unwrap()
+        .get(&conn)
+        .map(|s| s.storage.clone())
+        .unwrap_or_default();
 
-    let mut terminator = 0; // 0 keep editing, 1 save, 2 abort
-    let mut action = false;
-
-    if str_in.starts_with('/') {
-        action = true;
-        let actions: String = str_in.chars().skip(2).collect();
-        let cmd = str_in.chars().nth(1).unwrap_or('\0');
-        match cmd {
-            'a' => terminator = 2, // abort
-            'c' => {
-                let empty = states()
-                    .lock()
-                    .unwrap()
-                    .get(&conn)
-                    .map(|s| s.storage.is_empty())
-                    .unwrap_or(true);
-                if !empty {
-                    if let Some(st) = states().lock().unwrap().get_mut(&conn) {
-                        st.storage.clear();
-                    }
-                    send(g, conn, "Current buffer cleared.\r\n");
-                } else {
-                    send(g, conn, "Current buffer empty.\r\n");
-                }
-            }
-            'd' => parse_action_delete(g, conn, &actions),
-            'e' => parse_action_edit(g, conn, &actions),
-            'f' => {
-                if buffer_nonempty(conn) {
-                    parse_action_format(g, conn, &actions);
-                } else {
-                    send(g, conn, "Current buffer empty.\r\n");
-                }
-            }
-            'i' => {
-                if buffer_nonempty(conn) {
-                    parse_action_insert(g, conn, &actions);
-                } else {
-                    send(g, conn, "Current buffer empty.\r\n");
-                }
-            }
-            'h' => parse_action_help(g, conn),
-            'l' => {
-                if buffer_nonempty(conn) {
-                    parse_action_list(g, conn, &actions, false);
-                } else {
-                    send(g, conn, "Current buffer empty.\r\n");
-                }
-            }
-            'n' => {
-                if buffer_nonempty(conn) {
-                    parse_action_list(g, conn, &actions, true);
-                } else {
-                    send(g, conn, "Current buffer empty.\r\n");
-                }
-            }
-            'r' => parse_action_replace(g, conn, &actions),
-            's' => terminator = 1, // save
-            _ => send(g, conn, "Invalid option.\r\n"),
-        }
-    }
-
-    // Append the line to the buffer (only if it was not a command).
-    if !action {
-        let mut buf = states()
-            .lock()
-            .unwrap()
-            .get(&conn)
-            .map(|s| s.storage.clone())
-            .unwrap_or_default();
-        let mut append = str_in.clone();
-        if buf.is_empty() {
-            if append.len() > MAX_CMD_LENGTH {
-                send(g, conn, "String too long - Truncated.\r\n");
-                append.truncate(MAX_CMD_LENGTH);
-            }
-            buf = append;
-        } else if append.len() + buf.len() > MAX_CMD_LENGTH {
-            send(
-                g,
-                conn,
-                "String too long, limit reached on message. Last line ignored.\r\n",
-            );
-            return; // keep editing; line ignored
-        } else {
-            buf.push_str(&append);
-        }
-        if let Some(st) = states().lock().unwrap().get_mut(&conn) {
-            st.storage = buf;
-        }
-    }
-
-    if terminator == 0 {
-        // Not finished: a non-command line gets a trailing CRLF appended.
-        if !action {
+    match crate::modify::editor_buffer_input(g, conn, &mut buf, MAX_CMD_LENGTH, line) {
+        crate::modify::BufferEditorResult::Continue => {
             if let Some(st) = states().lock().unwrap().get_mut(&conn) {
-                st.storage.push_str("\r\n");
+                st.storage = buf;
             }
         }
-        return;
-    }
-
-    // Editor finished. terminator 1 = keep buffer (save), 2 = abort the change.
-    // Either way we return to the trigedit main menu (the C parser sets
-    // OLC_MODE = TRIGEDIT_MAIN_MENU when the TRIGEDIT_COMMANDS case is reached
-    // after string editing ends). The buffer is the new OLC_STORAGE on save; on
-    // abort C reverts to backstr — we keep the buffer as-is only on save.
-    if terminator == 2 {
-        // Abort: restore from the on-disk prototype (or empty for a new trig),
-        // matching C reverting d->str from d->backstr (the pre-edit text).
-        let (vnum,) = {
-            let map = states().lock().unwrap();
-            let st = match map.get(&conn) {
-                Some(s) => s,
-                None => return,
-            };
-            (st.vnum,)
-        };
-        let rnum = dg_db_scripts::real_trigger(vnum);
-        let restored = if rnum >= 0 {
-            let mut s = String::new();
-            if let Some(p) = dg_db_scripts::trig_proto(rnum as usize) {
-                for l in &p.cmdlist {
-                    s.push_str(l);
-                    s.push_str("\r\n");
+        crate::modify::BufferEditorResult::Save => {
+            if let Some(st) = states().lock().unwrap().get_mut(&conn) {
+                st.storage = buf;
+                st.back_storage = None;
+            }
+            set_mode(conn, Mode::MainMenu);
+            disp_menu(g, conn);
+        }
+        crate::modify::BufferEditorResult::Abort => {
+            if let Some(st) = states().lock().unwrap().get_mut(&conn) {
+                if let Some(back) = st.back_storage.take() {
+                    st.storage = back;
                 }
+                st.mode = Mode::MainMenu;
             }
-            s
-        } else {
-            "say My trigger commandlist is not complete!\r\n".to_string()
-        };
-        if let Some(st) = states().lock().unwrap().get_mut(&conn) {
-            st.storage = restored;
+            disp_menu(g, conn);
         }
     }
-
-    set_mode(conn, Mode::MainMenu);
-    disp_menu(g, conn);
 }
 
 fn buffer_nonempty(conn: ConnId) -> bool {

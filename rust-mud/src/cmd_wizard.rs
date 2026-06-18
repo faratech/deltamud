@@ -5348,8 +5348,9 @@ pub fn do_mcasters(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         .mob_protos
         .values()
         .filter(|proto| {
-            crate::spec_assign::get_mob_spec(proto.vnum)
-                .is_some_and(|func| std::ptr::fn_addr_eq(func, magic_user))
+            proto.act_flags & MOB_CASTER != 0
+                || crate::spec_assign::get_mob_spec(proto.vnum)
+                    .is_some_and(|func| std::ptr::fn_addr_eq(func, magic_user))
         })
         .collect();
     casters.sort_by_key(|proto| proto.vnum);
@@ -6745,7 +6746,7 @@ mod tests {
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
         assert!(out.starts_with("Spellcasting mobs:\r\n"));
         assert!(out.contains("[3095] a magic user (Type: ASSIGNED)\r\n"));
-        assert!(!out.contains("a flagged non-caster"));
+        assert!(out.contains("[4000] a flagged non-caster (Type: CASTER)\r\n"));
     }
 
     #[test]

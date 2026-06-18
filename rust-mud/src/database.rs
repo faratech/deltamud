@@ -113,7 +113,7 @@ impl Database {
         let idnum = self.next_idnum().await?;
         let mut stored = ch.clone();
         stored.idnum = idnum;
-        self.write_player_main(&stored, &crate::password::hash_password(password))
+        self.write_player_main(&stored, &crate::password::hash_password(password), "")
             .await?;
         self.write_skills(&stored).await?;
         self.write_affects(&stored).await?;
@@ -151,15 +151,14 @@ impl Database {
     }
 
     /// build_player_index() (db.c): read every player's index row. C selects
-    /// only idnum,name,level; we also pull last_logon,host so `do_last` can
-    /// render an offline player straight from the index. last_logon is a unix
-    /// BIGINT in player_main (see init_tables DDL), so it maps directly to the
-    /// PlayerIndex i64.
+    /// Pull the player_main fields needed for the in-memory player index and
+    /// offline reports. last_logon is a unix BIGINT in player_main (see
+    /// init_tables DDL), so it maps directly to the PlayerIndex i64.
     pub async fn list_players(&self) -> Result<Vec<crate::state::PlayerIndex>> {
         let mut conn = self.pool.get_conn().await?;
         let rows: Vec<Row> = conn
             .exec(
-                "SELECT idnum,name,level,last_logon,host FROM player_main",
+                "SELECT idnum,name,level,class,last_logon,host,act,clan,clan_rank FROM player_main",
                 (),
             )
             .await?;
@@ -168,14 +167,22 @@ impl Database {
             let idnum: i64 = row.get(0).unwrap_or(-1);
             let name: String = row.get(1).unwrap_or_default();
             let level: u8 = row.get(2).unwrap_or(1);
-            let last_logon: i64 = row.get(3).unwrap_or(0);
-            let host: String = row.get(4).unwrap_or_default();
+            let class = crate::types::Class::from_u8(row.get::<u8, _>(3).unwrap_or(3));
+            let last_logon: i64 = row.get(4).unwrap_or(0);
+            let host: String = row.get(5).unwrap_or_default();
+            let act_flags: i64 = row.get(6).unwrap_or(0);
+            let clan: i32 = row.get(7).unwrap_or(-1);
+            let clan_rank: i32 = row.get(8).unwrap_or(-1);
             out.push(crate::state::PlayerIndex {
                 idnum,
                 name,
                 level,
+                class,
                 last_logon,
                 host,
+                act_flags,
+                clan,
+                clan_rank,
             });
         }
         Ok(out)
@@ -225,20 +232,35 @@ impl Database {
     }
 
     pub async fn save_player(&self, ch: &Character) -> Result<()> {
+        self.save_player_with_host(ch, "").await
+    }
+
+    pub async fn save_player_with_host(&self, ch: &Character, host: &str) -> Result<()> {
         // The password is never rewritten on a normal save; preserve the
         // stored hash (C re-supplies ch->player.passwd, which is unchanged).
         let mut conn = self.pool.get_conn().await?;
+        let existing: Option<(String, String)> = conn
+            .exec_first(
+                "SELECT pwd, COALESCE(host, '') FROM player_main WHERE idnum = ?",
+                (ch.idnum,),
+            )
+            .await?;
+        let existing_pwd = existing
+            .as_ref()
+            .map(|(pwd, _)| pwd.clone())
+            .unwrap_or_default();
+        let existing_host = existing.map(|(_, host)| host).unwrap_or_default();
         let pwd = match &ch.pending_password_hash {
             Some(hash) => hash.clone(),
-            None => {
-                let pwd: Option<String> = conn
-                    .exec_first("SELECT pwd FROM player_main WHERE idnum = ?", (ch.idnum,))
-                    .await?;
-                pwd.unwrap_or_default()
-            }
+            None => existing_pwd,
+        };
+        let host_to_save = if host.is_empty() {
+            existing_host.as_str()
+        } else {
+            host
         };
         drop(conn);
-        self.write_player_main(ch, &pwd).await?;
+        self.write_player_main(ch, &pwd, host_to_save).await?;
         self.write_skills(ch).await?;
         self.write_affects(ch).await?;
         Ok(())
@@ -249,8 +271,7 @@ impl Database {
     /// INSERT-or-UPDATE all 83 player_main columns (REPLACE keyed on the unique
     /// idnum/name), reusing the canonical column set + value order from
     /// database_compat.rs.
-    async fn write_player_main(&self, ch: &Character, pwd_hash: &str) -> Result<()> {
-        let host = ""; // host string is connection-derived; "" when unknown.
+    async fn write_player_main(&self, ch: &Character, pwd_hash: &str, host: &str) -> Result<()> {
         let values: Vec<Value> = compat::player_main_values(ch, pwd_hash, host);
         let cols = compat::PLAYER_MAIN_COLUMNS;
 

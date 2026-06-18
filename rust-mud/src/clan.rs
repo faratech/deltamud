@@ -18,13 +18,11 @@
 //     pointer-width dependent); see `gaps`.
 //   * Operates on the live Character.clan / Character.clan_rank fields for the
 //     actor and any ONLINE victim — the analogue of C's `is_playing()` branch.
-//     The boot-loaded GameState.player_table now resolves a player's NAME<->IDNUM
-//     and level OFFLINE (g.get_id_by_name / g.get_name_by_id), so member-name
-//     *display* (e.g. the roster's offline members) and existence checks no
-//     longer degrade to "no such player". What the index does NOT carry is a
-//     player's clan / clan_rank columns: those live only in player_main, so
-//     offline clan-MEMBERSHIP mutations are queued through GameState.offline_ops
-//     and replayed after the async game loop loads the target row.
+//     The boot-loaded GameState.player_table resolves a player's NAME<->IDNUM
+//     and carries the SQL class/clan/clan_rank fields needed for offline roster
+//     display. Offline clan-MEMBERSHIP mutations are still queued through
+//     GameState.offline_ops and replayed after the async game loop loads the
+//     target row.
 //
 // House style follows cmd_comm.rs / cmd_item.rs: copy needed values into
 // locals before mutating or broadcasting; re-look-up entities by id every
@@ -32,6 +30,7 @@
 // send_to_char.
 
 use crate::act::{act, ActArg, To};
+use crate::class::class_abbrev;
 use crate::interpreter::{half_chop, is_abbrev};
 use crate::room::RoomFlags;
 use crate::state::GameState;
@@ -1466,13 +1465,8 @@ fn clan_who(g: &mut GameState, ch: CharId) {
 // ---------------------------------------------------------------------------
 // clan roster — C reads the whole player_main (`SELECT level,class,name,
 // clan_rank FROM player_main WHERE clan=N`) and lists every member, online or
-// not, with their class and clan_rank. The player_table index resolves a
-// member's NAME and level offline, but it does NOT carry the per-player
-// clan / clan_rank / class columns, so the *full* offline roster (rank label +
-// class for logged-off members) still needs an async player_main load (NOTE:
-// offline clan_rank/class roster requires the async DB layer). We therefore
-// list the online membership with full detail and append the clan owner from
-// the index if they are offline (so the roster always names the leader).
+// not, with their class and clan_rank. The Rust player index carries those
+// fields from SQL, so this can stay synchronous while matching the C query.
 // ---------------------------------------------------------------------------
 
 fn clan_roster(g: &mut GameState, ch: CharId) {
@@ -1485,54 +1479,57 @@ fn clan_roster(g: &mut GameState, ch: CharId) {
     g.send_to_char(ch, "Full Clan Roster:\r\n");
     g.send_to_char(ch, "------------------------------------\r\n");
 
-    // The clan owner's name (stored on the clan record). If they are not online
-    // we still want to list them: resolve their idnum from the index so the
-    // owner shows even when logged off (C's WHERE clan=N would include them).
-    let leader_name = with_clan(num, |c| c.leader.clone()).unwrap_or_default();
-
     let mut any = false;
-    let mut shown_leader = false;
-    for d in connected_players(g) {
-        if get_clan(g, d) == num && get_clan_rank(g, d) > 0 {
-            any = true;
-            let (lvl, class_abbr, name) = match g.get_char(d) {
-                Some(c) => (
-                    c.player.level,
-                    c.class_abbrev().to_string(),
-                    c.player.name.clone(),
-                ),
-                None => continue,
-            };
-            if name.eq_ignore_ascii_case(&leader_name) {
-                shown_leader = true;
-            }
-            let drank = get_clan_rank(g, d);
-            let label = with_clan(num, |c| c.rank_label(drank).to_string())
-                .unwrap_or_else(|| "N/A".to_string());
-            g.send_to_char(
-                ch,
-                &format!("[ {} {} ] {} - {}\r\n", lvl, class_abbr, name, label),
-            );
-        }
+    let mut rows = g
+        .player_table
+        .iter()
+        .filter(|p| p.clan == num && p.clan_rank > 0)
+        .cloned()
+        .collect::<Vec<_>>();
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    for p in rows {
+        let label = with_clan(num, |c| c.rank_label(p.clan_rank).to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+        g.send_to_char(
+            ch,
+            &format!(
+                "[ {} {} ] {} - {}\r\n",
+                p.level,
+                class_abbrev(p.class),
+                p.name,
+                label
+            ),
+        );
+        any = true;
     }
-    // Owner offline: pull their canonical name + level from the index so the
-    // roster still names the leader (class/rank unavailable offline — see note).
-    if !leader_name.is_empty() && !shown_leader {
-        if let Some(id) = g.get_id_by_name(&leader_name) {
-            if let Some(p) = g.player_index(&leader_name) {
-                let (lvl, name) = (p.level, g.get_name_by_id(id).unwrap_or(leader_name.clone()));
-                let label = with_clan(num, |c| c.rank_label(c.ranks).to_string())
+
+    // If the index is stale or absent in a unit harness, still show loaded
+    // online members so the command degrades usefully.
+    if !any {
+        for d in connected_players(g) {
+            if get_clan(g, d) == num && get_clan_rank(g, d) > 0 {
+                let Some(c) = g.get_char(d) else {
+                    continue;
+                };
+                let label = with_clan(num, |clan| clan.rank_label(c.clan_rank).to_string())
                     .unwrap_or_else(|| "N/A".to_string());
-                any = true;
                 g.send_to_char(
                     ch,
-                    &format!("[ {} {} ] {} - {} (offline)\r\n", lvl, "---", name, label),
+                    &format!(
+                        "[ {} {} ] {} - {}\r\n",
+                        c.player.level,
+                        c.class_abbrev(),
+                        c.player.name,
+                        label
+                    ),
                 );
+                any = true;
             }
         }
     }
+
     if !any {
-        g.send_to_char(ch, "No clan members on-line!\r\n");
+        g.send_to_char(ch, "No clan members!\r\n");
     }
     let members = with_clan(num, |c| c.members).unwrap_or(0);
     g.send_to_char(ch, &format!("\r\nTotal clan members: &c{}&n\r\n", members));
@@ -1927,8 +1924,12 @@ mod tests {
             idnum,
             name: name.to_string(),
             level,
+            class: Class::Warrior,
             last_logon: 0,
             host: String::new(),
+            act_flags: 0,
+            clan: -1,
+            clan_rank: -1,
         });
     }
 
@@ -1970,6 +1971,37 @@ mod tests {
         let decoded = decode_clans(&saved).unwrap();
         assert_eq!(decoded[0].members, 2);
         assert_eq!(decoded[1].members, 0);
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
+    #[test]
+    fn clan_roster_lists_indexed_offline_members_with_class_and_rank() {
+        let _guard = test_clan_guard();
+        let lib = temp_lib("offline-roster");
+        install_test_clan(&lib);
+        let mut g = GameState::new(Config::default());
+        let actor = connected_player(&mut g, ConnId(1), "Leader", 50);
+        {
+            let c = g.get_char_mut(actor).unwrap();
+            c.clan = 0;
+            c.clan_rank = 3;
+        }
+        g.player_table.push(PlayerIndex {
+            idnum: 42,
+            name: "Offline".to_string(),
+            level: 20,
+            class: Class::Thief,
+            last_logon: 0,
+            host: String::new(),
+            act_flags: 0,
+            clan: 0,
+            clan_rank: 2,
+        });
+
+        do_clan(&mut g, actor, "roster", 0);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("[ 20 Th ] Offline - Officer\r\n"));
         let _ = std::fs::remove_dir_all(lib);
     }
 

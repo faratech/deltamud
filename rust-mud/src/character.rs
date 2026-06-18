@@ -88,6 +88,13 @@ pub struct IgnoreEntry {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PersonalApplyState {
+    pub birth_delta: i64,
+    pub weight_delta: i32,
+    pub height_delta: i32,
+}
+
 #[derive(Debug, Clone)]
 pub struct Character {
     pub id: CharId,  // runtime arena id (per session)
@@ -124,6 +131,7 @@ pub struct Character {
     // (mock DB clone), so a logout->login round-trip reproduces the same maxima.
     pub real_points: CharPoints,
     pub last_applied: CharPoints,
+    pub last_personal_applied: PersonalApplyState,
 
     // NPC display strings (None for PCs).
     pub short_desc: Option<String>,
@@ -257,6 +265,7 @@ impl Character {
             points: CharPoints::default(),
             real_points: CharPoints::default(),
             last_applied: CharPoints::default(),
+            last_personal_applied: PersonalApplyState::default(),
             short_desc: None,
             long_desc: None,
             npc_description: None,

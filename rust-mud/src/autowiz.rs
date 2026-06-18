@@ -14,15 +14,10 @@
 // to `write_wizlist()`. do_gen_ps reads the files back so the on-disk artefact
 // is identical to what the C autowiz binary would have produced.
 //
-// ENUMERATION SOURCE (documented contract gap): the C helper reads the full
-// `player_main` roster directly from MySQL on a fresh connection. The Rust
-// command handlers run on the synchronous single-owner GameState and have no
-// handle to the async `Database` (that lives on `Game`), so we enumerate the
-// immortals currently present in `GameState.char_list` — i.e. every loaded
-// player Character at >= LVL_HERO that passes the same act_flags filter. This
-// matches C exactly for everyone online/loaded and degrades gracefully for
-// offline immortals (who simply aren't re-listed until they next log in or are
-// advanced while online — the same moment C's autowiz would re-run anyway).
+// ENUMERATION SOURCE: the C helper reads the full `player_main` roster directly
+// from MySQL. Rust builds `GameState.player_table` from the same rows at boot
+// and refreshes it on online/offline saves, so autowiz can enumerate offline
+// immortals without an async DB handle inside command dispatch.
 
 use crate::state::GameState;
 use crate::types::*;
@@ -71,29 +66,22 @@ const LEVEL_PARAMS: &[(u8, &str)] = &[
 // Roster enumeration + tier grouping.
 // ---------------------------------------------------------------------------
 
-/// Collect the (level, name) of every loaded player Character that the C
-/// autowiz roster query would have kept: level >= MIN_LEVEL (LVL_HERO), not
+/// Collect the (level, name) of every indexed player row that the C autowiz
+/// roster query would have kept: level >= MIN_LEVEL (LVL_HERO), not
 /// frozen, not NOWIZLIST, not deleted, and an all-alphabetic name (autowiz.c
 /// add_name() rejects any name containing a non-alpha character).
 fn collect_immortals(g: &GameState) -> Vec<(u8, String)> {
     let mut out: Vec<(u8, String)> = Vec::new();
-    for id in g.char_ids() {
-        let c = match g.get_char(id) {
-            Some(c) => c,
-            None => continue,
-        };
-        if c.is_npc {
-            continue;
-        }
-        let level = c.player.level;
+    for p in &g.player_table {
+        let level = p.level;
         if level < LVL_HERO {
             continue;
         }
-        let act = c.act_flags;
+        let act = p.act_flags;
         if act & PLR_FROZEN != 0 || act & PLR_NOWIZLIST != 0 || act & PLR_DELETED != 0 {
             continue;
         }
-        let name = c.player.name.clone();
+        let name = p.name.clone();
         if name.is_empty() || !name.chars().all(|ch| ch.is_ascii_alphabetic()) {
             continue;
         }
@@ -270,4 +258,57 @@ pub fn read_wizlist(lib_path: &str) -> Option<String> {
 
 pub fn read_immlist(lib_path: &str) -> Option<String> {
     std::fs::read_to_string(lib_file(lib_path, IMMLIST_FILE_REL)).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::state::{GameState, PlayerIndex};
+    use crate::types::Class;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_lib(name: &str) -> String {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("deltamud-autowiz-{}-{}", name, stamp));
+        std::fs::create_dir_all(path.join("text")).unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    fn player_index(name: &str, level: u8, act_flags: i64) -> PlayerIndex {
+        PlayerIndex {
+            idnum: level as i64,
+            name: name.to_string(),
+            level,
+            class: Class::Warrior,
+            last_logon: 0,
+            host: String::new(),
+            act_flags,
+            clan: -1,
+            clan_rank: -1,
+        }
+    }
+
+    #[test]
+    fn autowiz_uses_indexed_offline_player_rows() {
+        let lib = temp_lib("offline");
+        let mut cfg = Config::default();
+        cfg.lib_path = lib.clone();
+        let mut g = GameState::new(cfg);
+        g.player_table
+            .push(player_index("OfflineImm", LVL_IMMORT, 0));
+        g.player_table
+            .push(player_index("HiddenImm", LVL_IMMORT, PLR_NOWIZLIST));
+        g.player_table.push(player_index("Mortal", 10, 0));
+
+        assert!(run_autowiz(&g));
+
+        let wizlist = std::fs::read_to_string(format!("{}/text/wizlist", lib)).unwrap();
+        assert!(wizlist.contains("OfflineImm"));
+        assert!(!wizlist.contains("HiddenImm"));
+        assert!(!wizlist.contains("Mortal"));
+    }
 }

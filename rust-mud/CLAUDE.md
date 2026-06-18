@@ -17,8 +17,7 @@ The command surface is substantially ported: the Rust `CMD_INFO` table matches t
 Known remaining parity work is mostly integration and fidelity detail, not whole missing systems:
 
 - **Persistence compatibility:** SQL `player_main` is broad and current, and player aliases now round-trip through C-compatible `plralias/<bucket>/<name>.alias` sidecars. Rent/crash object files, houses, boards, clans, and mail still use Rust text formats rather than C raw on-disk records. Do not share live C persistence files with Rust without a migration/compatibility pass.
-- **Runtime/admin fidelity:** save currently records an empty player host, played-time updates and corrupted-value clamps are narrower than C, `slist` emits no spell rows, several `APPLY_*` locations are narrower than C, and autowiz/clan offline reporting are not fully SQL-backed.
-- **OLC/editor fidelity:** the main OLC save dispatcher covers room, object, mobile, zone, and shop writers, and redit/oedit/medit expose DG attachment editing. Remaining gaps are the partial C string-editor slash command set (`/a /c /d /e /f /i /h /l /n /r /s`) and first-class mobile prototype special-procedure bindings from OLC.
+- **OLC/editor fidelity:** the main OLC save dispatcher covers room, object, mobile, zone, and shop writers; redit/oedit/medit expose DG attachment editing; and inline OLC text buffers now share the C-style `modify.rs` string-editor command set (`/a /c /d /e /f /fi /i /h /l /n /r /ra /s`).
 
 Recently resolved tracker-backed parity fixes:
 
@@ -29,6 +28,8 @@ Recently resolved tracker-backed parity fixes:
 - Social minimum levels, `wizhelp` GCMD filtering, and the static `insult` social listing are covered (#90).
 - Hostname-based `BAN_NEW` and `BAN_SELECT` login gates are implemented (#91).
 - Immortal raw-kill and `deathblow` now use dedicated side-effect paths instead of normal damage routing (#92).
+- Runtime fidelity fixes now cover descriptor-host SQL saves, played-time save accounting, corrupted gold/bank clamps, `slist` spell rows, broader `APPLY_*` handling, SQL-backed autowiz enumeration, SQL-backed clan roster display, and MOB_CASTER magic-user binding.
+- Inline OLC text buffers in redit/oedit/medit/hedit/trigedit now share the generic C-style string-editor parser, including `/fi` and `/ra`.
 
 ## Build / run / test
 
@@ -36,7 +37,7 @@ Recently resolved tracker-backed parity fixes:
 cd /web/deltamud/rust-mud
 cargo build                 # debug
 cargo build --release       # optimized (LTO+strip; ~1.5 min from clean)
-cargo test                  # 211 tests across commands, combat, DG, OLC, nanny/login, persistence, and protocol helpers
+cargo test                  # 221 tests across commands, combat, DG, OLC, nanny/login, persistence, and protocol helpers
 cargo test <name>           # a single test by substring
 cargo clippy --all-targets  # lint (CI runs this; not gated)
 
@@ -81,7 +82,7 @@ Gotchas that waste time:
 **Subsystem map** (find by name; each port is intended to track the C oracle, with current gaps listed above):
 - `act()` message engine (`act.rs`, from comm.c `perform_act`): `$n/$N/$m/$s/$e/$o/$p` substitution + per-recipient visibility.
 - DG Scripts VM: `dg_scripts.rs` (`script_driver`, depth guard 10 + while-loop guard 30), `dg_handler.rs`/`dg_event.rs`/`dg_db_scripts.rs`, `dg_{mob,obj,wld}cmd.rs`, fire-hooks in `dg_triggers.rs`. **Triggers must boot before the world** (`main.rs` calls `boot_dg_scripts` before `load_world`).
-- OLC: `olc.rs` + `redit/oedit/medit/zedit/sedit/aedit/hedit/trigedit.rs` (nested-input editors; per-conn state in module-static `OnceLock<Mutex<...>>` keyed by `ConnId`; room/object/mobile/zone/shop central save dispatch is wired; DG attachment editors are exposed in redit/oedit/medit; string-editor slash-command parity is still partial).
+- OLC: `olc.rs` + `redit/oedit/medit/zedit/sedit/aedit/hedit/trigedit.rs` (nested-input editors; per-conn state in module-static `OnceLock<Mutex<...>>` keyed by `ConnId`; room/object/mobile/zone/shop central save dispatch is wired; DG attachment editors are exposed in redit/oedit/medit; inline text buffers share the C-style `modify.rs` string-editor command parser).
 - Persistence: `database.rs` (real 83-column `player_main` + `player_affects`/`player_skills`), `database_compat.rs` (the column<->Character mapping), `mock_database.rs`, `objsave.rs` (Rust-format rent/crash object files, not C binary compatible), `password.rs` (crypt-compatible).
 - Spec procs (`spec_procs.rs`/`spec_assign.rs`), combat (`combat.rs`: DeltaMUD's `chance()`/`dam_multi()` from utils.c, not stock THAC0), magic (`magic.rs`/`spell_parser.rs`/`spells.rs`), economy (`shop/clan/boards/mail/house/quest/auction`).
 

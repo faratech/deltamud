@@ -664,7 +664,7 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
     };
 
-    // Multi-line description editor consumes input until a lone "@".
+    // Multi-line description editor consumes input until `/s` (or legacy `@`).
     if mode == Mode::DDesc {
         ddesc_input(g, conn, line);
         return;
@@ -890,13 +890,22 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
         '5' => {
             set_mode(conn, Mode::DDesc);
             if let Some(s) = states().lock().unwrap().get_mut(&conn) {
-                s.ddesc_buf.clear();
+                s.ddesc_buf = s.mob.description.clone();
             }
             send(
                 g,
                 conn,
-                "Enter mob description: (terminate with a '@' on a blank line)\r\n\r\n",
+                "Enter mob description: (/s saves /h for help)\r\n\r\n",
             );
+            let cur = states()
+                .lock()
+                .unwrap()
+                .get(&conn)
+                .map(|s| s.mob.description.clone())
+                .unwrap_or_default();
+            if !cur.is_empty() {
+                send(g, conn, &cur);
+            }
         }
         '6' => {
             set_mode(conn, Mode::Level);
@@ -1037,9 +1046,30 @@ fn ddesc_input(g: &mut GameState, conn: ConnId, line: &str) {
         after_edit(g, conn);
         return;
     }
-    if let Some(s) = states().lock().unwrap().get_mut(&conn) {
-        s.ddesc_buf.push_str(line);
-        s.ddesc_buf.push('\n');
+
+    let mut buf = states()
+        .lock()
+        .unwrap()
+        .get(&conn)
+        .map(|s| s.ddesc_buf.clone())
+        .unwrap_or_default();
+    match crate::modify::editor_buffer_input(g, conn, &mut buf, MAX_MOB_DESC, line) {
+        crate::modify::BufferEditorResult::Continue => {
+            if let Some(s) = states().lock().unwrap().get_mut(&conn) {
+                s.ddesc_buf = buf;
+            }
+        }
+        crate::modify::BufferEditorResult::Save => {
+            with_mob(conn, |m| m.description = buf);
+            after_edit(g, conn);
+        }
+        crate::modify::BufferEditorResult::Abort => {
+            if let Some(s) = states().lock().unwrap().get_mut(&conn) {
+                s.ddesc_buf.clear();
+                s.mode = Mode::MainMenu;
+            }
+            disp_menu(g, conn);
+        }
     }
 }
 

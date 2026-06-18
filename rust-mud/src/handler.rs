@@ -8,6 +8,14 @@ use crate::object::{ObjLoc, ObjectType};
 use crate::state::GameState;
 use crate::types::*;
 
+const SECS_PER_REAL_SEC: i64 = 1;
+const SECS_PER_REAL_MIN: i64 = 60 * SECS_PER_REAL_SEC;
+const SECS_PER_REAL_HOUR: i64 = 60 * SECS_PER_REAL_MIN;
+const SECS_PER_MUD_HOUR: i64 = 75;
+const SECS_PER_MUD_DAY: i64 = 24 * SECS_PER_MUD_HOUR;
+const SECS_PER_MUD_MONTH: i64 = 35 * SECS_PER_MUD_DAY;
+const SECS_PER_MUD_YEAR: i64 = 17 * SECS_PER_MUD_MONTH;
+
 /// Port of CircleMUD isname(): true if `arg` is a whole keyword in `namelist`
 /// (case-insensitive, whole-word — NOT prefix, matching C exactly).
 pub fn isname(arg: &str, namelist: &str) -> bool {
@@ -461,6 +469,7 @@ impl GameState {
         // the only point-fields apply_location writes; ability mods are handled
         // separately via aff_abils = real_abils (full reset, like C).
         let new_applied = applied_points_from_mods(&mods);
+        let new_personal = personal_applied_from_mods(&mods);
 
         if let Some(ch) = self.chars.get_mut(&cid) {
             // Recover the bare base for each apply-target field by subtracting the
@@ -474,6 +483,16 @@ impl GameState {
             // Re-inflate: points (apply targets) = base + current modifiers.
             points_assign_apply(&mut ch.points, &points_add(&base, &new_applied));
             ch.last_applied = new_applied;
+
+            let base_birth = ch.player.time_birth - ch.last_personal_applied.birth_delta;
+            let base_weight = ch.player.weight as i32 - ch.last_personal_applied.weight_delta;
+            let base_height = ch.player.height as i32 - ch.last_personal_applied.height_delta;
+            ch.player.time_birth = base_birth + new_personal.birth_delta;
+            ch.player.weight =
+                (base_weight + new_personal.weight_delta).clamp(0, u8::MAX as i32) as u8;
+            ch.player.height =
+                (base_height + new_personal.height_delta).clamp(0, u8::MAX as i32) as u8;
+            ch.last_personal_applied = new_personal;
 
             // Abilities + AFF_ flags: full reset from real_abils, then re-apply
             // the ability portion of the modifier list (unchanged C semantics).
@@ -523,6 +542,7 @@ pub fn apply_ability(ch: &mut Character, location: i32, modifier: i32) {
         APPLY_INT => ch.aff_abils.intel += m,
         APPLY_WIS => ch.aff_abils.wis += m,
         APPLY_CON => ch.aff_abils.con += m,
+        APPLY_CHA => ch.aff_abils.cha += m,
         _ => {}
     }
 }
@@ -542,6 +562,14 @@ pub fn apply_location(ch: &mut Character, location: i32, modifier: i32) {
         APPLY_INT => ch.aff_abils.intel += m,
         APPLY_WIS => ch.aff_abils.wis += m,
         APPLY_CON => ch.aff_abils.con += m,
+        APPLY_CHA => ch.aff_abils.cha += m,
+        APPLY_AGE => ch.player.time_birth -= modifier as i64 * SECS_PER_MUD_YEAR,
+        APPLY_CHAR_WEIGHT => {
+            ch.player.weight = (ch.player.weight as i32 + modifier).clamp(0, u8::MAX as i32) as u8;
+        }
+        APPLY_CHAR_HEIGHT => {
+            ch.player.height = (ch.player.height as i32 + modifier).clamp(0, u8::MAX as i32) as u8;
+        }
         APPLY_HIT => ch.points.max_hit += modifier,
         APPLY_MANA => ch.points.max_mana += modifier,
         APPLY_MOVE => ch.points.max_move += modifier,
@@ -573,6 +601,19 @@ fn applied_points_from_mods(mods: &[(i32, i32)]) -> CharPoints {
             APPLY_POWER => p.power += m as i16,
             APPLY_MPOWER => p.mpower += m as i16,
             APPLY_TECHNIQUE => p.technique += m as i16,
+            _ => {}
+        }
+    }
+    p
+}
+
+fn personal_applied_from_mods(mods: &[(i32, i32)]) -> crate::character::PersonalApplyState {
+    let mut p = crate::character::PersonalApplyState::default();
+    for &(loc, m) in mods {
+        match loc {
+            APPLY_AGE => p.birth_delta -= m as i64 * SECS_PER_MUD_YEAR,
+            APPLY_CHAR_WEIGHT => p.weight_delta += m,
+            APPLY_CHAR_HEIGHT => p.height_delta += m,
             _ => {}
         }
     }
@@ -841,6 +882,59 @@ mod tests {
         assert_eq!(g.get_char(cid).unwrap().points.max_hit, 100); // 50 base + 50
         g.unequip_char(cid, WEAR_BODY);
         assert_eq!(g.get_char(cid).unwrap().points.max_hit, 50);
+    }
+
+    #[test]
+    fn affect_total_applies_charisma_age_weight_and_height_without_drift() {
+        let mut g = fresh_game();
+        let mut ch = Character::new_player("Applied".into(), Class::Warrior, Race::Human);
+        ch.real_abils.cha = 12;
+        ch.aff_abils = ch.real_abils;
+        ch.player.time_birth = 1_000_000;
+        ch.player.weight = 150;
+        ch.player.height = 170;
+        let cid = g.create_char(ch);
+
+        let mut obj = Object::new(99, "trinket".into(), "a trinket".into());
+        obj.affects.extend([
+            crate::object::ObjectAffect {
+                location: APPLY_CHA,
+                modifier: 3,
+            },
+            crate::object::ObjectAffect {
+                location: APPLY_AGE,
+                modifier: 2,
+            },
+            crate::object::ObjectAffect {
+                location: APPLY_CHAR_WEIGHT,
+                modifier: 5,
+            },
+            crate::object::ObjectAffect {
+                location: APPLY_CHAR_HEIGHT,
+                modifier: -4,
+            },
+        ]);
+        let oid = g.create_obj(obj);
+
+        g.equip_char(cid, oid, WEAR_HOLD);
+        for _ in 0..5 {
+            g.affect_total(cid);
+        }
+        let worn = g.get_char(cid).unwrap();
+        assert_eq!(worn.aff_abils.cha, 15);
+        assert_eq!(worn.player.time_birth, 1_000_000 - 2 * SECS_PER_MUD_YEAR);
+        assert_eq!(worn.player.weight, 155);
+        assert_eq!(worn.player.height, 166);
+
+        g.unequip_char(cid, WEAR_HOLD);
+        for _ in 0..5 {
+            g.affect_total(cid);
+        }
+        let bare = g.get_char(cid).unwrap();
+        assert_eq!(bare.aff_abils.cha, 12);
+        assert_eq!(bare.player.time_birth, 1_000_000);
+        assert_eq!(bare.player.weight, 150);
+        assert_eq!(bare.player.height, 170);
     }
 
     /// BUG 2 (persistence): a logout->login round-trip (clone the Character, as

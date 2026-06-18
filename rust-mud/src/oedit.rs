@@ -27,6 +27,7 @@ use std::sync::OnceLock;
 
 // MAX_OBJ_AFFECT (structs.h) — DeltaMUD object affect slots.
 const MAX_OBJ_AFFECT: usize = 6;
+const MAX_MESSAGE_LENGTH: usize = 4096;
 // Object value/spell/attack bounds used by the value menus.
 const NUM_SPELLS: i32 = 51;
 const NUM_ATTACK_TYPES: i32 = 16;
@@ -249,13 +250,9 @@ fn text_bufs() -> &'static Mutex<HashMap<ConnId, String>> {
 }
 
 fn begin_text(g: &mut GameState, conn: ConnId, seed: &str, mode: OeditMode) {
-    text_bufs().lock().unwrap().insert(conn, String::new());
+    text_bufs().lock().unwrap().insert(conn, seed.to_string());
     let _ = with_state(conn, |s| s.mode = mode);
-    send(
-        g,
-        conn,
-        "Enter text (terminate with '/s' on its own line, '/a' to abort):\r\n",
-    );
+    send(g, conn, "Enter text: (/s saves /h for help)\r\n\r\n");
     if !seed.is_empty() {
         send(g, conn, seed);
         if !seed.ends_with('\n') {
@@ -264,9 +261,9 @@ fn begin_text(g: &mut GameState, conn: ConnId, seed: &str, mode: OeditMode) {
     }
 }
 
-fn text_input(conn: ConnId, line: &str) -> Option<Option<String>> {
+fn text_input(g: &mut GameState, conn: ConnId, line: &str) -> Option<Option<String>> {
     let trimmed = line.trim_end_matches(['\r', '\n']);
-    if trimmed == "/s" || trimmed == "~" {
+    if trimmed == "~" {
         return Some(Some(
             text_bufs()
                 .lock()
@@ -275,15 +272,19 @@ fn text_input(conn: ConnId, line: &str) -> Option<Option<String>> {
                 .unwrap_or_default(),
         ));
     }
-    if trimmed == "/a" {
-        text_bufs().lock().unwrap().remove(&conn);
-        return Some(None);
+    let mut buf = text_bufs()
+        .lock()
+        .unwrap()
+        .remove(&conn)
+        .unwrap_or_default();
+    match crate::modify::editor_buffer_input(g, conn, &mut buf, MAX_MESSAGE_LENGTH, line) {
+        crate::modify::BufferEditorResult::Continue => {
+            text_bufs().lock().unwrap().insert(conn, buf);
+            None
+        }
+        crate::modify::BufferEditorResult::Save => Some(Some(buf)),
+        crate::modify::BufferEditorResult::Abort => Some(None),
     }
-    let mut bufs = text_bufs().lock().unwrap();
-    let buf = bufs.entry(conn).or_default();
-    buf.push_str(trimmed);
-    buf.push_str("\r\n");
-    None
 }
 
 // ===========================================================================
@@ -721,7 +722,7 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             commit_and_menu(g, conn);
         }
         OeditMode::ActDesc => {
-            if let Some(result) = text_input(conn, line) {
+            if let Some(result) = text_input(g, conn, line) {
                 if let Some(text) = result {
                     with_state(conn, |s| {
                         s.obj.action_description = if text.is_empty() { None } else { Some(text) };
@@ -897,7 +898,7 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             disp_extradesc_menu(g, conn);
         }
         OeditMode::ExtradescDescription => {
-            if let Some(result) = text_input(conn, line) {
+            if let Some(result) = text_input(g, conn, line) {
                 if let Some(text) = result {
                     with_state(conn, |s| {
                         let idx = s.cur_desc;

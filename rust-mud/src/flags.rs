@@ -63,17 +63,23 @@ pub const APPLY_DEX: i32 = 2;
 pub const APPLY_INT: i32 = 3;
 pub const APPLY_WIS: i32 = 4;
 pub const APPLY_CON: i32 = 5;
+pub const APPLY_CHA: i32 = 6;
+pub const APPLY_CLASS: i32 = 7;
+pub const APPLY_LEVEL: i32 = 8;
 pub const APPLY_AGE: i32 = 9;
 pub const APPLY_CHAR_WEIGHT: i32 = 10;
 pub const APPLY_CHAR_HEIGHT: i32 = 11;
 pub const APPLY_MANA: i32 = 12;
 pub const APPLY_HIT: i32 = 13;
 pub const APPLY_MOVE: i32 = 14;
+pub const APPLY_GOLD: i32 = 15;
+pub const APPLY_EXP: i32 = 16;
 pub const APPLY_DEFENSE: i32 = 17;
 pub const APPLY_MDEFENSE: i32 = 18;
 pub const APPLY_POWER: i32 = 19;
 pub const APPLY_MPOWER: i32 = 20;
 pub const APPLY_TECHNIQUE: i32 = 21;
+pub const APPLY_DAMAGE: i32 = 22;
 
 #[cfg(test)]
 mod tests {

@@ -314,6 +314,14 @@ pub trait DatabaseInterface: Send + Sync {
     async fn create_player(&self, character: &character::Character, password: &str) -> Result<i64>;
     async fn load_player(&self, name: &str) -> Result<character::Character>;
     async fn save_player(&self, character: &character::Character) -> Result<()>;
+    async fn save_player_with_host(
+        &self,
+        character: &character::Character,
+        host: &str,
+    ) -> Result<()> {
+        let _ = host;
+        self.save_player(character).await
+    }
     async fn verify_password(&self, name: &str, password: &str) -> Result<bool>;
     async fn delete_deleted_players(&self) -> Result<u64>;
     async fn clan_member_counts(&self) -> Result<Vec<(i32, i32)>>;
@@ -338,6 +346,9 @@ impl DatabaseInterface for database::Database {
     }
     async fn save_player(&self, c: &character::Character) -> Result<()> {
         self.save_player(c).await
+    }
+    async fn save_player_with_host(&self, c: &character::Character, host: &str) -> Result<()> {
+        self.save_player_with_host(c, host).await
     }
     async fn verify_password(&self, name: &str, p: &str) -> Result<bool> {
         self.verify_password(name, p).await

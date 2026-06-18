@@ -321,27 +321,30 @@ impl Game {
         crate::weather::write_mud_date_to_file(&self.state);
         for cid in &conn_ids {
             if let Some(ch) = self.state.descriptors.get(cid).and_then(|d| d.character) {
-                if let Some(c) = self.state.get_char(ch) {
-                    if !c.is_npc {
-                        let snapshot = c.clone();
-                        if let Err(e) = crate::alias::write_aliases(
-                            &self.lib_path,
+                if let Some(snapshot) = self.snapshot_online_player_for_save(ch) {
+                    if let Err(e) = crate::alias::write_aliases(
+                        &self.lib_path,
+                        snapshot.get_name(),
+                        snapshot.idnum,
+                    ) {
+                        warn!(
+                            "shutdown write_aliases({}) failed: {}",
                             snapshot.get_name(),
-                            snapshot.idnum,
-                        ) {
-                            warn!(
-                                "shutdown write_aliases({}) failed: {}",
-                                snapshot.get_name(),
-                                e
-                            );
-                        }
-                        if let Err(e) = self.db.save_player(&snapshot).await {
-                            warn!(
-                                "shutdown save_player({}) failed: {}",
-                                snapshot.get_name(),
-                                e
-                            );
-                        }
+                            e
+                        );
+                    }
+                    let host = self
+                        .state
+                        .descriptors
+                        .get(cid)
+                        .map(|d| d.host.as_str())
+                        .unwrap_or("");
+                    if let Err(e) = self.db.save_player_with_host(&snapshot, host).await {
+                        warn!(
+                            "shutdown save_player({}) failed: {}",
+                            snapshot.get_name(),
+                            e
+                        );
                     }
                 }
             }
@@ -801,6 +804,21 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
             .unwrap_or_default()
     }
 
+    fn snapshot_online_player_for_save(
+        &mut self,
+        ch: CharId,
+    ) -> Option<crate::character::Character> {
+        let now = chrono::Utc::now();
+        let c = self.state.get_char_mut(ch)?;
+        if c.is_npc {
+            return None;
+        }
+        let elapsed = (now - c.last_logon).num_seconds().max(0);
+        c.player.time_played = c.player.time_played.saturating_add(elapsed);
+        c.last_logon = now;
+        Some(c.clone())
+    }
+
     async fn create_and_enter(&mut self, conn_id: ConnId) {
         let (name, pass) = {
             let d = match self.state.descriptors.get(&conn_id) {
@@ -879,7 +897,13 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
                         LVL_IMPL,
                     );
                 }
-                if let Err(e) = self.db.save_player(&ch).await {
+                let host = self
+                    .state
+                    .descriptors
+                    .get(&conn_id)
+                    .map(|d| d.host.as_str())
+                    .unwrap_or("");
+                if let Err(e) = self.db.save_player_with_host(&ch, host).await {
                     warn!("save new player {} failed: {}", name, e);
                 }
                 crate::alias::clear_aliases(ch.idnum);
@@ -893,10 +917,8 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
                     .get(&conn_id)
                     .map(|d| d.host.clone())
                     .unwrap_or_default();
-                self.state.update_player_index(
-                    ch.idnum,
-                    &name,
-                    ch.player.level,
+                self.state.update_player_index_from_character(
+                    &ch,
                     ch.last_logon.timestamp(),
                     &host,
                 );
@@ -955,16 +977,15 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
             .map(|d| d.host.clone())
             .unwrap_or_default();
         let now = chrono::Utc::now().timestamp();
-        if let Some(c) = self.state.get_char_mut(id) {
+        let index_snapshot = if let Some(c) = self.state.get_char_mut(id) {
             c.last_logon = chrono::Utc::now();
+            Some(c.clone())
+        } else {
+            None
+        };
+        if let Some(c) = index_snapshot.as_ref() {
+            self.state.update_player_index_from_character(c, now, &host);
         }
-        let (pidnum, plevel) = self
-            .state
-            .get_char(id)
-            .map(|c| (c.idnum, c.player.level))
-            .unwrap_or((-1, 1));
-        self.state
-            .update_player_index(pidnum, &name, plevel, now, &host);
 
         // Room selection — interpreter.c enter_player_game (BUG #15). The C
         // precedence: GET_LOADROOM (saved.load_room) is honored first; a valid
@@ -1202,29 +1223,31 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
         if let Some(cid) = ch {
             let mut alias_id_to_clear = None;
             // Persist then remove the character from the world.
-            if let Some(c) = self.state.get_char(cid) {
-                if !c.is_npc {
-                    let snapshot = c.clone();
-                    // Keep the index current with the saved record (level can
-                    // have changed this session); host carries over the last
-                    // login's host (update_player_index ignores an empty host).
-                    let (idnum, pname, plevel, llogon) = (
-                        snapshot.idnum,
-                        snapshot.get_name().to_string(),
-                        snapshot.player.level,
-                        snapshot.last_logon.timestamp(),
-                    );
-                    alias_id_to_clear = Some(idnum);
-                    self.state
-                        .update_player_index(idnum, &pname, plevel, llogon, "");
-                    if let Err(err) = crate::alias::write_aliases(&self.lib_path, &pname, idnum) {
-                        warn!("write_aliases({}) failed: {}", pname, err);
-                    }
-                    let db = self.db.clone();
-                    tokio::spawn(async move {
-                        let _ = db.save_player(&snapshot).await;
-                    });
+            if let Some(snapshot) = self.snapshot_online_player_for_save(cid) {
+                // Keep the index current with the saved record (level can
+                // have changed this session); host carries over the last
+                // login's host (update_player_index ignores an empty host).
+                let (idnum, pname, llogon) = (
+                    snapshot.idnum,
+                    snapshot.get_name().to_string(),
+                    snapshot.last_logon.timestamp(),
+                );
+                alias_id_to_clear = Some(idnum);
+                self.state
+                    .update_player_index_from_character(&snapshot, llogon, "");
+                if let Err(err) = crate::alias::write_aliases(&self.lib_path, &pname, idnum) {
+                    warn!("write_aliases({}) failed: {}", pname, err);
                 }
+                let db = self.db.clone();
+                let host = self
+                    .state
+                    .descriptors
+                    .get(&conn_id)
+                    .map(|d| d.host.clone())
+                    .unwrap_or_default();
+                tokio::spawn(async move {
+                    let _ = db.save_player_with_host(&snapshot, &host).await;
+                });
             }
             crate::objsave::crash_save(&mut self.state, cid, &self.lib_path);
             self.state.extract_char(cid);
@@ -1313,13 +1336,8 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
             let snap = self.state.get_char(id).cloned();
             self.state.players_by_name.remove(&key);
             if let Some(ref s) = snap {
-                self.state.update_player_index(
-                    s.idnum,
-                    s.get_name(),
-                    s.player.level,
-                    s.last_logon.timestamp(),
-                    "",
-                );
+                self.state
+                    .update_player_index_from_character(s, s.last_logon.timestamp(), "");
             }
             self.state.extract_char(id);
             if let Some(s) = snap {
@@ -1359,22 +1377,21 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
 
         let mut snapshots = Vec::new();
         for cid in requests {
-            let Some(ch) = self.state.get_char(cid) else {
-                continue;
-            };
-            if ch.is_npc {
-                continue;
+            if let Some(snapshot) = self.snapshot_online_player_for_save(cid) {
+                snapshots.push(snapshot);
             }
-            snapshots.push(ch.clone());
         }
 
         for snapshot in snapshots {
-            self.state.update_player_index(
-                snapshot.idnum,
-                snapshot.get_name(),
-                snapshot.player.level,
+            let host = snapshot
+                .desc
+                .and_then(|conn| self.state.descriptors.get(&conn))
+                .map(|d| d.host.clone())
+                .unwrap_or_default();
+            self.state.update_player_index_from_character(
+                &snapshot,
                 snapshot.last_logon.timestamp(),
-                "",
+                &host,
             );
             if let Err(err) =
                 crate::alias::write_aliases(&self.lib_path, snapshot.get_name(), snapshot.idnum)
@@ -1385,7 +1402,7 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
                     err
                 );
             }
-            if let Err(err) = self.db.save_player(&snapshot).await {
+            if let Err(err) = self.db.save_player_with_host(&snapshot, &host).await {
                 warn!(
                     "queued save_player({}) failed: {}",
                     snapshot.get_name(),
@@ -1839,6 +1856,33 @@ mod tests {
 
     fn descriptor_state(game: &Game, conn: ConnId) -> ConState {
         game.state.descriptors.get(&conn).unwrap().state
+    }
+
+    #[test]
+    fn online_save_snapshot_accumulates_played_time_and_resets_logon() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        let conn = ConnId(1);
+        attach_descriptor(&mut game, conn);
+
+        let mut ch = crate::character::Character::new_player(
+            "Timer".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        ch.desc = Some(conn);
+        ch.player.time_played = 40;
+        ch.last_logon = chrono::Utc::now() - chrono::Duration::seconds(90);
+        let cid = game.state.create_char(ch);
+        game.state.descriptors.get_mut(&conn).unwrap().character = Some(cid);
+
+        let snapshot = game.snapshot_online_player_for_save(cid).unwrap();
+
+        assert!(snapshot.player.time_played >= 130);
+        let live = game.state.get_char(cid).unwrap();
+        assert_eq!(live.player.time_played, snapshot.player.time_played);
+        assert_eq!(live.last_logon, snapshot.last_logon);
+        assert!((chrono::Utc::now() - live.last_logon).num_seconds() <= 1);
     }
 
     fn ban_test_lock() -> std::sync::MutexGuard<'static, ()> {

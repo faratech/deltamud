@@ -776,6 +776,12 @@ fn call_mob_spec(g: &mut GameState, ch: CharId) -> bool {
     if crate::shop::is_shop_keeper_vnum(vnum) {
         return crate::shop::shop_keeper(g, ch, ch, "", "");
     }
+    if g.get_char(ch)
+        .map(|c| c.act_flags & MOB_CASTER != 0)
+        .unwrap_or(false)
+    {
+        return crate::spec_procs::magic_user(g, ch, ch, "", "");
+    }
 
     let name = get_name(g, ch);
     log::warn!(
@@ -803,7 +809,10 @@ pub fn combat_mob_spec_pulse(g: &mut GameState, ch: CharId) {
         return;
     }
     let vnum = c.nr;
-    if crate::spec_assign::get_mob_spec(vnum).is_some() || crate::shop::is_shop_keeper_vnum(vnum) {
+    if c.act_flags & MOB_CASTER != 0
+        || crate::spec_assign::get_mob_spec(vnum).is_some()
+        || crate::shop::is_shop_keeper_vnum(vnum)
+    {
         let _ = call_mob_spec(g, ch);
     }
 }
@@ -937,6 +946,20 @@ mod tests {
         let mut g = GameState::new(Config::default());
         let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
         let mob = npc_with_spec(&mut g, 1, room);
+
+        mobile_activity(&mut g);
+
+        assert_ne!(g.get_char(mob).unwrap().act_flags & MOB_SPEC, 0);
+    }
+
+    #[test]
+    fn mobile_activity_preserves_dynamic_caster_spec_flag() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let mut mob = Character::new_npc(987_656);
+        mob.act_flags |= MOB_SPEC | MOB_CASTER;
+        let mob = g.create_char(mob);
+        g.char_to_room(mob, room);
 
         mobile_activity(&mut g);
 

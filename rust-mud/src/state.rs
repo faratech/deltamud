@@ -34,18 +34,23 @@ pub fn listener_fd() -> std::os::unix::io::RawFd {
 
 /// One row of the in-memory player index (C `struct player_index_element`,
 /// db.h). C carries only {name, id, level}; the Rust port additionally caches
-/// `last_logon` (unix seconds) and `host` so `do_last` can render an offline
-/// player's record from the index without an async DB load. `name` keeps the
-/// player's stored capitalisation (C lowercases its copy; get_name_by_id then
-/// returns the lowercased form — we keep the canonical name so callers that
-/// display it, e.g. the ignore listing, match the C `last`/listing output).
+/// selected `player_main` fields so offline reports that C answers directly
+/// from SQL (last/roster/autowiz) do not silently omit logged-off players.
+/// `name` keeps the player's stored capitalisation (C lowercases its copy;
+/// get_name_by_id then returns the lowercased form — we keep the canonical name
+/// so callers that display it, e.g. the ignore listing, match the C
+/// `last`/listing output).
 #[derive(Debug, Clone)]
 pub struct PlayerIndex {
     pub idnum: i64,
     pub name: String,
     pub level: u8,
+    pub class: crate::types::Class,
     pub last_logon: i64,
     pub host: String,
+    pub act_flags: i64,
+    pub clan: i32,
+    pub clan_rank: i32,
 }
 
 /// A deferred immortal command against an OFFLINE player (the async bridge for
@@ -326,9 +331,28 @@ impl GameState {
                 idnum,
                 name: name.to_string(),
                 level,
+                class: crate::types::Class::Warrior,
                 last_logon,
                 host: host.to_string(),
+                act_flags: 0,
+                clan: -1,
+                clan_rank: -1,
             });
+        }
+    }
+
+    pub fn update_player_index_from_character(
+        &mut self,
+        ch: &crate::character::Character,
+        last_logon: i64,
+        host: &str,
+    ) {
+        self.update_player_index(ch.idnum, ch.get_name(), ch.player.level, last_logon, host);
+        if let Some(p) = self.player_table.iter_mut().find(|p| p.idnum == ch.idnum) {
+            p.class = ch.player.class;
+            p.act_flags = ch.act_flags;
+            p.clan = ch.clan;
+            p.clan_rank = ch.clan_rank;
         }
     }
 

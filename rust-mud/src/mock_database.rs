@@ -118,8 +118,12 @@ impl crate::DatabaseInterface for MockDatabase {
                 idnum: s.character.idnum,
                 name: s.character.get_name().to_string(),
                 level: s.character.player.level,
+                class: s.character.player.class,
                 last_logon: s.character.last_logon.timestamp(),
                 host: String::new(),
+                act_flags: s.character.act_flags,
+                clan: s.character.clan,
+                clan_rank: s.character.clan_rank,
             })
             .collect();
         Ok(out)

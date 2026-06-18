@@ -7,12 +7,16 @@ DeltaMUD tree (`/web/deltamud/src`, `/web/deltamud/lib`) and the Rust port in
 The old early-port guidance in this file is no longer accurate: the Rust port
 now has the full command table, most major subsystems, crypt-compatible
 password verification, and an 83-column `player_main` mapping. The remaining
-risks are mostly runtime fidelity and on-disk persistence compatibility.
+high-risk caveat is on-disk runtime persistence compatibility.
 
 The latest tracker-backed parity pass resolved the previously open high-risk
 runtime/editor items for complex alias queue timing, creation nanny/do_start,
 central OLC save dispatch, DG attachment editing and room `T` saves, social and
-wizhelp policy, hostname ban gates, and raw-kill/deathblow side effects.
+wizhelp policy, hostname ban gates, raw-kill/deathblow side effects,
+descriptor-host SQL saves, played-time accounting, corrupted gold/bank clamps,
+`slist`, broader `APPLY_*` handling, SQL-backed autowiz/clan roster reporting,
+MOB_CASTER magic-user binding, and C-style slash-command handling in inline OLC
+text buffers.
 
 ## Summary
 
@@ -39,8 +43,8 @@ backups and a deliberate migration/compatibility pass. The high-risk files are:
 - Mail data files
 
 The C server writes raw structs for several of these formats. The Rust port
-uses line-oriented Rust formats for safety and portability. That is easier to
-debug, but it is not byte-compatible with the C runtime files.
+uses Rust-specific text/binary formats for safety and portability. That is
+easier to debug, but it is not byte-compatible with the C runtime files.
 
 ## SQL Player Data
 
@@ -56,13 +60,8 @@ and copyover.
 
 Known SQL/runtime gaps:
 
-- Save currently writes an empty `host` value instead of the descriptor host.
-- Played-time accounting appears narrower than C's `played + now - logon`
-  update path.
-- C's defensive clamps for obviously corrupted gold/bank values are not fully
-  mirrored.
-- Some offline reporting utilities are not fully SQL-backed yet, including
-  autowiz enumeration and parts of clan roster reporting.
+- No known SQL/runtime fidelity gap remains from the latest tracker-backed
+  audit. Runtime persistence file byte-compatibility remains separate below.
 
 ## World and Builder Data
 
@@ -80,26 +79,14 @@ World grammar coverage is broad:
 
 Known builder/world gaps:
 
-- Several OLC text editors implement only a subset of the C string-editor slash
-  commands.
-- Mobile prototype special-procedure bindings from OLC are not represented as a
-  first-class prototype field; several specs are hardcoded by vnum instead.
+- No known builder/world fidelity gap remains from the latest tracker-backed
+  audit. Inline OLC text buffers share the generic runtime `modify.rs` parser
+  for the C-style string-editor slash command set.
 
 ## Runtime Fidelity Gaps
 
-The Rust port is no longer an early basic-command prototype. Current
-parity gaps are more specific:
-
-- `slist` still emits no spell rows.
-- Some `APPLY_*` locations are narrower than C, especially latent fields like
-  charisma, age, weight, and height.
-- Save currently writes an empty `host` value instead of the descriptor host.
-- Played-time accounting appears narrower than C's `played + now - logon`
-  update path.
-- C's defensive clamps for obviously corrupted gold/bank values are not fully
-  mirrored.
-- Some offline reporting utilities are not fully SQL-backed yet, including
-  autowiz enumeration and parts of clan roster reporting.
+The Rust port is no longer an early basic-command prototype. No open runtime
+fidelity gap is currently known from the latest tracker-backed audit.
 
 ## Combat and Gameplay Fidelity Gaps
 
@@ -113,9 +100,8 @@ Known correctness gaps from the latest parity pass:
 
 1. Keep the C source as the oracle for behavior fixes.
 2. Back up SQL and `lib/` runtime data before any Rust production run.
-3. Treat world source files as mostly shareable, but continue comparing Rust
-   OLC output against the C build when touching editor text commands or mobile
-   special-procedure assignments.
+3. Treat world source files as mostly shareable, and compare Rust OLC output
+   against the C build when changing save grammars or editor behavior.
 4. Treat runtime persistence files as Rust-only after Rust writes them, unless a
    migration tool is added.
 5. Use `MUD_MOCK_DB=true` for local development unless testing SQL behavior.

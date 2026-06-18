@@ -23,6 +23,7 @@ use crate::flags::*;
 use crate::handler::isname;
 use crate::interpreter::{half_chop, one_argument};
 use crate::object::{Object, ObjectType, WearFlags};
+use crate::spell_parser::{skill_name, spell_info};
 use crate::state::GameState;
 use crate::types::*;
 
@@ -3505,9 +3506,34 @@ pub fn do_slist(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
             class_label
         ),
     );
-    // The spell_info table (per-class min_level + spells[] names) is not loaded
-    // yet (Batch 6); with no spells defined the per-level loop produces no rows,
-    // exactly as C does for a class with an empty table.
+    let class_idx = class as usize;
+    let skills = g.get_char(ch).map(|c| c.skills.clone()).unwrap_or_default();
+    for level in 1..LVL_IMMORT as i32 {
+        let mut row = String::new();
+        for spellnum in 0..=TOP_SPELL_DEFINE {
+            let si = spell_info(spellnum);
+            if si.min_level[class_idx] == level {
+                let pct = skills.get(&(spellnum as u16)).copied().unwrap_or(0);
+                if row.is_empty() {
+                    row.push_str(&format!(
+                        "\r\n&G{:<3}: {}{:<20}",
+                        level,
+                        if pct == 100 { "&m" } else { "&C" },
+                        skill_name(spellnum)
+                    ));
+                } else {
+                    row.push_str(&format!(
+                        "{}{:<20}",
+                        if pct == 100 { "&m" } else { "&C" },
+                        skill_name(spellnum)
+                    ));
+                }
+            }
+        }
+        if !row.is_empty() {
+            g.send_to_char(ch, &row);
+        }
+    }
     g.send_to_char(ch, "\r\n");
 }
 
@@ -3924,6 +3950,32 @@ mod tests {
     }
 
     #[test]
+    fn do_slist_lists_class_spell_rows_from_spell_info() {
+        use crate::spell_parser::SKILL_KICK;
+
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(1);
+        let ch = connected_player(&mut g, conn, "War", 1);
+        g.get_char_mut(ch)
+            .unwrap()
+            .set_skill(SKILL_KICK as u16, 100);
+
+        do_slist(&mut g, ch, "warrior", 0);
+
+        let out = output(&g, conn);
+        assert!(out.contains("Spell/Skill Listing For The Warrior"));
+        assert!(out.contains("&G1  : &mkick"));
+        assert!(out.contains("&G3  : &Cmount"));
+
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        do_slist(&mut g, ch, "cleric", 0);
+        let out = output(&g, conn);
+        assert!(out.contains("Spell/Skill Listing For The Cleric"));
+        assert!(out.contains("&G1  : &Ccure light"));
+        assert!(!out.contains("kick"));
+    }
+
+    #[test]
     fn do_email_self_set_writes_extra_data_file() {
         let lib = temp_lib("email-write");
         let mut cfg = Config::default();
@@ -3951,8 +4003,12 @@ mod tests {
             idnum: 42,
             name: "Target".to_string(),
             level: 1,
+            class: Class::Warrior,
             last_logon: 0,
             host: String::new(),
+            act_flags: 0,
+            clan: -1,
+            clan_rank: -1,
         });
         write_extra_email(&lib, "Target", Some("*target@example.test"));
 
@@ -3973,8 +4029,12 @@ mod tests {
             idnum: 43,
             name: "Silent".to_string(),
             level: 1,
+            class: Class::Warrior,
             last_logon: 0,
             host: String::new(),
+            act_flags: 0,
+            clan: -1,
+            clan_rank: -1,
         });
 
         do_email(&mut g, ch, "Silent", 0);

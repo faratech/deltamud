@@ -501,91 +501,37 @@ pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
 }
 
 /// The body-text accumulator for menu option 2 (the help entry). Lines starting
-/// with '/' are editor commands: "/s" save+return to menu, "/a" abort (discard),
-/// "/h" help, "/c" clear. Everything else is appended with a trailing CRLF
-/// (matching load_help's per-line "\r\n").
+/// with '/' are handled by the shared modify.c-style editor command parser.
+/// Everything else is appended with a trailing CRLF (matching load_help's
+/// per-line "\r\n").
 fn hedit_text_input(g: &mut GameState, conn: ConnId, line: &str) {
-    let ch = match conn_char(g, conn) {
-        Some(c) => c,
-        None => {
-            cleanup(conn);
-            return;
-        }
-    };
-    let str_in = delete_doubledollar(line);
-
-    if let Some(rest) = str_in.strip_prefix('/') {
-        let cmd = rest.chars().next().unwrap_or('\0');
-        match cmd {
-            's' | 'S' => {
-                // Save: commit the accumulated buffer into the help entry.
-                let buf = with_state(conn, |st| st.text_buf.take().unwrap_or_default())
-                    .unwrap_or_default();
-                with_state(conn, |st| {
-                    st.help.entry = buf;
-                    st.changed = true;
-                    st.mode = HeditMode::MainMenu;
-                });
-                hedit_disp_menu(g, conn);
-                return;
-            }
-            'a' | 'A' => {
-                // Abort: discard edits to the entry text, return to menu.
-                with_state(conn, |st| {
-                    st.text_buf = None;
-                    st.mode = HeditMode::MainMenu;
-                });
-                g.send_to_char(ch, "Entry aborted.\r\n");
-                hedit_disp_menu(g, conn);
-                return;
-            }
-            'c' | 'C' => {
-                with_state(conn, |st| st.text_buf = Some(String::new()));
-                g.send_to_char(ch, "Current buffer cleared.\r\n");
-                return;
-            }
-            'h' | 'H' => {
-                g.send_to_char(
-                    ch,
-                    "Editor commands:\r\n  /s  save and exit\r\n  /a  abort (discard)\r\n  \
-/c  clear the buffer\r\n  /h  this help\r\n",
-                );
-                return;
-            }
-            _ => {
-                g.send_to_char(ch, "Invalid option.\r\n");
-                return;
-            }
-        }
+    if conn_char(g, conn).is_none() {
+        cleanup(conn);
+        return;
     }
 
-    // Append the plain line with truncation to MAX_HELP_ENTRY.
-    let overflow = with_state(conn, |st| {
-        let buf = st.text_buf.get_or_insert_with(String::new);
-        let mut append = str_in.clone();
-        if buf.is_empty() {
-            if append.len() > MAX_HELP_ENTRY {
-                append.truncate(MAX_HELP_ENTRY);
-                return true;
-            }
-            buf.push_str(&append);
-            buf.push_str("\r\n");
-            false
-        } else if append.len() + buf.len() + 2 > MAX_HELP_ENTRY {
-            true
-        } else {
-            buf.push_str(&append);
-            buf.push_str("\r\n");
-            false
+    let mut buf =
+        with_state(conn, |st| st.text_buf.clone().unwrap_or_default()).unwrap_or_default();
+    match crate::modify::editor_buffer_input(g, conn, &mut buf, MAX_HELP_ENTRY, line) {
+        crate::modify::BufferEditorResult::Continue => {
+            with_state(conn, |st| st.text_buf = Some(buf));
         }
-    })
-    .unwrap_or(false);
-
-    if overflow {
-        g.send_to_char(
-            ch,
-            "String too long, limit reached on message. Last line ignored.\r\n",
-        );
+        crate::modify::BufferEditorResult::Save => {
+            with_state(conn, |st| {
+                st.help.entry = buf;
+                st.text_buf = None;
+                st.changed = true;
+                st.mode = HeditMode::MainMenu;
+            });
+            hedit_disp_menu(g, conn);
+        }
+        crate::modify::BufferEditorResult::Abort => {
+            with_state(conn, |st| {
+                st.text_buf = None;
+                st.mode = HeditMode::MainMenu;
+            });
+            hedit_disp_menu(g, conn);
+        }
     }
 }
 

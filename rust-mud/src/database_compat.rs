@@ -150,8 +150,8 @@ pub fn player_main_values(ch: &Character, pwd_hash: &str, host: &str) -> Vec<Val
         Value::from(ch.points.max_hit),
         Value::from(ch.points.move_points),
         Value::from(ch.points.max_move),
-        Value::from(ch.points.gold),
-        Value::from(ch.points.bank_gold),
+        Value::from(clamp_corrupt_gold(ch.points.gold)),
+        Value::from(clamp_corrupt_gold(ch.points.bank_gold)),
         Value::from(ch.points.exp),
         Value::from(ch.points.power),
         Value::from(ch.points.mpower),
@@ -258,8 +258,8 @@ pub fn player_main_to_character(row: &Row) -> Character {
     ch.points.max_hit = col::<i32>(row, "max_hit");
     ch.points.move_points = col::<i32>(row, "move");
     ch.points.max_move = col::<i32>(row, "max_move");
-    ch.points.gold = col::<i32>(row, "gold");
-    ch.points.bank_gold = col::<i32>(row, "bank_gold");
+    ch.points.gold = clamp_corrupt_gold(col::<i32>(row, "gold"));
+    ch.points.bank_gold = clamp_corrupt_gold(col::<i32>(row, "bank_gold"));
     ch.points.exp = col::<i64>(row, "exp");
     ch.points.power = col::<i32>(row, "power") as i16;
     ch.points.mpower = col::<i32>(row, "mpower") as i16;
@@ -332,6 +332,14 @@ pub fn player_main_to_character(row: &Row) -> Character {
     ch
 }
 
+fn clamp_corrupt_gold(value: i32) -> i32 {
+    if !(-1_000_000_000..=1_000_000_000).contains(&value) {
+        0
+    } else {
+        value
+    }
+}
+
 /// Build the `player_affects` rows for a character (mirrors
 /// dbmodify_player_affects MODE_STORE). Returns one (type,duration,modifier,
 /// location,bitvector) tuple per affect.
@@ -388,5 +396,45 @@ pub fn apply_skill_rows(ch: &mut Character, rows: &[Row]) {
         if (0..=MAX_SKILLS as i32).contains(&skill) {
             ch.skills.insert(skill as u16, learned as u8);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::types::{Class, Race};
+
+    #[test]
+    fn player_main_values_places_descriptor_host_in_host_column() {
+        let ch = Character::new_player("Hosty".to_string(), Class::Warrior, Race::Human);
+        let values = player_main_values(&ch, "hash", "dialup.example.test");
+        let host_idx = PLAYER_MAIN_COLUMNS
+            .iter()
+            .position(|column| *column == "host")
+            .unwrap();
+
+        assert_eq!(values[host_idx], Value::from("dialup.example.test"));
+    }
+
+    #[test]
+    fn player_main_values_clamps_corrupt_gold_and_bank_gold() {
+        let mut ch = Character::new_player("Goldy".to_string(), Class::Warrior, Race::Human);
+        ch.points.gold = 1_000_000_001;
+        ch.points.bank_gold = -1_000_000_001;
+        let values = player_main_values(&ch, "hash", "");
+        let gold_idx = PLAYER_MAIN_COLUMNS
+            .iter()
+            .position(|column| *column == "gold")
+            .unwrap();
+        let bank_idx = PLAYER_MAIN_COLUMNS
+            .iter()
+            .position(|column| *column == "bank_gold")
+            .unwrap();
+
+        assert_eq!(values[gold_idx], Value::from(0));
+        assert_eq!(values[bank_idx], Value::from(0));
+        assert_eq!(clamp_corrupt_gold(1_000_000_000), 1_000_000_000);
+        assert_eq!(clamp_corrupt_gold(-1_000_000_000), -1_000_000_000);
     }
 }

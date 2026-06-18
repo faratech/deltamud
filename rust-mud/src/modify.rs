@@ -2,9 +2,9 @@
 // to the single-owner GameState. This module owns:
 //
 //   * the line-oriented string editor (string_add / parse_action): the `/`-style
-//     editor commands (/a /c /d /e /f /i /l /n /r /s /h), buffer accumulation,
-//     and save/abort dispatch to the right consumer (note / mail / board / OLC
-//     immortal field);
+//     editor commands (/a /c /d /e /f /fi /i /l /n /r /ra /s /h), buffer
+//     accumulation, and save/abort dispatch to the right consumer (note / mail /
+//     board / OLC immortal field);
 //   * format_text / replace_str (utils.c) used by /f and /r;
 //   * the Michael-Buselli pager (next_page / count_pages / paginate_string /
 //     page_string / show_string) with per-connection paging state;
@@ -26,7 +26,7 @@
 use crate::act::{act, ActArg, To};
 use crate::connection::InputContext;
 use crate::interpreter::{half_chop, one_argument};
-use crate::spell_parser::{find_skill_num, skill_name, MAX_SPELLS, TOP_SPELL_DEFINE};
+use crate::spell_parser::{find_skill_num, skill_name, TOP_SPELL_DEFINE};
 use crate::state::GameState;
 use crate::types::*;
 use std::collections::HashMap;
@@ -112,6 +112,13 @@ fn edit_max_len(conn: ConnId) -> usize {
         .get(&conn)
         .map(|e| e.max_len)
         .unwrap_or(0)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferEditorResult {
+    Continue,
+    Save,
+    Abort,
 }
 
 // ---------------------------------------------------------------------------
@@ -274,11 +281,39 @@ pub fn editing(g: &GameState, conn: ConnId) -> bool {
 /// normal input). The StringEdit context itself is NOT popped here — the caller
 /// (game.rs) removes it when this returns false, mirroring the C state reset.
 pub fn editor_input(g: &mut GameState, conn: ConnId, line: &str) -> bool {
+    let max = edit_max_len(conn);
+    let mut buf = read_buffer(g, conn).unwrap_or_default();
+    let result = editor_buffer_input(g, conn, &mut buf, max, line);
+    write_buffer(g, conn, buf);
+
+    match result {
+        BufferEditorResult::Continue => true,
+        BufferEditorResult::Save => {
+            finish_editor(g, conn, 1);
+            false
+        }
+        BufferEditorResult::Abort => {
+            finish_editor(g, conn, 2);
+            false
+        }
+    }
+}
+
+/// Feed one input line into a raw editable buffer using CircleMUD's string
+/// editor command set. OLC editors use this adapter for inline text fields so
+/// their `/` commands stay identical to the generic runtime editor.
+pub fn editor_buffer_input(
+    g: &mut GameState,
+    conn: ConnId,
+    buf: &mut String,
+    max_len: usize,
+    line: &str,
+) -> BufferEditorResult {
     // determine if this is the terminal string, and truncate if so
     // (C: '/<letter>' style editing commands; '@' handling removed in C).
     let str_in = delete_doubledollar(line);
 
-    let mut terminator = 0; // 0 = keep editing, 1 = save, 2 = abort
+    let mut terminator = BufferEditorResult::Continue;
     let mut action = false; // an editor command ran (don't append to buffer)
     let mut content = str_in.clone(); // text to append (cleared by commands)
 
@@ -289,49 +324,48 @@ pub fn editor_input(g: &mut GameState, conn: ConnId, line: &str) -> bool {
         content.clear();
         let cmd = str_in.chars().nth(1).unwrap_or('\0');
         match cmd {
-            'a' => terminator = 2, // abort
+            'a' => terminator = BufferEditorResult::Abort,
             'c' => {
-                let buf = read_buffer(g, conn).unwrap_or_default();
                 if !buf.is_empty() {
-                    write_buffer(g, conn, String::new());
+                    buf.clear();
                     send_to_q(g, conn, "Current buffer cleared.\r\n");
                 } else {
                     send_to_q(g, conn, "Current buffer empty.\r\n");
                 }
             }
-            'd' => parse_action(g, conn, ParseCmd::Delete, &actions),
-            'e' => parse_action(g, conn, ParseCmd::Edit, &actions),
+            'd' => parse_action(g, conn, ParseCmd::Delete, &actions, buf, max_len),
+            'e' => parse_action(g, conn, ParseCmd::Edit, &actions, buf, max_len),
             'f' => {
-                if buffer_nonempty(g, conn) {
-                    parse_action(g, conn, ParseCmd::Format, &actions);
+                if !buf.is_empty() {
+                    parse_action(g, conn, ParseCmd::Format, &actions, buf, max_len);
                 } else {
                     send_to_q(g, conn, "Current buffer empty.\r\n");
                 }
             }
             'i' => {
-                if buffer_nonempty(g, conn) {
-                    parse_action(g, conn, ParseCmd::Insert, &actions);
+                if !buf.is_empty() {
+                    parse_action(g, conn, ParseCmd::Insert, &actions, buf, max_len);
                 } else {
                     send_to_q(g, conn, "Current buffer empty.\r\n");
                 }
             }
-            'h' => parse_action(g, conn, ParseCmd::Help, &actions),
+            'h' => parse_action(g, conn, ParseCmd::Help, &actions, buf, max_len),
             'l' => {
-                if buffer_nonempty(g, conn) {
-                    parse_action(g, conn, ParseCmd::ListNorm, &actions);
+                if !buf.is_empty() {
+                    parse_action(g, conn, ParseCmd::ListNorm, &actions, buf, max_len);
                 } else {
                     send_to_q(g, conn, "Current buffer empty.\r\n");
                 }
             }
             'n' => {
-                if buffer_nonempty(g, conn) {
-                    parse_action(g, conn, ParseCmd::ListNum, &actions);
+                if !buf.is_empty() {
+                    parse_action(g, conn, ParseCmd::ListNum, &actions, buf, max_len);
                 } else {
                     send_to_q(g, conn, "Current buffer empty.\r\n");
                 }
             }
-            'r' => parse_action(g, conn, ParseCmd::Replace, &actions),
-            's' => terminator = 1, // save
+            'r' => parse_action(g, conn, ParseCmd::Replace, &actions, buf, max_len),
+            's' => terminator = BufferEditorResult::Save,
             _ => send_to_q(g, conn, "Invalid option.\r\n"),
         }
     }
@@ -339,45 +373,38 @@ pub fn editor_input(g: &mut GameState, conn: ConnId, line: &str) -> bool {
     // Append the line to the buffer (only if it was not a command), with the
     // max_str truncation / overflow rules of string_add.
     if !action {
-        let max = edit_max_len(conn);
-        let mut buf = read_buffer(g, conn).unwrap_or_default();
         let mut append = content.clone();
         if buf.is_empty() {
-            if append.len() > max {
+            if append.len() > max_len {
                 if let Some(cid) = conn_char(g, conn) {
                     g.send_to_char(cid, "String too long - Truncated.\r\n");
                 }
-                append.truncate(max);
+                append.truncate(max_len);
             }
-            buf = append;
-        } else if append.len() + buf.len() > max {
+            *buf = append;
+        } else if append.len() + buf.len() > max_len {
             if let Some(cid) = conn_char(g, conn) {
                 g.send_to_char(
                     cid,
                     "String too long, limit reached on message. Last line ignored.\r\n",
                 );
             }
-            return true; // keep editing; line ignored
+            return BufferEditorResult::Continue;
         } else {
             buf.push_str(&append);
         }
-        write_buffer(g, conn, buf);
     }
 
-    if terminator == 0 {
+    if terminator == BufferEditorResult::Continue {
         // Not finished: a non-command line gets a trailing CRLF appended
         // (C: `else if (!action) strcat(*d->str, "\r\n");`).
         if !action {
-            let mut buf = read_buffer(g, conn).unwrap_or_default();
             buf.push_str("\r\n");
-            write_buffer(g, conn, buf);
         }
-        return true;
+        return BufferEditorResult::Continue;
     }
 
-    // ----- Editor finished: dispatch save / abort to the right consumer. ----
-    finish_editor(g, conn, terminator);
-    false
+    terminator
 }
 
 fn buffer_nonempty(g: &GameState, conn: ConnId) -> bool {
@@ -574,7 +601,14 @@ enum ParseCmd {
     Edit,
 }
 
-fn parse_action(g: &mut GameState, conn: ConnId, command: ParseCmd, string: &str) {
+fn parse_action(
+    g: &mut GameState,
+    conn: ConnId,
+    command: ParseCmd,
+    string: &str,
+    buf: &mut String,
+    max: usize,
+) {
     match command {
         ParseCmd::Help => {
             let help = "Editor command formats: /<letter>\r\n\r\n\
@@ -607,10 +641,8 @@ fn parse_action(g: &mut GameState, conn: ConnId, command: ParseCmd, string: &str
                     flags |= FORMAT_INDENT;
                 }
             }
-            let max = edit_max_len(conn);
-            let buf = read_buffer(g, conn).unwrap_or_default();
-            let formatted = format_text(&buf, flags, max);
-            write_buffer(g, conn, formatted);
+            let formatted = format_text(buf, flags, max);
+            *buf = formatted;
             let msg = format!(
                 "Text formatted with{} indent.\r\n",
                 if indent { "" } else { "out" }
@@ -657,17 +689,15 @@ fn parse_action(g: &mut GameState, conn: ConnId, command: ParseCmd, string: &str
                 }
             };
 
-            let max = edit_max_len(conn);
-            let buf = read_buffer(g, conn).unwrap_or_default();
             // total_len = (len(t) - len(s)) + len(buf) <= max
             let total_len = buf.len() as i64 - s.len() as i64 + t.len() as i64;
             if total_len > max as i64 {
                 send_to_q(g, conn, "Not enough space left in buffer.\r\n");
                 return;
             }
-            match replace_str(&buf, s, t, rep_all, max) {
+            match replace_str(buf, s, t, rep_all, max) {
                 ReplaceResult::Replaced(n, new) => {
-                    write_buffer(g, conn, new);
+                    *buf = new;
                     let plural = if n != 1 { "s " } else { " " };
                     send_to_q(
                         g,
@@ -714,22 +744,21 @@ fn parse_action(g: &mut GameState, conn: ConnId, command: ParseCmd, string: &str
                 );
                 return;
             }
-            let buf = read_buffer(g, conn).unwrap_or_default();
             if buf.is_empty() {
                 send_to_q(g, conn, "Buffer is empty.\r\n");
                 return;
             }
-            match delete_lines(&buf, low, high) {
+            match delete_lines(buf, low, high) {
                 Some((new, deleted)) => {
-                    write_buffer(g, conn, new);
+                    *buf = new;
                     let plural = if deleted != 1 { "s " } else { " " };
                     send_to_q(g, conn, &format!("{} line{}deleted.\r\n", deleted, plural));
                 }
                 None => send_to_q(g, conn, "Line(s) out of range; not deleting.\r\n"),
             }
         }
-        ParseCmd::ListNorm => list_buffer(g, conn, string, false),
-        ParseCmd::ListNum => list_buffer(g, conn, string, true),
+        ParseCmd::ListNorm => list_buffer(g, conn, string, false, buf),
+        ParseCmd::ListNum => list_buffer(g, conn, string, true, buf),
         ParseCmd::Insert => {
             let (numstr, text) = half_chop(string);
             if numstr.is_empty() {
@@ -741,7 +770,6 @@ fn parse_action(g: &mut GameState, conn: ConnId, command: ParseCmd, string: &str
                 return;
             }
             let line_low: i32 = numstr.parse().unwrap_or(0);
-            let buf = read_buffer(g, conn).unwrap_or_default();
             if buf.is_empty() {
                 send_to_q(g, conn, "Buffer is empty, nowhere to insert.\r\n");
                 return;
@@ -750,10 +778,9 @@ fn parse_action(g: &mut GameState, conn: ConnId, command: ParseCmd, string: &str
                 send_to_q(g, conn, "Line number must be higher than 0.\r\n");
                 return;
             }
-            let max = edit_max_len(conn);
-            match insert_line(&buf, line_low, &text, max) {
+            match insert_line(buf, line_low, &text, max) {
                 InsertResult::Ok(new) => {
-                    write_buffer(g, conn, new);
+                    *buf = new;
                     send_to_q(g, conn, "Line inserted.\r\n");
                 }
                 InsertResult::OutOfRange => {
@@ -779,7 +806,6 @@ fn parse_action(g: &mut GameState, conn: ConnId, command: ParseCmd, string: &str
                 return;
             }
             let line_low: i32 = numstr.parse().unwrap_or(0);
-            let buf = read_buffer(g, conn).unwrap_or_default();
             if buf.is_empty() {
                 send_to_q(g, conn, "Buffer is empty, nothing to change.\r\n");
                 return;
@@ -788,10 +814,9 @@ fn parse_action(g: &mut GameState, conn: ConnId, command: ParseCmd, string: &str
                 send_to_q(g, conn, "Line number must be higher than 0.\r\n");
                 return;
             }
-            let max = edit_max_len(conn);
-            match edit_line(&buf, line_low, &text, max) {
+            match edit_line(buf, line_low, &text, max) {
                 EditLineResult::Ok(new) => {
-                    write_buffer(g, conn, new);
+                    *buf = new;
                     send_to_q(g, conn, "Line changed.\r\n");
                 }
                 EditLineResult::OutOfRange => {
@@ -934,7 +959,7 @@ fn edit_line(buf: &str, line_low: i32, text: &str, max: usize) -> EditLineResult
 }
 
 /// List the buffer (/l plain, /n numbered) honoring an optional line range.
-fn list_buffer(g: &mut GameState, conn: ConnId, string: &str, numbered: bool) {
+fn list_buffer(g: &mut GameState, conn: ConnId, string: &str, numbered: bool, buf: &str) {
     let (low, high) = if string.trim().is_empty() {
         (1, 999999)
     } else {
@@ -951,8 +976,7 @@ fn list_buffer(g: &mut GameState, conn: ConnId, string: &str, numbered: bool) {
         send_to_q(g, conn, "That range is invalid.\r\n");
         return;
     }
-    let buf = read_buffer(g, conn).unwrap_or_default();
-    let segs = line_segments(&buf);
+    let segs = line_segments(buf);
     let total = segs.len() as i32;
     if low > total {
         send_to_q(g, conn, "Line(s) out of range; no buffer listing.\r\n");
@@ -1549,7 +1573,7 @@ pub fn do_skillset(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "You can't set NPC skills.\r\n");
         return;
     }
-    if skill > MAX_SPELLS && skill > TOP_SPELL_DEFINE {
+    if skill > TOP_SPELL_DEFINE {
         g.send_to_char(ch, "Unrecognized skill.\r\n");
         return;
     }
@@ -1672,5 +1696,44 @@ mod tests {
             .unwrap()
             .outbuf
             .contains("Note aborted."));
+    }
+
+    #[test]
+    fn buffer_editor_supports_replace_all_command() {
+        let (mut g, conn, _ch, _obj) = editor_game();
+        let mut buf = "alpha beta alpha\r\n".to_string();
+
+        assert_eq!(
+            editor_buffer_input(&mut g, conn, &mut buf, 1000, "/ra 'alpha' 'omega'"),
+            BufferEditorResult::Continue
+        );
+
+        assert_eq!(buf, "omega beta omega\r\n");
+        assert!(g
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("Replaced 2 occurances"));
+    }
+
+    #[test]
+    fn buffer_editor_supports_indented_format_command() {
+        let (mut g, conn, _ch, _obj) = editor_game();
+        let mut buf = "one sentence. another sentence\r\n".to_string();
+
+        assert_eq!(
+            editor_buffer_input(&mut g, conn, &mut buf, 1000, "/fi"),
+            BufferEditorResult::Continue
+        );
+
+        assert!(buf.starts_with("   One sentence."));
+        assert!(buf.contains("  Another sentence"));
+        assert!(g
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("Text formatted with indent."));
     }
 }
