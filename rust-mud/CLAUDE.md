@@ -16,13 +16,12 @@ The command surface is substantially ported: the Rust `CMD_INFO` table matches t
 
 Known remaining parity work is mostly integration and fidelity detail, not whole missing systems:
 
-- **Editor/message pipeline:** the shared string editor return value is not honored by `game.rs`, and mail/board composition bypasses completion hooks. `write` note authoring validates and prompts but does not enter the object text editor.
-- **Persistence compatibility:** SQL `player_main` is broad and current, but rent/crash object files, houses, boards, clans, and mail use Rust text formats rather than C raw on-disk records. Do not share live C persistence files with Rust without a migration/compatibility pass.
-- **Character creation:** the Rust nanny path skips C states for newbie prompts, deity, hometown, stat reroll/accept, and creation-time `do_start_init`.
-- **Combat and flags:** `MOB_WIMPY` is currently bit-shifted incorrectly; sanctuary damage ordering differs; core damage lacks the low-level PC-vs-PC guard; `deathblow` and immortal raw-kill semantics route through normal damage; shopkeeper damage protection exists but is not wired; armor `value[0]` AC/defense is not applied by generic equip; normal `wear` does not call `wear_otrigger`.
-- **Command semantics:** complex aliases execute immediately instead of being queued through descriptor wait, aliases are not persisted, social minimum level is not enforced, `wizhelp` ignores per-command GCMD bits, and `socials` omits the static `insult` social.
-- **OLC/DG authoring:** trigger prototype editing is strong, but redit/oedit/medit do not expose the C DG attachment-list editor, room saves drop room `T` trigger attachments, and central `olc save` does not dispatch every editor's disk writer.
-- **Runtime/admin policy:** `-q` currently behaves like no-specials even though C uses only `-s` for that; `MUD_NO_SPECIALS`/`-s` can be bypassed by lazy spec assignment; ban enforcement misses C hostname, `BAN_NEW`, and `BAN_SELECT` paths.
+- **Persistence compatibility:** SQL `player_main` is broad and current, and player aliases now round-trip through C-compatible `plralias/<bucket>/<name>.alias` sidecars. Rent/crash object files, houses, boards, clans, and mail still use Rust text formats rather than C raw on-disk records. Do not share live C persistence files with Rust without a migration/compatibility pass.
+- **Character creation:** the Rust nanny path skips C states for newbie prompts, deity, hometown, stat reroll/accept, and creation-time `do_start_init` (#87).
+- **Combat and flags:** `deathblow` and immortal raw-kill semantics still route through normal damage; the current tracker item is #92.
+- **Command semantics:** complex aliases execute immediately instead of being queued through descriptor wait (#86), social minimum level is not enforced, `wizhelp` ignores per-command GCMD bits, and `socials` omits the static `insult` social (#90).
+- **OLC/DG authoring:** trigger prototype editing is strong, but redit/oedit/medit do not expose the C DG attachment-list editor, room saves drop room `T` trigger attachments (#89), and central `olc save` does not dispatch every editor's disk writer (#88).
+- **Runtime/admin policy:** ban enforcement misses C hostname, `BAN_NEW`, and `BAN_SELECT` paths (#91).
 - **Other fidelity gaps:** `slist` emits no spell rows, several `APPLY_*` locations are narrower than C, autowiz/clan offline reporting are not fully SQL-backed, and some OLC text editors do not support the full C `/a /c /d /e /f /i /h /l /n /r /s` command set.
 
 ## Build / run / test
@@ -42,7 +41,7 @@ MUD_MOCK_DB=true MUD_PORT=4000 MUD_LIB_PATH=/web/deltamud/lib ./target/release/d
 Key env vars (read in `config.rs` + `main.rs`):
 - `MUD_MOCK_DB=true` — use the in-memory `MockDatabase` (default for dev; round-trips full player state within one run). Unset / `false` → real MySQL via `DATABASE_URL` (default `mysql://root:password@localhost/deltamud`).
 - `MUD_LIB_PATH` — the world/data dir (use `/web/deltamud/lib`, the shared C lib).
-- `MUD_PORT` (default 4000), `MUD_RNG_SEED=<n>` (pins the Lehmer PRNG for golden tests — same seed => identical zone prime / combat), `MUD_NO_SPECIALS` (or argv `-s`; `-q` currently aliases this in Rust but diverges from C and should not be used for parity checks).
+- `MUD_PORT` (default 4000), `MUD_RNG_SEED=<n>` (pins the Lehmer PRNG for golden tests — same seed => identical zone prime / combat), `MUD_NO_SPECIALS` (or argv `-s`; C-compatible no-specials mode. `-q` is not treated as no-specials).
 - `MUD_METRICS_PORT=<port>` — enables a Prometheus `/metrics` + `/health` HTTP endpoint. **Never use 9200/9201 — this box's Elasticsearch owns them; use e.g. 19595.**
 - `MUD_MAX_CONN` (default 256), `MUD_CONN_BURST`/`MUD_CONN_WINDOW_MS` (per-IP rate limit).
 

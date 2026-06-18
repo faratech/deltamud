@@ -130,16 +130,20 @@ fn assign_mobiles(mobs: &mut HashMap<MobVnum, SpecFn>) {
     //
     // Limbo.
     ASSIGNMOB(mobs, 1, crate::spec_procs::puff as SpecFn); // ASSIGNMOB(1, puff)
-    // Immortal Zone.
+                                                           // Immortal Zone.
     ASSIGNMOB(mobs, 1200, crate::objsave::receptionist as SpecFn); // ASSIGNMOB(1200, receptionist)
     ASSIGNMOB(mobs, 1201, crate::mail::postmaster as SpecFn);
     ASSIGNMOB(mobs, 1202, crate::spec_procs::janitor as SpecFn); // immortal-zone janitor
-    // Battle Arena (Thargor 7/25-28/98). arenaentrancemaster lives in arena.rs
-    // (the full arena subsystem); temple_healer / temple_mana_regenerator in
-    // spec_procs.rs.
+                                                                 // Battle Arena (Thargor 7/25-28/98). arenaentrancemaster lives in arena.rs
+                                                                 // (the full arena subsystem); temple_healer / temple_mana_regenerator in
+                                                                 // spec_procs.rs.
     ASSIGNMOB(mobs, 4800, crate::arena::arenaentrancemaster as SpecFn);
     ASSIGNMOB(mobs, 4801, crate::spec_procs::temple_healer as SpecFn);
-    ASSIGNMOB(mobs, 4802, crate::spec_procs::temple_mana_regenerator as SpecFn);
+    ASSIGNMOB(
+        mobs,
+        4802,
+        crate::spec_procs::temple_mana_regenerator as SpecFn,
+    );
     // Itrius.
     ASSIGNMOB(mobs, 199, crate::mail::postmaster as SpecFn);
     ASSIGNMOB(mobs, 101, crate::objsave::receptionist as SpecFn); // ASSIGNMOB(101, receptionist)
@@ -192,11 +196,11 @@ fn assign_objects(objs: &mut HashMap<ObjVnum, ObjSpecFn>) {
     ASSIGNOBJ(objs, 1207, gen_board as ObjSpecFn); // bugs board
     ASSIGNOBJ(objs, 1208, gen_board as ObjSpecFn); // reimbursement board
     ASSIGNOBJ(objs, 1209, gen_board as ObjSpecFn); // builders board
-    // SPECIAL(bank) is declared in DeltaMUD's spec_assign.c (a forward prototype
-    // so OLC can reference it) but it is never DEFINED in any .c file and never
-    // ASSIGNOBJ'd to a vnum — it is a dangling no-op in the C source. There is
-    // nothing to port and nothing to assign; banking is handled by the BANKER
-    // mob flag path (act.other.c), not an object spec. Left intentionally absent.
+                                                   // SPECIAL(bank) is declared in DeltaMUD's spec_assign.c (a forward prototype
+                                                   // so OLC can reference it) but it is never DEFINED in any .c file and never
+                                                   // ASSIGNOBJ'd to a vnum — it is a dangling no-op in the C source. There is
+                                                   // nothing to port and nothing to assign; banking is handled by the BANKER
+                                                   // mob flag path (act.other.c), not an object spec. Left intentionally absent.
 }
 
 fn assign_rooms(rooms: &mut HashMap<RoomVnum, RoomSpecFn>) {
@@ -318,6 +322,10 @@ pub fn get_room_spec(vnum: RoomVnum) -> Option<RoomSpecFn> {
 /// a vanished entity is simply skipped (its `get_*` returns None), mirroring C's
 /// reliance on the linked-list `next` pointers staying valid for that pulse.
 pub fn special(g: &mut GameState, ch: CharId, cmd: &str, arg: &str) -> bool {
+    if g.config.no_specials {
+        return false;
+    }
+
     // The actor's room. If the actor is nowhere (just extracted / between
     // rooms) there is nothing to dispatch against — C dereferences
     // ch->in_room unconditionally, but our arena guards it.
@@ -434,4 +442,46 @@ pub fn special(g: &mut GameState, ch: CharId, cmd: &str, arg: &str) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::room::Room;
+
+    fn pet_shop_world(no_specials: bool) -> (GameState, CharId) {
+        let mut cfg = Config::default();
+        cfg.no_specials = no_specials;
+        let mut g = GameState::new(cfg);
+        let shop = g.add_room(Room::new(
+            3031,
+            0,
+            "Pet Shop".to_string(),
+            "A pet shop.".to_string(),
+        ));
+        g.add_room(Room::new(
+            3032,
+            0,
+            "Pet Room".to_string(),
+            "Pets wait here.".to_string(),
+        ));
+        let ch = g.create_char(Character::new_player(
+            "Buyer".to_string(),
+            Class::Warrior,
+            Race::Human,
+        ));
+        g.char_to_room(ch, shop);
+        (g, ch)
+    }
+
+    #[test]
+    fn special_honors_no_specials_even_with_lazy_tables() {
+        let (mut enabled, enabled_ch) = pet_shop_world(false);
+        assert!(special(&mut enabled, enabled_ch, "list", ""));
+
+        let (mut disabled, disabled_ch) = pet_shop_world(true);
+        assert!(!special(&mut disabled, disabled_ch, "list", ""));
+    }
 }

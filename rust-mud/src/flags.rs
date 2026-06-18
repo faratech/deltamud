@@ -46,7 +46,7 @@ pub const MOB_SENTINEL: i64 = 1 << 1;
 pub const MOB_SCAVENGER: i64 = 1 << 2;
 pub const MOB_ISNPC: i64 = 1 << 3;
 pub const MOB_AGGRESSIVE: i64 = 1 << 5;
-pub const MOB_WIMPY: i64 = 1 << 8;
+pub const MOB_WIMPY: i64 = 1 << 7;
 pub const MOB_CASTER: i64 = 1 << 21;
 pub const MOB_DBLATTACK: i64 = 1 << 22;
 
@@ -68,3 +68,13 @@ pub const APPLY_MDEFENSE: i32 = 18;
 pub const APPLY_POWER: i32 = 19;
 pub const APPLY_MPOWER: i32 = 20;
 pub const APPLY_TECHNIQUE: i32 = 21;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mob_wimpy_bit_matches_c_structs_h() {
+        assert_eq!(MOB_WIMPY, 1 << 7);
+    }
+}

@@ -84,10 +84,14 @@ const SCMD_QECHO: i32 = 1;
 // ---------------------------------------------------------------------------
 
 fn prf(g: &GameState, id: CharId, flag: i64) -> bool {
-    g.get_char(id).map(|c| c.prf_flags & flag != 0).unwrap_or(false)
+    g.get_char(id)
+        .map(|c| c.prf_flags & flag != 0)
+        .unwrap_or(false)
 }
 fn prf2(g: &GameState, id: CharId, flag: i64) -> bool {
-    g.get_char(id).map(|c| c.prf2_flags & flag != 0).unwrap_or(false)
+    g.get_char(id)
+        .map(|c| c.prf2_flags & flag != 0)
+        .unwrap_or(false)
 }
 fn plr(g: &GameState, id: CharId, flag: i64) -> bool {
     let c = match g.get_char(id) {
@@ -125,7 +129,9 @@ fn room_soundproof(g: &GameState, id: CharId) -> bool {
     }
 }
 fn get_name(g: &GameState, id: CharId) -> String {
-    g.get_char(id).map(|c| c.player.name.clone()).unwrap_or_default()
+    g.get_char(id)
+        .map(|c| c.player.name.clone())
+        .unwrap_or_default()
 }
 
 /// COLOR_LEV(ch): _clrlevel = (PRF_COLOR_1?1:0) + (PRF_COLOR_2?2:0).
@@ -201,7 +207,12 @@ fn connected_players(g: &GameState) -> Vec<CharId> {
 /// into `replacements`, so the slice length is number_of_rep + 1 (C indexes
 /// [0..=number_of_rep] inclusive).
 const DRUNK_TABLE: [(i32, &[&str]); 26] = [
-    (3, &["a", "a", "a", "A", "aa", "ah", "Ah", "ao", "aw", "oa", "ahhhh"]),
+    (
+        3,
+        &[
+            "a", "a", "a", "A", "aa", "ah", "Ah", "ao", "aw", "oa", "ahhhh",
+        ],
+    ),
     (8, &["b", "b", "b", "B", "B", "vb"]),
     (3, &["c", "c", "C", "cj", "sj", "zj"]),
     (5, &["d", "d", "D"]),
@@ -213,7 +224,10 @@ const DRUNK_TABLE: [(i32, &[&str]); 26] = [
     (9, &["j", "j", "jj", "Jj", "jJ", "J"]),
     (7, &["k", "k", "K"]),
     (3, &["l", "l", "L"]),
-    (5, &["m", "m", "mm", "mmm", "mmmm", "mmmmm", "MmM", "mM", "M"]),
+    (
+        5,
+        &["m", "m", "mm", "mmm", "mmmm", "mmmmm", "MmM", "mM", "M"],
+    ),
     (6, &["n", "n", "nn", "Nn", "nnn", "nNn", "N"]),
     (3, &["o", "o", "ooo", "ao", "aOoo", "Ooo", "ooOo"]),
     (3, &["p", "p", "P"]),
@@ -226,11 +240,19 @@ const DRUNK_TABLE: [(i32, &[&str]); 26] = [
     (4, &["w", "w", "W"]),
     (5, &["x", "x", "X", "ks", "iks", "kz", "xz"]),
     (3, &["y", "y", "Y"]),
-    (2, &["z", "z", "ZzzZz", "Zzz", "Zsszzsz", "szz", "sZZz", "ZSz", "zZ", "Z"]),
+    (
+        2,
+        &[
+            "z", "z", "ZzzZz", "Zzz", "Zsszzsz", "szz", "sZZz", "ZSz", "zZ", "Z",
+        ],
+    ),
 ];
 
 fn makedrunk(arg: &str, g: &mut GameState, ch: CharId) -> String {
-    let drunk = g.get_char(ch).map(|c| c.conditions[DRUNK] as i32).unwrap_or(0);
+    let drunk = g
+        .get_char(ch)
+        .map(|c| c.conditions[DRUNK] as i32)
+        .unwrap_or(0);
     if drunk <= 0 {
         return arg.to_string();
     }
@@ -345,7 +367,10 @@ pub fn do_ignore(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     if argument.is_empty() {
         g.send_to_char(ch, "\r\nName                 Type           Reason\r\n");
         g.send_to_char(ch, "-------------------- -------------- ------>\r\n");
-        let list = g.get_char(ch).map(|c| c.ignore_list.clone()).unwrap_or_default();
+        let list = g
+            .get_char(ch)
+            .map(|c| c.ignore_list.clone())
+            .unwrap_or_default();
         if list.is_empty() {
             g.send_to_char(ch, "None                 None           None\r\n");
             return;
@@ -353,9 +378,21 @@ pub fn do_ignore(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         for i in &list {
             // C renders get_name_by_id(i->id); we use the cached name.
             let mut line = format!("{:<20}", i.name);
-            line.push_str(if i.type_bits & IGNORE_PUBLIC != 0 { " pub" } else { "    " });
-            line.push_str(if i.type_bits & IGNORE_PRIVATE != 0 { " priv" } else { "     " });
-            line.push_str(if i.type_bits & IGNORE_EMOTE != 0 { " emote " } else { "       " });
+            line.push_str(if i.type_bits & IGNORE_PUBLIC != 0 {
+                " pub"
+            } else {
+                "    "
+            });
+            line.push_str(if i.type_bits & IGNORE_PRIVATE != 0 {
+                " priv"
+            } else {
+                "     "
+            });
+            line.push_str(if i.type_bits & IGNORE_EMOTE != 0 {
+                " emote "
+            } else {
+                "       "
+            });
             line.push_str(&i.reason);
             line.push_str("\r\n");
             g.send_to_char(ch, &line);
@@ -407,7 +444,10 @@ pub fn do_ignore(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     };
     let target_name = match online {
         Some(t) => get_name(g, t),
-        None => idx.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| who.clone()),
+        None => idx
+            .as_ref()
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| who.clone()),
     };
     // Cannot ignore immortals.
     if target_level >= LVL_IMMORT as u8 {
@@ -623,7 +663,10 @@ pub fn do_say(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 pub fn do_gsay(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let argument = arg.trim_start();
 
-    let grouped = g.get_char(ch).map(|c| c.affect_flags & AFF_GROUP != 0).unwrap_or(false);
+    let grouped = g
+        .get_char(ch)
+        .map(|c| c.affect_flags & AFF_GROUP != 0)
+        .unwrap_or(false);
     if !grouped {
         g.send_to_char(ch, "But you are not the member of a group!\r\n");
         return;
@@ -640,13 +683,22 @@ pub fn do_gsay(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
     let buf = format!("$n tells the group, '{}'", argument);
 
-    let k_grouped = g.get_char(k).map(|c| c.affect_flags & AFF_GROUP != 0).unwrap_or(false);
+    let k_grouped = g
+        .get_char(k)
+        .map(|c| c.affect_flags & AFF_GROUP != 0)
+        .unwrap_or(false);
     if k_grouped && k != ch {
         act_sleep(g, &buf, false, ch, None, ActArg::Char(k), To::Vict, true);
     }
-    let followers = g.get_char(k).map(|c| c.followers.clone()).unwrap_or_default();
+    let followers = g
+        .get_char(k)
+        .map(|c| c.followers.clone())
+        .unwrap_or_default();
     for f in followers {
-        let f_grouped = g.get_char(f).map(|c| c.affect_flags & AFF_GROUP != 0).unwrap_or(false);
+        let f_grouped = g
+            .get_char(f)
+            .map(|c| c.affect_flags & AFF_GROUP != 0)
+            .unwrap_or(false);
         if f_grouped && f != ch && !isignore(g, f, ch, IGNORE_PRIVATE) {
             act_sleep(g, &buf, false, ch, None, ActArg::Char(f), To::Vict, true);
         }
@@ -668,7 +720,16 @@ fn perform_tell(g: &mut GameState, ch: CharId, vict: CharId, arg: &str) {
     g.send_to_char(vict, vred);
     let arg = makedrunk(arg, g, ch);
     let to_vict = format!("$n tells you, '{}'", arg);
-    act_sleep(g, &to_vict, false, ch, None, ActArg::Char(vict), To::Vict, true);
+    act_sleep(
+        g,
+        &to_vict,
+        false,
+        ch,
+        None,
+        ActArg::Char(vict),
+        To::Vict,
+        true,
+    );
     let vnrm = ccnrm(g, vict, C_NRM);
     g.send_to_char(vict, vnrm);
 
@@ -678,7 +739,16 @@ fn perform_tell(g: &mut GameState, ch: CharId, vict: CharId, arg: &str) {
         let cred = ccred(g, ch, C_CMP);
         g.send_to_char(ch, cred);
         let to_self = format!("You tell $N, '{}'", arg);
-        act_sleep(g, &to_self, false, ch, None, ActArg::Char(vict), To::Char, true);
+        act_sleep(
+            g,
+            &to_self,
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Char,
+            true,
+        );
         let cnrm = ccnrm(g, ch, C_CMP);
         g.send_to_char(ch, cnrm);
     }
@@ -694,19 +764,54 @@ fn is_tell_ok(g: &mut GameState, ch: CharId, vict: CharId) -> bool {
     if ch == vict {
         g.send_to_char(ch, "You try to tell yourself something.\r\n");
     } else if prf(g, ch, PRF_NOTELL) {
-        g.send_to_char(ch, "You can't tell other people while you have notell on.\r\n");
+        g.send_to_char(
+            ch,
+            "You can't tell other people while you have notell on.\r\n",
+        );
     } else if room_soundproof(g, ch) {
         g.send_to_char(ch, "The walls seem to absorb your words.\r\n");
     } else if !is_npc(g, vict) && !has_desc(g, vict) {
-        act(g, "$E's linkless at the moment.", false, ch, None, ActArg::Char(vict), To::Char);
+        act(
+            g,
+            "$E's linkless at the moment.",
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Char,
+        );
     } else if plr(g, vict, PLR_WRITING) {
-        act(g, "$E's writing a message right now; try again later.", false, ch, None, ActArg::Char(vict), To::Char);
+        act(
+            g,
+            "$E's writing a message right now; try again later.",
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Char,
+        );
     } else if prf(g, vict, PRF_NOTELL) || room_soundproof(g, vict) {
-        act(g, "$E can't hear you.", false, ch, None, ActArg::Char(vict), To::Char);
+        act(
+            g,
+            "$E can't hear you.",
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Char,
+        );
     } else if isignoresend(g, vict, ch, IGNORE_PRIVATE) {
         return false;
     } else if prf(g, vict, PRF_AFK) {
-        act(g, "$E has AFK on, and may not see your message.", false, ch, None, ActArg::Char(vict), To::Char);
+        act(
+            g,
+            "$E has AFK on, and may not see your message.",
+            false,
+            ch,
+            None,
+            ActArg::Char(vict),
+            To::Char,
+        );
         return true; // still delivered
     } else {
         return true;
@@ -773,7 +878,10 @@ pub fn do_spec_comm(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
     let (name, message) = half_chop(arg);
 
     if name.is_empty() || message.is_empty() {
-        g.send_to_char(ch, &format!("Whom do you want to {}.. and what??\r\n", action_sing));
+        g.send_to_char(
+            ch,
+            &format!("Whom do you want to {}.. and what??\r\n", action_sing),
+        );
         return;
     }
     let vict = match g.get_char_room_vis(ch, &name) {
@@ -784,7 +892,10 @@ pub fn do_spec_comm(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
         }
     };
     if vict == ch {
-        g.send_to_char(ch, "You can't get your mouth close enough to your ear...\r\n");
+        g.send_to_char(
+            ch,
+            "You can't get your mouth close enough to your ear...\r\n",
+        );
         return;
     }
     if isignoresend(g, vict, ch, IGNORE_PRIVATE) {
@@ -802,18 +913,25 @@ pub fn do_spec_comm(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
         let to_self = format!("You {} {}, '{}'\r\n", action_sing, vname, message);
         act(g, &to_self, false, ch, None, ActArg::None, To::Char);
     }
-    act(g, action_others, false, ch, None, ActArg::Char(vict), To::NotVict);
+    act(
+        g,
+        action_others,
+        false,
+        ch,
+        None,
+        ActArg::Char(vict),
+        To::NotVict,
+    );
 }
 
 // ---------------------------------------------------------------------------
-// do_write — compose a note onto paper using a pen. The string editor and the
-// descriptor's note plumbing are not yet ported, so this reproduces every
-// pre-editor validation message; on success it tells the writer the editor is
-// open and broadcasts the "$n begins to jot down a note." line.
+// do_write — compose a note onto paper using a pen.
 // ---------------------------------------------------------------------------
+const MAX_NOTE_LENGTH: usize = 1000;
+
 pub fn do_write(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
-    use crate::object::ObjectType;
     use crate::interpreter::any_one_arg;
+    use crate::object::ObjectType;
 
     // two_arguments: paper, then pen (both lowercased, fill-words not skipped).
     let (papername, rest) = any_one_arg(arg);
@@ -823,11 +941,17 @@ pub fn do_write(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
     if papername.is_empty() {
-        g.send_to_char(ch, "Write?  With what?  ON what?  What are you trying to do?!?\r\n");
+        g.send_to_char(
+            ch,
+            "Write?  With what?  ON what?  What are you trying to do?!?\r\n",
+        );
         return;
     }
 
-    let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let inv = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     let mut paper: Option<ObjId>;
     let mut pen: Option<ObjId>;
 
@@ -849,12 +973,18 @@ pub fn do_write(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         let p = match paper {
             Some(p) => p,
             None => {
-                g.send_to_char(ch, &format!("There is no {} in your inventory.\r\n", papername));
+                g.send_to_char(
+                    ch,
+                    &format!("There is no {} in your inventory.\r\n", papername),
+                );
                 return;
             }
         };
         pen = None;
-        let ptype = g.get_obj(p).map(|o| o.obj_type).unwrap_or(ObjectType::Other);
+        let ptype = g
+            .get_obj(p)
+            .map(|o| o.obj_type)
+            .unwrap_or(ObjectType::Other);
         // ITEM_PEN is DeltaMUD's pen item; the contract ObjectType has no Pen
         // variant, so a "pen" is any non-note item the player names as paper.
         if ptype == ObjectType::Note {
@@ -870,7 +1000,10 @@ pub fn do_write(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             Some(h) => h,
             None => {
                 let an = a_or_an(&papername);
-                g.send_to_char(ch, &format!("You can't write with {} {} alone.\r\n", an, papername));
+                g.send_to_char(
+                    ch,
+                    &format!("You can't write with {} {} alone.\r\n", an, papername),
+                );
                 return;
             }
         };
@@ -892,32 +1025,74 @@ pub fn do_write(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         None => return,
     };
 
-    let pen_type = g.get_obj(pen).map(|o| o.obj_type).unwrap_or(ObjectType::Other);
-    let paper_type = g.get_obj(paper).map(|o| o.obj_type).unwrap_or(ObjectType::Other);
+    let pen_type = g
+        .get_obj(pen)
+        .map(|o| o.obj_type)
+        .unwrap_or(ObjectType::Other);
+    let paper_type = g
+        .get_obj(paper)
+        .map(|o| o.obj_type)
+        .unwrap_or(ObjectType::Other);
     let already = g
         .get_obj(paper)
-        .map(|o| o.action_description.as_ref().map(|s| !s.is_empty()).unwrap_or(false))
+        .map(|o| {
+            o.action_description
+                .as_ref()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)
+        })
         .unwrap_or(false);
 
     if paper_type != ObjectType::Note {
         // C: "$p is no good for writing with." iff pen isn't a pen; but with no
         // ITEM_PEN type the pen check collapses — the note check is the gate.
-        act(g, "You can't write on $p.", false, ch, Some(paper), ActArg::None, To::Char);
+        act(
+            g,
+            "You can't write on $p.",
+            false,
+            ch,
+            Some(paper),
+            ActArg::None,
+            To::Char,
+        );
     } else if pen_type == ObjectType::Note {
         // The "pen" is actually a note — no good for writing.
-        act(g, "$p is no good for writing with.", false, ch, Some(pen), ActArg::None, To::Char);
+        act(
+            g,
+            "$p is no good for writing with.",
+            false,
+            ch,
+            Some(pen),
+            ActArg::None,
+            To::Char,
+        );
     } else if already {
         g.send_to_char(ch, "There's something written on it already.\r\n");
     } else {
         // We can write.
         g.send_to_char(ch, "Write your note.  (/s saves /h for help)\r\n");
-        act(g, "$n begins to jot down a note.", true, ch, None, ActArg::None, To::Room);
-        // The descriptor's string editor would be opened here once ported.
+        act(
+            g,
+            "$n begins to jot down a note.",
+            true,
+            ch,
+            None,
+            ActArg::None,
+            To::Room,
+        );
+        if let Some(conn) = g.get_char(ch).and_then(|c| c.desc) {
+            crate::modify::start_note_editing(g, conn, paper, MAX_NOTE_LENGTH);
+        }
     }
 }
 
 fn a_or_an(word: &str) -> &'static str {
-    let first = word.trim_start().chars().next().unwrap_or('x').to_ascii_lowercase();
+    let first = word
+        .trim_start()
+        .chars()
+        .next()
+        .unwrap_or('x')
+        .to_ascii_lowercase();
     if "aeiou".contains(first) {
         "an"
     } else {
@@ -974,17 +1149,56 @@ pub fn do_page(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 // ---------------------------------------------------------------------------
 pub fn do_gen_comm(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
     // channels[subcmd]: the PRF_* flag that must NOT be set to hear the channel.
-    let channels = [0i64, PRF_DEAF, PRF_NOGOSS, PRF_NOAUCT, PRF_NOGRATZ, 0, PRF_NOARENA, 0];
+    let channels = [
+        0i64,
+        PRF_DEAF,
+        PRF_NOGOSS,
+        PRF_NOAUCT,
+        PRF_NOGRATZ,
+        0,
+        PRF_NOARENA,
+        0,
+    ];
 
     // com_msgs[subcmd] = [cant_msg, name, not_on_channel_msg, color]
     let com_msgs: [[&str; 4]; 7] = [
         ["You cannot holler!!\r\n", "holler", "", "&Y"],
-        ["You cannot shout!!\r\n", "shout", "Turn off your noshout flag first!\r\n", "&Y"],
-        ["You cannot gossip!!\r\n", "GOSSIP", "You aren't even on the channel!\r\n", "&Y"],
-        ["You cannot auction!!\r\n", "AUCTION", "You aren't even on the channel!\r\n", "&M"],
-        ["You cannot congratulate!\r\n", "CONGRAT", "You aren't even on the channel!\r\n", "&G"],
-        ["You cannot gemote!\r\n", "gemote", "You aren't even on the channel!\r\n", "&G"],
-        ["You cannot arena?!\r\n", "ARENA", "You aren't even on the channel!\r\n", "&Y"],
+        [
+            "You cannot shout!!\r\n",
+            "shout",
+            "Turn off your noshout flag first!\r\n",
+            "&Y",
+        ],
+        [
+            "You cannot gossip!!\r\n",
+            "GOSSIP",
+            "You aren't even on the channel!\r\n",
+            "&Y",
+        ],
+        [
+            "You cannot auction!!\r\n",
+            "AUCTION",
+            "You aren't even on the channel!\r\n",
+            "&M",
+        ],
+        [
+            "You cannot congratulate!\r\n",
+            "CONGRAT",
+            "You aren't even on the channel!\r\n",
+            "&G",
+        ],
+        [
+            "You cannot gemote!\r\n",
+            "gemote",
+            "You aren't even on the channel!\r\n",
+            "&G",
+        ],
+        [
+            "You cannot arena?!\r\n",
+            "ARENA",
+            "You aren't even on the channel!\r\n",
+            "&Y",
+        ],
     ];
 
     let mut subcmd = subcmd;
@@ -1014,7 +1228,10 @@ pub fn do_gen_comm(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
     if level(g, ch) < LEVEL_CAN_SHOUT {
         g.send_to_char(
             ch,
-            &format!("You must be at least level {} before you can {}.\r\n", LEVEL_CAN_SHOUT, com_msgs[idx][1]),
+            &format!(
+                "You must be at least level {} before you can {}.\r\n",
+                LEVEL_CAN_SHOUT, com_msgs[idx][1]
+            ),
         );
         return;
     }
@@ -1038,7 +1255,10 @@ pub fn do_gen_comm(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
     if argument.is_empty() {
         g.send_to_char(
             ch,
-            &format!("Yes, {}, fine, {} we must, but WHAT???\r\n", com_msgs[idx][1], com_msgs[idx][1]),
+            &format!(
+                "Yes, {}, fine, {} we must, but WHAT???\r\n",
+                com_msgs[idx][1], com_msgs[idx][1]
+            ),
         );
         return;
     }
@@ -1111,7 +1331,10 @@ pub fn do_gen_comm(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
         }
         if subcmd == SCMD_SHOUT {
             let tgt_zone = in_room(g, tgt).and_then(|r| g.room_opt(r)).map(|r| r.zone);
-            let tgt_pos = g.get_char(tgt).map(|c| c.position).unwrap_or(Position::Standing);
+            let tgt_pos = g
+                .get_char(tgt)
+                .map(|c| c.position)
+                .unwrap_or(Position::Standing);
             if tgt_zone != my_zone || tgt_pos < Position::Resting {
                 continue;
             }
@@ -1140,7 +1363,10 @@ pub fn do_qcomm(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
     if argument.is_empty() {
         // C uses CMD_NAME (the command word). qsay -> "Qsay?", qecho -> "Qecho?".
         let cmd_name = if subcmd == SCMD_QSAY { "qsay" } else { "qecho" };
-        let mut out = format!("{}?  Yes, fine, {} we must, but WHAT??\r\n", cmd_name, cmd_name);
+        let mut out = format!(
+            "{}?  Yes, fine, {} we must, but WHAT??\r\n",
+            cmd_name, cmd_name
+        );
         cap_first(&mut out);
         g.send_to_char(ch, &out);
         return;

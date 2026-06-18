@@ -95,7 +95,10 @@ fn edits() -> &'static Mutex<HashMap<ConnId, EditState>> {
 }
 
 fn set_edit(conn: ConnId, target: EditTarget, max_len: usize) {
-    edits().lock().unwrap().insert(conn, EditState { target, max_len });
+    edits()
+        .lock()
+        .unwrap()
+        .insert(conn, EditState { target, max_len });
 }
 
 fn take_edit(conn: ConnId) -> Option<EditState> {
@@ -103,7 +106,12 @@ fn take_edit(conn: ConnId) -> Option<EditState> {
 }
 
 fn edit_max_len(conn: ConnId) -> usize {
-    edits().lock().unwrap().get(&conn).map(|e| e.max_len).unwrap_or(0)
+    edits()
+        .lock()
+        .unwrap()
+        .get(&conn)
+        .map(|e| e.max_len)
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -207,7 +215,13 @@ pub fn start_textfile_editing(
     initial: &str,
     max_len: usize,
 ) {
-    push_editor_with(g, conn, max_len, EditTarget::TextFile(path), initial.to_string());
+    push_editor_with(
+        g,
+        conn,
+        max_len,
+        EditTarget::TextFile(path),
+        initial.to_string(),
+    );
 }
 
 fn push_editor(g: &mut GameState, conn: ConnId, max_len: usize, target: EditTarget) {
@@ -229,7 +243,10 @@ fn push_editor_with(
         });
     }
     // Mark the character PLR_WRITING (and PLR_MAILING for mail).
-    let mailing = matches!(edits().lock().unwrap().get(&conn).map(|e| &e.target), Some(EditTarget::Mail));
+    let mailing = matches!(
+        edits().lock().unwrap().get(&conn).map(|e| &e.target),
+        Some(EditTarget::Mail)
+    );
     if let Some(cid) = conn_char(g, conn) {
         if let Some(c) = g.get_char_mut(cid) {
             if !c.is_npc {
@@ -383,7 +400,11 @@ fn finish_editor(g: &mut GameState, conn: ConnId, terminator: i32) {
     match target {
         EditTarget::Note(oid) => {
             if saved {
-                let text = if body.is_empty() { None } else { Some(buffer.clone()) };
+                let text = if body.is_empty() {
+                    None
+                } else {
+                    Some(buffer.clone())
+                };
                 if let Some(o) = g.get_obj_mut(oid) {
                     o.action_description = text;
                 }
@@ -392,7 +413,15 @@ fn finish_editor(g: &mut GameState, conn: ConnId, terminator: i32) {
                 send_to_q(g, conn, "Note aborted.\r\n");
             }
             if let Some(cid) = cid {
-                act(g, "$n stops writing a note.", true, cid, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n stops writing a note.",
+                    true,
+                    cid,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
             }
         }
         EditTarget::Mail => {
@@ -439,7 +468,12 @@ fn finish_editor(g: &mut GameState, conn: ConnId, terminator: i32) {
                             .and_then(|c| g.get_char(c))
                             .map(|c| c.player.name.clone())
                             .unwrap_or_default();
-                        mudlog(g, &format!("OLC: {} saves '{}'.", name, path.display()), crate::syslog::CMP, LVL_GOD);
+                        mudlog(
+                            g,
+                            &format!("OLC: {} saves '{}'.", name, path.display()),
+                            crate::syslog::CMP,
+                            LVL_GOD,
+                        );
                         send_to_q(g, conn, "Saved.\r\n");
                     }
                     Err(_) => {
@@ -455,7 +489,15 @@ fn finish_editor(g: &mut GameState, conn: ConnId, terminator: i32) {
                 send_to_q(g, conn, "Edit aborted.\r\n");
             }
             if let Some(cid) = cid {
-                act(g, "$n stops editing some scrolls.", true, cid, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n stops editing some scrolls.",
+                    true,
+                    cid,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
             }
         }
         EditTarget::Plain => {
@@ -486,7 +528,11 @@ fn apply_char_field(g: &mut GameState, cid: CharId, field: StrField, saved: bool
             StrField::Name => c.player.name = text,
             StrField::Short => c.short_desc = if text.is_empty() { None } else { Some(text) },
             StrField::Long => {
-                c.long_desc = if text.is_empty() { None } else { Some(format!("{}\r\n", text)) }
+                c.long_desc = if text.is_empty() {
+                    None
+                } else {
+                    Some(format!("{}\r\n", text))
+                }
             }
             StrField::Description => c.player.description = text,
             StrField::Title => c.player.title = if text.is_empty() { None } else { Some(text) },
@@ -565,7 +611,10 @@ fn parse_action(g: &mut GameState, conn: ConnId, command: ParseCmd, string: &str
             let buf = read_buffer(g, conn).unwrap_or_default();
             let formatted = format_text(&buf, flags, max);
             write_buffer(g, conn, formatted);
-            let msg = format!("Text formatted with{} indent.\r\n", if indent { "" } else { "out" });
+            let msg = format!(
+                "Text formatted with{} indent.\r\n",
+                if indent { "" } else { "out" }
+            );
             send_to_q(g, conn, &msg);
         }
         ParseCmd::Replace => {
@@ -585,7 +634,11 @@ fn parse_action(g: &mut GameState, conn: ConnId, command: ParseCmd, string: &str
             let s = match toks.next() {
                 Some(t) if !t.is_empty() => t,
                 Some(_) => {
-                    send_to_q(g, conn, "Target string must be enclosed in single quotes.\r\n");
+                    send_to_q(
+                        g,
+                        conn,
+                        "Target string must be enclosed in single quotes.\r\n",
+                    );
                     return;
                 }
                 None => {
@@ -619,7 +672,10 @@ fn parse_action(g: &mut GameState, conn: ConnId, command: ParseCmd, string: &str
                     send_to_q(
                         g,
                         conn,
-                        &format!("Replaced {} occurance{}of '{}' with '{}'.\r\n", n, plural, s, t),
+                        &format!(
+                            "Replaced {} occurance{}of '{}' with '{}'.\r\n",
+                            n, plural, s, t
+                        ),
                     );
                 }
                 ReplaceResult::NotFound => {
@@ -638,7 +694,11 @@ fn parse_action(g: &mut GameState, conn: ConnId, command: ParseCmd, string: &str
             let (low, high) = match scan_range(string) {
                 Some(r) => r,
                 None => {
-                    send_to_q(g, conn, "You must specify a line number or range to delete.\r\n");
+                    send_to_q(
+                        g,
+                        conn,
+                        "You must specify a line number or range to delete.\r\n",
+                    );
                     return;
                 }
             };
@@ -647,7 +707,11 @@ fn parse_action(g: &mut GameState, conn: ConnId, command: ParseCmd, string: &str
                 return;
             }
             if low <= 0 {
-                send_to_q(g, conn, "Invalid line numbers to delete must be higher than 0.\r\n");
+                send_to_q(
+                    g,
+                    conn,
+                    "Invalid line numbers to delete must be higher than 0.\r\n",
+                );
                 return;
             }
             let buf = read_buffer(g, conn).unwrap_or_default();
@@ -669,7 +733,11 @@ fn parse_action(g: &mut GameState, conn: ConnId, command: ParseCmd, string: &str
         ParseCmd::Insert => {
             let (numstr, text) = half_chop(string);
             if numstr.is_empty() {
-                send_to_q(g, conn, "You must specify a line number before which to insert text.\r\n");
+                send_to_q(
+                    g,
+                    conn,
+                    "You must specify a line number before which to insert text.\r\n",
+                );
                 return;
             }
             let line_low: i32 = numstr.parse().unwrap_or(0);
@@ -703,7 +771,11 @@ fn parse_action(g: &mut GameState, conn: ConnId, command: ParseCmd, string: &str
         ParseCmd::Edit => {
             let (numstr, text) = half_chop(string);
             if numstr.is_empty() {
-                send_to_q(g, conn, "You must specify a line number at which to change text.\r\n");
+                send_to_q(
+                    g,
+                    conn,
+                    "You must specify a line number at which to change text.\r\n",
+                );
                 return;
             }
             let line_low: i32 = numstr.parse().unwrap_or(0);
@@ -934,11 +1006,7 @@ fn format_text(src: &str, mode: i32, maxlen: usize) -> String {
         if i < n {
             let start = i;
             i += 1;
-            while i < n
-                && !is_ws(chars[i])
-                && chars[i] != '.'
-                && chars[i] != '?'
-                && chars[i] != '!'
+            while i < n && !is_ws(chars[i]) && chars[i] != '.' && chars[i] != '?' && chars[i] != '!'
             {
                 i += 1;
             }
@@ -999,7 +1067,13 @@ enum ReplaceResult {
 
 /// replace_str (utils.c): replace the first (or all) occurrence(s) of `pattern`
 /// with `replacement`, bounded by `max_size`.
-fn replace_str(buf: &str, pattern: &str, replacement: &str, rep_all: bool, max_size: usize) -> ReplaceResult {
+fn replace_str(
+    buf: &str,
+    pattern: &str,
+    replacement: &str,
+    rep_all: bool,
+    max_size: usize,
+) -> ReplaceResult {
     if pattern.is_empty() {
         return ReplaceResult::NotFound;
     }
@@ -1112,7 +1186,10 @@ pub fn page_string(g: &mut GameState, conn: ConnId, str: &str) {
         return;
     }
     let pages = paginate(str);
-    pagers().lock().unwrap().insert(conn, Pager { pages, page: 0 });
+    pagers()
+        .lock()
+        .unwrap()
+        .insert(conn, Pager { pages, page: 0 });
     show_string(g, conn, "");
 }
 
@@ -1139,7 +1216,11 @@ fn show_string(g: &mut GameState, conn: ConnId, input: &str) {
             Some(p) => p,
             None => return,
         };
-        let first = input.trim_start().chars().next().map(|c| c.to_ascii_lowercase());
+        let first = input
+            .trim_start()
+            .chars()
+            .next()
+            .map(|c| c.to_ascii_lowercase());
         (first, p.page, p.pages.len())
     };
 
@@ -1266,7 +1347,9 @@ pub fn do_string(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     // Find a target: a character in the room first, then an object (inv/room).
     let max_len = field_max_len(field);
     if let Some(tcid) = g.get_char_room_vis(ch, &target_name) {
-        if g.get_char(tcid).map(|c| c.is_npc).unwrap_or(false) || field == StrField::DeleteDescription {
+        if g.get_char(tcid).map(|c| c.is_npc).unwrap_or(false)
+            || field == StrField::DeleteDescription
+        {
             if !text.is_empty() || field == StrField::DeleteDescription {
                 // Inline set / delete.
                 apply_char_field(g, tcid, field, true, &text);
@@ -1274,17 +1357,29 @@ pub fn do_string(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             } else {
                 // Open the editor seeded with the current value.
                 let seed = current_char_field(g, tcid, field);
-                open_field_editor(g, conn, EditTarget::CharField { cid: tcid, field }, max_len, &seed);
+                open_field_editor(
+                    g,
+                    conn,
+                    EditTarget::CharField { cid: tcid, field },
+                    max_len,
+                    &seed,
+                );
                 g.send_to_char(ch, "Edit the field.  (/s saves /h for help)\r\n\r\n");
             }
         } else {
-            g.send_to_char(ch, "You can only string NPCs and objects (not players' core fields).\r\n");
+            g.send_to_char(
+                ch,
+                "You can only string NPCs and objects (not players' core fields).\r\n",
+            );
         }
         return;
     }
 
     // Object lookup: inventory then room.
-    let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let inv = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     let mut oid = g.get_obj_in_list_vis(ch, &target_name, &inv);
     if oid.is_none() {
         if let Some(rnum) = g.get_char(ch).and_then(|c| c.in_room) {
@@ -1299,7 +1394,13 @@ pub fn do_string(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 g.send_to_char(ch, "Field set.\r\n");
             } else {
                 let seed = current_obj_field(g, o, field);
-                open_field_editor(g, conn, EditTarget::ObjField { oid: o, field }, max_len, &seed);
+                open_field_editor(
+                    g,
+                    conn,
+                    EditTarget::ObjField { oid: o, field },
+                    max_len,
+                    &seed,
+                );
                 g.send_to_char(ch, "Edit the field.  (/s saves /h for help)\r\n\r\n");
             }
         }
@@ -1308,7 +1409,13 @@ pub fn do_string(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 }
 
 /// Push a field editor seeded with the field's current text (so /l shows it).
-fn open_field_editor(g: &mut GameState, conn: ConnId, target: EditTarget, max_len: usize, seed: &str) {
+fn open_field_editor(
+    g: &mut GameState,
+    conn: ConnId,
+    target: EditTarget,
+    max_len: usize,
+    seed: &str,
+) {
     set_edit(conn, target, max_len);
     if let Some(d) = g.descriptors.get_mut(&conn) {
         d.editors.push(InputContext::StringEdit {
@@ -1447,14 +1554,26 @@ pub fn do_skillset(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
 
-    let ch_name = g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default();
-    let vict_name = g.get_char(vict).map(|c| c.player.name.clone()).unwrap_or_default();
+    let ch_name = g
+        .get_char(ch)
+        .map(|c| c.player.name.clone())
+        .unwrap_or_default();
+    let vict_name = g
+        .get_char(vict)
+        .map(|c| c.player.name.clone())
+        .unwrap_or_default();
     // C: mudlog(buf2, BRF, -1, TRUE) — the -1 level suppresses the immortal
     // echo (file-only). syslog::mudlog takes an unsigned threshold and always
     // echoes; LVL_IMMORT keeps the echo gated to immortals.
     mudlog(
         g,
-        &format!("{} changed {}'s {} to {}.", ch_name, vict_name, skill_name(skill), value),
+        &format!(
+            "{} changed {}'s {} to {}.",
+            ch_name,
+            vict_name,
+            skill_name(skill),
+            value
+        ),
         crate::syslog::BRF,
         LVL_IMMORT,
     );
@@ -1465,7 +1584,12 @@ pub fn do_skillset(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
     g.send_to_char(
         ch,
-        &format!("You change {}'s {} to {}.\r\n", vict_name, skill_name(skill), value),
+        &format!(
+            "You change {}'s {} to {}.\r\n",
+            vict_name,
+            skill_name(skill),
+            value
+        ),
     );
 }
 
@@ -1475,4 +1599,78 @@ pub fn do_skillset(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 /// PFT/CMP class for this message.
 fn mudlog(g: &mut GameState, line: &str, log_type: u8, min_level: u8) {
     crate::syslog::mudlog(g, line, log_type, min_level);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::{ConState, Descriptor};
+    use crate::object::Object;
+    use crate::types::{Class, ConnId, Race};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_CONN: AtomicU64 = AtomicU64::new(1);
+
+    fn editor_game() -> (GameState, ConnId, CharId, ObjId) {
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(NEXT_TEST_CONN.fetch_add(1, Ordering::SeqCst));
+
+        let mut ch = Character::new_player("Writer".to_string(), Class::Warrior, Race::Human);
+        ch.desc = Some(conn);
+        let ch_id = g.create_char(ch);
+
+        let mut d = Descriptor::new(conn, "test".to_string());
+        d.state = ConState::Playing;
+        d.character = Some(ch_id);
+        g.descriptors.insert(conn, d);
+
+        let obj = Object::new(1, "note paper".to_string(), "a note".to_string());
+        let obj_id = g.create_obj(obj);
+        (g, conn, ch_id, obj_id)
+    }
+
+    #[test]
+    fn note_editor_save_installs_body_and_finishes() {
+        let (mut g, conn, _ch, obj) = editor_game();
+        start_note_editing(&mut g, conn, obj, 1000);
+
+        assert!(editor_input(&mut g, conn, "hello"));
+        assert!(!editor_input(&mut g, conn, "/s"));
+        g.descriptors.get_mut(&conn).unwrap().editors.pop();
+
+        assert!(g.descriptors.get(&conn).unwrap().editors.is_empty());
+        assert_eq!(
+            g.get_obj(obj).unwrap().action_description.as_deref(),
+            Some("hello\r\n")
+        );
+        assert!(g
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("Note saved."));
+    }
+
+    #[test]
+    fn note_editor_abort_clears_writer_flag_without_saving() {
+        let (mut g, conn, ch, obj) = editor_game();
+        start_note_editing(&mut g, conn, obj, 1000);
+        assert_ne!(g.get_char(ch).unwrap().act_flags & PLR_WRITING, 0);
+
+        assert!(editor_input(&mut g, conn, "discard me"));
+        assert!(!editor_input(&mut g, conn, "/a"));
+        g.descriptors.get_mut(&conn).unwrap().editors.pop();
+
+        assert!(g.descriptors.get(&conn).unwrap().editors.is_empty());
+        assert!(g.get_obj(obj).unwrap().action_description.is_none());
+        assert_eq!(g.get_char(ch).unwrap().act_flags & PLR_WRITING, 0);
+        assert!(g
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("Note aborted."));
+    }
 }

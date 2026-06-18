@@ -178,13 +178,7 @@ impl GameState {
         }
     }
 
-    fn adjust_room_light_for_equipment(
-        &mut self,
-        cid: CharId,
-        oid: ObjId,
-        pos: usize,
-        delta: i32,
-    ) {
+    fn adjust_room_light_for_equipment(&mut self, cid: CharId, oid: ObjId, pos: usize, delta: i32) {
         if pos != WEAR_LIGHT || !self.is_lit_light(oid) {
             return;
         }
@@ -443,8 +437,14 @@ impl GameState {
         let mut mods: Vec<(i32, i32)> = Vec::new();
         let mut flagbits: i64 = 0;
         if let Some(ch) = self.chars.get(&cid) {
-            for slot in ch.equipment.iter().flatten() {
-                if let Some(obj) = self.objs.get(slot) {
+            for (pos, slot) in ch.equipment.iter().enumerate() {
+                if let Some(oid) = *slot {
+                    let Some(obj) = self.objs.get(&oid) else {
+                        continue;
+                    };
+                    if obj.obj_type == ObjectType::Armor {
+                        mods.push((APPLY_DEFENSE, armor_ac_modifier(pos, obj.values[0])));
+                    }
                     for a in &obj.affects {
                         mods.push((a.location, a.modifier));
                     }
@@ -484,6 +484,15 @@ impl GameState {
             }
         }
     }
+}
+
+fn armor_ac_modifier(pos: usize, armor_value: i32) -> i32 {
+    let factor = match pos {
+        WEAR_BODY => 3,
+        WEAR_HEAD | WEAR_LEGS => 2,
+        _ => 1,
+    };
+    factor * armor_value
 }
 
 /// check_perm_duration (handler.c): true if `ch` carries a permanent affect
@@ -773,6 +782,45 @@ mod tests {
         assert_eq!(g.get_char(cid).unwrap().points.max_hit, base_hit);
     }
 
+    #[test]
+    fn armor_value_applies_slot_scaled_defense_without_doubling() {
+        let mut g = fresh_game();
+        let cid = g.create_char(Character::new_player(
+            "Armored".into(),
+            Class::Warrior,
+            Race::Human,
+        ));
+        g.affect_total(cid);
+        let base_def = g.get_char(cid).unwrap().points.defense;
+
+        let mut armor = Object::new(2, "armor".into(), "some armor".into());
+        armor.obj_type = ObjectType::Armor;
+        armor.values[0] = 7;
+        let oid = g.create_obj(armor);
+
+        for (slot, expected_bonus) in [
+            (WEAR_BODY, 21),
+            (WEAR_HEAD, 14),
+            (WEAR_LEGS, 14),
+            (WEAR_SHIELD, 7),
+        ] {
+            g.equip_char(cid, oid, slot);
+            assert_eq!(
+                g.get_char(cid).unwrap().points.defense,
+                base_def + expected_bonus
+            );
+            for _ in 0..3 {
+                g.affect_total(cid);
+            }
+            assert_eq!(
+                g.get_char(cid).unwrap().points.defense,
+                base_def + expected_bonus
+            );
+            assert_eq!(g.unequip_char(cid, slot), Some(oid));
+            assert_eq!(g.get_char(cid).unwrap().points.defense, base_def);
+        }
+    }
+
     /// BUG 2: an external base change (advance_level-style points bump) survives
     /// the affect_total strip/re-apply and combines correctly with equipment.
     #[test]
@@ -924,12 +972,7 @@ mod tests {
             "From".into(),
             "A room.".into(),
         ));
-        let to = g.add_room(crate::room::Room::new(
-            11,
-            0,
-            "To".into(),
-            "A room.".into(),
-        ));
+        let to = g.add_room(crate::room::Room::new(11, 0, "To".into(), "A room.".into()));
         let cid = g.create_char(Character::new_player(
             "Torchbearer".into(),
             Class::Warrior,

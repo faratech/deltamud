@@ -15,7 +15,7 @@ use crate::flags::{
     AFF_GROUP, AFF_HIDE, AFF_INVISIBLE, AFF_SANCTUARY, AFF_SLEEP, APPLY_POWER, MOB_DBLATTACK,
     MOB_WIMPY,
 };
-use crate::object::{Object, ObjectType, ObjLoc};
+use crate::object::{ObjLoc, Object, ObjectType};
 use crate::room::{RoomFlags, SectorType, EX_CLOSED};
 use crate::spell_parser::{
     MAX_SPELLS, SKILL_ADRENALINE, SKILL_BLOODLUST, SKILL_CARNALRAGE, SPELL_REDIRECT_CHARGE,
@@ -58,6 +58,7 @@ const AFF_R_CHARGED: i64 = 1 << 26;
 
 // config.c — PvP gating (pk_allowed is false on this MUD).
 const PK_ALLOWED: bool = false;
+const PK_VICTIM_MIN: Level = 10;
 // Position multiplier hack (fight.c) keys off POS_FIGHTING's ordinal (8).
 const POS_FIGHTING_ORD: i32 = Position::Fighting as i32;
 
@@ -89,8 +90,7 @@ pub fn set_fighting(g: &mut GameState, ch: CharId, victim: CharId) {
     if g.get_char(ch).and_then(|c| c.fighting).is_some() {
         return;
     }
-    if g
-        .get_char(ch)
+    if g.get_char(ch)
         .map(|c| c.affect_flags & AFF_SLEEP != 0)
         .unwrap_or(false)
     {
@@ -139,8 +139,8 @@ pub fn perform_violence(g: &mut GameState) {
             None => continue,
         };
         // Victim must still exist, be in the same room, and be alive.
-        let same_room = g.get_char(ch).and_then(|c| c.in_room)
-            == g.get_char(victim).and_then(|c| c.in_room);
+        let same_room =
+            g.get_char(ch).and_then(|c| c.in_room) == g.get_char(victim).and_then(|c| c.in_room);
         if !g.char_exists(victim) || !same_room {
             stop_fighting(g, ch);
             continue;
@@ -168,13 +168,24 @@ pub fn perform_violence(g: &mut GameState) {
                 }
             }
             if scrambled {
-                act(g, "$n scrambles to $s feet!", true, ch, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n scrambles to $s feet!",
+                    true,
+                    ch,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
             }
             if waiting {
                 continue;
             }
         }
-        if g.get_char(ch).map(|c| c.position != Position::Fighting).unwrap_or(true) {
+        if g.get_char(ch)
+            .map(|c| c.position != Position::Fighting)
+            .unwrap_or(true)
+        {
             continue;
         }
         let show_diag = g
@@ -271,7 +282,10 @@ fn damage_worn_equipment_after_hit(g: &mut GameState, ch: CharId) {
                 None
             };
             if let Some(short) = damaged {
-                g.send_to_char(victim, &format!("{} just got DAMAGED during the combat!\r\n", short));
+                g.send_to_char(
+                    victim,
+                    &format!("{} just got DAMAGED during the combat!\r\n", short),
+                );
                 g.mark_crash(victim);
             }
         }
@@ -280,7 +294,10 @@ fn damage_worn_equipment_after_hit(g: &mut GameState, ch: CharId) {
             .filter(|o| o.total_slots != 0 && o.curr_slots == 0)
             .map(|o| o.short_description.clone());
         if let Some(short) = crumble {
-            g.send_to_char(victim, &format!("{} crumbles to dust as it wears out!\r\n", short));
+            g.send_to_char(
+                victim,
+                &format!("{} crumbles to dust as it wears out!\r\n", short),
+            );
             g.obj_from_anywhere(oid);
             g.extract_obj(oid);
         }
@@ -295,11 +312,19 @@ fn damage_worn_equipment_after_hit(g: &mut GameState, ch: CharId) {
 /// Transcribed term-for-term from the C; the same integer truncation applies.
 pub fn chance(g: &GameState, ch: CharId, vict: CharId, ty: i32) -> i32 {
     let (c_tech, c_dex, c_int) = match g.get_char(ch) {
-        Some(c) => (c.points.technique as i32, c.aff_abils.dex as i32, c.aff_abils.intel as i32),
+        Some(c) => (
+            c.points.technique as i32,
+            c.aff_abils.dex as i32,
+            c.aff_abils.intel as i32,
+        ),
         None => return 0,
     };
     let (v_tech, v_dex, v_wis) = match g.get_char(vict) {
-        Some(c) => (c.points.technique as i32, c.aff_abils.dex as i32, c.aff_abils.wis as i32),
+        Some(c) => (
+            c.points.technique as i32,
+            c.aff_abils.dex as i32,
+            c.aff_abils.wis as i32,
+        ),
         None => return 0,
     };
     // sh_int p;  (C uses signed-short arithmetic, fits in i32 here)
@@ -406,14 +431,18 @@ pub fn hit_type(g: &mut GameState, ch: CharId, victim: CharId, ty: i32) {
     // C `hit(ch,victim,type)` forwards `type` to `damage()`; for an untyped
     // melee swing that resolves to the weapon verb (GET_ATTACKTYPE), and
     // SKILL_BACKSTAB stays SKILL_BACKSTAB. Match that here.
-    let attacktype = if ty == TYPE_UNDEFINED { get_attacktype(g, ch) } else { ty };
+    let attacktype = if ty == TYPE_UNDEFINED {
+        get_attacktype(g, ch)
+    } else {
+        ty
+    };
     let is_backstab = ty == SKILL_BACKSTAB as i32;
 
     crate::dg_triggers::fight_mtrigger(g, ch);
     crate::dg_triggers::fight_otrigger(g, ch);
 
-    let same_room = g.get_char(ch).and_then(|c| c.in_room)
-        == g.get_char(victim).and_then(|c| c.in_room);
+    let same_room =
+        g.get_char(ch).and_then(|c| c.in_room) == g.get_char(victim).and_then(|c| c.in_room);
     if !same_room {
         if g.get_char(ch).and_then(|c| c.fighting) == Some(victim) {
             stop_fighting(g, ch);
@@ -422,7 +451,10 @@ pub fn hit_type(g: &mut GameState, ch: CharId, victim: CharId, ty: i32) {
     }
 
     let diceroll = g.rng.number(0, 100);
-    let awake = g.get_char(victim).map(|c| c.position > Position::Sleeping).unwrap_or(false);
+    let awake = g
+        .get_char(victim)
+        .map(|c| c.position > Position::Sleeping)
+        .unwrap_or(false);
 
     // Decide whether this is a hit or a miss.
     if diceroll > chance(g, ch, victim, 0) && awake {
@@ -434,7 +466,10 @@ pub fn hit_type(g: &mut GameState, ch: CharId, victim: CharId, ty: i32) {
 
     // The victim has been hit; now calculate damage.
     let wield = g.get_char(ch).and_then(|c| c.equipment[WEAR_WIELD]);
-    let mut dam: i32 = if let Some((n, s)) = wield.and_then(|w| g.get_obj(w)).and_then(|o| o.damage_dice()) {
+    let mut dam: i32 = if let Some((n, s)) = wield
+        .and_then(|w| g.get_obj(w))
+        .and_then(|o| o.damage_dice())
+    {
         g.rng.dice(n, s)
     } else {
         // No weapon: NPCs use prototype damnodice/damsizedice, PCs roll 0..2.
@@ -454,7 +489,10 @@ pub fn hit_type(g: &mut GameState, ch: CharId, victim: CharId, ty: i32) {
 
     // Position multiplier if the victim isn't ready to fight (fight.c hack):
     //   sitting 1.33x .. mortally 3.00x. Integer math keyed off POS_FIGHTING.
-    let v_pos = g.get_char(victim).map(|c| c.position as i32).unwrap_or(POS_FIGHTING_ORD);
+    let v_pos = g
+        .get_char(victim)
+        .map(|c| c.position as i32)
+        .unwrap_or(POS_FIGHTING_ORD);
     if v_pos < POS_FIGHTING_ORD {
         dam *= 1 + (POS_FIGHTING_ORD - v_pos) / 3;
     }
@@ -598,12 +636,33 @@ fn try_defensive_skills(g: &mut GameState, ch: CharId, victim: CharId, attacktyp
 
     // --- Riposte: counter-attack ----------------------------------------
     if g.rng.number(1, 100) * AVOID_FACTOR <= skill(g, SKILL_RIPOSTE) {
-        act(g, "You anticipate $N's attack, avoiding it, and striking back!",
-            true, victim, None, ActArg::Char(ch), To::Char);
-        act(g, "$n anticipates your attack, and strikes back at you!",
-            false, victim, None, ActArg::Char(ch), To::Vict);
-        act(g, "$n anticipates $N's ameteur attack, and strikes back expertly.",
-            false, victim, None, ActArg::Char(ch), To::NotVict);
+        act(
+            g,
+            "You anticipate $N's attack, avoiding it, and striking back!",
+            true,
+            victim,
+            None,
+            ActArg::Char(ch),
+            To::Char,
+        );
+        act(
+            g,
+            "$n anticipates your attack, and strikes back at you!",
+            false,
+            victim,
+            None,
+            ActArg::Char(ch),
+            To::Vict,
+        );
+        act(
+            g,
+            "$n anticipates $N's ameteur attack, and strikes back expertly.",
+            false,
+            victim,
+            None,
+            ActArg::Char(ch),
+            To::NotVict,
+        );
 
         // Weapon dice (val1, val2) with the attacker's position multiplier,
         // else minimal bare-hand damage. damage_dice() yields Some only for a
@@ -616,7 +675,10 @@ fn try_defensive_skills(g: &mut GameState, ch: CharId, victim: CharId, attacktyp
         {
             Some((n, s)) => {
                 let mut d = g.rng.dice(n, s);
-                let ch_pos = g.get_char(ch).map(|c| c.position as i32).unwrap_or(POS_FIGHTING_ORD);
+                let ch_pos = g
+                    .get_char(ch)
+                    .map(|c| c.position as i32)
+                    .unwrap_or(POS_FIGHTING_ORD);
                 d *= 1 + (POS_FIGHTING_ORD - ch_pos) / 3;
                 d
             }
@@ -628,12 +690,33 @@ fn try_defensive_skills(g: &mut GameState, ch: CharId, victim: CharId, attacktyp
 
     // --- Avoid: trip the attacker ---------------------------------------
     if g.rng.number(1, 100) * AVOID_FACTOR <= skill(g, SKILL_AVOID) {
-        act(g, "You avoid $N's attack, tossing $M to the ground.",
-            true, victim, None, ActArg::Char(ch), To::Char);
-        act(g, "$n avoids your attack, trips you, sending you to the ground.",
-            false, victim, None, ActArg::Char(ch), To::Vict);
-        act(g, "$n avoids $N's pathetic attack and sends $M sprawling.",
-            false, victim, None, ActArg::Char(ch), To::NotVict);
+        act(
+            g,
+            "You avoid $N's attack, tossing $M to the ground.",
+            true,
+            victim,
+            None,
+            ActArg::Char(ch),
+            To::Char,
+        );
+        act(
+            g,
+            "$n avoids your attack, trips you, sending you to the ground.",
+            false,
+            victim,
+            None,
+            ActArg::Char(ch),
+            To::Vict,
+        );
+        act(
+            g,
+            "$n avoids $N's pathetic attack and sends $M sprawling.",
+            false,
+            victim,
+            None,
+            ActArg::Char(ch),
+            To::NotVict,
+        );
 
         if let Some(c) = g.get_char_mut(ch) {
             c.position = Position::Sitting;
@@ -644,23 +727,65 @@ fn try_defensive_skills(g: &mut GameState, ch: CharId, victim: CharId, attacktyp
 
     // --- Parry: full block ----------------------------------------------
     if g.rng.number(1, 100) * AVOID_FACTOR <= skill(g, SKILL_PARRY) {
-        act(g, "You parry $N's viscious attack upon your person.",
-            true, victim, None, ActArg::Char(ch), To::Char);
-        act(g, "$n spoils your attack with a deft parrying move.",
-            false, victim, None, ActArg::Char(ch), To::Vict);
-        act(g, "$n parries $N's attack with a series of skillful maneuvers.",
-            false, victim, None, ActArg::Char(ch), To::NotVict);
+        act(
+            g,
+            "You parry $N's viscious attack upon your person.",
+            true,
+            victim,
+            None,
+            ActArg::Char(ch),
+            To::Char,
+        );
+        act(
+            g,
+            "$n spoils your attack with a deft parrying move.",
+            false,
+            victim,
+            None,
+            ActArg::Char(ch),
+            To::Vict,
+        );
+        act(
+            g,
+            "$n parries $N's attack with a series of skillful maneuvers.",
+            false,
+            victim,
+            None,
+            ActArg::Char(ch),
+            To::NotVict,
+        );
         return true;
     }
 
     // --- Dodge: full evade ----------------------------------------------
     if g.rng.number(1, 100) * AVOID_FACTOR <= skill(g, SKILL_DODGE) {
-        act(g, "You narrowly dodge $N's masterful attack.",
-            true, victim, None, ActArg::Char(ch), To::Char);
-        act(g, "$n narrowly dodges your skillful attack, just avoiding your intended blow.",
-            false, victim, None, ActArg::Char(ch), To::Vict);
-        act(g, "$n narrowly dodges $N's strike.",
-            false, victim, None, ActArg::Char(ch), To::NotVict);
+        act(
+            g,
+            "You narrowly dodge $N's masterful attack.",
+            true,
+            victim,
+            None,
+            ActArg::Char(ch),
+            To::Char,
+        );
+        act(
+            g,
+            "$n narrowly dodges your skillful attack, just avoiding your intended blow.",
+            false,
+            victim,
+            None,
+            ActArg::Char(ch),
+            To::Vict,
+        );
+        act(
+            g,
+            "$n narrowly dodges $N's strike.",
+            false,
+            victim,
+            None,
+            ActArg::Char(ch),
+            To::NotVict,
+        );
         return true;
     }
 
@@ -735,8 +860,30 @@ fn adrenaline_rush(g: &mut GameState, ch: CharId, damage: i32) {
 /// and death. `attacktype` selects the verb table and the dam_multi flavour.
 pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, attacktype: i32) {
     // Attempt to damage a corpse -> resolve its death and bail (fight.c ~806).
-    if g.get_char(victim).map(|c| c.position <= Position::Dead).unwrap_or(true) {
+    if g.get_char(victim)
+        .map(|c| c.position <= Position::Dead)
+        .unwrap_or(true)
+    {
         die(g, ch, victim);
+        return;
+    }
+
+    if let Some(msg) = newbie_pvp_block_message(g, ch, victim) {
+        g.send_to_char(ch, msg);
+        return;
+    }
+
+    if g.get_char(ch).and_then(|c| c.in_room) != g.get_char(victim).and_then(|c| c.in_room) {
+        let log = format!(
+            "DEBUG: Timing Bug Trigger - {} (ch) and {} (victim) are not in same room.",
+            g.get_char(ch)
+                .map(|c| c.get_name().to_string())
+                .unwrap_or_default(),
+            g.get_char(victim)
+                .map(|c| c.get_name().to_string())
+                .unwrap_or_default(),
+        );
+        mudlog(g, &log, LVL_GRGOD);
         return;
     }
 
@@ -749,21 +896,47 @@ pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, atta
             .map(|r| g.room(r).room_flags.contains(RoomFlags::PEACEFUL))
             .unwrap_or(false);
         if peaceful && ch_lvl < LVL_IMPL {
-            g.send_to_char(ch, "This room just has such a peaceful, easy feeling...\r\n");
+            g.send_to_char(
+                ch,
+                "This room just has such a peaceful, easy feeling...\r\n",
+            );
             return;
         }
     }
 
+    if !crate::shop::ok_damage_shopkeeper(g, ch, victim) {
+        return;
+    }
+
     // You can't damage an immortal victim, or (as a mortal/NPC) an intangible
     // victim -> the blow lands for 0 damage (fight.c ~854).
-    let v_imm = g.get_char(victim).map(|c| !c.is_npc && c.player.level >= LVL_IMMORT).unwrap_or(false);
-    let ch_mortal_or_npc = g.get_char(ch).map(|c| c.is_npc || c.player.level < LVL_IMMORT).unwrap_or(true);
-    let v_intangible = g.get_char(victim).map(|c| c.prf2_flags & PRF2_INTANGIBLE != 0).unwrap_or(false);
-    let mut dmg = if v_imm || (ch_mortal_or_npc && v_intangible) { 0 } else { dmg };
+    let v_imm = g
+        .get_char(victim)
+        .map(|c| !c.is_npc && c.player.level >= LVL_IMMORT)
+        .unwrap_or(false);
+    let ch_mortal_or_npc = g
+        .get_char(ch)
+        .map(|c| c.is_npc || c.player.level < LVL_IMMORT)
+        .unwrap_or(true);
+    let v_intangible = g
+        .get_char(victim)
+        .map(|c| c.prf2_flags & PRF2_INTANGIBLE != 0)
+        .unwrap_or(false);
+    let mut dmg = if v_imm || (ch_mortal_or_npc && v_intangible) {
+        0
+    } else {
+        dmg
+    };
 
     // Intangibles (ghosts) can't fight: stop both and bail (fight.c ~857).
-    let ch_ghost = g.get_char(ch).map(|c| c.prf2_flags & PRF2_INTANGIBLE != 0 && c.prf2_flags & PRF2_MBUILDING == 0).unwrap_or(false);
-    let v_ghost = g.get_char(victim).map(|c| c.prf2_flags & PRF2_INTANGIBLE != 0 && c.prf2_flags & PRF2_MBUILDING == 0).unwrap_or(false);
+    let ch_ghost = g
+        .get_char(ch)
+        .map(|c| c.prf2_flags & PRF2_INTANGIBLE != 0 && c.prf2_flags & PRF2_MBUILDING == 0)
+        .unwrap_or(false);
+    let v_ghost = g
+        .get_char(victim)
+        .map(|c| c.prf2_flags & PRF2_INTANGIBLE != 0 && c.prf2_flags & PRF2_MBUILDING == 0)
+        .unwrap_or(false);
     let ch_lvl = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
     let v_lvl = g.get_char(victim).map(|c| c.player.level).unwrap_or(0);
     if (ch_ghost && v_lvl < LVL_IMMORT) || (v_ghost && ch_lvl < LVL_IMMORT) {
@@ -776,12 +949,18 @@ pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, atta
     // (fight.c ~864-877). This is what makes the opening blow actually start a
     // fight even when the victim parries/dodges it.
     if victim != ch {
-        let ch_can = g.get_char(ch).map(|c| c.position > Position::Stunned).unwrap_or(false)
+        let ch_can = g
+            .get_char(ch)
+            .map(|c| c.position > Position::Stunned)
+            .unwrap_or(false)
             && g.get_char(ch).and_then(|c| c.fighting).is_none();
         if ch_can {
             set_fighting(g, ch, victim);
         }
-        let v_can = g.get_char(victim).map(|c| c.position > Position::Stunned).unwrap_or(false)
+        let v_can = g
+            .get_char(victim)
+            .map(|c| c.position > Position::Stunned)
+            .unwrap_or(false)
             && g.get_char(victim).and_then(|c| c.fighting).is_none();
         if v_can {
             set_fighting(g, victim, ch);
@@ -796,12 +975,19 @@ pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, atta
     if g.get_char(victim).and_then(|c| c.master) == Some(ch) {
         crate::cmd_movement::stop_follower(g, victim);
     }
-    if g
-        .get_char(ch)
+    if g.get_char(ch)
         .map(|c| c.affect_flags & (AFF_INVISIBLE | AFF_HIDE) != 0)
         .unwrap_or(false)
     {
         crate::cmd_other::appear(g, ch);
+    }
+
+    if dmg >= 2
+        && g.get_char(victim)
+            .map(|c| c.affect_flags & AFF_SANCTUARY != 0)
+            .unwrap_or(false)
+    {
+        dmg /= 2;
     }
 
     // PK flagging on a non-PK MUD (fight.c do_actual_damage ~892).
@@ -811,16 +997,12 @@ pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, atta
 
     // Damage multiplier. Spells (1..=MAX_SPELLS) use the magical flavour;
     // everything else (weapons / skills / undefined) uses the physical one.
-    let mt = if attacktype > 0 && attacktype <= MAX_SPELLS { 1 } else { 0 };
+    let mt = if attacktype > 0 && attacktype <= MAX_SPELLS {
+        1
+    } else {
+        0
+    };
     dmg = (dmg as f32 * dam_multi(g, ch, victim, mt)) as i32;
-    if dmg >= 2
-        && g
-            .get_char(victim)
-            .map(|c| c.affect_flags & AFF_SANCTUARY != 0)
-            .unwrap_or(false)
-    {
-        dmg /= 2;
-    }
 
     // Victim defensive skills (fight.c do_actual_damage ~904): riposte / avoid /
     // parry / dodge. A successful defense consumes the swing AFTER engagement.
@@ -848,18 +1030,24 @@ pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, atta
     // SKILL_RIPOSTE attack types print nothing here — except TYPE_UNDEFINED,
     // which keeps the port's generic-hit fallback for environment / dg damage.
     const PRF2_MERCY: i64 = 1 << 7; // structs.h
-    if attacktype != TYPE_UNDEFINED && attacktype < SELF_DAMAGE && attacktype != SKILL_RIPOSTE as i32
+    if attacktype != TYPE_UNDEFINED
+        && attacktype < SELF_DAMAGE
+        && attacktype != SKILL_RIPOSTE as i32
     {
         if attacktype < TYPE_HIT {
             // Non-weapon attack (skill / spell): always use skill_message.
             crate::fight_messages::skill_message(g, dmg, ch, victim, attacktype);
         } else {
             // Weapon type (TYPE_HIT..SELF_DAMAGE).
-            let vict_dead =
-                g.get_char(victim).map(|c| c.position == Position::Dead).unwrap_or(false);
+            let vict_dead = g
+                .get_char(victim)
+                .map(|c| c.position == Position::Dead)
+                .unwrap_or(false);
             let ch_npc = g.get_char(ch).map(|c| c.is_npc).unwrap_or(true);
-            let ch_mercy =
-                g.get_char(ch).map(|c| c.prf2_flags & PRF2_MERCY != 0).unwrap_or(false);
+            let ch_mercy = g
+                .get_char(ch)
+                .map(|c| c.prf2_flags & PRF2_MERCY != 0)
+                .unwrap_or(false);
             // `deathblow` is not modelled in this path (false): a normal kill
             // tries the weapon's death-blow skill_message first, per C.
             if (vict_dead && !ch_mercy && !ch_npc) || dmg == 0 {
@@ -880,7 +1068,10 @@ pub fn damage_type(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32, atta
     trigger_pc_escape_thresholds(g, ch, victim);
     rescue_linkdead_victim(g, victim);
 
-    if g.get_char(victim).map(|c| c.position == Position::Dead).unwrap_or(false) {
+    if g.get_char(victim)
+        .map(|c| c.position == Position::Dead)
+        .unwrap_or(false)
+    {
         die(g, ch, victim);
     }
 }
@@ -907,7 +1098,10 @@ fn send_position_feedback(g: &mut GameState, ch: CharId, victim: CharId, dmg: i3
                 ActArg::None,
                 To::Room,
             );
-            g.send_to_char(victim, "You are mortally wounded, and will die soon, if not aided.\r\n");
+            g.send_to_char(
+                victim,
+                "You are mortally wounded, and will die soon, if not aided.\r\n",
+            );
         }
         Position::Incapacitated => {
             act(
@@ -919,7 +1113,10 @@ fn send_position_feedback(g: &mut GameState, ch: CharId, victim: CharId, dmg: i3
                 ActArg::None,
                 To::Room,
             );
-            g.send_to_char(victim, "You are incapacitated an will slowly die, if not aided.\r\n");
+            g.send_to_char(
+                victim,
+                "You are incapacitated an will slowly die, if not aided.\r\n",
+            );
         }
         Position::Stunned => {
             act(
@@ -931,15 +1128,34 @@ fn send_position_feedback(g: &mut GameState, ch: CharId, victim: CharId, dmg: i3
                 ActArg::None,
                 To::Room,
             );
-            g.send_to_char(victim, "You're stunned, but will probably regain consciousness again.\r\n");
+            g.send_to_char(
+                victim,
+                "You're stunned, but will probably regain consciousness again.\r\n",
+            );
         }
         Position::Dead => {
-            act(g, "$n is dead!  R.I.P.", false, victim, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n is dead!  R.I.P.",
+                false,
+                victim,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             g.send_to_char(victim, "You are dead!  Sorry...\r\n");
         }
         _ => {
             if max_hit > 0 && dmg > max_hit / 4 {
-                act(g, "That really did HURT!", false, victim, None, ActArg::None, To::Char);
+                act(
+                    g,
+                    "That really did HURT!",
+                    false,
+                    victim,
+                    None,
+                    ActArg::None,
+                    To::Char,
+                );
             }
             if max_hit > 0 && hit < max_hit / 4 {
                 g.send_to_char(
@@ -1057,11 +1273,18 @@ pub fn check_killer(g: &mut GameState, ch: CharId, vict: CharId) {
     }
 
     // Flag the killer, drop alignment to the floor, notify.
-    let ch_thief = g.get_char(ch).map(|c| c.act_flags & PLR_THIEF != 0).unwrap_or(false);
+    let ch_thief = g
+        .get_char(ch)
+        .map(|c| c.act_flags & PLR_THIEF != 0)
+        .unwrap_or(false);
     let log = format!(
         "PC Killer bit set on {} for initiating attack on {} at {}.",
-        g.get_char(ch).map(|c| c.get_name().to_string()).unwrap_or_default(),
-        g.get_char(vict).map(|c| c.get_name().to_string()).unwrap_or_default(),
+        g.get_char(ch)
+            .map(|c| c.get_name().to_string())
+            .unwrap_or_default(),
+        g.get_char(vict)
+            .map(|c| c.get_name().to_string())
+            .unwrap_or_default(),
         g.room(room).name.clone(),
     );
     if !ch_thief {
@@ -1100,7 +1323,11 @@ fn update_position(g: &mut GameState, ch: CharId) {
     if let Some(c) = g.get_char_mut(ch) {
         let hp = c.points.hit;
         c.position = if hp > 0 {
-            if c.position == Position::Fighting { Position::Fighting } else { c.position }
+            if c.position == Position::Fighting {
+                Position::Fighting
+            } else {
+                c.position
+            }
         } else if hp <= -11 {
             Position::Dead
         } else if hp <= -6 {
@@ -1113,6 +1340,27 @@ fn update_position(g: &mut GameState, ch: CharId) {
     }
 }
 
+fn newbie_pvp_block_message(g: &GameState, ch: CharId, victim: CharId) -> Option<&'static str> {
+    if PK_ALLOWED
+        || ch == victim
+        || (crate::arena::is_arena_combatant(ch) && crate::arena::is_arena_combatant(victim))
+    {
+        return None;
+    }
+    let attacker = g.get_char(ch)?;
+    let vict = g.get_char(victim)?;
+    if attacker.is_npc || vict.is_npc {
+        return None;
+    }
+    if vict.player.level < PK_VICTIM_MIN && vict.act_flags & PLR_THIEF == 0 {
+        return Some("Ack! But he's a newbie!\r\n");
+    }
+    if attacker.player.level < PK_VICTIM_MIN {
+        return Some("Wait till you're level 10 at least before becoming a PLAYER KILLER.\r\n");
+    }
+    None
+}
+
 /// death_cry (fight.c): wail into the dying char's room, then a generic cry into
 /// every adjacent room reachable through an open exit. C targets each neighbour
 /// by temporarily pointing the char's `in_room` at it — act()'s TO_ROOM audience
@@ -1121,16 +1369,22 @@ fn update_position(g: &mut GameState, ch: CharId) {
 /// extra there. Shared by every death path (combat, environment, weather, purge)
 /// so the neighbouring-room cries are no longer dropped.
 pub(crate) fn death_cry(g: &mut GameState, ch: CharId) {
-    act(g, "Your blood freezes as you hear $n's death cry.", false, ch, None, ActArg::None, To::Room);
+    act(
+        g,
+        "Your blood freezes as you hear $n's death cry.",
+        false,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
     let was_in = match g.get_char(ch).and_then(|c| c.in_room) {
         Some(r) => r,
         None => return,
     };
     for door in 0..NUM_OF_DIRS {
         // CAN_GO: an exit exists, resolves to a real room, and is not closed.
-        let to_vnum = g
-            .room(was_in)
-            .exits[door]
+        let to_vnum = g.room(was_in).exits[door]
             .as_ref()
             .filter(|e| e.exit_info & EX_CLOSED == 0)
             .map(|e| e.to_room);
@@ -1141,7 +1395,15 @@ pub(crate) fn death_cry(g: &mut GameState, ch: CharId) {
             if let Some(c) = g.get_char_mut(ch) {
                 c.in_room = Some(to_rnum);
             }
-            act(g, "Your blood freezes as you hear someone's death cry.", false, ch, None, ActArg::None, To::Room);
+            act(
+                g,
+                "Your blood freezes as you hear someone's death cry.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             if let Some(c) = g.get_char_mut(ch) {
                 c.in_room = Some(was_in);
             }
@@ -1180,7 +1442,15 @@ fn die(g: &mut GameState, killer: CharId, victim: CharId) {
     // raw_kill suppresses the death cry when the trigger returns false.
     let cry = crate::dg_triggers::death_mtrigger(g, victim, Some(killer));
 
-    act(g, "$n is dead! R.I.P.", false, victim, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n is dead! R.I.P.",
+        false,
+        victim,
+        None,
+        ActArg::None,
+        To::Room,
+    );
     g.send_to_char(victim, "You are dead!  Sorry...\r\n");
 
     // death_cry (raw_kill): wail into this room + every open-exit neighbour.
@@ -1192,16 +1462,26 @@ fn die(g: &mut GameState, killer: CharId, victim: CharId) {
 
     // Make a corpse holding the victim's inventory + equipment.
     if let Some(rnum) = rnum {
-        let name = g.get_char(victim).map(|c| c.display_for_others()).unwrap_or_default();
+        let name = g
+            .get_char(victim)
+            .map(|c| c.display_for_others())
+            .unwrap_or_default();
         let corpse = make_corpse(g, &name);
         // Move carried + worn objects into the corpse.
-        let carried = g.get_char(victim).map(|c| c.carrying.clone()).unwrap_or_default();
+        let carried = g
+            .get_char(victim)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         for oid in carried {
             g.obj_from_anywhere(oid);
             g.obj_to_obj(oid, corpse);
         }
         let worn: Vec<usize> = (0..NUM_WEARS)
-            .filter(|&p| g.get_char(victim).map(|c| c.equipment[p].is_some()).unwrap_or(false))
+            .filter(|&p| {
+                g.get_char(victim)
+                    .map(|c| c.equipment[p].is_some())
+                    .unwrap_or(false)
+            })
             .collect();
         for p in worn {
             if let Some(oid) = g.unequip_char(victim, p) {
@@ -1215,7 +1495,10 @@ fn die(g: &mut GameState, killer: CharId, victim: CharId) {
         // zeroed so it can't be looted twice.
         let gold = g.get_char(victim).map(|c| c.points.gold).unwrap_or(0);
         if gold > 0 {
-            let has_desc = g.get_char(victim).map(|c| c.is_npc || c.desc.is_some()).unwrap_or(false);
+            let has_desc = g
+                .get_char(victim)
+                .map(|c| c.is_npc || c.desc.is_some())
+                .unwrap_or(false);
             if has_desc {
                 let money = create_money(g, gold);
                 g.obj_to_obj(money, corpse);
@@ -1289,7 +1572,15 @@ fn handle_pc_kill_side_effects(g: &mut GameState, killer: CharId, victim: CharId
         if let Some(jail) = g.real_room(JAIL_NUM) {
             g.char_from_room(killer);
             g.char_to_room(killer, jail);
-            act(g, "$n suddenly appears in the room.", true, killer, None, ActArg::None, To::Room);
+            act(
+                g,
+                "$n suddenly appears in the room.",
+                true,
+                killer,
+                None,
+                ActArg::None,
+                To::Room,
+            );
             crate::cmd_informative::look_at_room(g, killer, false);
         }
     } else if victim_killer && !killer_npc {
@@ -1342,7 +1633,10 @@ fn award_kill_experience(g: &mut GameState, killer: CharId, victim: CharId) {
 fn solo_gain(g: &mut GameState, ch: CharId, victim: CharId) {
     let exp = kill_exp(g, victim, 1);
     if exp > 1 {
-        g.send_to_char(ch, &format!("You receive {} experience points.\r\n", numdisplay(exp)));
+        g.send_to_char(
+            ch,
+            &format!("You receive {} experience points.\r\n", numdisplay(exp)),
+        );
     } else {
         g.send_to_char(ch, "You receive one lousy experience point.\r\n");
     }
@@ -1395,7 +1689,10 @@ fn perform_group_gain(g: &mut GameState, ch: CharId, exp: i64, victim: CharId) {
             ),
         );
     } else {
-        g.send_to_char(ch, "You receive your share of experience -- one measly little point!\r\n");
+        g.send_to_char(
+            ch,
+            "You receive your share of experience -- one measly little point!\r\n",
+        );
     }
     crate::limits::gain_exp(g, ch, exp);
     change_alignment(g, ch, victim);
@@ -1447,7 +1744,11 @@ fn numdisplay(val: i64) -> String {
 }
 
 fn make_corpse(g: &mut GameState, who: &str) -> ObjId {
-    let mut obj = Object::new(NOTHING, format!("corpse {}", who), format!("the corpse of {}", who));
+    let mut obj = Object::new(
+        NOTHING,
+        format!("corpse {}", who),
+        format!("the corpse of {}", who),
+    );
     obj.description = format!("The corpse of {} is lying here.", who);
     obj.obj_type = ObjectType::Container;
     obj.timer = 60;
@@ -1524,7 +1825,10 @@ pub(crate) fn create_money(g: &mut GameState, amount: i32) -> ObjId {
 
 fn respawn_pc(g: &mut GameState, victim: CharId) {
     g.char_from_room(victim);
-    let home = g.get_char(victim).map(|c| c.player.hometown).unwrap_or(3001);
+    let home = g
+        .get_char(victim)
+        .map(|c| c.player.hometown)
+        .unwrap_or(3001);
     let rnum = g.real_room(home).or_else(|| g.real_room(3001)).unwrap_or(0);
     if let Some(c) = g.get_char_mut(victim) {
         c.points.hit = 1;
@@ -1532,7 +1836,10 @@ fn respawn_pc(g: &mut GameState, victim: CharId) {
         c.fighting = None;
     }
     g.char_to_room(victim, rnum);
-    g.send_to_char(victim, "\r\nYou feel your spirit drawn back to a familiar place...\r\n");
+    g.send_to_char(
+        victim,
+        "\r\nYou feel your spirit drawn back to a familiar place...\r\n",
+    );
     crate::cmd_informative::look_at_room(g, victim, false);
 }
 
@@ -1721,11 +2028,9 @@ mod tests {
     const TEST_W_BODY: usize = 5;
 
     fn player(g: &mut GameState, name: &str) -> CharId {
-        g.create_char(Character::new_player(
-            name.to_string(),
-            Class::Warrior,
-            Race::Human,
-        ))
+        let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        ch.player.level = PK_VICTIM_MIN;
+        g.create_char(ch)
     }
 
     fn connected_player(g: &mut GameState, name: &str, conn: ConnId) -> CharId {
@@ -1733,6 +2038,7 @@ mod tests {
             .insert(conn, Descriptor::new(conn, "test".to_string()));
         let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
         ch.desc = Some(conn);
+        ch.player.level = PK_VICTIM_MIN;
         g.create_char(ch)
     }
 
@@ -1754,7 +2060,12 @@ mod tests {
         oid
     }
 
-    fn make_dg_trigger(attach_type: i32, trigger_type: i64, narg: i32, cmds: &[&str]) -> crate::dg_handler::TrigId {
+    fn make_dg_trigger(
+        attach_type: i32,
+        trigger_type: i64,
+        narg: i32,
+        cmds: &[&str],
+    ) -> crate::dg_handler::TrigId {
         install_trig(TrigData {
             nr: 0,
             vnum: 9999,
@@ -1859,6 +2170,76 @@ mod tests {
         damage_type(&mut g, attacker, victim, 1, TYPE_UNDEFINED);
 
         assert_eq!(g.get_char(victim).unwrap().points.hit, 19);
+    }
+
+    #[test]
+    fn sanctuary_halves_before_damage_multiplier() {
+        let mut g = GameState::new(Config::default());
+        let attacker = player(&mut g, "Attacker");
+        let victim = player(&mut g, "Victim");
+        {
+            let a = g.get_char_mut(attacker).unwrap();
+            a.points.power = 200;
+        }
+        g.get_char_mut(victim).unwrap().affect_flags |= AFF_SANCTUARY;
+
+        damage_type(&mut g, attacker, victim, 9, TYPE_UNDEFINED);
+
+        assert_eq!(g.get_char(victim).unwrap().points.hit, 15);
+    }
+
+    #[test]
+    fn damage_blocks_pc_attacking_newbie_victim() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Pit".to_string(),
+            "A fighting pit.".to_string(),
+        ));
+        let attacker = connected_player(&mut g, "Attacker", ConnId(1));
+        let victim = connected_player(&mut g, "Victim", ConnId(2));
+        g.get_char_mut(victim).unwrap().player.level = PK_VICTIM_MIN - 1;
+        g.char_to_room(attacker, room);
+        g.char_to_room(victim, room);
+
+        damage_type(&mut g, attacker, victim, 10, TYPE_UNDEFINED);
+
+        assert_eq!(g.get_char(victim).unwrap().points.hit, 20);
+        assert_eq!(g.get_char(attacker).unwrap().fighting, None);
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("Ack! But he's a newbie!\r\n"));
+    }
+
+    #[test]
+    fn damage_blocks_underlevel_pc_attacker() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Pit".to_string(),
+            "A fighting pit.".to_string(),
+        ));
+        let attacker = connected_player(&mut g, "Attacker", ConnId(1));
+        let victim = connected_player(&mut g, "Victim", ConnId(2));
+        g.get_char_mut(attacker).unwrap().player.level = PK_VICTIM_MIN - 1;
+        g.char_to_room(attacker, room);
+        g.char_to_room(victim, room);
+
+        damage_type(&mut g, attacker, victim, 10, TYPE_UNDEFINED);
+
+        assert_eq!(g.get_char(victim).unwrap().points.hit, 20);
+        assert_eq!(g.get_char(attacker).unwrap().fighting, None);
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("Wait till you're level 10 at least before becoming a PLAYER KILLER.\r\n"));
     }
 
     #[test]
@@ -2068,7 +2449,12 @@ mod tests {
     #[test]
     fn perform_violence_calls_registered_mob_combat_spec() {
         let mut g = GameState::new(Config::default());
-        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Pit".to_string(),
+            "A fighting pit.".to_string(),
+        ));
         let mut snake = Character::new_npc(3618);
         snake.player.name = "Snake".to_string();
         snake.player.level = 42;
@@ -2101,7 +2487,12 @@ mod tests {
     #[test]
     fn npc_mob_wait_counts_down_and_recovers_to_fighting() {
         let mut g = GameState::new(Config::default());
-        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Pit".to_string(),
+            "A fighting pit.".to_string(),
+        ));
         let mut mob = Character::new_npc(99);
         mob.player.name = "Bruiser".to_string();
         mob.position = Position::Sitting;
@@ -2141,7 +2532,12 @@ mod tests {
     #[test]
     fn warrior_second_and_third_attack_add_melee_hits() {
         let mut g = GameState::new(Config::default());
-        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Pit".to_string(),
+            "A fighting pit.".to_string(),
+        ));
         let attacker = player(&mut g, "Attacker");
         let victim = connected_player(&mut g, "Victim", ConnId(1));
         {
@@ -2173,7 +2569,12 @@ mod tests {
     fn mob_dblattack_adds_extra_melee_hit() {
         let mut g = GameState::new(Config::default());
         g.rng.srandom(5);
-        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Pit".to_string(),
+            "A fighting pit.".to_string(),
+        ));
         let mut mob = Character::new_npc(99);
         mob.player.name = "Raider".to_string();
         mob.player.level = 100;
@@ -2203,7 +2604,12 @@ mod tests {
         let _dg = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         dg_handler::boot_handler();
         let mut g = GameState::new(Config::default());
-        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Pit".to_string(),
+            "A fighting pit.".to_string(),
+        ));
         let mut mob = Character::new_npc(99);
         mob.player.name = "Sentry".to_string();
         mob.position = Position::Fighting;
@@ -2214,11 +2620,12 @@ mod tests {
         g.char_to_room(mob, room);
         g.char_to_room(victim, room);
         g.get_char_mut(mob).unwrap().fighting = Some(victim);
-        let trig = make_dg_trigger(MOB_TRIGGER, MTRIG_FIGHT, 100, &[
-            "set fired yes",
-            "global fired",
-            "halt",
-        ]);
+        let trig = make_dg_trigger(
+            MOB_TRIGGER,
+            MTRIG_FIGHT,
+            100,
+            &["set fired yes", "global fired", "halt"],
+        );
         add_trigger(ScriptKey::Mob(mob), trig, -1);
 
         hit(&mut g, mob, victim);
@@ -2234,7 +2641,12 @@ mod tests {
         let _dg = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         dg_handler::boot_handler();
         let mut g = GameState::new(Config::default());
-        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Pit".to_string(),
+            "A fighting pit.".to_string(),
+        ));
         let attacker = player(&mut g, "Attacker");
         let victim = player(&mut g, "Victim");
         let obj = durable_item(&mut g, attacker, 1, 1);
@@ -2247,11 +2659,12 @@ mod tests {
             a.points.power = 1000;
             a.points.technique = 1000;
         }
-        let trig = make_dg_trigger(OBJ_TRIGGER, OTRIG_FIGHT, 100, &[
-            "set fired yes",
-            "global fired",
-            "halt",
-        ]);
+        let trig = make_dg_trigger(
+            OBJ_TRIGGER,
+            OTRIG_FIGHT,
+            100,
+            &["set fired yes", "global fired", "halt"],
+        );
         add_trigger(ScriptKey::Obj(obj), trig, -1);
 
         hit(&mut g, attacker, victim);
@@ -2267,7 +2680,12 @@ mod tests {
         let _dg = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         dg_handler::boot_handler();
         let mut g = GameState::new(Config::default());
-        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Pit".to_string(),
+            "A fighting pit.".to_string(),
+        ));
         let attacker = player(&mut g, "Attacker");
         let mut mob = Character::new_npc(99);
         mob.player.name = "Target".to_string();
@@ -2285,11 +2703,12 @@ mod tests {
             a.points.technique = 1000;
         }
         g.get_char_mut(victim).unwrap().fighting = Some(attacker);
-        let trig = make_dg_trigger(MOB_TRIGGER, MTRIG_HITPRCNT, 50, &[
-            "set low yes",
-            "global low",
-            "halt",
-        ]);
+        let trig = make_dg_trigger(
+            MOB_TRIGGER,
+            MTRIG_HITPRCNT,
+            50,
+            &["set low yes", "global low", "halt"],
+        );
         add_trigger(ScriptKey::Mob(victim), trig, -1);
 
         hit(&mut g, attacker, victim);
@@ -2303,7 +2722,12 @@ mod tests {
     #[test]
     fn die_awards_solo_kill_scaled_experience_and_alignment() {
         let mut g = GameState::new(Config::default());
-        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Pit".to_string(),
+            "A fighting pit.".to_string(),
+        ));
         let killer = connected_player(&mut g, "Killer", ConnId(1));
         let mut mob = Character::new_npc(99);
         mob.player.name = "Bandit".to_string();
@@ -2329,7 +2753,12 @@ mod tests {
     #[test]
     fn die_shares_group_experience_with_same_room_members() {
         let mut g = GameState::new(Config::default());
-        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Pit".to_string(),
+            "A fighting pit.".to_string(),
+        ));
         let leader = connected_player(&mut g, "Leader", ConnId(1));
         let follower = connected_player(&mut g, "Follower", ConnId(2));
         {
@@ -2371,8 +2800,18 @@ mod tests {
     #[test]
     fn die_applies_pc_death_penalty_flags_conditions_and_blood() {
         let mut g = GameState::new(Config::default());
-        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
-        g.add_room(Room::new(3001, 0, "Home".to_string(), "A hometown.".to_string()));
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Pit".to_string(),
+            "A fighting pit.".to_string(),
+        ));
+        g.add_room(Room::new(
+            3001,
+            0,
+            "Home".to_string(),
+            "A hometown.".to_string(),
+        ));
         let killer = player(&mut g, "Killer");
         let victim = connected_player(&mut g, "Victim", ConnId(1));
         {
@@ -2401,8 +2840,18 @@ mod tests {
     #[test]
     fn die_sends_high_level_pc_to_ghost_limbo() {
         let mut g = GameState::new(Config::default());
-        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
-        let limbo = g.add_room(Room::new(99, 0, "Limbo".to_string(), "The ghost room.".to_string()));
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Pit".to_string(),
+            "A fighting pit.".to_string(),
+        ));
+        let limbo = g.add_room(Room::new(
+            99,
+            0,
+            "Limbo".to_string(),
+            "The ghost room.".to_string(),
+        ));
         let killer = player(&mut g, "Killer");
         let victim = connected_player(&mut g, "Victim", ConnId(1));
         {
@@ -2435,9 +2884,24 @@ mod tests {
     #[test]
     fn die_logs_pc_kill_and_jails_killer_flagged_attacker() {
         let mut g = GameState::new(Config::default());
-        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
-        let jail = g.add_room(Room::new(JAIL_NUM, 0, "Jail".to_string(), "A jail cell.".to_string()));
-        g.add_room(Room::new(3001, 0, "Home".to_string(), "A hometown.".to_string()));
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Pit".to_string(),
+            "A fighting pit.".to_string(),
+        ));
+        let jail = g.add_room(Room::new(
+            JAIL_NUM,
+            0,
+            "Jail".to_string(),
+            "A jail cell.".to_string(),
+        ));
+        g.add_room(Room::new(
+            3001,
+            0,
+            "Home".to_string(),
+            "A hometown.".to_string(),
+        ));
         let killer = connected_player(&mut g, "Killer", ConnId(1));
         let victim = connected_player(&mut g, "Victim", ConnId(2));
         let imm = connected_player(&mut g, "Imm", ConnId(3));
@@ -2490,8 +2954,18 @@ mod tests {
     #[test]
     fn die_broadcasts_defending_pc_kill() {
         let mut g = GameState::new(Config::default());
-        let room = g.add_room(Room::new(100, 0, "Pit".to_string(), "A fighting pit.".to_string()));
-        g.add_room(Room::new(3001, 0, "Home".to_string(), "A hometown.".to_string()));
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Pit".to_string(),
+            "A fighting pit.".to_string(),
+        ));
+        g.add_room(Room::new(
+            3001,
+            0,
+            "Home".to_string(),
+            "A hometown.".to_string(),
+        ));
         let killer = connected_player(&mut g, "Defender", ConnId(1));
         let victim = connected_player(&mut g, "Outlaw", ConnId(2));
         g.players_by_name.insert("defender".to_string(), killer);
@@ -2676,7 +3150,12 @@ mod tests {
     #[test]
     fn injured_pc_below_recall_level_recites_scroll() {
         let mut g = GameState::new(Config::default());
-        let recall_room = g.add_room(Room::new(100, 0, "Recall".to_string(), "Recall.".to_string()));
+        let recall_room = g.add_room(Room::new(
+            100,
+            0,
+            "Recall".to_string(),
+            "Recall.".to_string(),
+        ));
         let combat_room = g.add_room(Room::new(101, 0, "Arena".to_string(), "Arena.".to_string()));
         let attacker = player(&mut g, "Attacker");
         let victim = connected_player(&mut g, "Victim", ConnId(1));

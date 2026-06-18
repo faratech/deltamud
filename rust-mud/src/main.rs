@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 mod act;
+mod aedit;
 mod alias;
 mod arena;
 mod auction;
@@ -14,6 +15,7 @@ mod ban;
 mod boards;
 mod castle;
 mod character;
+mod clan;
 mod class;
 mod cmd_comm;
 mod cmd_create;
@@ -24,7 +26,6 @@ mod cmd_offensive;
 mod cmd_other;
 mod cmd_social;
 mod cmd_wizard;
-mod clan;
 mod combat;
 mod command_table;
 mod commands;
@@ -43,41 +44,38 @@ mod dg_objcmd;
 mod dg_scripts;
 mod dg_triggers;
 mod dg_wldcmd;
-mod file_loader;
 mod fight_messages;
+mod file_loader;
 mod flags;
 mod game;
 mod gcmd;
 mod graph;
-mod house;
 mod handler;
+mod hedit;
+mod house;
 mod interpreter;
 mod language;
 mod limits;
 mod magic;
 mod mail;
 mod maputils;
+mod medit;
 mod metrics;
 mod misc;
 mod mobact;
 mod mock_database;
 mod modify;
-mod olc;
-mod redit;
-mod oedit;
-mod medit;
-mod zedit;
-mod sedit;
-mod aedit;
-mod hedit;
-mod trigedit;
 mod object;
-mod password;
 mod objsave;
+mod oedit;
+mod olc;
+mod password;
 mod quest;
 mod races;
+mod redit;
 mod rng;
 mod room;
+mod sedit;
 mod shop;
 mod spec_assign;
 mod spec_procs;
@@ -85,9 +83,11 @@ mod spell_parser;
 mod spells;
 mod state;
 mod syslog;
+mod trigedit;
 mod types;
 mod weather;
 mod world;
+mod zedit;
 
 use anyhow::Result;
 use config::Config;
@@ -246,6 +246,15 @@ fn read_copyover_state(lib_path: &str) -> Vec<CopyoverEntry> {
     out
 }
 
+fn apply_cli_flags(config: &mut Config, args: impl IntoIterator<Item = String>) {
+    for arg in args {
+        if arg == "-s" {
+            config.no_specials = true;
+            info!("Suppressing assignment of special routines (no_specials).");
+        }
+    }
+}
+
 /// Minimal raw-TCP HTTP responder for the metrics + health endpoints. Bound on
 /// `MUD_METRICS_PORT` when set. NO web framework: we read the request line, look
 /// at the path, and write a fixed HTTP/1.1 response, one request per connection
@@ -372,18 +381,10 @@ async fn main() -> Result<()> {
     info!("DeltaMUD (Rust) starting...");
     let mut config = Config::from_env();
 
-    // Faithful port of the C `-s` command-line flag (comm.c:272 `no_specials = 1`,
-    // "Suppressing assignment of special routines."). The Rust port has no full
-    // argv parser, so we scan argv for the single flag the conversion task needs:
-    // any of `-s`/`-q` enables no_specials (the env var MUD_NO_SPECIALS does the
-    // same). When set, shop data + spec-proc func tables are not booted and the
-    // MOB_SPEC pulse call is gated, exactly as C's `if (!no_specials)` guards.
-    for arg in std::env::args().skip(1) {
-        if arg == "-s" || arg == "-q" {
-            config.no_specials = true;
-            info!("Suppressing assignment of special routines (no_specials).");
-        }
-    }
+    // Faithful port of the C `-s` command-line flag (comm.c:272
+    // `no_specials = 1`, "Suppressing assignment of special routines.").
+    // `-q` is quickboot in C and must not suppress specials.
+    apply_cli_flags(&mut config, std::env::args().skip(1));
 
     let db: Arc<dyn DatabaseInterface> = if config.use_mock_db {
         info!("Using in-memory mock database");
@@ -400,7 +401,10 @@ async fn main() -> Result<()> {
 
     // Seed the PRNG (pinned for golden tests, else from the clock).
     let seed = config.rng_seed.unwrap_or_else(|| {
-        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(1)
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(1)
     });
     state.rng.srandom(seed);
 
@@ -513,7 +517,10 @@ async fn main() -> Result<()> {
                     Err(e) => warn!("Could not bind metrics port {}: {}", port, e),
                 }
             }
-            _ => warn!("MUD_METRICS_PORT={:?} is not a valid port; metrics disabled", mport),
+            _ => warn!(
+                "MUD_METRICS_PORT={:?} is not a valid port; metrics disabled",
+                mport
+            ),
         }
     }
 
@@ -566,7 +573,10 @@ async fn main() -> Result<()> {
         // persists the players, e.g. real MySQL), so enter_game can load them.
         reseed_copyover_chars(&db_for_recovery, &config.lib_path).await;
         let entries = read_copyover_state(&config.lib_path);
-        info!("Copyover recovery: {} player socket(s) to restore", entries.len());
+        info!(
+            "Copyover recovery: {} player socket(s) to restore",
+            entries.len()
+        );
         for e in entries {
             let id = ConnId(next_conn);
             next_conn += 1;
@@ -626,7 +636,8 @@ async fn main() -> Result<()> {
     // need to know so the process exits, not just the game loop). On either
     // signal — or when the game task itself returns (it returns only on its own
     // graceful shutdown) — break the accept loop and exit the process cleanly.
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+    let mut sigterm =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
 
     loop {
         let sigterm_fut = async {
@@ -728,4 +739,20 @@ async fn main() -> Result<()> {
 
     info!("Server exiting.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_no_specials_flag_matches_c_s_only() {
+        let mut q_config = Config::default();
+        apply_cli_flags(&mut q_config, ["-q".to_string()]);
+        assert!(!q_config.no_specials);
+
+        let mut s_config = Config::default();
+        apply_cli_flags(&mut s_config, ["-s".to_string()]);
+        assert!(s_config.no_specials);
+    }
 }

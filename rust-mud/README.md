@@ -18,7 +18,7 @@ The Rust port has the broad DeltaMUD feature surface in place, including the sta
 - **Persistence**: 83-column `player_main` + `player_affects` + `player_skills` (MySQL), Rust-format object rent/crash files, crypt-compatible passwords; offline-player immortal ops via an async bridge.
 - **Immortal tooling**: the full `act.wizard` command set, god-command (GCMD) permission bits, `can_edit_zone`, autowiz, on-disk syslog, the player-index table.
 
-Known remaining C-parity gaps are tracked in `COMPATIBILITY.md`. The highest-risk areas are C runtime persistence-file compatibility, shared string-editor flows, character creation, combat edge cases, alias persistence/timing, OLC/DG attachment saves, and some admin policy details.
+Known remaining C-parity gaps are tracked in `COMPATIBILITY.md` and GitHub issues. The highest-risk areas are C runtime persistence-file compatibility, character creation, complex alias queue timing, OLC/DG attachment saves, raw-kill/deathblow edge cases, and some admin policy details.
 
 ### Modern improvements over the C version
 - **Idiomatic Rust core**: a single-owner `GameState` (id-indexed `IndexMap`/`Vec` arenas, `Copy` ids instead of locked pointers) — deadlock-free, with async (Tokio) only at the socket edge. No `Arc<RwLock>` entity graph.
@@ -57,7 +57,7 @@ Connect with any telnet/MUD client: `telnet <host> 4000` (or `nc` for scripts). 
 | `DATABASE_URL` | `mysql://root:password@localhost/deltamud` | Used when not mocking. Tables auto-create. |
 | `MUD_METRICS_PORT` | *(off)* | Enables `/metrics` + `/health`. **Avoid 9200/9201** — Elasticsearch on this host owns them; use e.g. `19595`. |
 | `MUD_RNG_SEED` | *(clock)* | Pins the Lehmer PRNG for reproducible/golden runs. |
-| `MUD_NO_SPECIALS` / `-s` | off | Skip special-procedure assignment (C's `-s` flag). Rust currently also treats `-q` this way, which is a known C-parity bug. |
+| `MUD_NO_SPECIALS` / `-s` | off | Skip special-procedure assignment (C's `-s` flag). `-q` is not treated as no-specials. |
 | `MUD_MAX_CONN` | `256` | Concurrent-connection cap; `MUD_CONN_BURST`/`MUD_CONN_WINDOW_MS` add per-IP rate limiting. |
 | `RUST_LOG` | `info` | Log level. |
 

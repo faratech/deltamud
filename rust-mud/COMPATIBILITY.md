@@ -44,6 +44,11 @@ The Rust `database.rs`/`database_compat.rs` path now targets the original
 deity, conditions, preferences, combat stats, quest fields, clan fields, arena
 fields, map coordinates, god-command bitvectors, affects, and skills.
 
+Player aliases now use the C sidecar format under
+`plralias/<bucket>/<lowername>.alias`: alias, replacement, and type triples are
+loaded on login and rewritten on alias changes, saves, disconnects, shutdown,
+and copyover.
+
 Known SQL/runtime gaps:
 
 - Save currently writes an empty `host` value instead of the descriptor host.
@@ -71,11 +76,11 @@ World grammar coverage is broad:
 Known builder/world gaps:
 
 - Room saves currently drop room `T` trigger attachment lines even though room
-  loading reads them.
-- The C DG attachment-list editor in redit/oedit/medit is not exposed yet.
+  loading reads them (#89).
+- The C DG attachment-list editor in redit/oedit/medit is not exposed yet (#89).
 - Central `olc save` does not dispatch every editor's disk writer; some editor
   modules save correctly through their own flow but not through the generic
-  save command.
+  save command (#88).
 - Several OLC text editors implement only a subset of the C string-editor slash
   commands.
 - Mobile prototype special-procedure bindings from OLC are not represented as a
@@ -87,31 +92,21 @@ The Rust port is no longer an early basic-command prototype. Current
 parity gaps are more specific:
 
 - Character creation skips several C nanny states: newbie prompt, deity,
-  hometown, stat reroll/accept, and creation-time `do_start_init`.
-- Shared string editor completion is not fully wired for mail/boards, and
-  `write` note authoring does not enter the object text editor.
-- Aliases work in memory but are not persisted, and complex alias expansion can
-  bypass C `WAIT_STATE` behavior by executing expanded commands immediately.
+  hometown, stat reroll/accept, and creation-time `do_start_init` (#87).
+- Complex alias expansion can bypass C `WAIT_STATE` behavior by executing
+  expanded commands immediately instead of queueing descriptor input (#86).
 - Some command display/gating details differ: `wizhelp` does not filter by GCMD
   bits, social minimum level is not enforced, and `socials` omits the static
-  `insult` social.
+  `insult` social (#90).
 - Ban enforcement does not yet match C's hostname, `BAN_NEW`, and `BAN_SELECT`
-  checks.
-- `-q` currently behaves like no-specials in Rust; C uses only `-s` for that.
+  checks (#91).
 
 ## Combat and Gameplay Fidelity Gaps
 
-Known correctness gaps from the latest read-only parity pass:
+Known correctness gaps from the latest parity pass:
 
-- `MOB_WIMPY` is assigned the wrong bit in Rust, colliding with
-  `MOB_AGGR_EVIL`.
-- Sanctuary damage is scaled in a different order from C.
-- Core damage lacks C's low-level non-arena PC-vs-PC guard.
 - `deathblow` and immortal raw-kill paths route through normal damage instead
-  of matching C's side-effect differences.
-- Shopkeeper damage protection exists but is not wired into combat.
-- Armor `value[0]` AC/defense is not applied by generic equip handling.
-- `wear_otrigger` exists but normal `wear` does not call it.
+  of matching C's side-effect differences (#92).
 - `slist` still emits no spell rows.
 - Some `APPLY_*` locations are narrower than C, especially latent fields like
   charisma, age, weight, and height.

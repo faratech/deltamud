@@ -46,9 +46,8 @@
 // graceful degradation identical to a player who never finishes typing in C.
 
 use crate::act::{act, ActArg, To};
-use crate::connection::InputContext;
-use crate::interpreter::one_argument;
 use crate::handler::isname;
+use crate::interpreter::one_argument;
 use crate::state::GameState;
 use crate::types::*;
 
@@ -74,7 +73,7 @@ const B_LVL_FREEZE: Level = LVL_FREEZE; // == LVL_GRGOD
 
 // PLR_WRITING (structs.h) — set while a player is composing a board/note
 // message so the heartbeat skips them. Not yet in flags.rs; defined locally.
-const PLR_WRITING: i64 = 1 << 7;
+const PLR_WRITING: i64 = 1 << 4;
 
 /// Magic header for our portable board save files.
 const BOARD_FILE_MAGIC: &[u8; 4] = b"DBRD";
@@ -94,20 +93,98 @@ struct BoardInfo {
 
 const BOARD_INFO: [BoardInfo; NUM_OF_BOARDS] = [
     // Mortal boards.
-    BoardInfo { vnum: 199, read_lvl: 0, write_lvl: 0, remove_lvl: B_LVL_GOD, filename: "etc/board/mortal/general" },
-    BoardInfo { vnum: 198, read_lvl: 0, write_lvl: 0, remove_lvl: B_LVL_GOD, filename: "etc/board/mortal/social" },
-    BoardInfo { vnum: 197, read_lvl: 0, write_lvl: 0, remove_lvl: B_LVL_GOD, filename: "etc/board/mortal/auction" },
+    BoardInfo {
+        vnum: 199,
+        read_lvl: 0,
+        write_lvl: 0,
+        remove_lvl: B_LVL_GOD,
+        filename: "etc/board/mortal/general",
+    },
+    BoardInfo {
+        vnum: 198,
+        read_lvl: 0,
+        write_lvl: 0,
+        remove_lvl: B_LVL_GOD,
+        filename: "etc/board/mortal/social",
+    },
+    BoardInfo {
+        vnum: 197,
+        read_lvl: 0,
+        write_lvl: 0,
+        remove_lvl: B_LVL_GOD,
+        filename: "etc/board/mortal/auction",
+    },
     // Immortal boards.
-    BoardInfo { vnum: 1200, read_lvl: B_LVL_GRGOD, write_lvl: B_LVL_GRGOD, remove_lvl: B_LVL_IMPL, filename: "etc/board/god/imps" },
-    BoardInfo { vnum: 1201, read_lvl: B_LVL_IMMORT, write_lvl: B_LVL_IMMORT, remove_lvl: B_LVL_GRGOD, filename: "etc/board/god/general" },
-    BoardInfo { vnum: 1202, read_lvl: B_LVL_IMMORT, write_lvl: B_LVL_IMMORT, remove_lvl: B_LVL_GRGOD, filename: "etc/board/god/ideas" },
-    BoardInfo { vnum: 1203, read_lvl: B_LVL_IMMORT, write_lvl: B_LVL_IMMORT, remove_lvl: B_LVL_GRGOD, filename: "etc/board/god/quest" },
-    BoardInfo { vnum: 1204, read_lvl: B_LVL_IMMORT, write_lvl: B_LVL_IMMORT, remove_lvl: B_LVL_GRGOD, filename: "etc/board/god/public" },
-    BoardInfo { vnum: 1205, read_lvl: B_LVL_IMMORT, write_lvl: B_LVL_FREEZE, remove_lvl: B_LVL_IMPL, filename: "etc/board/god/freeze" },
-    BoardInfo { vnum: 1206, read_lvl: B_LVL_IMMORT, write_lvl: B_LVL_IMMORT, remove_lvl: B_LVL_GRGOD, filename: "etc/board/god/typos" },
-    BoardInfo { vnum: 1207, read_lvl: B_LVL_IMMORT, write_lvl: B_LVL_IMMORT, remove_lvl: B_LVL_GRGOD, filename: "etc/board/god/bugs" },
-    BoardInfo { vnum: 1208, read_lvl: B_LVL_IMMORT, write_lvl: B_LVL_IMMORT, remove_lvl: B_LVL_GRGOD, filename: "etc/board/god/imburse" },
-    BoardInfo { vnum: 1209, read_lvl: B_LVL_IMMORT, write_lvl: B_LVL_IMMORT, remove_lvl: B_LVL_GRGOD, filename: "etc/board/god/build" },
+    BoardInfo {
+        vnum: 1200,
+        read_lvl: B_LVL_GRGOD,
+        write_lvl: B_LVL_GRGOD,
+        remove_lvl: B_LVL_IMPL,
+        filename: "etc/board/god/imps",
+    },
+    BoardInfo {
+        vnum: 1201,
+        read_lvl: B_LVL_IMMORT,
+        write_lvl: B_LVL_IMMORT,
+        remove_lvl: B_LVL_GRGOD,
+        filename: "etc/board/god/general",
+    },
+    BoardInfo {
+        vnum: 1202,
+        read_lvl: B_LVL_IMMORT,
+        write_lvl: B_LVL_IMMORT,
+        remove_lvl: B_LVL_GRGOD,
+        filename: "etc/board/god/ideas",
+    },
+    BoardInfo {
+        vnum: 1203,
+        read_lvl: B_LVL_IMMORT,
+        write_lvl: B_LVL_IMMORT,
+        remove_lvl: B_LVL_GRGOD,
+        filename: "etc/board/god/quest",
+    },
+    BoardInfo {
+        vnum: 1204,
+        read_lvl: B_LVL_IMMORT,
+        write_lvl: B_LVL_IMMORT,
+        remove_lvl: B_LVL_GRGOD,
+        filename: "etc/board/god/public",
+    },
+    BoardInfo {
+        vnum: 1205,
+        read_lvl: B_LVL_IMMORT,
+        write_lvl: B_LVL_FREEZE,
+        remove_lvl: B_LVL_IMPL,
+        filename: "etc/board/god/freeze",
+    },
+    BoardInfo {
+        vnum: 1206,
+        read_lvl: B_LVL_IMMORT,
+        write_lvl: B_LVL_IMMORT,
+        remove_lvl: B_LVL_GRGOD,
+        filename: "etc/board/god/typos",
+    },
+    BoardInfo {
+        vnum: 1207,
+        read_lvl: B_LVL_IMMORT,
+        write_lvl: B_LVL_IMMORT,
+        remove_lvl: B_LVL_GRGOD,
+        filename: "etc/board/god/bugs",
+    },
+    BoardInfo {
+        vnum: 1208,
+        read_lvl: B_LVL_IMMORT,
+        write_lvl: B_LVL_IMMORT,
+        remove_lvl: B_LVL_GRGOD,
+        filename: "etc/board/god/imburse",
+    },
+    BoardInfo {
+        vnum: 1209,
+        read_lvl: B_LVL_IMMORT,
+        write_lvl: B_LVL_IMMORT,
+        remove_lvl: B_LVL_GRGOD,
+        filename: "etc/board/god/build",
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -309,7 +386,10 @@ pub fn board_write(g: &mut GameState, board_type: usize, ch: CharId, arg: &str) 
 
     // "%6.10s %-12s :: %s" — date (first 10 chars of asctime, fixed width),
     // "(name)" left-justified to 12, then the headline.
-    let name = g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default();
+    let name = g
+        .get_char(ch)
+        .map(|c| c.player.name.clone())
+        .unwrap_or_default();
     let tmstr = board_timestamp();
     let date10: String = tmstr.chars().take(10).collect();
     let namebuf = format!("({})", name);
@@ -334,24 +414,19 @@ pub fn board_write(g: &mut GameState, board_type: usize, ch: CharId, arg: &str) 
     }
 
     g.send_to_char(ch, "Write your message.  (/s saves /h for help)\r\n\r\n");
-    act(g, "$n starts to write a message.", true, ch, None, ActArg::None, To::Room);
-
-    // SET_BIT(PLR_FLAGS(ch), PLR_WRITING) for non-NPCs.
-    let is_npc = g.get_char(ch).map(|c| c.is_npc).unwrap_or(true);
-    if !is_npc {
-        if let Some(c) = g.get_char_mut(ch) {
-            c.act_flags |= PLR_WRITING;
-        }
-    }
+    act(
+        g,
+        "$n starts to write a message.",
+        true,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
 
     // Open the string editor on the descriptor (C: ch->desc->str = &slot).
     if let Some(conn) = g.get_char(ch).and_then(|c| c.desc) {
-        if let Some(d) = g.descriptors.get_mut(&conn) {
-            d.editors.push(InputContext::StringEdit {
-                buffer: String::new(),
-                max_len: MAX_MESSAGE_LENGTH,
-            });
-        }
+        crate::modify::start_board_editing(g, conn, MAX_MESSAGE_LENGTH);
     }
 }
 
@@ -406,7 +481,10 @@ pub fn board_finish_write(g: &mut GameState, conn: ConnId, body: &str, save: boo
     let msgs = guard.boards[board_type].clone();
     drop(guard);
     if let Err(e) = save_board_file(&path, &msgs) {
-        eprintln!("SYSERR: Error writing board '{}': {}", BOARD_INFO[board_type].filename, e);
+        eprintln!(
+            "SYSERR: Error writing board '{}': {}",
+            BOARD_INFO[board_type].filename, e
+        );
     }
     true
 }
@@ -431,7 +509,15 @@ pub fn board_show(g: &mut GameState, board_type: usize, ch: CharId, arg: &str) -
         g.send_to_char(ch, "You try but fail to understand the holy words.\r\n");
         return true;
     }
-    act(g, "$n studies the board.", true, ch, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n studies the board.",
+        true,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
 
     let msgs = board_msgs(board_type);
     let mut buf = String::from(
@@ -441,7 +527,10 @@ pub fn board_show(g: &mut GameState, board_type: usize, ch: CharId, arg: &str) -
     if msgs.is_empty() {
         buf.push_str("The board is empty.\r\n");
     } else {
-        buf.push_str(&format!("There are {} messages on the board.\r\n", msgs.len()));
+        buf.push_str(&format!(
+            "There are {} messages on the board.\r\n",
+            msgs.len()
+        ));
         for (i, m) in msgs.iter().enumerate() {
             if m.heading.is_empty() {
                 // C: "SYSERR: The board is fubar'd."
@@ -474,7 +563,12 @@ pub fn board_display(g: &mut GameState, board_type: usize, ch: CharId, arg: &str
         return board_show(g, board_type, ch, arg);
     }
     // Must start with a digit and parse to a non-zero number.
-    if !number.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    if !number
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
         return false;
     }
     let msg: i32 = atoi(&number);
@@ -525,7 +619,11 @@ pub fn board_remove(g: &mut GameState, board_type: usize, ch: CharId, arg: &str)
     let (number, _) = one_argument(arg);
 
     if number.is_empty()
-        || !number.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+        || !number
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
     {
         return false;
     }
@@ -551,13 +649,19 @@ pub fn board_remove(g: &mut GameState, board_type: usize, ch: CharId, arg: &str)
         return true;
     }
 
-    let name = g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default();
+    let name = g
+        .get_char(ch)
+        .map(|c| c.player.name.clone())
+        .unwrap_or_default();
     let namebuf = format!("({})", name);
     let level = char_level_i32(g, ch);
 
     // Permission: high enough to remove others' messages, OR it's your own.
     if level < REMOVE_LVL(board_type) as i32 && !m.heading.contains(&namebuf) {
-        g.send_to_char(ch, "You are not holy enough to remove other people's messages.\r\n");
+        g.send_to_char(
+            ch,
+            "You are not holy enough to remove other people's messages.\r\n",
+        );
         return true;
     }
     if level < m.level {
@@ -577,7 +681,10 @@ pub fn board_remove(g: &mut GameState, board_type: usize, ch: CharId, arg: &str)
             .any(|&(bt, mi)| bt == board_type && mi == ind);
         if authoring {
             drop(guard);
-            g.send_to_char(ch, "At least wait until the author is finished before removing it!\r\n");
+            g.send_to_char(
+                ch,
+                "At least wait until the author is finished before removing it!\r\n",
+            );
             return true;
         }
     }
@@ -600,7 +707,10 @@ pub fn board_remove(g: &mut GameState, board_type: usize, ch: CharId, arg: &str)
         let snapshot = guard.boards[board_type].clone();
         drop(guard);
         if let Err(e) = save_board_file(&path, &snapshot) {
-            eprintln!("SYSERR: Error writing board '{}': {}", BOARD_INFO[board_type].filename, e);
+            eprintln!(
+                "SYSERR: Error writing board '{}': {}",
+                BOARD_INFO[board_type].filename, e
+            );
         }
     }
 
@@ -702,7 +812,11 @@ fn parse_board_blob(data: &[u8]) -> Option<Vec<BoardMsg>> {
         if heading.is_empty() {
             return None;
         }
-        msgs.push(BoardMsg { heading, message, level });
+        msgs.push(BoardMsg {
+            heading,
+            message,
+            level,
+        });
     }
     Some(msgs)
 }

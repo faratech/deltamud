@@ -184,23 +184,30 @@ impl Game {
     pub async fn load_text_files(&mut self, lib_path: &str) {
         self.lib_path = lib_path.to_string();
         let text_dir = std::path::Path::new(lib_path).join("text");
-        self.state.credits =
-            tokio::fs::read_to_string(text_dir.join("credits")).await.unwrap_or_default();
-        self.state.news =
-            tokio::fs::read_to_string(text_dir.join("news")).await.unwrap_or_default();
-        self.state.info =
-            tokio::fs::read_to_string(text_dir.join("info")).await.unwrap_or_default();
-        self.state.handbook =
-            tokio::fs::read_to_string(text_dir.join("handbook")).await.unwrap_or_default();
-        self.state.policies =
-            tokio::fs::read_to_string(text_dir.join("policies")).await.unwrap_or_default();
+        self.state.credits = tokio::fs::read_to_string(text_dir.join("credits"))
+            .await
+            .unwrap_or_default();
+        self.state.news = tokio::fs::read_to_string(text_dir.join("news"))
+            .await
+            .unwrap_or_default();
+        self.state.info = tokio::fs::read_to_string(text_dir.join("info"))
+            .await
+            .unwrap_or_default();
+        self.state.handbook = tokio::fs::read_to_string(text_dir.join("handbook"))
+            .await
+            .unwrap_or_default();
+        self.state.policies = tokio::fs::read_to_string(text_dir.join("policies"))
+            .await
+            .unwrap_or_default();
         self.state.motd = tokio::fs::read_to_string(text_dir.join("motd"))
             .await
             .unwrap_or_else(|_| "\r\nWelcome to DeltaMUD!\r\n".to_string());
-        self.state.imotd =
-            tokio::fs::read_to_string(text_dir.join("imotd")).await.unwrap_or_default();
-        self.state.circlemud =
-            tokio::fs::read_to_string(text_dir.join("circlemud")).await.unwrap_or_default();
+        self.state.imotd = tokio::fs::read_to_string(text_dir.join("imotd"))
+            .await
+            .unwrap_or_default();
+        self.state.circlemud = tokio::fs::read_to_string(text_dir.join("circlemud"))
+            .await
+            .unwrap_or_default();
     }
 
     pub fn prime_zones(&mut self) {
@@ -219,15 +226,14 @@ impl Game {
         // SIGTERM stream (systemd stop / kill -TERM). Ctrl-C (SIGINT) is handled
         // by tokio::signal::ctrl_c. On either, we run a clean shutdown: crash-save
         // every player + their objects, flush descriptors, and return.
-        let mut sigterm = match tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        ) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                warn!("Could not install SIGTERM handler: {} (Ctrl-C only)", e);
-                None
-            }
-        };
+        let mut sigterm =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    warn!("Could not install SIGTERM handler: {} (Ctrl-C only)", e);
+                    None
+                }
+            };
 
         loop {
             // When the SIGTERM stream failed to install, fall back to a future
@@ -291,7 +297,10 @@ impl Game {
         // Notify everyone still connected.
         let conn_ids: Vec<ConnId> = self.state.descriptors.keys().copied().collect();
         for cid in &conn_ids {
-            self.out(*cid, "\r\nThe server is shutting down. Saving and disconnecting...\r\n");
+            self.out(
+                *cid,
+                "\r\nThe server is shutting down. Saving and disconnecting...\r\n",
+            );
         }
 
         // Crash-save all rent/inventory + persist every online player file.
@@ -302,8 +311,23 @@ impl Game {
                 if let Some(c) = self.state.get_char(ch) {
                     if !c.is_npc {
                         let snapshot = c.clone();
+                        if let Err(e) = crate::alias::write_aliases(
+                            &self.lib_path,
+                            snapshot.get_name(),
+                            snapshot.idnum,
+                        ) {
+                            warn!(
+                                "shutdown write_aliases({}) failed: {}",
+                                snapshot.get_name(),
+                                e
+                            );
+                        }
                         if let Err(e) = self.db.save_player(&snapshot).await {
-                            warn!("shutdown save_player({}) failed: {}", snapshot.get_name(), e);
+                            warn!(
+                                "shutdown save_player({}) failed: {}",
+                                snapshot.get_name(),
+                                e
+                            );
                         }
                     }
                 }
@@ -321,7 +345,12 @@ impl Game {
 
     async fn handle_message(&mut self, msg: GameMessage) {
         match msg {
-            GameMessage::NewConnection { id, host, raw_fd, output_tx } => {
+            GameMessage::NewConnection {
+                id,
+                host,
+                raw_fd,
+                output_tx,
+            } => {
                 info!("New connection from {}", host);
                 self.metrics.inc_connections();
                 let mut d = Descriptor::with_fd(id, host, raw_fd);
@@ -330,7 +359,13 @@ impl Game {
                 self.outputs.insert(id, output_tx);
                 self.write_prompt(id);
             }
-            GameMessage::Recover { id, host, raw_fd, name, output_tx } => {
+            GameMessage::Recover {
+                id,
+                host,
+                raw_fd,
+                name,
+                output_tx,
+            } => {
                 self.recover_player(id, host, raw_fd, name, output_tx).await;
             }
             GameMessage::Input { conn_id, input } => {
@@ -358,7 +393,11 @@ impl Game {
             if crate::modify::page_active(conn_id) {
                 crate::modify::page_input(&mut self.state, conn_id, &input);
             } else if crate::modify::editing(&self.state, conn_id) {
-                crate::modify::editor_input(&mut self.state, conn_id, &input);
+                if !crate::modify::editor_input(&mut self.state, conn_id, &input) {
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.editors.pop();
+                    }
+                }
             } else if crate::olc::in_olc(conn_id) {
                 crate::olc::olc_input(&mut self.state, conn_id, &input);
             } else {
@@ -440,7 +479,11 @@ impl Game {
                 let exists = self.db.player_exists(&name).await.unwrap_or(false);
                 if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                     d.temp_name = Some(name.clone());
-                    d.state = if exists { ConState::GetOldPassword } else { ConState::ConfirmName };
+                    d.state = if exists {
+                        ConState::GetOldPassword
+                    } else {
+                        ConState::ConfirmName
+                    };
                 }
             }
             ConState::ConfirmName => {
@@ -456,7 +499,11 @@ impl Game {
             }
             ConState::GetOldPassword => {
                 let name = self.descriptor_name(conn_id);
-                let ok = self.db.verify_password(&name, &input).await.unwrap_or(false);
+                let ok = self
+                    .db
+                    .verify_password(&name, &input)
+                    .await
+                    .unwrap_or(false);
                 if ok {
                     self.enter_game(conn_id, false).await;
                 } else {
@@ -583,10 +630,14 @@ impl Game {
                 Some(d) => d,
                 None => return,
             };
-            (d.temp_name.clone().unwrap_or_default(), d.temp_password.clone().unwrap_or_default())
+            (
+                d.temp_name.clone().unwrap_or_default(),
+                d.temp_password.clone().unwrap_or_default(),
+            )
         };
         let choices = self.pending.remove(&conn_id).unwrap_or_default();
-        let mut ch = crate::character::Character::new_player(name.clone(), choices.class, choices.race);
+        let mut ch =
+            crate::character::Character::new_player(name.clone(), choices.class, choices.race);
         ch.player.sex = choices.sex;
         match self.db.create_player(&ch, &pass).await {
             Ok(idnum) => {
@@ -619,6 +670,7 @@ impl Game {
                 if let Err(e) = self.db.save_player(&ch).await {
                     warn!("save new player {} failed: {}", name, e);
                 }
+                crate::alias::clear_aliases(ch.idnum);
                 // Register the new player in the in-memory index immediately (C
                 // create_entry appends to player_table) so name<->idnum lookups
                 // — ignore-by-name, mail, `last` — resolve them at once, before
@@ -661,6 +713,9 @@ impl Game {
                 return;
             }
         };
+        if let Err(e) = crate::alias::read_aliases(&self.lib_path, ch.get_name(), ch.idnum) {
+            warn!("read_aliases({}) failed: {}", ch.get_name(), e);
+        }
         ch.desc = Some(conn_id);
         ch.aff_abils = ch.real_abils;
         // The player file/DB carries no object references (C semantics): the real
@@ -696,7 +751,8 @@ impl Game {
             .get_char(id)
             .map(|c| (c.idnum, c.player.level))
             .unwrap_or((-1, 1));
-        self.state.update_player_index(pidnum, &name, plevel, now, &host);
+        self.state
+            .update_player_index(pidnum, &name, plevel, now, &host);
 
         // Room selection — interpreter.c enter_player_game (BUG #15). The C
         // precedence: GET_LOADROOM (saved.load_room) is honored first; a valid
@@ -786,8 +842,9 @@ impl Game {
             && saved_mapy >= 1
             && saved_mapy <= self.state.max_map_y as i64
         {
-            if let Some(rnum) =
-                self.state.map_coords_to_rnum(saved_mapx as i32, saved_mapy as i32)
+            if let Some(rnum) = self
+                .state
+                .map_coords_to_rnum(saved_mapx as i32, saved_mapy as i32)
             {
                 load_rnum = Some(rnum);
             }
@@ -800,7 +857,11 @@ impl Game {
         // Fall back to the normal start room when nothing above resolved (C: if
         // load_room == NOWHERE -> immort/mortal start room). Preserve the
         // existing Rust fallback chain (vnum 100 / hometown / 3001 / first room).
-        let home = self.state.get_char(id).map(|c| c.player.hometown).unwrap_or(100);
+        let home = self
+            .state
+            .get_char(id)
+            .map(|c| c.player.hometown)
+            .unwrap_or(100);
         if load_rnum.is_none() {
             let start_vnum = if level >= crate::types::LVL_IMMORT {
                 crate::config::IMMORT_START_ROOM
@@ -921,8 +982,13 @@ impl Game {
         // teardown; without this the per-conn state + vnum lock leak until the
         // next reboot — BUG #21). No-op if not editing.
         crate::olc::abort_editor(conn_id);
-        let ch = self.state.descriptors.get(&conn_id).and_then(|d| d.character);
+        let ch = self
+            .state
+            .descriptors
+            .get(&conn_id)
+            .and_then(|d| d.character);
         if let Some(cid) = ch {
+            let mut alias_id_to_clear = None;
             // Persist then remove the character from the world.
             if let Some(c) = self.state.get_char(cid) {
                 if !c.is_npc {
@@ -936,7 +1002,12 @@ impl Game {
                         snapshot.player.level,
                         snapshot.last_logon.timestamp(),
                     );
-                    self.state.update_player_index(idnum, &pname, plevel, llogon, "");
+                    alias_id_to_clear = Some(idnum);
+                    self.state
+                        .update_player_index(idnum, &pname, plevel, llogon, "");
+                    if let Err(err) = crate::alias::write_aliases(&self.lib_path, &pname, idnum) {
+                        warn!("write_aliases({}) failed: {}", pname, err);
+                    }
                     let db = self.db.clone();
                     tokio::spawn(async move {
                         let _ = db.save_player(&snapshot).await;
@@ -945,6 +1016,9 @@ impl Game {
             }
             crate::objsave::crash_save(&mut self.state, cid, &self.lib_path);
             self.state.extract_char(cid);
+            if let Some(idnum) = alias_id_to_clear {
+                crate::alias::clear_aliases(idnum);
+            }
         }
         self.state.descriptors.remove(&conn_id);
         self.outputs.remove(&conn_id);
@@ -987,7 +1061,8 @@ impl Game {
             let mut chr = match self.db.load_player(&op.target).await {
                 Ok(c) => c,
                 Err(_) => {
-                    self.state.send_to_char(op.requester, "There is no such player.\r\n");
+                    self.state
+                        .send_to_char(op.requester, "There is no such player.\r\n");
                     continue;
                 }
             };
@@ -1089,6 +1164,15 @@ impl Game {
                 snapshot.last_logon.timestamp(),
                 "",
             );
+            if let Err(err) =
+                crate::alias::write_aliases(&self.lib_path, snapshot.get_name(), snapshot.idnum)
+            {
+                warn!(
+                    "queued write_aliases({}) failed: {}",
+                    snapshot.get_name(),
+                    err
+                );
+            }
             if let Err(err) = self.db.save_player(&snapshot).await {
                 warn!(
                     "queued save_player({}) failed: {}",
@@ -1211,7 +1295,6 @@ impl Game {
         }
     }
 
-
     // ---- Output flushing ------------------------------------------------
     async fn flush_all(&mut self) {
         let conns: Vec<ConnId> = self.state.descriptors.keys().copied().collect();
@@ -1244,7 +1327,11 @@ impl Game {
             Some(d) => d.state,
             None => return,
         };
-        let name = self.state.descriptors.get(&conn_id).and_then(|d| d.temp_name.clone());
+        let name = self
+            .state
+            .descriptors
+            .get(&conn_id)
+            .and_then(|d| d.temp_name.clone());
         let prompt = match state {
             ConState::GetName => "By what name do you wish to be known? ".to_string(),
             ConState::ConfirmName => {
@@ -1459,7 +1546,11 @@ struct PendingChoices {
 }
 impl Default for PendingChoices {
     fn default() -> Self {
-        PendingChoices { sex: Gender::Neutral, class: Class::Warrior, race: Race::Human }
+        PendingChoices {
+            sex: Gender::Neutral,
+            class: Class::Warrior,
+            race: Race::Human,
+        }
     }
 }
 

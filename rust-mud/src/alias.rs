@@ -24,6 +24,8 @@
 use crate::state::GameState;
 use crate::types::*;
 use std::collections::HashMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 // C: ALIAS_SIMPLE / ALIAS_COMPLEX (interpreter.h).
@@ -43,7 +45,7 @@ const MAX_INPUT_LENGTH: usize = 256;
 
 /// One alias record (C `struct alias`). `type` is preserved verbatim
 /// (ALIAS_SIMPLE / ALIAS_COMPLEX) so the on-disk format round-trips.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AliasEntry {
     pub alias: String,
     pub replacement: String,
@@ -83,6 +85,102 @@ pub fn get_aliases(idnum: i64) -> Vec<AliasEntry> {
 /// Drop a player's aliases from the live table (e.g. on extract). Idempotent.
 pub fn clear_aliases(idnum: i64) {
     table().lock().unwrap().remove(&idnum);
+}
+
+fn alias_bucket(name: &str) -> &'static str {
+    match name.chars().next().unwrap_or('z').to_ascii_lowercase() {
+        'a'..='e' => "A-E",
+        'f'..='j' => "F-J",
+        'k'..='o' => "K-O",
+        'p'..='t' => "P-T",
+        'u'..='z' => "U-Z",
+        _ => "ZZZ",
+    }
+}
+
+fn alias_filename(lib_path: &str, name: &str) -> Option<PathBuf> {
+    if name.is_empty() {
+        return None;
+    }
+    let lower = name.to_ascii_lowercase();
+    Some(
+        Path::new(lib_path)
+            .join("plralias")
+            .join(alias_bucket(&lower))
+            .join(format!("{lower}.alias")),
+    )
+}
+
+/// C read_aliases(): load `plralias/<bucket>/<lowername>.alias` triples into
+/// the live alias table. Missing files mean the character has no aliases.
+pub fn read_aliases(lib_path: &str, name: &str, idnum: i64) -> std::io::Result<()> {
+    clear_aliases(idnum);
+    let Some(path) = alias_filename(lib_path, name) else {
+        return Ok(());
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+
+    let mut lines = text
+        .lines()
+        .map(|line| line.trim_end_matches('\r').to_string());
+    let mut list = Vec::new();
+    loop {
+        let Some(alias) = lines.next() else {
+            break;
+        };
+        let Some(replacement) = lines.next() else {
+            break;
+        };
+        let Some(atype) = lines.next() else {
+            break;
+        };
+        list.push(AliasEntry {
+            alias,
+            replacement,
+            atype: atype.parse().unwrap_or(ALIAS_SIMPLE),
+        });
+    }
+    if !list.is_empty() {
+        set_aliases(idnum, list);
+    }
+    Ok(())
+}
+
+/// C write_aliases(): rewrite the whole alias sidecar. Empty alias lists remove
+/// the old file and leave no replacement.
+pub fn write_aliases(lib_path: &str, name: &str, idnum: i64) -> std::io::Result<()> {
+    let Some(path) = alias_filename(lib_path, name) else {
+        return Ok(());
+    };
+    let aliases = get_aliases(idnum);
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    if aliases.is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::File::create(&path)?;
+    for alias in aliases {
+        writeln!(file, "{}", alias.alias)?;
+        writeln!(file, "{}", alias.replacement)?;
+        writeln!(file, "{}", alias.atype)?;
+    }
+    Ok(())
+}
+
+fn persist_aliases(g: &GameState, idnum: i64, name: &str) {
+    if let Err(err) = write_aliases(&g.config.lib_path, name, idnum) {
+        log::warn!("write_aliases({name}) failed: {err}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -232,8 +330,8 @@ pub fn alias_replace(g: &GameState, ch: CharId, input: &str) -> Option<String> {
 /// `alias` — with no argument, list defined aliases; with an alias word and no
 /// replacement, delete it; with both, add or redefine it.
 pub fn do_alias(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
-    let idnum = match g.get_char(ch) {
-        Some(c) if !c.is_npc => c.idnum, // C: IS_NPC(ch) -> return
+    let (idnum, name) = match g.get_char(ch) {
+        Some(c) if !c.is_npc => (c.idnum, c.get_name().to_string()), // C: IS_NPC(ch) -> return
         _ => return,
     };
 
@@ -275,6 +373,7 @@ pub fn do_alias(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         // No replacement specified — treat as a delete request.
         if existed {
             g.send_to_char(ch, "Alias deleted.\r\n");
+            persist_aliases(g, idnum, &name);
         } else {
             g.send_to_char(ch, "No such alias.\r\n");
         }
@@ -312,4 +411,88 @@ pub fn do_alias(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     }
 
     g.send_to_char(ch, "Alias added.\r\n");
+    persist_aliases(g, idnum, &name);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
+
+    fn temp_lib(name: &str) -> PathBuf {
+        let n = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "deltamud_alias_{name}_{}_{}",
+            std::process::id(),
+            n
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn alias_filename_matches_c_bucket_and_lowercase() {
+        let path = alias_filename("/mud/lib", "Zed").unwrap();
+        assert_eq!(
+            path,
+            Path::new("/mud/lib")
+                .join("plralias")
+                .join("U-Z")
+                .join("zed.alias")
+        );
+    }
+
+    #[test]
+    fn alias_sidecar_round_trips_c_triples_and_removes_empty_file() {
+        let lib = temp_lib("round_trip");
+        let idnum = 42;
+        set_aliases(
+            idnum,
+            vec![
+                AliasEntry {
+                    alias: "zz".to_string(),
+                    replacement: "sleep".to_string(),
+                    atype: ALIAS_SIMPLE,
+                },
+                AliasEntry {
+                    alias: "combo".to_string(),
+                    replacement: "say $1;wave".to_string(),
+                    atype: ALIAS_COMPLEX,
+                },
+            ],
+        );
+
+        write_aliases(lib.to_str().unwrap(), "Tester", idnum).unwrap();
+        let path = alias_filename(lib.to_str().unwrap(), "Tester").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "zz\nsleep\n0\ncombo\nsay $1;wave\n1\n"
+        );
+
+        clear_aliases(idnum);
+        read_aliases(lib.to_str().unwrap(), "Tester", idnum).unwrap();
+        assert_eq!(
+            get_aliases(idnum),
+            vec![
+                AliasEntry {
+                    alias: "zz".to_string(),
+                    replacement: "sleep".to_string(),
+                    atype: ALIAS_SIMPLE,
+                },
+                AliasEntry {
+                    alias: "combo".to_string(),
+                    replacement: "say $1;wave".to_string(),
+                    atype: ALIAS_COMPLEX,
+                },
+            ]
+        );
+
+        set_aliases(idnum, Vec::new());
+        write_aliases(lib.to_str().unwrap(), "Tester", idnum).unwrap();
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(lib);
+    }
 }

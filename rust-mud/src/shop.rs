@@ -93,7 +93,14 @@ const OPERATOR_STR: [&str; 5] = ["[({", "])}", "|+", "&*", "^'"];
 
 // trade_letters[] (who we sell to), terminated implicitly by length.
 const TRADE_LETTERS: [&str; 8] = [
-    "Good", "Evil", "Neutral", "Magic User", "Cleric", "Thief", "Warrior", "Artisan",
+    "Good",
+    "Evil",
+    "Neutral",
+    "Magic User",
+    "Cleric",
+    "Thief",
+    "Warrior",
+    "Artisan",
 ];
 
 // shop_bits[] for the detailed listing.
@@ -180,8 +187,24 @@ const ITEM_TYPE_NAMES: [&str; 24] = [
 // extra_bits[] names for the RPN keyword evaluator (constants.c extra_bits[]).
 // Index == bit position; push(IS_SET(EXTRA, 1<<index)).
 const EXTRA_BITS: [&str; 18] = [
-    "GLOW", "HUM", "!RENT", "!DONATE", "!INVIS", "INVISIBLE", "MAGIC", "!DROP", "BLESS", "!GOOD",
-    "!EVIL", "!NEUTRAL", "!MAGE", "!CLERIC", "!THIEF", "!WARRIOR", "!SELL", "!ARTISAN",
+    "GLOW",
+    "HUM",
+    "!RENT",
+    "!DONATE",
+    "!INVIS",
+    "INVISIBLE",
+    "MAGIC",
+    "!DROP",
+    "BLESS",
+    "!GOOD",
+    "!EVIL",
+    "!NEUTRAL",
+    "!MAGE",
+    "!CLERIC",
+    "!THIEF",
+    "!WARRIOR",
+    "!SELL",
+    "!ARTISAN",
 ];
 
 // ---------------------------------------------------------------------------
@@ -373,7 +396,10 @@ struct ShopReader<'a> {
 
 impl<'a> ShopReader<'a> {
     fn new(s: &'a str) -> Self {
-        ShopReader { lines: s.lines().collect(), pos: 0 }
+        ShopReader {
+            lines: s.lines().collect(),
+            pos: 0,
+        }
     }
 
     /// get_line(): next non-comment, non-blank line (CircleMUD skips lines that
@@ -436,14 +462,24 @@ impl<'a> ShopReader<'a> {
 /// sscanf would leave the (zero-initialized) target in practice.
 fn read_int(r: &mut ShopReader) -> i32 {
     match r.get_line() {
-        Some(l) => l.trim().split_whitespace().next().and_then(|t| parse_int(t)).unwrap_or(0),
+        Some(l) => l
+            .trim()
+            .split_whitespace()
+            .next()
+            .and_then(|t| parse_int(t))
+            .unwrap_or(0),
         None => 0,
     }
 }
 
 fn read_float(r: &mut ShopReader) -> f32 {
     match r.get_line() {
-        Some(l) => l.trim().split_whitespace().next().and_then(|t| t.parse::<f32>().ok()).unwrap_or(0.0),
+        Some(l) => l
+            .trim()
+            .split_whitespace()
+            .next()
+            .and_then(|t| t.parse::<f32>().ok())
+            .unwrap_or(0.0),
         None => 0.0,
     }
 }
@@ -505,7 +541,9 @@ fn read_type_list(r: &mut ShopReader) -> Vec<ShopBuyData> {
         let mut rest = body;
         let trimmed = body.trim_start();
         for (idx, name) in ITEM_TYPE_NAMES.iter().enumerate() {
-            if !name.is_empty() && trimmed.len() >= name.len() && trimmed[..name.len()].eq_ignore_ascii_case(name)
+            if !name.is_empty()
+                && trimmed.len() >= name.len()
+                && trimmed[..name.len()].eq_ignore_ascii_case(name)
             {
                 num = idx as i32;
                 rest = &trimmed[name.len()..];
@@ -533,8 +571,15 @@ fn read_type_list(r: &mut ShopReader) -> Vec<ShopBuyData> {
         }
 
         let kw = rest.trim();
-        let kw = if kw.is_empty() { None } else { Some(kw.to_string()) };
-        out.push(ShopBuyData { type_: num, keywords: kw });
+        let kw = if kw.is_empty() {
+            None
+        } else {
+            Some(kw.to_string())
+        };
+        out.push(ShopBuyData {
+            type_: num,
+            keywords: kw,
+        });
 
         if num < 0 {
             // The terminator entry (-1) was pushed; trim it back off so the
@@ -621,7 +666,9 @@ fn boot_the_shops(contents: &str, table: &mut Vec<ShopData>) {
 // ---------------------------------------------------------------------------
 
 fn get_name(g: &GameState, ch: CharId) -> String {
-    g.get_char(ch).map(|c| c.player.name.clone()).unwrap_or_default()
+    g.get_char(ch)
+        .map(|c| c.player.name.clone())
+        .unwrap_or_default()
 }
 
 fn get_gold(g: &GameState, ch: CharId) -> i32 {
@@ -636,8 +683,7 @@ fn is_npc(g: &GameState, ch: CharId) -> bool {
 fn is_god(g: &GameState, ch: CharId) -> bool {
     g.get_char(ch)
         .map(|c| {
-            !c.is_npc
-                && (c.godcmds1 != 0 || c.godcmds2 != 0 || c.godcmds3 != 0 || c.godcmds4 != 0)
+            !c.is_npc && (c.godcmds1 != 0 || c.godcmds2 != 0 || c.godcmds3 != 0 || c.godcmds4 != 0)
         })
         .unwrap_or(false)
 }
@@ -657,7 +703,9 @@ fn class_of(g: &GameState, ch: CharId) -> Option<Class> {
 }
 
 fn awake(g: &GameState, ch: CharId) -> bool {
-    g.get_char(ch).map(|c| c.position > Position::Sleeping).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.position > Position::Sleeping)
+        .unwrap_or(false)
 }
 
 fn in_room(g: &GameState, ch: CharId) -> Option<RoomRnum> {
@@ -669,7 +717,9 @@ fn room_vnum(g: &GameState, rnum: RoomRnum) -> RoomVnum {
 }
 
 fn plr_killer(g: &GameState, ch: CharId) -> bool {
-    g.get_char(ch).map(|c| c.act_flags & PLR_KILLER != 0).unwrap_or(false)
+    g.get_char(ch)
+        .map(|c| c.act_flags & PLR_KILLER != 0)
+        .unwrap_or(false)
 }
 
 /// Current mud-clock hour (0..23) for the shop open/close gate. This mirrors
@@ -722,7 +772,9 @@ fn obj_name(g: &GameState, oid: ObjId) -> String {
     g.get_obj(oid).map(|o| o.name.clone()).unwrap_or_default()
 }
 fn obj_short(g: &GameState, oid: ObjId) -> String {
-    g.get_obj(oid).map(|o| o.short_description.clone()).unwrap_or_default()
+    g.get_obj(oid)
+        .map(|o| o.short_description.clone())
+        .unwrap_or_default()
 }
 
 /// CAN_SEE_OBJ — Tier-0 visibility defers to existence (matches the rest of the
@@ -840,7 +892,15 @@ fn keeper_say(g: &mut GameState, keeper: CharId, msg: &str) {
 /// token. perform_tell renders "$n tells you, '<body>'" to that player only.
 fn keeper_tell_named(g: &mut GameState, keeper: CharId, target: CharId, body: &str) {
     let line = format!("tells you, '{}'", body);
-    act(g, &line, false, keeper, None, ActArg::Char(target), To::Vict);
+    act(
+        g,
+        &line,
+        false,
+        keeper,
+        None,
+        ActArg::Char(target),
+        To::Vict,
+    );
 }
 
 fn page_string_to_char(g: &mut GameState, ch: CharId, body: &str) {
@@ -873,7 +933,12 @@ fn is_ok_char(g: &mut GameState, keeper: CharId, ch: CharId, shop: &ShopData) ->
         || (is_neutral(g, ch) && notrade_neutral)
     {
         let body = format!("{} {}", get_name(g, ch), MSG_NO_SELL_ALIGN);
-        keeper_tell_named(g, keeper, ch, body.split_once(' ').map(|x| x.1).unwrap_or(&body));
+        keeper_tell_named(
+            g,
+            keeper,
+            ch,
+            body.split_once(' ').map(|x| x.1).unwrap_or(&body),
+        );
         return false;
     }
     if is_npc(g, ch) {
@@ -977,7 +1042,12 @@ fn evaluate_expression(g: &GameState, obj: ObjId, expr: Option<&str>) -> bool {
     if expr.is_empty() {
         return true;
     }
-    if !expr.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false) {
+    if !expr
+        .chars()
+        .next()
+        .map(|c| c.is_alphabetic())
+        .unwrap_or(false)
+    {
         return true;
     }
 
@@ -999,7 +1069,8 @@ fn evaluate_expression(g: &GameState, obj: ObjId, expr: Option<&str>) -> bool {
         if temp == NOTHING {
             // Read a name token: up to the next space/operator.
             let start = i;
-            while i < chars.len() && !chars[i].is_whitespace() && find_oper_num(chars[i]) == NOTHING {
+            while i < chars.len() && !chars[i].is_whitespace() && find_oper_num(chars[i]) == NOTHING
+            {
                 i += 1;
             }
             let name: String = chars[start..i].iter().collect();
@@ -1154,10 +1225,7 @@ fn buy_price(g: &GameState, obj: ObjId, shop: &ShopData) -> i32 {
 
 fn sell_price(g: &GameState, ch: CharId, obj: ObjId, shop: &ShopData) -> i32 {
     let mut value = (obj_cost(g, obj) as f32 * shop.profit_sell) as i32;
-    if !PK_ALLOWED
-        && plr_killer(g, ch)
-        && in_room(g, ch) == g.real_room(JAIL_NUM)
-        && value > 75000
+    if !PK_ALLOWED && plr_killer(g, ch) && in_room(g, ch) == g.real_room(JAIL_NUM) && value > 75000
     {
         value = 75000;
     }
@@ -1196,14 +1264,21 @@ fn list_object(g: &GameState, obj: ObjId, cnt: i32, index: i32, shop: &ShopData)
     let ty = obj_type_int(g, obj);
     if ty == ITEM_DRINKCON && obj_val(g, obj, 1) != 0 {
         let liq = obj_val(g, obj, 2);
-        let drink = crate::constants::DRINKS.get(liq as usize).copied().unwrap_or("water");
+        let drink = crate::constants::DRINKS
+            .get(liq as usize)
+            .copied()
+            .unwrap_or("water");
         buf3.push_str(&format!(" of {}", drink));
     }
     if (ty == ITEM_WAND || ty == ITEM_STAFF) && obj_val(g, obj, 2) < obj_val(g, obj, 1) {
         buf3.push_str(" (partially used)");
     }
 
-    let line = format!("{:<48} {:>8}\r\n", buf3, numdisplay(buy_price(g, obj, shop)));
+    let line = format!(
+        "{:<48} {:>8}\r\n",
+        buf3,
+        numdisplay(buy_price(g, obj, shop))
+    );
     buf.push_str(&cap(&line));
     buf
 }
@@ -1272,7 +1347,10 @@ fn get_purchase_obj(
 ) -> Option<ObjId> {
     let (name, _) = crate::interpreter::one_argument(arg);
     loop {
-        let carrying = g.get_char(keeper).map(|c| c.carrying.clone()).unwrap_or_default();
+        let carrying = g
+            .get_char(keeper)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         let obj = if name.starts_with('#') {
             get_hash_obj_vis(g, ch, &name, &carrying)
         } else {
@@ -1306,7 +1384,10 @@ fn get_selling_obj(
     shop: &ShopData,
     msg: bool,
 ) -> Option<ObjId> {
-    let inv = g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default();
+    let inv = g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     let obj = match g.get_obj_in_list_vis(ch, name, &inv) {
         Some(o) => o,
         None => {
@@ -1334,7 +1415,10 @@ fn get_selling_obj(
     };
     if msg {
         // Strip the leading "<name> " prefix for the tell body.
-        let body = body.split_once(' ').map(|x| x.1.to_string()).unwrap_or(body);
+        let body = body
+            .split_once(' ')
+            .map(|x| x.1.to_string())
+            .unwrap_or(body);
         keeper_tell_named(g, keeper, ch, &body);
     }
     None
@@ -1347,12 +1431,18 @@ fn sprintf_name(template: &str, name: &str) -> String {
     // stripped by perform_tell's target parse. We replicate by substituting
     // %s with the name, then dropping the name prefix.
     let full = template.replacen("%s", name, 1);
-    full.split_once(' ').map(|x| x.1.to_string()).unwrap_or(full)
+    full.split_once(' ')
+        .map(|x| x.1.to_string())
+        .unwrap_or(full)
 }
 
 fn sprintf_name_amt(template: &str, name: &str, amt: i32) -> String {
-    let full = template.replacen("%s", name, 1).replacen("%d", &amt.to_string(), 1);
-    full.split_once(' ').map(|x| x.1.to_string()).unwrap_or(full)
+    let full = template
+        .replacen("%s", name, 1)
+        .replacen("%d", &amt.to_string(), 1);
+    full.split_once(' ')
+        .map(|x| x.1.to_string())
+        .unwrap_or(full)
 }
 
 // ---------------------------------------------------------------------------
@@ -1380,7 +1470,10 @@ fn transaction_amt(arg: &str) -> (i32, String) {
 fn sort_keeper_objs(g: &mut GameState, keeper: CharId, shop_idx: usize) {
     // Snapshot the keeper's inventory and re-order so identical items are
     // grouped adjacently (the on-list grouping the C slide_obj maintains).
-    let inv = g.get_char(keeper).map(|c| c.carrying.clone()).unwrap_or_default();
+    let inv = g
+        .get_char(keeper)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
 
     // Stable grouping: walk the list, bucketing same_obj items together while
     // preserving first-appearance order of each group.
@@ -1478,7 +1571,15 @@ fn shopping_buy(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_i
                 crate::cmd_social::do_action_named(g, keeper, "puke", &pname);
             }
             1 => {
-                act(g, "$n smokes on his joint.", false, keeper, None, ActArg::None, To::Room);
+                act(
+                    g,
+                    "$n smokes on his joint.",
+                    false,
+                    keeper,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
             }
             _ => {}
         }
@@ -1486,11 +1587,23 @@ fn shopping_buy(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_i
     }
 
     if is_carrying_n(g, ch) + 1 > can_carry_n(g, ch) {
-        g.send_to_char(ch, &format!("{}: You can't carry any more items.\r\n", fname(&obj_name(g, obj))));
+        g.send_to_char(
+            ch,
+            &format!(
+                "{}: You can't carry any more items.\r\n",
+                fname(&obj_name(g, obj))
+            ),
+        );
         return;
     }
     if is_carrying_w(g, ch) + obj_weight(g, obj) > can_carry_w(g, ch) {
-        g.send_to_char(ch, &format!("{}: You can't carry that much weight.\r\n", fname(&obj_name(g, obj))));
+        g.send_to_char(
+            ch,
+            &format!(
+                "{}: You can't carry that much weight.\r\n",
+                fname(&obj_name(g, obj))
+            ),
+        );
         return;
     }
 
@@ -1546,7 +1659,10 @@ fn shopping_buy(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_i
     if bought < buynum {
         let body = if cur.is_none() || !same_obj(g, last_obj, cur) {
             format!("I only have {} to sell you.", bought)
-        } else if cur.map(|o| get_gold(g, ch) < buy_price(g, o, &shop)).unwrap_or(false) {
+        } else if cur
+            .map(|o| get_gold(g, ch) < buy_price(g, o, &shop))
+            .unwrap_or(false)
+        {
             format!("You can only afford {}.", bought)
         } else if is_carrying_n(g, ch) >= can_carry_n(g, ch) {
             format!("You can only hold {}.", bought)
@@ -1699,7 +1815,10 @@ fn shopping_sell(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_
 fn slide_obj(g: &mut GameState, obj: ObjId, keeper: CharId, shop: &mut ShopData) -> Option<ObjId> {
     if shop.lastsort < is_carrying_n(g, keeper) {
         // Resort first (group identicals).
-        let inv = g.get_char(keeper).map(|c| c.carrying.clone()).unwrap_or_default();
+        let inv = g
+            .get_char(keeper)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default();
         let mut groups: Vec<Vec<ObjId>> = Vec::new();
         for oid in inv {
             let mut placed = false;
@@ -1731,7 +1850,10 @@ fn slide_obj(g: &mut GameState, obj: ObjId, keeper: CharId, shop: &mut ShopData)
     shop.lastsort += 1;
     g.obj_to_char(obj, keeper);
     // Re-group: move obj adjacent to any identical item.
-    let inv = g.get_char(keeper).map(|c| c.carrying.clone()).unwrap_or_default();
+    let inv = g
+        .get_char(keeper)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     let mut groups: Vec<Vec<ObjId>> = Vec::new();
     for oid in inv {
         let mut placed = false;
@@ -1804,7 +1926,10 @@ fn shopping_list(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_
     buf.push_str(" ##   Available   Item                                                 Cost\r\n");
     buf.push_str("---------------------------------------------------------------------------\r\n");
 
-    let carrying = g.get_char(keeper).map(|c| c.carrying.clone()).unwrap_or_default();
+    let carrying = g
+        .get_char(keeper)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default();
     let mut last_obj: Option<ObjId> = None;
     let mut cnt = 0;
     let mut index = 0;
@@ -1864,9 +1989,11 @@ pub fn shop_keeper(g: &mut GameState, ch: CharId, me: CharId, cmd: &str, arg: &s
     let keeper_vnum = g.get_char(keeper).map(|c| c.nr).unwrap_or(NOBODY);
 
     // Find the shop owned by this keeper.
-    let shop_idx = match shops().lock().ok().and_then(|guard| {
-        guard.iter().position(|s| s.keeper == keeper_vnum)
-    }) {
+    let shop_idx = match shops()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.iter().position(|s| s.keeper == keeper_vnum))
+    {
         Some(i) => i,
         None => return false,
     };
@@ -1951,7 +2078,11 @@ pub fn ok_damage_shopkeeper(g: &mut GameState, ch: CharId, victim: CharId) -> bo
     let protected = shops()
         .lock()
         .ok()
-        .map(|guard| guard.iter().any(|s| s.keeper == vnum && s.bitvector & WILL_START_FIGHT == 0))
+        .map(|guard| {
+            guard
+                .iter()
+                .any(|s| s.keeper == vnum && s.bitvector & WILL_START_FIGHT == 0)
+        })
         .unwrap_or(false);
     if protected {
         let pname = get_name(g, ch);
@@ -1977,7 +2108,10 @@ pub fn ok_damage_shopkeeper(g: &mut GameState, ch: CharId, victim: CharId) -> bo
 fn keeper_here(g: &GameState, ch: CharId) -> Option<(CharId, usize)> {
     let rnum = in_room(g, ch)?;
     let rvnum = room_vnum(g, rnum);
-    let people = g.room_opt(rnum).map(|r| r.people.clone()).unwrap_or_default();
+    let people = g
+        .room_opt(rnum)
+        .map(|r| r.people.clone())
+        .unwrap_or_default();
     let guard = shops().lock().ok()?;
     for &cid in &people {
         if cid == ch {
@@ -1987,9 +2121,15 @@ fn keeper_here(g: &GameState, ch: CharId) -> Option<(CharId, usize)> {
             Some(c) if c.is_npc => c.nr,
             _ => continue,
         };
-        if let Some(idx) = guard.iter().position(|s| s.keeper == vnum && ok_shop_room(s, rvnum)) {
+        if let Some(idx) = guard
+            .iter()
+            .position(|s| s.keeper == vnum && ok_shop_room(s, rvnum))
+        {
             // Awake keeper required, mirroring the spec proc.
-            if g.get_char(cid).map(|c| c.position > Position::Sleeping).unwrap_or(false) {
+            if g.get_char(cid)
+                .map(|c| c.position > Position::Sleeping)
+                .unwrap_or(false)
+            {
                 return Some((cid, idx));
             }
         }
@@ -2133,7 +2273,14 @@ fn list_all_shops(g: &mut GameState, ch: CharId) {
 }
 
 fn list_detailed_shop(g: &mut GameState, ch: CharId, shop: &ShopData, shop_idx: usize) {
-    g.send_to_char(ch, &format!("Vnum:       [{:5}], Rnum: [{:5}]\r\n", shop.vnum, shop_idx + 1));
+    g.send_to_char(
+        ch,
+        &format!(
+            "Vnum:       [{:5}], Rnum: [{:5}]\r\n",
+            shop.vnum,
+            shop_idx + 1
+        ),
+    );
 
     // Rooms.
     let mut buf = String::from("Rooms:      ");
@@ -2160,22 +2307,43 @@ fn list_detailed_shop(g: &mut GameState, ch: CharId, shop: &ShopData, shop_idx: 
 
     // Shopkeeper.
     if shop.keeper >= 0 {
-        let kname = g.mob_protos.get(&shop.keeper).map(|p| fname(&p.name)).unwrap_or_else(|| "<none>".to_string());
-        g.send_to_char(ch, &format!("Shopkeeper: {} (#{}), Special Function: No\r\n", kname, shop.keeper));
+        let kname = g
+            .mob_protos
+            .get(&shop.keeper)
+            .map(|p| fname(&p.name))
+            .unwrap_or_else(|| "<none>".to_string());
+        g.send_to_char(
+            ch,
+            &format!(
+                "Shopkeeper: {} (#{}), Special Function: No\r\n",
+                kname, shop.keeper
+            ),
+        );
         // Live coins, if an instance exists.
         if let Some(k) = g.chars.values().find(|c| c.is_npc && c.nr == shop.keeper) {
             let kg = k.points.gold;
-            g.send_to_char(ch, &format!(
-                "Coins:      [{:9}], Bank: [{:9}] (Total: {})\r\n",
-                kg, shop.bank_account, kg + shop.bank_account
-            ));
+            g.send_to_char(
+                ch,
+                &format!(
+                    "Coins:      [{:9}], Bank: [{:9}] (Total: {})\r\n",
+                    kg,
+                    shop.bank_account,
+                    kg + shop.bank_account
+                ),
+            );
         }
     } else {
         g.send_to_char(ch, "Shopkeeper: <NONE>\r\n");
     }
 
     let cs = customer_string(shop, true);
-    g.send_to_char(ch, &format!("Customers:  {}\r\n", if cs.is_empty() { "None" } else { &cs }));
+    g.send_to_char(
+        ch,
+        &format!(
+            "Customers:  {}\r\n",
+            if cs.is_empty() { "None" } else { &cs }
+        ),
+    );
 
     // Produces.
     let mut buf = String::from("Produces:   ");
@@ -2185,7 +2353,11 @@ fn list_detailed_shop(g: &mut GameState, ch: CharId, shop: &ShopData, shop_idx: 
             buf.push_str(", ");
         }
         any = true;
-        let short = g.obj_protos.get(&pv).map(|p| p.short_desc.clone()).unwrap_or_default();
+        let short = g
+            .obj_protos
+            .get(&pv)
+            .map(|p| p.short_desc.clone())
+            .unwrap_or_default();
         buf.push_str(&format!("{} (#{})", short, pv));
     }
     if !any {
@@ -2203,7 +2375,10 @@ fn list_detailed_shop(g: &mut GameState, ch: CharId, shop: &ShopData, shop_idx: 
             buf.push_str(", ");
         }
         any = true;
-        let tname = ITEM_TYPE_NAMES.get(entry.type_ as usize).copied().unwrap_or("UNDEFINED");
+        let tname = ITEM_TYPE_NAMES
+            .get(entry.type_ as usize)
+            .copied()
+            .unwrap_or("UNDEFINED");
         buf.push_str(&format!("{} (#{}) ", tname, entry.type_));
         match &entry.keywords {
             Some(k) => buf.push_str(&format!("[{}]", k)),
@@ -2217,10 +2392,13 @@ fn list_detailed_shop(g: &mut GameState, ch: CharId, shop: &ShopData, shop_idx: 
         g.send_to_char(ch, &buf);
     }
 
-    g.send_to_char(ch, &format!(
-        "Buy at:     [{:.2}], Sell at: [{:.2}], Open: [{}-{}, {}-{}]\r\n",
-        shop.profit_sell, shop.profit_buy, shop.open1, shop.close1, shop.open2, shop.close2
-    ));
+    g.send_to_char(
+        ch,
+        &format!(
+            "Buy at:     [{:.2}], Sell at: [{:.2}], Open: [{}-{}, {}-{}]\r\n",
+            shop.profit_sell, shop.profit_buy, shop.open1, shop.close1, shop.open2, shop.close2
+        ),
+    );
 
     // Bits.
     let mut bits = String::new();
@@ -2346,6 +2524,46 @@ mod tests {
     }
 
     #[test]
+    fn combat_damage_honors_protected_shopkeeper_flag() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Shop".to_string(),
+            "A small shop.".to_string(),
+        ));
+        let attacker = connected_player(&mut g, ConnId(1), "Attacker", 10);
+        let mut keeper = Character::new_npc(4242);
+        keeper.player.name = "Keeper".to_string();
+        keeper.points.hit = 50;
+        keeper.points.max_hit = 50;
+        let keeper = g.create_char(keeper);
+        g.char_to_room(attacker, room);
+        g.char_to_room(keeper, room);
+        {
+            let mut guard = shops().lock().unwrap();
+            guard.clear();
+            let mut shop = ShopData::new(1);
+            shop.keeper = 4242;
+            shop.bitvector = 0;
+            guard.push(shop);
+        }
+
+        crate::combat::damage_type(&mut g, attacker, keeper, 10, crate::combat::TYPE_HIT);
+
+        assert_eq!(g.get_char(keeper).unwrap().points.hit, 50);
+        assert_eq!(g.get_char(attacker).unwrap().fighting, None);
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains(MSG_CANT_KILL_KEEPER));
+
+        shops().lock().unwrap().clear();
+    }
+
+    #[test]
     fn producing_shop_purchase_fires_load_trigger_on_fresh_object() {
         let _dg = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         crate::dg_handler::boot_handler();
@@ -2398,7 +2616,13 @@ mod tests {
 
         shopping_buy(&mut g, "amulet", buyer, keeper, 0);
 
-        let bought = g.get_char(buyer).unwrap().carrying.first().copied().unwrap();
+        let bought = g
+            .get_char(buyer)
+            .unwrap()
+            .carrying
+            .first()
+            .copied()
+            .unwrap();
         assert_eq!(
             crate::dg_handler::get_global_var(ScriptKey::Obj(bought), "bought").as_deref(),
             Some("yes")

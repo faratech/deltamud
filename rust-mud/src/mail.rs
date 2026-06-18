@@ -188,7 +188,11 @@ pub fn boot_mail(lib_path: &str) -> bool {
         Ok(f) => f,
         Err(_) => {
             // Non-existent -> create an empty file, like scan_file().
-            let _ = OpenOptions::new().write(true).create(true).truncate(true).open(&file);
+            let _ = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&file);
             m.file_end_pos = 0;
             install(m);
             return true;
@@ -310,7 +314,10 @@ fn get_name_by_id(g: &GameState, id: i64) -> String {
 
 /// Read exactly one BLOCK_SIZE block. Returns Ok(true) if a full block was
 /// read, Ok(false) on a clean EOF at a block boundary.
-fn read_exact_block(f: &mut std::fs::File, buf: &mut [u8; BLOCK_SIZE as usize]) -> std::io::Result<bool> {
+fn read_exact_block(
+    f: &mut std::fs::File,
+    buf: &mut [u8; BLOCK_SIZE as usize],
+) -> std::io::Result<bool> {
     let mut filled = 0usize;
     while filled < buf.len() {
         match f.read(&mut buf[filled..]) {
@@ -340,7 +347,12 @@ fn write_to_file(m: &mut MailSystem, block: &[u8; BLOCK_SIZE as usize], filepos:
         m.no_mail = true;
         return;
     }
-    let mut f = match OpenOptions::new().read(true).write(true).create(true).open(&m.file) {
+    let mut f = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&m.file)
+    {
         Ok(f) => f,
         Err(_) => {
             m.no_mail = true;
@@ -402,7 +414,13 @@ fn index_mail(m: &mut MailSystem, recipient: i64, pos: u64) {
 
 /// Build a HEADER block (block_type/next/from/to/time + up to HEADER_TEXT_CAP
 /// bytes of NUL-terminated text).
-fn make_header_block(next_block: i64, from: i64, to: i64, mail_time: i64, txt: &str) -> [u8; BLOCK_SIZE as usize] {
+fn make_header_block(
+    next_block: i64,
+    from: i64,
+    to: i64,
+    mail_time: i64,
+    txt: &str,
+) -> [u8; BLOCK_SIZE as usize] {
     let mut b = [0u8; BLOCK_SIZE as usize];
     b[0..8].copy_from_slice(&HEADER_BLOCK.to_le_bytes());
     b[8..16].copy_from_slice(&next_block.to_le_bytes());
@@ -444,7 +462,10 @@ fn read_text(src: &[u8], cap: usize) -> String {
 /// has_mail(): does this recipient have any mail waiting? (mail.c has_mail)
 pub fn has_mail(recipient: i64) -> bool {
     let m = sys().lock().unwrap();
-    m.index.get(&recipient).map(|e| !e.positions.is_empty()).unwrap_or(false)
+    m.index
+        .get(&recipient)
+        .map(|e| !e.positions.is_empty())
+        .unwrap_or(false)
 }
 
 /// store_mail(): store a message addressed to `to` from `from`. Splits the body
@@ -606,9 +627,18 @@ fn retype_block(src: &[u8; BLOCK_SIZE as usize], new_type: i64) -> [u8; BLOCK_SI
 ///
 /// Wire this into the spec-proc dispatch keyed on POSTMASTER_VNUMS once a
 /// spec-proc table exists; until then do_mail() drives the same helpers.
-pub fn postmaster(g: &mut GameState, ch: CharId, mailman: CharId, cmd_name: &str, arg: &str) -> bool {
+pub fn postmaster(
+    g: &mut GameState,
+    ch: CharId,
+    mailman: CharId,
+    cmd_name: &str,
+    arg: &str,
+) -> bool {
     // "so mobs don't get caught here" — actor must be a real player.
-    let has_desc = g.get_char(ch).map(|c| c.desc.is_some() && !c.is_npc).unwrap_or(false);
+    let has_desc = g
+        .get_char(ch)
+        .map(|c| c.desc.is_some() && !c.is_npc)
+        .unwrap_or(false);
     if !has_desc {
         return false;
     }
@@ -621,7 +651,10 @@ pub fn postmaster(g: &mut GameState, ch: CharId, mailman: CharId, cmd_name: &str
     }
 
     if sys().lock().unwrap().no_mail {
-        g.send_to_char(ch, "Sorry, the mail system is having technical difficulties.\r\n");
+        g.send_to_char(
+            ch,
+            "Sorry, the mail system is having technical difficulties.\r\n",
+        );
         return false;
     }
 
@@ -652,7 +685,15 @@ fn postmaster_check_mail(g: &mut GameState, ch: CharId, mailman: CharId) {
 fn postmaster_receive_mail(g: &mut GameState, ch: CharId, mailman: CharId) {
     let idnum = char_idnum(g, ch);
     if !has_mail(idnum) {
-        act(g, "$n tells you, 'Sorry, you don't have any mail waiting.'", false, mailman, None, ActArg::Char(ch), To::Vict);
+        act(
+            g,
+            "$n tells you, 'Sorry, you don't have any mail waiting.'",
+            false,
+            mailman,
+            None,
+            ActArg::Char(ch),
+            To::Vict,
+        );
         return;
     }
 
@@ -676,10 +717,26 @@ fn postmaster_receive_mail(g: &mut GameState, ch: CharId, mailman: CharId) {
         let oid = g.create_obj(obj);
         g.obj_to_char(oid, ch);
 
-        act(g, "$n gives you a piece of mail.", false, mailman, None, ActArg::Char(ch), To::Vict);
+        act(
+            g,
+            "$n gives you a piece of mail.",
+            false,
+            mailman,
+            None,
+            ActArg::Char(ch),
+            To::Vict,
+        );
         // C: act("$N gives $n a piece of mail.", ..., ch, 0, mailman, TO_ROOM)
         // i.e. broadcast in ch's room with $n=ch, $N=mailman.
-        act(g, "$N gives $n a piece of mail.", false, ch, None, ActArg::Char(mailman), To::Room);
+        act(
+            g,
+            "$N gives $n a piece of mail.",
+            false,
+            ch,
+            None,
+            ActArg::Char(mailman),
+            To::Room,
+        );
     }
 }
 
@@ -699,7 +756,15 @@ fn postmaster_send_mail(g: &mut GameState, ch: CharId, mailman: CharId, arg: &st
 
     let (recipient_name, _) = crate::interpreter::one_argument(arg);
     if recipient_name.is_empty() {
-        act(g, "$n tells you, 'You need to specify an address!'", false, mailman, None, ActArg::Char(ch), To::Vict);
+        act(
+            g,
+            "$n tells you, 'You need to specify an address!'",
+            false,
+            mailman,
+            None,
+            ActArg::Char(ch),
+            To::Vict,
+        );
         return;
     }
 
@@ -716,11 +781,27 @@ fn postmaster_send_mail(g: &mut GameState, ch: CharId, mailman: CharId, arg: &st
 
     let recipient = get_id_by_name(g, &recipient_name);
     if recipient < 0 {
-        act(g, "$n tells you, 'No one by that name is registered here!'", false, mailman, None, ActArg::Char(ch), To::Vict);
+        act(
+            g,
+            "$n tells you, 'No one by that name is registered here!'",
+            false,
+            mailman,
+            None,
+            ActArg::Char(ch),
+            To::Vict,
+        );
         return;
     }
 
-    act(g, "$n starts to write some mail.", true, ch, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n starts to write some mail.",
+        true,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
 
     let buf = if mailman_level != 1 {
         format!(
@@ -771,12 +852,18 @@ pub fn do_mail(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
     };
 
     // Mirror the spec-proc guard set: the actor needs a live descriptor.
-    let has_desc = g.get_char(ch).map(|c| c.desc.is_some() && !c.is_npc).unwrap_or(false);
+    let has_desc = g
+        .get_char(ch)
+        .map(|c| c.desc.is_some() && !c.is_npc)
+        .unwrap_or(false);
     if !has_desc {
         return;
     }
     if sys().lock().unwrap().no_mail {
-        g.send_to_char(ch, "Sorry, the mail system is having technical difficulties.\r\n");
+        g.send_to_char(
+            ch,
+            "Sorry, the mail system is having technical difficulties.\r\n",
+        );
         return;
     }
 
@@ -820,13 +907,11 @@ fn open_compose_editor(g: &mut GameState, ch: CharId, to: i64, from: i64) {
         Some(c) => c,
         None => return,
     };
-    pending().lock().unwrap().insert(conn, PendingMail { to, from });
-    if let Some(d) = g.descriptors.get_mut(&conn) {
-        d.editors.push(crate::connection::InputContext::StringEdit {
-            buffer: String::new(),
-            max_len: MAX_MAIL_SIZE,
-        });
-    }
+    pending()
+        .lock()
+        .unwrap()
+        .insert(conn, PendingMail { to, from });
+    crate::modify::start_mail_editing(g, conn, MAX_MAIL_SIZE);
 }
 
 /// finish_mail(): the integrator calls this when a mail-compose StringEdit

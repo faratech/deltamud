@@ -2243,6 +2243,9 @@ fn perform_wear(g: &mut GameState, ch: CharId, obj: ObjId, mut where_: usize) {
         g.send_to_char(ch, ALREADY_WEARING[where_]);
         return;
     }
+    if !crate::dg_triggers::wear_otrigger(g, obj, ch, where_) {
+        return;
+    }
     if wear_restriction_zaps(g, ch, obj) {
         act(
             g,
@@ -2971,7 +2974,11 @@ mod tests {
     use crate::character::Character;
     use crate::config::Config;
     use crate::connection::Descriptor;
+    use crate::dg_handler::{
+        self, add_trigger, install_trig, ScriptKey, TrigData, DG_TEST_LOCK, OBJ_TRIGGER, OTRIG_WEAR,
+    };
     use crate::object::Object;
+    use std::collections::HashMap;
 
     fn wearable_game(
         extra_flags: ExtraFlags,
@@ -3010,6 +3017,26 @@ mod tests {
             .contains("You are zapped by a test armor and instantly let go of it.\r\n"));
     }
 
+    fn make_obj_trigger(cmds: &[&str]) -> crate::dg_handler::TrigId {
+        install_trig(TrigData {
+            nr: 0,
+            vnum: 9999,
+            attach_type: OBJ_TRIGGER,
+            name: "wear test".to_string(),
+            trigger_type: OTRIG_WEAR,
+            narg: 100,
+            arglist: String::new(),
+            cmdlist: cmds.iter().map(|s| s.to_string()).collect(),
+            curr_line: 0,
+            depth: 0,
+            loops: 0,
+            wait_event: None,
+            var_list: Vec::new(),
+            purged: false,
+            loop_origin: HashMap::new(),
+        })
+    }
+
     #[test]
     fn perform_wear_rejects_anti_alignment_items() {
         let (mut g, ch, obj, conn) = wearable_game(ExtraFlags::ANTI_GOOD, 0);
@@ -3030,5 +3057,29 @@ mod tests {
         let (g, ch, obj, conn) = wearable_game(ExtraFlags::empty(), 20);
 
         assert_zapped(g, ch, obj, conn);
+    }
+
+    #[test]
+    fn perform_wear_runs_wear_trigger_and_honors_veto() {
+        let _dg = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        dg_handler::boot_handler();
+        let (mut g, ch, obj, conn) = wearable_game(ExtraFlags::empty(), 0);
+        let trig = make_obj_trigger(&["set fired yes", "global fired", "return 0", "halt"]);
+        add_trigger(ScriptKey::Obj(obj), trig, -1);
+
+        perform_wear(&mut g, ch, obj, W_BODY);
+
+        assert_eq!(
+            dg_handler::get_global_var(ScriptKey::Obj(obj), "fired").as_deref(),
+            Some("yes")
+        );
+        assert_eq!(g.get_char(ch).unwrap().equipment[W_BODY], None);
+        assert_eq!(g.get_obj(obj).unwrap().loc, ObjLoc::Carried(ch));
+        assert!(!g
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("You wear a test armor on your body.\r\n"));
     }
 }

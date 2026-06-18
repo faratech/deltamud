@@ -1686,14 +1686,7 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
             ch,
             &format!(
                 "Hometown: [{}], Speaks: [{}/{}/{}], (STL[{}]/per[{}]/NSTL[{}]) Clan: [{}]\r\n",
-                hometown,
-                talks[0] as i32,
-                talks[1] as i32,
-                talks[2] as i32,
-                practices,
-                0,
-                0,
-                clan
+                hometown, talks[0] as i32, talks[1] as i32, talks[2] as i32, practices, 0, 0, clan
             ),
         );
     }
@@ -3942,25 +3935,25 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             }
             match g.find_player_by_name(&value) {
                 Some(p) => {
-                    let (nm, sex, lvl, cls, gold, bank, exp, align, lessons, birth, logon, played) = g
-                        .get_char(p)
-                        .map(|c| {
-                            (
-                                c.player.name.clone(),
-                                c.player.sex as usize,
-                                c.player.level,
-                                c.player.class,
-                                c.points.gold,
-                                c.points.bank_gold,
-                                c.points.exp,
-                                c.alignment,
-                                c.spells_to_learn,
-                                c.player.time_birth,
-                                c.last_logon.timestamp(),
-                                c.player.time_played.max(0),
-                            )
-                        })
-                        .unwrap();
+                    let (nm, sex, lvl, cls, gold, bank, exp, align, lessons, birth, logon, played) =
+                        g.get_char(p)
+                            .map(|c| {
+                                (
+                                    c.player.name.clone(),
+                                    c.player.sex as usize,
+                                    c.player.level,
+                                    c.player.class,
+                                    c.points.gold,
+                                    c.points.bank_gold,
+                                    c.points.exp,
+                                    c.alignment,
+                                    c.spells_to_learn,
+                                    c.player.time_birth,
+                                    c.last_logon.timestamp(),
+                                    c.player.time_played.max(0),
+                                )
+                            })
+                            .unwrap();
                     let started = ctime(birth);
                     let last = ctime(logon);
                     let played_hours = played / 3600;
@@ -6460,6 +6453,12 @@ pub fn do_copyover(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         // handle if a real DB is in use; the mock DB clones on load so the
         // in-memory state is already authoritative.
         crate::objsave::crash_save(g, cid, &g.config.lib_path.clone());
+        if let Some(c) = g.get_char(cid) {
+            if let Err(err) = crate::alias::write_aliases(&g.config.lib_path, c.get_name(), c.idnum)
+            {
+                log::warn!("copyover write_aliases({}) failed: {}", c.get_name(), err);
+            }
+        }
 
         // Dump the char snapshot line (pipe-delimited; player names are
         // alphabetic so they never collide with the separator).
@@ -6892,8 +6891,14 @@ mod tests {
 
         do_dig(&mut g, builder, "east 200", 0);
 
-        assert_eq!(g.room(here).exits[EAST].as_ref().map(|e| e.to_room), Some(200));
-        assert_eq!(g.room(there).exits[WEST].as_ref().map(|e| e.to_room), Some(100));
+        assert_eq!(
+            g.room(here).exits[EAST].as_ref().map(|e| e.to_room),
+            Some(200)
+        );
+        assert_eq!(
+            g.room(there).exits[WEST].as_ref().map(|e| e.to_room),
+            Some(100)
+        );
         crate::olc::olc_saveinfo(&mut g, builder);
         assert!(g
             .descriptors
