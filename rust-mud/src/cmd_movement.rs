@@ -33,6 +33,7 @@ use crate::types::*;
 const AFF_WATERWALK: i64 = 1 << 6;
 const AFF_TAMED: i64 = 1 << 16;
 const AFF_CHAINED: i64 = 1 << 24;
+const MAX_PLAYER_STAT: i32 = 18; // utils.h MAX_PLAYER_STAT
 
 // PRF2_INTANGIBLE (structs.h): ghosting immortals don't burn move (1 << 9).
 const PRF2_INTANGIBLE: i64 = 1 << 9;
@@ -436,6 +437,9 @@ pub(crate) fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_spe
     // ROOM_IMPROOM (LVL_GRGOD). The port checked GODROOM (wrong flag) with a
     // wrong string and never checked IMPROOM, so impl-only rooms were open
     // and god rooms were blocked (#118).
+    if dt_precheck(g, ch, to_rnum, dir) {
+        return false;
+    }
     if (level as u8) < LVL_GRGOD && g.room(to_rnum).room_flags.contains(RoomFlags::IMPROOM) {
         g.send_to_char(ch, "You are not godly enough to use that room!\r\n");
         return false;
@@ -667,6 +671,63 @@ fn death_trap_effect(g: &mut GameState, ch: CharId) -> bool {
     }
     g.extract_char(ch);
     true
+}
+
+
+/// C act.movement.c:260-321: the pre-move death-trap veto in do_simple_move.
+/// A mortal entering a ROOM_DEATH destination is stopped: with max WIS+INT
+/// they spot the trap (broadcast + random gear drop); a THIEF/KILLER is
+/// stripped and released to their hometown instead of dying (#123).
+fn dt_precheck(g: &mut GameState, ch: CharId, to_rnum: RoomRnum, dir: usize) -> bool {
+    const PLR_KILLER: i64 = 1 << 0;
+    const PLR_THIEF: i64 = 1 << 1;
+    let mortal = g.get_char(ch).map(|c| c.player.level < LVL_IMMORT).unwrap_or(false);
+    if !mortal {
+        return false;
+    }
+    let is_dt = g.room(to_rnum).room_flags.contains(RoomFlags::DEATH);
+    if !is_dt {
+        return false;
+    }
+    let (wis, int, is_npc) = g
+        .get_char(ch)
+        .map(|c| (c.aff_abils.wis as i32, c.aff_abils.intel as i32, c.is_npc))
+        .unwrap_or((0, 0, true));
+    if !is_npc && wis >= MAX_PLAYER_STAT && int >= MAX_PLAYER_STAT {
+        g.send_to_char(
+            ch,
+            "Yikes!!! Thankfully, your head is screwed on right,\r\nfor you notice that a death trap lies there.\r\n",
+        );
+        let dir_name = crate::types::DIR_NAMES[dir].to_string();
+        let msg = format!("$n spots a death trap in the {} direction.", dir_name);
+        act(g, &msg, true, ch, None, ActArg::None, To::Room);
+        // Player loses some equipment/carried items in the panic.
+        for p in 0..NUM_WEARS {
+            let drop = g.get_char(ch).and_then(|c| c.equipment[p]).is_some()
+                && g.rng.number(1, 10) > g.rng.number(8, 10);
+            if drop {
+                if let Some(oid) = g.unequip_char(ch, p) {
+                    let sname = g.get_obj(oid).map(|o| o.short_description.clone()).unwrap_or_default();
+                    let line = format!("In your frantic panic to avoid the trap you accidentally lose {}\r\n", sname);
+                    g.send_to_char(ch, &line);
+                    let r = g.get_char(ch).and_then(|c| c.in_room);
+                    if let Some(r) = r {
+                        g.obj_to_room(oid, r);
+                    }
+                }
+            }
+        }
+        if g.rng.number(1, 10) > g.rng.number(6, 10) {
+            if let Some(first) = g.get_char(ch).and_then(|c| c.carrying.first().copied()) {
+                let sname = g.get_obj(first).map(|o| o.short_description.clone()).unwrap_or_default();
+                let line = format!("In your frantic panic to avoid the trap you accidentally lose {}\r\n", sname);
+                g.send_to_char(ch, &line);
+                g.obj_from_anywhere(first);
+            }
+        }
+        return true;
+    }
+    false
 }
 
 /// num_pc_in_room: count non-NPC occupants (CircleMUD num_pc_in_room).
@@ -1433,6 +1494,7 @@ fn do_special_move(g: &mut GameState, ch: CharId) -> bool {
     // ROOM_IMPROOM (LVL_GRGOD). The port checked GODROOM (wrong flag) with a
     // wrong string and never checked IMPROOM, so impl-only rooms were open
     // and god rooms were blocked (#118).
+    
     if (level as u8) < LVL_GRGOD && g.room(to_rnum).room_flags.contains(RoomFlags::IMPROOM) {
         g.send_to_char(ch, "You are not godly enough to use that room!\r\n");
         return false;
