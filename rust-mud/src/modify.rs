@@ -172,7 +172,7 @@ fn conn_char(g: &GameState, conn: ConnId) -> Option<CharId> {
 // ===========================================================================
 // delete_doubledollar (interpreter.c): collapse "$$" -> "$".
 // ===========================================================================
-fn delete_doubledollar(s: &str) -> String {
+pub fn delete_doubledollar(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut bytes = s.chars().peekable();
     while let Some(c) = bytes.next() {
