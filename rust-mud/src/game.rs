@@ -200,6 +200,8 @@ pub struct Game {
     /// in C) and the reset queue of zones past their lifespan.
     zone_minute_timer: u64,
     zone_reset_queue: Vec<i32>,
+    /// C comm.c mins_since_crashsave: minutes since the last autosave sweep.
+    mins_since_crashsave: u32,
 }
 
 impl Game {
@@ -214,6 +216,7 @@ impl Game {
             started_at: chrono::Utc::now().timestamp(),
             zone_minute_timer: 0,
             zone_reset_queue: Vec::new(),
+            mins_since_crashsave: 0,
         }
     }
 
@@ -1501,47 +1504,86 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
         // `--d->wait <= 0 && get_from_q(...)`), one command per descriptor.
         self.process_input_queues();
 
-        if pulse % PULSE_VIOLENCE == 0 {
-            combat::perform_violence(&mut self.state);
-        }
-        if pulse % PULSE_MOBILE == 0 {
-            crate::mobact::mobile_activity(&mut self.state);
+        // C comm.c:1001-1058 heartbeat(): stage order and cadences below
+        // mirror the oracle exactly (issues #192/#225). Input draining is the
+        // game_loop's job and stays above.
+        crate::dg_event::process_events(&mut self.state);
+        // PULSE_DG_SCRIPT (dg_scripts.h): random/idle trigger scan.
+        if pulse % 130 == 0 {
+            crate::dg_scripts::script_trigger_check(&mut self.state);
         }
         if pulse % PULSE_ZONE == 0 {
             self.zone_update();
         }
-        // DG Scripts: drain the wait/event queue every pulse (C process_events
-        // in heartbeat), and run the periodic random-trigger scan every
-        // PULSE_DG_SCRIPT (13 RL_SEC = 130 pulses, offset from PULSE_MOBILE).
-        crate::dg_event::process_events(&mut self.state);
-        if pulse % 130 == 0 {
-            crate::dg_scripts::script_trigger_check(&mut self.state);
+        // 15 seconds: reap sockets sitting at login prompts, then auctions.
+        if pulse % (15 * PASSES_PER_SEC) == 0 {
+            self.check_idle_passwords();
         }
-        // CircleMUD point_update + weather/time run once per mud-hour
-        // (SECS_PER_MUD_HOUR=75 => 750 pulses): regen, hunger/thirst, idle,
-        // object timers, corpse decay; weather advances the clock & sky.
-        if pulse % 750 == 0 {
-            // C comm.c:1038: affect_update() runs every mud hour, right
-            // before point_update, aging spell/skill affects (issue #96).
-            crate::magic::affect_update(&mut self.state);
-            crate::limits::point_update(&mut self.state);
-            crate::weather::weather_and_time(&mut self.state);
+        if pulse % (15 * PASSES_PER_SEC) == 0 {
+            crate::auction::auction_update(&mut self.state);
+        }
+        if pulse % PULSE_MOBILE == 0 {
+            crate::mobact::mobile_activity(&mut self.state);
+        }
+        if pulse % PULSE_VIOLENCE == 0 {
+            combat::perform_violence(&mut self.state);
         }
         // Live surface weather (storms spawn/move/collide/expire) every 30
-        // RL-seconds (comm.c: 30 * PASSES_PER_SEC = 300 pulses).
-        if pulse % 300 == 0 {
+        // RL-seconds.
+        if pulse % (30 * PASSES_PER_SEC) == 0 {
             crate::maputils::weather_activity(&mut self.state);
         }
-        // Autoquest update + room blood decay (C: every 60s = 600 pulses).
-        if pulse % 600 == 0 {
+        // Autoquest update + room blood decay, every minute.
+        if pulse % (60 * PASSES_PER_SEC) == 0 {
             crate::quest::quest_update(&mut self.state);
             crate::maputils::blood_update(&mut self.state);
         }
-        if pulse % 100 == 0 {
-            crate::auction::auction_update(&mut self.state);
+        // Mud-hour block (SECS_PER_MUD_HOUR * PASSES_PER_SEC = 750 pulses):
+        // calendar/sky, affect aging (comm.c:1038, #96), then regen/conditions.
+        if pulse % 750 == 0 { // SECS_PER_MUD_HOUR(75) * PASSES_PER_SEC(10)
+            crate::weather::weather_and_time(&mut self.state);
+            crate::magic::affect_update(&mut self.state);
+            crate::limits::point_update(&mut self.state);
         }
-        if pulse % 750 == 0 {
-            crate::objsave::crash_save_all(&mut self.state);
+        // 1-minute autosave block (C: auto_save && pulse % 60s) with the
+        // autosave_time (config.c:174 = 5) minute gate: Crash_save_all +
+        // House_save_all (#192; the old 75-second crash-save tick was 4x
+        // C's cadence and houses were never saved at all).
+        if pulse % (60 * PASSES_PER_SEC) == 0 {
+            self.mins_since_crashsave += 1;
+            if self.mins_since_crashsave >= crate::config::AUTOSAVE_TIME {
+                self.mins_since_crashsave = 0;
+                crate::objsave::crash_save_all(&mut self.state);
+                crate::house::house_save_all(&mut self.state);
+            }
+        }
+    }
+
+    /// C comm.c:2049-2069 check_idle_passwords(): a descriptor sitting at a
+    /// name/password prompt for two consecutive 15-second ticks is disconnected
+    /// with C's message.
+    fn check_idle_passwords(&mut self) {
+        let mut to_close: Vec<ConnId> = Vec::new();
+        for (cid, d) in self.state.descriptors.iter_mut() {
+            if matches!(
+                d.state,
+                ConState::GetName
+                    | ConState::GetOldPassword
+                    | ConState::GetNewPassword
+                    | ConState::ConfirmPassword
+                    | ConState::ConfirmName
+            ) {
+                d.idle_tics += 1;
+                if d.idle_tics >= 2 {
+                    d.outbuf.push_str("\r\nTimed out... goodbye.\r\n");
+                    to_close.push(*cid);
+                }
+            }
+        }
+        for cid in to_close {
+            if let Some(d) = self.state.descriptors.get_mut(&cid) {
+                d.state = ConState::Close;
+            }
         }
     }
 

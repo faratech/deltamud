@@ -304,6 +304,9 @@ pub struct Descriptor {
     pub outbuf: String,
     /// True when a fresh prompt should be sent after flushing.
     pub need_prompt: bool,
+    /// C comm.c d->idle_tics: 15-second heartbeat ticks spent sitting at a
+    /// login prompt (name/password). Two ticks disconnect (issue #192).
+    pub idle_tics: u8,
     /// Command-lag counter (C `d->wait`): the heartbeat decrements it each pulse
     /// and only pulls the next queued command when it reaches <= 0. WAIT_STATE
     /// sets it from combat skills/casting to impose command lag.
@@ -332,6 +335,7 @@ impl Descriptor {
             character: None,
             original: None,
             outbuf: String::new(),
+            idle_tics: 0,
             need_prompt: true,
             wait: 1,
             input_queue: std::collections::VecDeque::new(),

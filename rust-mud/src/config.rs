@@ -89,3 +89,7 @@ impl Default for Config {
         }
     }
 }
+
+/// C config.c:174 `autosave_time = 5` - minutes between Crash_save_all /
+/// House_save_all sweeps (comm.c heartbeat autosave block).
+pub const AUTOSAVE_TIME: u32 = 5;
