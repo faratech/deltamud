@@ -804,7 +804,7 @@ fn sedit_disp_menu(g: &mut GameState, conn: ConnId) {
     };
 
     let menu = format!(
-        "\x1b[H\x1b[J\
+        "\
 -- Shop Number : [&c{}&n]\r\n\
 &g0&n) Keeper      : [&c{}&n] &y{}\r\n\
 &g1&n) Open 1      : &c{:4}&n          &g2&n) Close 1     : &c{:4}\r\n\
@@ -862,7 +862,7 @@ fn sedit_products_menu(g: &mut GameState, conn: ConnId) {
         Some(c) => c,
         None => return,
     };
-    let mut out = String::from("\x1b[H\x1b[J##     VNUM     Product\r\n");
+    let mut out = String::from("##     VNUM     Product\r\n");
     for (i, &p) in prods.iter().enumerate() {
         out.push_str(&format!(
             "{:2} - [&c{:5}&n] - &y{}&n\r\n",
@@ -889,7 +889,7 @@ fn sedit_rooms_menu(g: &mut GameState, conn: ConnId) {
         Some(c) => c,
         None => return,
     };
-    let mut out = String::from("\x1b[H\x1b[J##     VNUM     Room\r\n\r\n");
+    let mut out = String::from("##     VNUM     Room\r\n\r\n");
     for (i, &room) in rooms.iter().enumerate() {
         out.push_str(&format!(
             "{:2} - [&c{:5}&n] - &y{}&n\r\n",
@@ -917,7 +917,7 @@ fn sedit_compact_rooms_menu(g: &mut GameState, conn: ConnId) {
         Some(c) => c,
         None => return,
     };
-    let mut out = String::from("\x1b[H\x1b[J");
+    let mut out = String::from("");
     for (i, &room) in rooms.iter().enumerate() {
         out.push_str(&format!("{:2} - [&c{:5}&n]  | ", i, room));
         if (i + 1) % 5 == 0 {
@@ -943,7 +943,7 @@ fn sedit_namelist_menu(g: &mut GameState, conn: ConnId) {
         Some(c) => c,
         None => return,
     };
-    let mut out = String::from("\x1b[H\x1b[J##              Type   Namelist\r\n\r\n");
+    let mut out = String::from("##              Type   Namelist\r\n\r\n");
     for (i, t) in types.iter().enumerate() {
         let tname = type_name(t.type_);
         out.push_str(&format!(
@@ -965,7 +965,7 @@ fn sedit_types_menu(g: &mut GameState, conn: ConnId) {
         Some(c) => c,
         None => return,
     };
-    let mut out = String::from("\x1b[H\x1b[J");
+    let mut out = String::from("");
     let mut count = 0;
     for i in 0..NUM_ITEM_TYPES {
         out.push_str(&format!("&g{:2}&n) &c{:<20}&n  ", i, type_name(i as i32)));
@@ -990,7 +990,7 @@ fn sedit_shop_flags_menu(g: &mut GameState, conn: ConnId) {
         Some(c) => c,
         None => return,
     };
-    let mut out = String::from("\x1b[H\x1b[J");
+    let mut out = String::from("");
     let mut count = 0;
     for (i, name) in SHOP_BITS.iter().enumerate() {
         out.push_str(&format!("&g{:2}&n) {:<20.20}   ", i + 1, name));
@@ -1018,7 +1018,7 @@ fn sedit_no_trade_menu(g: &mut GameState, conn: ConnId) {
         Some(c) => c,
         None => return,
     };
-    let mut out = String::from("\x1b[H\x1b[J");
+    let mut out = String::from("");
     let mut count = 0;
     for (i, name) in TRADE_LETTERS.iter().enumerate() {
         out.push_str(&format!("&g{:2}&n) {:<20.20}   ", i + 1, name));

@@ -400,7 +400,7 @@ fn hedit_disp_menu(g: &mut GameState, conn: ConnId) {
     };
 
     let menu = format!(
-        "\x1b[H\x1b[J\
+        "\
 &g1&n) Keywords    : &y{}\r\n\
 &g2&n) Entry       :\r\n&y{}\
 &g3&n) Min Level   : &c{}\r\n\
@@ -480,7 +480,7 @@ pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     st.text_buf = Some(st.help.entry.clone());
                     st.changed = true;
                 });
-                g.send_to_char(ch, "\x1b[H\x1b[J");
+                g.send_to_char(ch, "");
                 g.send_to_char(ch, "Enter help entry: (/s saves /h for help)\r\n\r\n");
                 let cur = with_state(conn, |st| st.help.entry.clone()).unwrap_or_default();
                 if !cur.is_empty() {

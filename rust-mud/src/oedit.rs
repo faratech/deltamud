@@ -487,8 +487,8 @@ fn disp_weapon_menu(g: &mut GameState, conn: ConnId) {
     // attack_hit_text[].singular — use a faithful DeltaMUD attack list.
     const ATTACKS: &[&str] = &[
         "hit", "sting", "whip", "slash", "bite", "bludgeon", "crush", "pound", "claw", "maul",
-        "thrash", "pierce", "blast", "punch", "stab", "shock",
-    ];
+        "thrash", "pierce", "blast", "punch", "stab",
+    ]; // fight.c:69-85 attack_hit_text[] - 15 entries, no 'shock' (#288)
     let mut out = String::new();
     let mut columns = 0;
     for (i, name) in ATTACKS.iter().enumerate() {
@@ -557,7 +557,9 @@ fn disp_prompt_apply_menu(g: &mut GameState, conn: ConnId) {
 }
 
 fn disp_apply_menu(g: &mut GameState, conn: ConnId) {
-    disp_bit_menu(g, conn, APPLY_TYPES, false);
+    // C oedit.c:563: NUM_APPLIES = 22 - DAMAGE (the 23rd entry) is never
+    // offered or accepted ('This is BOGUS, don't use it.') (#289).
+    disp_bit_menu(g, conn, &APPLY_TYPES[..22], false);
     send(g, conn, "\r\nEnter apply type (0 is no apply) : ");
     let _ = with_state(conn, |s| s.mode = OeditMode::Apply);
 }
@@ -877,7 +879,7 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     s.obj.affects[slot] = (0, 0);
                 });
                 disp_prompt_apply_menu(g, conn);
-            } else if number < 0 || number as usize >= real_len(APPLY_TYPES) {
+            } else if number < 0 || number as usize >= 22 { // NUM_APPLIES (#289)
                 disp_apply_menu(g, conn);
             } else {
                 with_state(conn, |s| {

@@ -448,7 +448,7 @@ fn aedit_disp_menu(g: &mut GameState, conn: ConnId) {
     let sort15 = trunc(&a.sort_as, 15);
 
     let menu = format!(
-        "\x1b[H\x1b[J\
+        "\
 &n-- Action editor\r\n\r\n\
 &gn&n) Command         : &y{:<15}&n &g1&n) Sort as Command  : &y{:<15}&n\r\n\
 &g2&n) Min Position[CH]: &c{:<8}        &g3&n) Min Position [VT]: &c{:<8}\r\n\

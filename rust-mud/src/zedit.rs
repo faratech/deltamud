@@ -352,7 +352,7 @@ fn belongs_to_room(cmds: &[RawCmd], room_vnum: RoomVnum, c: &RawCmd) -> bool {
             'M' | 'O' => cur = Some(cmd.arg3),
             'D' | 'R' => cur = Some(cmd.arg1),
             'G' | 'E' | 'P' => {}
-            _ => {}
+            _ => log::warn!("SYSERR: OLC: zedit_parse(): invalid command state"),
         }
         if std::ptr::eq(cmd, c) {
             return cur == Some(room_vnum);
@@ -566,7 +566,7 @@ fn disp_arg1(g: &mut GameState, conn: ConnId) {
             with_cur(conn, |c| c.arg1 = state_room(conn));
             disp_arg2(g, conn);
         }
-        _ => {}
+        _ => log::warn!("SYSERR: OLC: zedit_parse(): invalid command state"),
     }
 }
 
@@ -593,7 +593,7 @@ fn disp_arg2(g: &mut GameState, conn: ConnId) {
         'R' => {
             send(g, conn, "Input object's vnum : ");
         }
-        _ => {}
+        _ => log::warn!("SYSERR: OLC: zedit_parse(): invalid command state"),
     }
     set_mode(conn, Mode::Arg2);
 }
@@ -637,7 +637,7 @@ fn disp_arg3(g: &mut GameState, conn: ConnId) {
             conn,
             "Give the percentage chance that this event should happen: ",
         ),
-        _ => {}
+        _ => log::warn!("SYSERR: OLC: zedit_parse(): invalid command state"),
     }
     set_mode(conn, Mode::Arg3);
 }
@@ -653,7 +653,7 @@ fn disp_arg4(g: &mut GameState, conn: ConnId) {
             );
             set_mode(conn, Mode::Arg4);
         }
-        _ => {}
+        _ => log::warn!("SYSERR: OLC: zedit_parse(): invalid command state"),
     }
 }
 
@@ -1058,7 +1058,7 @@ fn parse_arg1(g: &mut GameState, conn: ConnId, line: &str) {
                 send(g, conn, "That object does not exist, try again : ");
             }
         }
-        _ => {}
+        _ => log::warn!("SYSERR: OLC: zedit_parse(): invalid command state"),
     }
 }
 
@@ -1104,7 +1104,7 @@ fn parse_arg2(g: &mut GameState, conn: ConnId, line: &str) {
                 send(g, conn, "That object does not exist, try again : ");
             }
         }
-        _ => {}
+        _ => log::warn!("SYSERR: OLC: zedit_parse(): invalid command state"),
     }
 }
 
@@ -1157,7 +1157,7 @@ fn parse_arg3(g: &mut GameState, conn: ConnId, line: &str) {
                 send(g, conn, "Give a number between 0 and 100. Try again: ");
             }
         }
-        _ => {}
+        _ => log::warn!("SYSERR: OLC: zedit_parse(): invalid command state"),
     }
 }
 
@@ -1181,7 +1181,7 @@ fn parse_arg4(g: &mut GameState, conn: ConnId, line: &str) {
                 send(g, conn, "Give a number between 1 and 100. Try again: ");
             }
         }
-        _ => {}
+        _ => log::warn!("SYSERR: OLC: zedit_parse(): invalid command state"),
     }
 }
 
