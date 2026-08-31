@@ -450,8 +450,20 @@ impl GameState {
     /// N.name ordinal). Mirrors get_char_room_vis.
     pub fn get_char_room_vis(&self, observer: CharId, arg: &str) -> Option<CharId> {
         let rnum = self.chars.get(&observer)?.in_room?;
+        // C handler.c:1208-1215: 'self'/'me' resolve to the observer, and a
+        // '0.<name>' ordinal resolves the PC by name via get_player_vis
+        // (count == 0 after get_number strips the '0.') (#226).
         let (mut count, name) = get_number(arg);
+        if name.eq_ignore_ascii_case("self") || name.eq_ignore_ascii_case("me") {
+            return Some(observer);
+        }
         if count == 0 {
+            // 0.<name>: world-wide player lookup.
+            for (cid, ch) in self.chars.iter() {
+                if !ch.is_npc && isname(&name, &ch.player.name) {
+                    return Some(*cid);
+                }
+            }
             return None;
         }
         for &cid in &self.rooms[rnum].people {

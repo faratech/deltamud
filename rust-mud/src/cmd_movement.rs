@@ -1525,6 +1525,16 @@ fn do_special_move(g: &mut GameState, ch: CharId) -> bool {
         }
     }
 
+    // C act.movement.c:1411-1415: special exits fire the same pre-move DG
+    // triggers as normal movement - a consuming trigger vetoes the move
+    // (#119).
+    if !crate::dg_triggers::entry_mtrigger(g, ch) {
+        return false;
+    }
+    if !crate::dg_triggers::enter_wtrigger(g, to_rnum, ch, -1) {
+        return false;
+    }
+
     g.char_from_room(ch);
     g.char_to_room(ch, to_rnum);
 
