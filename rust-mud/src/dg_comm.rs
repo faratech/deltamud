@@ -300,9 +300,17 @@ fn render_for(g: &GameState, segments: &[Segment], to: CharId) -> String {
                 sb.push_str(&piece);
             }
             Some(Token::Obj(obj)) => {
+                // C dg_comm.c:103 OBJS(obj, to): an invisible object the
+                // recipient cannot see renders as 'something' (#153).
                 let piece = match obj {
                     None => "something".to_string(),
-                    Some(o) => objs(g, *o),
+                    Some(o) => {
+                        if !crate::cmd_informative::can_see_obj(g, to, *o) {
+                            "something".to_string()
+                        } else {
+                            objs(g, *o)
+                        }
+                    }
                 };
                 sb.push_str(&piece);
             }

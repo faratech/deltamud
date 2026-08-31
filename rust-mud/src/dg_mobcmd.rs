@@ -474,7 +474,13 @@ fn sub_write_to_char(
             }
             Tok::Obj => match otoks[i] {
                 None => sb.push_str("something"),
-                Some(o) => sb.push_str(&objs_short(g, o)),
+                Some(o) => {
+                    if !crate::cmd_informative::can_see_obj(g, to, o) {
+                        sb.push_str("something");
+                    } else {
+                        sb.push_str(&objs_short(g, o));
+                    }
+                }
             },
         }
     }
