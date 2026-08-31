@@ -375,3 +375,160 @@ impl Database {
         Ok(())
     }
 }
+
+// ---------------------------------------------------------------------------
+// MySQL integration tests (Deltania Breathes W1). These run against a REAL
+// MariaDB and are opt-in: each test returns early unless MUD_TEST_DATABASE_URL
+// is set (scripts/db-check.sh boots a throwaway mariadbd on 127.0.0.1:3307 and
+// exports it). The production database must never be a target — the URL the
+// script exports points at its own throwaway instance only.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod mysql_integration {
+    use super::*;
+    use crate::character::Character;
+    use crate::types::{Class, Race};
+
+    fn test_db() -> Option<Database> {
+        let url = std::env::var("MUD_TEST_DATABASE_URL").ok()?;
+        Some(Database::new(&url).expect("connect to throwaway test db"))
+    }
+
+    /// Unique per-run player names: the throwaway db is reused across runs,
+    /// and name collisions would fail create_player.
+    fn unique_name(base: &str) -> String {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() % 1_000_000)
+            .unwrap_or(0);
+        format!("{base}{n}")
+    }
+
+    fn rich_player(name: &str) -> Character {
+        let mut ch = Character::new_player(name.to_string(), Class::Cleric, Race::Dwarf);
+        ch.player.level = 34;
+        ch.player.hometown = 300;
+        ch.player.sex = crate::types::Gender::Female;
+        ch.player.deity = 7;
+        ch.alignment = -420;
+        // The DB row carries the BARE BASE (real_points), not the eq/affect-
+        // layered points (see Character.real_points doc); set the base and
+        // mirror it into points the way affect_total would.
+        ch.real_points.hit = 88;
+        ch.real_points.max_hit = 210;
+        ch.real_points.mana = 40;
+        ch.real_points.max_mana = 333;
+        ch.real_points.move_points = 22;
+        ch.real_points.max_move = 144;
+        ch.real_points.armor = -87;
+        ch.real_points.hitroll = 9;
+        ch.real_points.damroll = 11;
+        ch.points = ch.real_points.clone();
+        ch.points.gold = 12_345;
+        ch.points.bank_gold = 98_765;
+        ch.points.exp = 4_242_424;
+        ch.real_abils.str = 18;
+        ch.real_abils.str_add = 30;
+        ch.real_abils.intel = 14;
+        ch.real_abils.wis = 19;
+        ch.real_abils.dex = 12;
+        ch.real_abils.con = 17;
+        ch.real_abils.cha = 8;
+        ch.aff_abils = ch.real_abils;
+        ch.player.title = Some("the Courier".to_string());
+        ch.spells_to_learn = 6;
+        ch.quest_points = 77;
+        ch.quest_mob = -3;
+        ch.quest_obj = 9011;
+        ch.next_quest = 12;
+        ch.quest_countdown = 9;
+        ch.tloadroom = 310;
+        ch.act_flags |= (1 << 16) | (1 << 2); // PLR_QUESTOR | POSTALIZED whatever bits round-trip
+        ch
+    }
+
+    #[tokio::test]
+    async fn create_load_roundtrip_preserves_the_row() {
+        let Some(db) = test_db() else { return };
+        db.init_tables().await.unwrap();
+
+        let name = unique_name("RoundTripper");
+        let mut ch = rich_player(&name);
+        let idnum = db.create_player(&ch, "s3cretpw").await.unwrap();
+        ch.idnum = idnum;
+        ch.act_flags |= 0;
+        db.save_player_with_host(&ch, "courier.example.test").await.unwrap();
+
+        let loaded = db.load_player(&name).await.unwrap();
+        assert_eq!(loaded.idnum, idnum);
+        assert_eq!(loaded.player.name, name);
+        assert_eq!(loaded.player.level, 34);
+        assert_eq!(loaded.points.gold, 12_345);
+        assert_eq!(loaded.points.bank_gold, 98_765);
+        assert_eq!(loaded.points.exp, 4_242_424);
+        assert_eq!(loaded.points.max_hit, 210);
+        assert_eq!(loaded.points.max_mana, 333);
+        assert_eq!(loaded.points.max_move, 144);
+        // NOTE: armor/hitroll/damroll are apply targets recomputed by
+        // affect_total on load — they are derived stats, not persisted ones.
+        assert_eq!(loaded.real_abils.str, 18);
+        assert_eq!(loaded.real_abils.str_add, 30);
+        assert_eq!(loaded.real_abils.wis, 19);
+        assert_eq!(loaded.player.title.as_deref(), Some("the Courier"));
+        assert_eq!(loaded.alignment, -420);
+        assert_eq!(loaded.spells_to_learn, 6);
+        assert_eq!(loaded.quest_points, 77);
+        assert_eq!(loaded.quest_mob, -3);
+        assert_eq!(loaded.quest_obj, 9011);
+        assert_eq!(loaded.next_quest, 12);
+        assert_eq!(loaded.quest_countdown, 9);
+        assert_eq!(loaded.tloadroom, 310);
+        assert!(loaded.act_flags & (1 << 16) != 0);
+        assert!(loaded.act_flags & (1 << 2) != 0);
+
+        // Password path.
+        assert!(db.verify_password(&name, "s3cretpw").await.unwrap());
+        assert!(!db.verify_password(&name, "wrong").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn save_is_idempotent_across_repeated_writes() {
+        let Some(db) = test_db() else { return };
+        db.init_tables().await.unwrap();
+        let name = unique_name("IdemPotent");
+        let mut ch = rich_player(&name);
+        let idnum = db.create_player(&ch, "pw").await.unwrap();
+        ch.idnum = idnum;
+        db.save_player_with_host(&ch, "host-a").await.unwrap();
+        let first = db.load_player(&name).await.unwrap();
+        db.save_player(&ch).await.unwrap();
+        let second = db.load_player(&name).await.unwrap();
+
+        assert_eq!(first.points.gold, second.points.gold);
+        assert_eq!(first.points.exp, second.points.exp);
+        assert_eq!(first.quest_mob, second.quest_mob);
+        assert_eq!(first.real_abils.str, second.real_abils.str);
+        assert_eq!(first.real_abils.str_add, second.real_abils.str_add);
+        assert_eq!(first.real_abils.wis, second.real_abils.wis);
+    }
+
+    #[tokio::test]
+    async fn mutation_then_reload_reflects_the_new_state() {
+        let Some(db) = test_db() else { return };
+        db.init_tables().await.unwrap();
+        let name = unique_name("Mutator");
+        let mut ch = rich_player(&name);
+        let idnum = db.create_player(&ch, "pw").await.unwrap();
+        ch.idnum = idnum;
+        ch.points.gold = 1;
+        ch.player.level = 61;
+        ch.quest_mob = 0;
+        ch.quest_obj = 0;
+        db.save_player(&ch).await.unwrap();
+        let loaded = db.load_player(&name).await.unwrap();
+        assert_eq!(loaded.player.level, 61);
+        assert_eq!(loaded.points.gold, 1);
+        assert_eq!(loaded.quest_mob, 0);
+        assert_eq!(loaded.quest_obj, 0);
+    }
+}

@@ -480,3 +480,63 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod schema_parity_tests {
+    use super::*;
+
+    /// The column map must be exhaustive against the shipped schema: every
+    /// player_main column in deltamud_schema.sql appears in
+    /// PLAYER_MAIN_COLUMNS, and vice versa. Skipped on checkouts without the
+    /// schema file. Catches the classic failure where a schema migration (or
+    /// a new saved field) updates one side only.
+    #[test]
+    fn column_map_matches_the_shipped_schema() {
+        let schema = concat!(env!("CARGO_MANIFEST_DIR"), "/../deltamud_schema.sql");
+        let Ok(text) = std::fs::read_to_string(schema) else {
+            return; // exotic checkout without the schema: nothing to check
+        };
+        let mut in_player_main = false;
+        let mut schema_cols: Vec<String> = Vec::new();
+        for line in text.lines() {
+            if line.starts_with("CREATE TABLE") {
+                in_player_main = line.contains("player_main");
+                continue;
+            }
+            if in_player_main {
+                let trimmed = line.trim();
+                if trimmed.starts_with(')') {
+                    in_player_main = false;
+                    continue;
+                }
+                let name: String =
+                    trimmed.split(|c: char| c.is_whitespace() || c == '(').next().unwrap_or("").to_string();
+                if !name.is_empty()
+                    && !matches!(name.as_str(), "UNIQUE" | "INDEX" | "KEY" | "PRIMARY")
+                    && !name.starts_with("--")
+                {
+                    schema_cols.push(name);
+                }
+            }
+        }
+        assert!(
+            schema_cols.len() >= PLAYER_MAIN_COLUMNS.len(),
+            "schema parse found {} player_main columns, map has {}",
+            schema_cols.len(),
+            PLAYER_MAIN_COLUMNS.len()
+        );
+        let mapped: std::collections::HashSet<&str> = PLAYER_MAIN_COLUMNS.iter().copied().collect();
+        for col in &schema_cols {
+            assert!(
+                mapped.contains(col.as_str()),
+                "schema column '{col}' has no mapping in PLAYER_MAIN_COLUMNS"
+            );
+        }
+        for col in PLAYER_MAIN_COLUMNS {
+            assert!(
+                schema_cols.iter().any(|c| c == col),
+                "mapped column '{col}' is absent from the shipped schema"
+            );
+        }
+    }
+}
