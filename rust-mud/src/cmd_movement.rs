@@ -143,6 +143,13 @@ pub fn perform_move(g: &mut GameState, ch: CharId, dir: i32, need_specials_check
     };
 
     if exit.exit_info & EX_CLOSED != 0 {
+        // C act.movement.c:496-505: a HIDDEN closed exit reports only
+        // 'Alas, you cannot go that way...' - the keyword/'closed' lines
+        // would reveal secret doors (#124).
+        if exit.exit_info & EX_HIDDEN != 0 {
+            g.send_to_char(ch, "Alas, you cannot go that way...\r\n");
+            return false;
+        }
         match &exit.keyword {
             Some(kw) => {
                 let msg = format!("The {} seems to be closed.\r\n", fname(kw));
@@ -281,14 +288,35 @@ pub(crate) fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_spe
         return false;
     }
 
-    // Movement cost: avg of source & destination sector loss; doubled in snow.
+    // Movement cost (C act.movement.c:191-201, #117): for MAP rooms the
+    // per-cell mapmv replaces the sector table - `ismap(r) ? mapmv(r) :
+    // movement_loss[SECT(r)]` per leg - and a destination cell with
+    // mapmv == -1 is IMPASSIBLE. The port ignored mapmv entirely, so the
+    // 9,801 surface rooms moved at sector-table cost and walls were
+    // walkable.
     let loss = |s: SectorType| {
         constants::MOVEMENT_LOSS
             .get(s as usize)
             .copied()
             .unwrap_or(1)
     };
-    let mut need_movement = (loss(from_sect) + loss(to_sect)) / 2;
+    let src_room = g.room(rnum);
+    let dst_room = g.room(to_rnum);
+    let src_cost = if src_room.map_x.is_some() && src_room.map_y.is_some() {
+        src_room.mapmv
+    } else {
+        loss(from_sect)
+    };
+    let dst_cost = if dst_room.map_x.is_some() && dst_room.map_y.is_some() {
+        dst_room.mapmv
+    } else {
+        loss(to_sect)
+    };
+    if dst_room.map_x.is_some() && dst_room.map_y.is_some() && dst_room.mapmv < 0 {
+        g.send_to_char(ch, "That terrain is impassible.\r\n");
+        return false;
+    }
+    let mut need_movement = (src_cost + dst_cost) / 2;
     if g.room(to_rnum).snow > 0 {
         need_movement *= 2;
     }
@@ -334,8 +362,12 @@ pub(crate) fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_spe
     }
 
     // Godroom gating (LVL_GRGOD): mortals/low gods can't pass.
-    if (level as u8) < LVL_GRGOD && g.room(to_rnum).room_flags.contains(RoomFlags::GODROOM) {
-        g.send_to_char(ch, "You aren't godly enough to use that room!\r\n");
+    // C act.movement.c:239-242: the ONLY god-tier movement gate is
+    // ROOM_IMPROOM (LVL_GRGOD). The port checked GODROOM (wrong flag) with a
+    // wrong string and never checked IMPROOM, so impl-only rooms were open
+    // and god rooms were blocked (#118).
+    if (level as u8) < LVL_GRGOD && g.room(to_rnum).room_flags.contains(RoomFlags::IMPROOM) {
+        g.send_to_char(ch, "You are not godly enough to use that room!\r\n");
         return false;
     }
 
@@ -1327,8 +1359,12 @@ fn do_special_move(g: &mut GameState, ch: CharId) -> bool {
         );
         return false;
     }
-    if (level as u8) < LVL_GRGOD && g.room(to_rnum).room_flags.contains(RoomFlags::GODROOM) {
-        g.send_to_char(ch, "You aren't godly enough to use that room!\r\n");
+    // C act.movement.c:239-242: the ONLY god-tier movement gate is
+    // ROOM_IMPROOM (LVL_GRGOD). The port checked GODROOM (wrong flag) with a
+    // wrong string and never checked IMPROOM, so impl-only rooms were open
+    // and god rooms were blocked (#118).
+    if (level as u8) < LVL_GRGOD && g.room(to_rnum).room_flags.contains(RoomFlags::IMPROOM) {
+        g.send_to_char(ch, "You are not godly enough to use that room!\r\n");
         return false;
     }
 
