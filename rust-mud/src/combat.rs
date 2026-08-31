@@ -1675,6 +1675,11 @@ pub(crate) fn die(g: &mut GameState, killer: Option<CharId>, victim: CharId) {
     if let Some(k) = killer {
         if k != victim {
             award_kill_experience(g, k, victim);
+            // C fight.c:1196-1198: a MOB_MEMORY killer forgets the victim
+            // when the victim dies, so it does not re-aggro on return (#185).
+            if g.get_char(k).map(|m| m.is_npc && m.act_flags & (1 << 11) != 0).unwrap_or(false) {
+                crate::mobact::forget(g, k, victim);
+            }
         }
         if is_npc {
             // Mark the kill against any active autoquest (fight.c PLR_QUESTOR).

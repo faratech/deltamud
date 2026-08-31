@@ -35,7 +35,7 @@ use crate::act::{act, ActArg, To};
 use crate::cmd_movement::perform_move;
 use crate::combat::hit;
 use crate::flags::*;
-use crate::room::RoomFlags;
+use crate::room::{EX_CLOSED, RoomFlags};
 use crate::state::GameState;
 use crate::types::*;
 use std::collections::HashMap;
@@ -307,16 +307,18 @@ pub fn mobile_activity(g: &mut GameState) {
 
         // ---- 4. Aggression ---------------------------------------------
         if mob_flagged(g, ch, MOB_AGGRESSIVE | MOB_AGGR_TO_ALIGN) {
-            // aggro_attack returns true if it issued a MERCY "return" — in C
-            // the whole mobile_activity returns there. We faithfully stop this
-            // mob's processing (the C `return` aborts the entire function, but
-            // the practical effect is identical for the remaining single mob).
+            // C mobact.c: the MERCY check `return`s from mobile_activity(),
+            // pausing the ENTIRE world's mob AI for one pulse - not just this
+            // mob's turn (#184).
             if aggro_attack(g, ch) {
-                continue;
+                return;
             }
         }
 
-        if !g.char_exists(ch) || fighting(g, ch).is_some() {
+        // C mobact.c has NO re-guard between the aggressive, memory and
+        // helper blocks: a mob that just acquired a target still runs its
+        // memory attack and helper assist in the same pulse (#183).
+        if !g.char_exists(ch) {
             continue;
         }
 
@@ -325,17 +327,13 @@ pub fn mobile_activity(g: &mut GameState) {
             memory_attack(g, ch);
         }
 
-        if !g.char_exists(ch) || fighting(g, ch).is_some() {
+        if !g.char_exists(ch) {
             continue;
         }
 
         // ---- 6. Helper mobs --------------------------------------------
         if mob_flagged(g, ch, MOB_HELPER) {
             helper_assist(g, ch);
-        }
-
-        if !g.char_exists(ch) || fighting(g, ch).is_some() {
-            continue;
         }
 
         // ---- 7. PC-helper variants -------------------------------------
@@ -416,15 +414,26 @@ fn wander(g: &mut GameState, ch: CharId) {
         None => return,
     };
 
-    // CAN_GO(ch, door): exit exists and its destination resolves.
+    // CAN_GO(ch, door) (utils.h:486-489): exit exists, destination resolves,
+    // NOT EX_CLOSED, and not an impassible (mapmv == -1) map cell. The port
+    // only checked existence, so mobs wandered through closed doors and
+    // across walls (#186).
     let exit = match g.room(rnum).exits[door].clone() {
         Some(e) => e,
         None => return,
     };
+    if exit.exit_info & EX_CLOSED != 0 {
+        return;
+    }
     let to_rnum = match g.real_room(exit.to_room) {
         Some(r) => r,
         None => return,
     };
+    if let Some(dest) = g.room_opt(to_rnum) {
+        if dest.map_x.is_some() && dest.map_y.is_some() && dest.mapmv == -1 {
+            return;
+        }
+    }
 
     // Destination must not be NOMOB / DEATH.
     let to_flags = g.room(to_rnum).room_flags;
