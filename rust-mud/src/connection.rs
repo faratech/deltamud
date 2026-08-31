@@ -349,6 +349,10 @@ pub struct Descriptor {
     /// C d->last_input: the previous completed input line, for the '!' and
     /// '^a^b' history substitution (comm.c:1861-1868) (#224).
     pub last_input: String,
+    /// Set by a nanny arm that printed its own inline prompt (C messages such
+    /// as 'Illegal password.\r\nPassword: ' carry the prompt); the normal
+    /// post-nanny prompt is skipped once, mirroring C's SEND_TO_Q-and-return.
+    pub suppress_prompt: bool,
 }
 
 impl Descriptor {
@@ -377,6 +381,7 @@ impl Descriptor {
             wants_colour: None,
             temp_description: None,
             last_input: String::new(),
+            suppress_prompt: false,
         }
     }
 
