@@ -48,6 +48,39 @@ const MSSP_VAR: u8 = 1;
 const MSSP_VAL: u8 = 2;
 
 const PLR_SITEOK: i64 = 1 << 7;
+// ---- C config.c:256-295: the login/menu strings, verbatim (#198) ----
+pub const ANSI_QUESTION: &str = "\u{1b}[0;31;1mRED\u{1b}[31;0m \u{1b}[0;34;1mBLUE\u{1b}[34;0m \u{1b}[0;32;1mGREEN\u{1b}[32;0m\r\nIs the above text shown in color? ";
+
+pub const MENU: &str = "\r\n\
+&GWelcome to the DeltaMUD Menu&n\r\n\
+&B------------------------------&n\r\n\
+&R[&n&C0&n&R]&n Exit from DeltaMUD.\r\n\
+&R[&n&C1&n&R]&n Enter the game.\r\n\
+&R[&n&C2&n&R]&n Enter description.\r\n\
+&R[&n&C3&n&R]&n Read the background story.\r\n\
+&R[&n&C4&n&R]&n Read the latest news.\r\n\
+&R[&n&C5&n&R]&n Read the game policy.\r\n\
+&R[&n&C6&n&R]&n See who is online.\r\n\
+&R[&n&C7&n&R]&n Change password.\r\n\
+&R[&n&C8&n&R]&n Delete this character.\r\n\
+&B------------------------------&n\r\n\
+\r\n\
+   Make your choice: ";
+
+pub const ASK_NAME: &str = "\r\nPlease enter a name&R:&n ";
+
+pub const WELC_MESSG: &str = "\r\n\
+Welcome to the ever changing world of Deltania..may your life here\r\n\
+be full of adventure and intrigue...\r\n\
+\r\n\r\n";
+
+pub const START_MESSG: &str = "\r\n\
+This is your new DeltaMUD character!  You can now earn &Ygold&n,\r\n\
+gain &Cexperience&n, find &Rweapons&n and &Mequipment&n, and much more.\r\n\
+\r\nThe first thing you should do is read the Newbie Guide. You do that\r\n\
+by typing 'read guide' (without the quotes, of course)\r\n\
+\r\n\r\n";
+
 const NEWBIE_STAT_EXPLANATION: &str = "\r\nHere is a brief explanation of each ability:\r\n\
 [&YStr&n] - Strength determines how hard you hit your opponents in a fight.\r\n\r\n\
 [&YInt&n] - Intelligence determines how well you hit your opponents in a fight,\r\n\
@@ -102,7 +135,13 @@ fn json_escape(s: &str) -> String {
 fn is_password_state(s: ConState) -> bool {
     matches!(
         s,
-        ConState::GetOldPassword | ConState::GetNewPassword | ConState::ConfirmPassword
+        ConState::GetOldPassword
+            | ConState::GetNewPassword
+            | ConState::ConfirmPassword
+            | ConState::ChPwdGetOld
+            | ConState::ChPwdGetNew
+            | ConState::ChPwdVerify
+            | ConState::DelCnf1
     )
 }
 
@@ -189,6 +228,12 @@ pub struct Game {
     outputs: HashMap<ConnId, mpsc::Sender<String>>,
     /// Character-creation choices accumulated across nanny steps.
     pending: HashMap<ConnId, PendingChoices>,
+    /// Player records loaded at password-verify time (gates + motd choice)
+    /// and consumed by menu option 1, so login loads the row once.
+    pending_load: HashMap<ConnId, crate::character::Character>,
+    /// Connections whose character was just created (their first menu-enter
+    /// also runs the C `do_start` branch: START_MESSG + do_newbie).
+    just_created: std::collections::HashSet<ConnId>,
     lib_path: String,
     /// Lock-free observability counters, shared with the metrics HTTP task.
     /// Updated on the heartbeat hot path (atomics, no mutex).
@@ -211,6 +256,8 @@ impl Game {
             db,
             outputs: HashMap::new(),
             pending: HashMap::new(),
+            pending_load: HashMap::new(),
+            just_created: std::collections::HashSet::new(),
             lib_path: "./lib".to_string(),
             metrics: Arc::new(Metrics::new()),
             started_at: chrono::Utc::now().timestamp(),
@@ -256,6 +303,12 @@ impl Game {
             .await
             .unwrap_or_default();
         self.state.circlemud = tokio::fs::read_to_string(text_dir.join("circlemud"))
+            .await
+            .unwrap_or_default();
+        self.state.startup = tokio::fs::read_to_string(text_dir.join("startup"))
+            .await
+            .unwrap_or_default();
+        self.state.background = tokio::fs::read_to_string(text_dir.join("background"))
             .await
             .unwrap_or_default();
     }
@@ -412,7 +465,9 @@ impl Game {
                 info!("New connection from {}", host);
                 self.metrics.inc_connections();
                 let mut d = Descriptor::with_fd(id, host, raw_fd);
-                d.write("\r\n&YWelcome to DeltaMUD!&n\r\n\r\n");
+                // C comm.c:1608: the colour question is the very first output;
+                // the startup banner follows the answer (CON_QANSI) (#198).
+                d.write(ANSI_QUESTION);
                 self.state.descriptors.insert(id, d);
                 self.outputs.insert(id, output_tx);
                 self.write_prompt(id);
@@ -551,7 +606,38 @@ impl Game {
         };
 
         match state {
+            ConState::QAnsi => {
+                // C interpreter.c:1706-1735 CON_QANSI (#198).
+                let first = input.chars().next().map(|c| c.to_ascii_lowercase());
+                if input.is_empty() || first == Some('y') {
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.wants_colour = Some(true);
+                    }
+                    self.out(conn_id, "Your terminal will now receive color.\r\n\r\n\r\n");
+                } else if first == Some('n') {
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.wants_colour = Some(false);
+                    }
+                    self.out(conn_id, "Your terminal will not receive color.\r\n\r\n\r\n");
+                } else {
+                    self.out(conn_id, "That is not a proper response.\r\n\r\n");
+                    self.out(conn_id, ANSI_QUESTION);
+                    return;
+                }
+                let startup = self.state.startup.clone();
+                self.out(conn_id, &startup);
+                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    d.state = ConState::GetName;
+                }
+            }
             ConState::GetName => {
+                if input.is_empty() {
+                    // C interpreter.c:1744: an empty name closes the socket.
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.state = ConState::Close;
+                    }
+                    return;
+                }
                 let name = normalize_name(&input);
                 if !valid_name(&name) {
                     self.out(conn_id, "Invalid name, please try another.\r\n");
@@ -587,6 +673,22 @@ impl Game {
                         }
                         return;
                     }
+                    // C interpreter.c:1826: wizlock refuses NEW characters too.
+                    if crate::cmd_wizard::circle_restrict() > 0 {
+                        warn!(
+                            "Request for new char {} denied from [{}] (wizlock)",
+                            self.descriptor_name(conn_id),
+                            host
+                        );
+                        self.out(
+                            conn_id,
+                            "Sorry, new players can't be created at the moment.\r\n",
+                        );
+                        if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                            d.state = ConState::Close;
+                        }
+                        return;
+                    }
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                         d.state = ConState::GetNewPassword;
                     }
@@ -596,36 +698,151 @@ impl Game {
                 }
             }
             ConState::GetOldPassword => {
+                // C interpreter.c:1869-2020 CON_PASSWORD.
                 let name = self.descriptor_name(conn_id);
                 let ok = self
                     .db
                     .verify_password(&name, &input)
                     .await
                     .unwrap_or(false);
-                if ok {
+                if !ok {
+                    // C 1897-1911: mudlog the attempt, bump GET_BAD_PWS (and
+                    // persist it), re-prompt; disconnect at max_bad_pws (#194).
                     let host = self.descriptor_host(conn_id);
-                    let banned = crate::ban::isbanned(&host);
-                    if banned >= crate::ban::BanType::Select {
-                        if let Ok(ch) = self.db.load_player(&name).await {
-                            if ch.act_flags & PLR_SITEOK == 0 {
-                                self.out(
-                                    conn_id,
-                                    "Sorry, this char has not been cleared for login from your site!\r\n",
-                                );
-                                warn!("Connection attempt for {} denied from {}", name, host);
-                                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
-                                    d.state = ConState::Close;
-                                }
-                                return;
-                            }
+                    warn!("Bad PW: {} [{}]", name, host);
+                    if let Ok(mut rec) = self.db.load_player(&name).await {
+                        rec.bad_pws = rec.bad_pws.saturating_add(1);
+                        let _ = self.db.save_player(&rec).await;
+                    }
+                    let tries = {
+                        let d = self
+                            .state
+                            .descriptors
+                            .get_mut(&conn_id)
+                            .expect("descriptor present in its own state arm");
+                        d.bad_pws += 1;
+                        d.bad_pws
+                    };
+                    if tries >= crate::config::MAX_BAD_PWS as u32 {
+                        self.out(conn_id, "Wrong password... disconnecting.\r\n");
+                        if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                            d.state = ConState::Close;
+                        }
+                    } else {
+                        self.out(conn_id, "Wrong password.\r\nPassword: ");
+                        if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                            // stay in GetOldPassword; echo stays off
                         }
                     }
-                    self.enter_game(conn_id, false).await;
-                } else {
-                    self.out(conn_id, "Wrong password.\r\n");
+                    return;
+                }
+
+                // Password was correct.
+                let host = self.descriptor_host(conn_id);
+                let mut rec = match self.db.load_player(&name).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!("load player {} failed: {}", name, e);
+                        self.out(conn_id, "Error loading your character.\r\n");
+                        if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                            d.state = ConState::Close;
+                        }
+                        return;
+                    }
+                };
+                let load_result = rec.bad_pws;
+                if load_result > 0 {
+                    rec.bad_pws = 0;
+                    let _ = self.db.save_player(&rec).await;
+                }
+
+                // C 1914-1952: automatic upgrade of legacy password hashes (#219).
+                if let Ok(Some(hash)) = self.db.get_password_hash(&name).await {
+                    if crate::password::password_needs_upgrade(&hash) {
+                        info!("Upgrading password security for {}", name);
+                        rec.pending_password_hash = Some(crate::password::hash_password(&input));
+                        let _ = self.db.save_player(&rec).await;
+                        rec.pending_password_hash = None;
+                    }
+                }
+
+                // C 1957-1967: BAN_SELECT without PLR_SITEOK.
+                let banned = crate::ban::isbanned(&host);
+                if banned >= crate::ban::BanType::Select && rec.act_flags & PLR_SITEOK == 0 {
+                    self.out(
+                        conn_id,
+                        "Sorry, this char has not been cleared for login from your site!\r\n",
+                    );
+                    warn!("Connection attempt for {} denied from {}", name, host);
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                         d.state = ConState::Close;
                     }
+                    return;
+                }
+                // C 1968-1979: multiplay gate (comm.c check_multiplaying;
+                // the C build returns 1 immediately — dev-mode bypass kept).
+                if !crate::cmd_comm::check_multiplaying(&self.state, &host)
+                    && rec.player.level < LVL_IMMORT
+                    && rec.act_flags & crate::flags::PLR_MULTIOK == 0
+                {
+                    self.out(
+                        conn_id,
+                        "\r\nSorry, there is already more then one connection to the MUD from your host.\r\n\
+If you are playing from a shared connection please e-mail help@deltamud.net\r\n\
+for access.\r\n\r\n",
+                    );
+                    warn!("Connection attempt for {} denied from {} - multi-play", name, host);
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.state = ConState::Close;
+                    }
+                    return;
+                }
+                // C 1980-1989: wizlock (#202).
+                let restrict = crate::cmd_wizard::circle_restrict();
+                if restrict > 0 && (rec.player.level as i32) < restrict {
+                    self.out(conn_id, "The game is temporarily restricted.. try again later.\r\n");
+                    warn!("Request for login denied for {} [{}] (wizlock)", name, host);
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.state = ConState::Close;
+                    }
+                    return;
+                }
+                // C 1990: perform_dupe_check — on dupe, take over the live
+                // body and go straight to Playing (no MOTD) (#218).
+                if self.perform_dupe_check(conn_id, rec.idnum).await {
+                    return;
+                }
+
+                // C 1991-2019: motd/imotd, "has connected" mudlog, the
+                // bad-pw notice, do_time, and PRESS RETURN -> CON_RMOTD.
+                self.pending_load.insert(conn_id, rec.clone());
+                let motd = if rec.player.level >= LVL_IMMORT {
+                    self.state.imotd.clone()
+                } else {
+                    self.state.motd.clone()
+                };
+                self.out(conn_id, &motd);
+                info!("{} [{}] has connected.", name, host);
+                if load_result > 0 {
+                    self.out(
+                        conn_id,
+                        &format!(
+                            "\r\n\r\n\x07\x07\x07{} LOGIN FAILURE{} SINCE LAST SUCCESSFUL LOGIN.\r\n",
+                            load_result,
+                            if load_result > 1 { "S" } else { "" }
+                        ),
+                    );
+                }
+                self.out(conn_id, "\r\n");
+                {
+                    // C runs do_time for the (still-unplaced) character.
+                    let stub = self.login_stub(conn_id);
+                    crate::cmd_informative::do_time(&mut self.state, stub, "", 0);
+                    self.state.extract_char(stub);
+                }
+                self.out(conn_id, "\r\n\n*** PRESS RETURN: ");
+                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    d.state = ConState::ReadMotd;
                 }
             }
             ConState::GetNewPassword => {
@@ -793,6 +1010,152 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
                 }
                 _ => self.begin_stat_roll(conn_id, false),
             },
+            ConState::ReadMotd => {
+                // C interpreter.c:2243-2246 CON_RMOTD: any input -> MENU (#198).
+                self.out(conn_id, MENU);
+                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    d.state = ConState::Menu;
+                }
+            }
+            ConState::Menu => self.menu_choice(conn_id, &input).await,
+            ConState::ExDesc => {
+                // The string editor owns this input (modify::editing is checked
+                // before the nanny); if we ever get here the editor is gone —
+                // return to the menu like C's fall-through.
+                self.out(conn_id, MENU);
+                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    d.state = ConState::Menu;
+                }
+            }
+            ConState::ChPwdGetOld => {
+                // C interpreter.c:2348-2364.
+                let name = self.descriptor_name(conn_id);
+                let ok = self
+                    .db
+                    .verify_password(&name, &input)
+                    .await
+                    .unwrap_or(false);
+                if ok {
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.state = ConState::ChPwdGetNew;
+                    }
+                } else {
+                    self.out(conn_id, "\r\nIncorrect password.\r\n");
+                    self.out(conn_id, MENU);
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.state = ConState::Menu;
+                    }
+                }
+            }
+            ConState::ChPwdGetNew => {
+                // C interpreter.c:2022-2039 CON_NEWPASSWD (shared).
+                if input.is_empty() || input.len() > 64 || input.len() < 3
+                    || input.eq_ignore_ascii_case(&self.descriptor_name(conn_id))
+                {
+                    self.out(conn_id, "\r\nIllegal password.\r\nPassword: ");
+                    return;
+                }
+                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    d.temp_password = Some(input);
+                    d.state = ConState::ChPwdVerify;
+                }
+            }
+            ConState::ChPwdVerify => {
+                // C interpreter.c:2041-2068 CON_CHPWD_VRFY: save immediately.
+                let matches = self
+                    .state
+                    .descriptors
+                    .get(&conn_id)
+                    .and_then(|d| d.temp_password.clone())
+                    .map(|p| p == input)
+                    .unwrap_or(false);
+                if !matches {
+                    self.out(conn_id, "\r\nPasswords don't match... start over.\r\nPassword: ");
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.state = ConState::ChPwdGetNew;
+                    }
+                    return;
+                }
+                let name = self.descriptor_name(conn_id);
+                let mut rec = match self.db.load_player(&name).await {
+                    Ok(c) => c,
+                    Err(_) => {
+                        self.out(conn_id, MENU);
+                        if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                            d.state = ConState::Menu;
+                        }
+                        return;
+                    }
+                };
+                rec.pending_password_hash = Some(crate::password::hash_password(&input));
+                let _ = self.db.save_player(&rec).await;
+                self.out(conn_id, "\r\nDone.\n\r");
+                self.out(conn_id, MENU);
+                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    d.temp_password = None;
+                    d.state = ConState::Menu;
+                }
+            }
+            ConState::DelCnf1 => {
+                // C interpreter.c:2366-2387 CON_DELCNF1.
+                let name = self.descriptor_name(conn_id);
+                let ok = self
+                    .db
+                    .verify_password(&name, &input)
+                    .await
+                    .unwrap_or(false);
+                if ok {
+                    self.out(
+                        conn_id,
+                        "\r\nYOU ARE ABOUT TO DELETE THIS CHARACTER PERMANENTLY.\r\n\
+ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
+                    );
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.state = ConState::DelCnf2;
+                    }
+                } else {
+                    self.out(conn_id, "\r\nIncorrect password.\r\n");
+                    self.out(conn_id, MENU);
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.state = ConState::Menu;
+                    }
+                }
+            }
+            ConState::DelCnf2 => {
+                // C interpreter.c:2389-2430 CON_DELCNF2.
+                if input == "yes" || input == "YES" {
+                    let name = self.descriptor_name(conn_id);
+                    if let Ok(mut rec) = self.db.load_player(&name).await {
+                        if rec.act_flags & crate::flags::PLR_FROZEN != 0 {
+                            self.out(
+                                conn_id,
+                                "You try to kill yourself, but the ice stops you.\r\nCharacter not deleted.\r\n\r\n",
+                            );
+                            if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                                d.state = ConState::Close;
+                            }
+                            return;
+                        }
+                        if rec.player.level < LVL_GRGOD {
+                            rec.act_flags |= crate::flags::PLR_DELETED;
+                        }
+                        let level = rec.player.level;
+                        let _ = self.db.save_player(&rec).await;
+                        crate::objsave::crash_delete_file_by_name(&self.lib_path, &name);
+                        self.out(conn_id, &format!("Character '{}' deleted!\r\nGoodbye.\r\n", name));
+                        info!("{} (lev {}) has self-deleted.", name, level);
+                    }
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.state = ConState::Close;
+                    }
+                } else {
+                    self.out(conn_id, "\r\nThat was not \"yes\". Character not deleted.\r\n");
+                    self.out(conn_id, MENU);
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.state = ConState::Menu;
+                    }
+                }
+            }
             _ => {}
         }
 
@@ -966,7 +1329,17 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
                     &host,
                 );
                 crate::mail::mail_register_player(ch.idnum, &name);
-                self.enter_game(conn_id, true).await;
+                // C interpreter.c start_player (1637-1653): the new character
+                // gets the MOTD + PRESS RETURN and lands at the MENU; the
+                // actual world-enter happens at menu option 1.
+                self.just_created.insert(conn_id);
+                self.pending_load.insert(conn_id, ch);
+                let motd = self.state.motd.clone();
+                self.out(conn_id, &motd);
+                self.out(conn_id, "\r\n\n*** PRESS RETURN: ");
+                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    d.state = ConState::ReadMotd;
+                }
             }
             Err(e) => {
                 warn!("create player {} failed: {}", name, e);
@@ -978,18 +1351,219 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
         }
     }
 
+    /// C interpreter.c:2254-2360 CON_MENU: the DeltaMUD main menu (#198).
+    async fn menu_choice(&mut self, conn_id: ConnId, input: &str) {
+        match input.chars().next() {
+            Some('0') => {
+                self.out(
+                    conn_id,
+                    "\r\nYou awaken, and find yourself in a land called reality.\r\nWe hope you come back to Deltania soon!\r\n\r\n",
+                );
+                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    d.state = ConState::Close;
+                }
+            }
+            Some('1') => {
+                self.enter_game(conn_id, false).await;
+            }
+            Some('2') => {
+                // C 2287-2307 CON_EXDESC: the string editor writes the new
+                // description; it is applied to the player at enter-game.
+                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    if d.temp_description.is_some() {
+                        d.write("Current description:\r\n");
+                        d.write(&d.temp_description.clone().unwrap_or_default());
+                        d.write("\r\n");
+                    }
+                    d.write(
+                        "Enter the new text you'd like others to see when they look at you.\r\n(/s saves /h for help)\r\n",
+                    );
+                }
+                crate::modify::start_login_description_editing(&mut self.state, conn_id, 8192);
+                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    d.state = ConState::ExDesc;
+                }
+            }
+            Some('3') => {
+                let background = self.state.background.clone();
+                crate::modify::page_string(&mut self.state, conn_id, &background);
+                // C sets CON_RMOTD: when paging (or RETURN) ends, the next
+                // input re-shows the menu.
+                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    d.state = ConState::ReadMotd;
+                }
+            }
+            Some('4') => {
+                let news = self.state.news.clone();
+                crate::modify::page_string(&mut self.state, conn_id, &news);
+                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    d.state = ConState::ReadMotd;
+                }
+            }
+            Some('5') => {
+                let policies = self.state.policies.clone();
+                crate::modify::page_string(&mut self.state, conn_id, &policies);
+                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    d.state = ConState::ReadMotd;
+                }
+            }
+            Some('6') => {
+                // C 2339-2344: run do_who against a transient stand-in
+                // character (not registered in players_by_name, so it does not
+                // list itself), then back to the menu via PRESS RETURN.
+                let stub = self.login_stub(conn_id);
+                crate::cmd_informative::do_who(&mut self.state, stub, "", 0);
+                self.state.extract_char(stub);
+                self.out(conn_id, "\r\n\n*** PRESS RETURN: ");
+                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    d.state = ConState::ReadMotd;
+                }
+            }
+            Some('7') => {
+                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    d.state = ConState::ChPwdGetOld;
+                }
+            }
+            Some('8') => {
+                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    d.state = ConState::DelCnf1;
+                }
+            }
+            _ => {
+                self.out(conn_id, "\r\nThat's not a menu choice!\r\n");
+                self.out(conn_id, MENU);
+            }
+        }
+    }
+
+    /// A transient stand-in Character for pre-login menu commands (who /
+    /// do_time). Carries the login name + loaded record's level so
+    /// CAN_SEE/level checks behave; never placed in a room; extracted by the
+    /// caller. Extracting requires the id NOT to be in players_by_name.
+    fn login_stub(&mut self, conn_id: ConnId) -> CharId {
+        let name = self.descriptor_name(conn_id);
+        let rec = self.pending_load.get(&conn_id).cloned();
+        let mut ch = crate::character::Character::new_player(
+            name.into(),
+            crate::types::Class::Warrior,
+            crate::types::Race::Human,
+        );
+        if let Some(rec) = &rec {
+            ch.player.level = rec.player.level;
+            ch.prf_flags = rec.prf_flags;
+        }
+        self.state.create_char(ch)
+    }
+
+    /// C interpreter.c:1418-1530 perform_dupe_check: disconnect other
+    /// descriptors controlling the same idnum and adopt the live body
+    /// (#218). Returns true when THIS connection should go straight to
+    /// Playing (dupe handled).
+    async fn perform_dupe_check(&mut self, conn_id: ConnId, idnum: i64) -> bool {
+        let dupes: Vec<(ConnId, CharId, bool)> = self
+            .state
+            .descriptors
+            .iter()
+            .filter(|(&c, d)| {
+                c != conn_id
+                    && d.character
+                        .map(|cid| {
+                            self.state
+                                .get_char(cid)
+                                .map(|ch| !ch.is_npc && ch.idnum == idnum)
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or(false)
+            })
+            .map(|(&c, d)| (c, d.character.unwrap(), d.state == ConState::Playing))
+            .collect();
+        if dupes.is_empty() {
+            return false;
+        }
+        let mut adopted: Option<CharId> = None;
+        for (old_conn, old_char, was_playing) in dupes {
+            if adopted.is_none() && was_playing {
+                // USURP: the old socket is told its body was taken.
+                self.out(old_conn, "\r\nThis body has been usurped!\r\n");
+                adopted = Some(old_char);
+            } else if adopted.is_none() {
+                adopted = Some(old_char);
+            }
+            self.out(old_conn, "\r\nMultiple login detected -- disconnecting.\r\n");
+            if let Some(d) = self.state.descriptors.get_mut(&old_conn) {
+                // Detach WITHOUT the save/extract disconnect path: the body
+                // lives on under this connection (C: k->character = NULL).
+                d.character = None;
+                d.state = ConState::Close;
+            }
+            // C 1521-1533: USURP room line + messages to the taker.
+            if was_playing {
+                if let Some(cid) = adopted {
+                    crate::act::act(
+                        &mut self.state,
+                        "$n suddenly keels over in pain, surrounded by a white aura...\r\n$n's body has been taken over by a new spirit!",
+                        true,
+                        cid,
+                        None,
+                        crate::act::ActArg::None,
+                        crate::act::To::Room,
+                    );
+                }
+                self.out(conn_id, "You take over your own body, already in use!\r\n");
+            } else {
+                self.out(conn_id, "Reconnecting.\r\n");
+            }
+            info!("{} has re-logged in ... disconnecting old socket.", self.descriptor_name(conn_id));
+        }
+        let Some(body) = adopted else { return false; };
+        // Re-attach this descriptor to the existing entity.
+        if let Some(c) = self.state.get_char_mut(body) {
+            c.desc = Some(conn_id);
+        }
+        self.state
+            .players_by_name
+            .insert(self.descriptor_name(conn_id).to_lowercase(), body);
+        if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+            d.character = Some(body);
+            d.state = ConState::Playing;
+        }
+        self.write_prompt(conn_id);
+        true
+    }
+
     /// Load (or, for fresh chars, re-load) the player, place them in the
     /// world, and start play.
     async fn enter_game(&mut self, conn_id: ConnId, _is_new: bool) {
+        // C interpreter.c enter_player_game. The record was usually already
+        // loaded at password-verify (pending_load) — consume it so login hits
+        // the DB once.
         let name = self.descriptor_name(conn_id);
-        let mut ch = match self.db.load_player(&name).await {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("load player {} failed: {}", name, e);
-                self.out(conn_id, "Error loading your character.\r\n");
-                return;
-            }
+        let mut ch = match self.pending_load.remove(&conn_id) {
+            Some(c) if c.get_name().eq_ignore_ascii_case(&name) => c,
+            _ => match self.db.load_player(&name).await {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("load player {} failed: {}", name, e);
+                    self.out(conn_id, "Error loading your character.\r\n");
+                    return;
+                }
+            },
         };
+        // CON_QANSI answer and menu option 2's description land here, the way
+        // C carries them on d->character (#198).
+        if let Some(d) = self.state.descriptors.get(&conn_id) {
+            if let Some(want) = d.wants_colour {
+                if want {
+                    ch.prf_flags |= crate::flags::PRF_COLOR_1 | crate::flags::PRF_COLOR_2;
+                } else {
+                    ch.prf_flags &= !(crate::flags::PRF_COLOR_1 | crate::flags::PRF_COLOR_2);
+                }
+            }
+            if let Some(desc) = &d.temp_description {
+                ch.player.description = desc.clone();
+            }
+        }
+        let is_new_char = self.just_created.remove(&conn_id);
         if let Err(e) = crate::alias::read_aliases(&self.lib_path, ch.get_name(), ch.idnum) {
             warn!("read_aliases({}) failed: {}", ch.get_name(), e);
         }
@@ -1183,10 +1757,18 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
         // Restore the player's rented/crash-saved objects (objsave.c).
         crate::objsave::crash_load(&mut self.state, id, &self.lib_path);
 
-        let motd = self.state.motd.clone();
-        self.state.send_to_char(id, &motd);
-        self.state.send_to_char(id, "\r\n\r\n");
+        // C interpreter.c menu '1' (2261-2268): WELC_MESSG, then for a fresh
+        // character do_start + START_MESSG + do_newbie; then the first look.
+        self.state.send_to_char(id, WELC_MESSG);
+        if is_new_char {
+            self.state.send_to_char(id, START_MESSG);
+        }
         crate::cmd_informative::look_at_room(&mut self.state, id, true);
+        // C 2271-2272: "You have mail waiting."
+        let idnum = self.state.get_char(id).map(|c| c.idnum).unwrap_or(0);
+        if crate::mail::has_mail(idnum) {
+            self.state.send_to_char(id, "You have mail waiting.\r\n");
+        }
         let rnum = self.state.get_char(id).and_then(|c| c.in_room);
         if let Some(rnum) = rnum {
             crate::act::act(
@@ -1728,17 +2310,25 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
             .get(&conn_id)
             .and_then(|d| d.temp_name.clone());
         let prompt = match state {
-            ConState::GetName => "By what name do you wish to be known? ".to_string(),
+            ConState::QAnsi => String::new(), // question sent on connect / on retry
+            ConState::GetName => ASK_NAME.to_string(),
             ConState::ConfirmName => {
-                format!("Did I get that right, {} (Y/N)? ", name.unwrap_or_default())
+                // C interpreter.c:1759: "Did I get that right, %s &c(&YY&c/&YN&c)&n? "
+                format!(
+                    "Did I get that right, {} &c(&YY&c/&YN&c)&n? ",
+                    name.unwrap_or_default()
+                )
             }
             ConState::GetOldPassword => "Password: ".to_string(),
-            ConState::GetNewPassword => "Give me a password for your character: ".to_string(),
-            ConState::ConfirmPassword => "Please retype password: ".to_string(),
+            ConState::GetNewPassword => format!(
+                "Give me a password for {}: ",
+                name.unwrap_or_default()
+            ),
+            ConState::ConfirmPassword => "\r\nPlease retype password: ".to_string(),
             ConState::GetNewbie => {
                 "Are you completely new to MUDing &c(&YY&c/&YN&c)&n? ".to_string()
             }
-            ConState::GetSex => "\r\nWhat is your sex (M/F)? ".to_string(),
+            ConState::GetSex => "\r\nWhat is your sex &c(&YM&c/&YF&c)&n? ".to_string(),
             ConState::GetRace => format!(
                 "{}\r\nTo see a race's average statistics type help <race letter>.\r\nRace: ",
                 crate::races::RACE_MENU
@@ -1753,6 +2343,16 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
                 .get(&conn_id)
                 .map(|p| stat_roll_prompt(p.rolled))
                 .unwrap_or_default(),
+            ConState::ReadMotd => String::new(), // "*** PRESS RETURN" sent on transition
+            ConState::Menu => String::new(),     // MENU sent on transition
+            ConState::ExDesc => String::new(),   // string editor owns the input
+            ConState::ChPwdGetOld => "\r\nEnter your old password: ".to_string(),
+            ConState::ChPwdGetNew => "\r\nEnter a new password: ".to_string(),
+            ConState::ChPwdVerify => "\r\nPlease retype password: ".to_string(),
+            ConState::DelCnf1 => "\r\nEnter your password for verification: ".to_string(),
+            ConState::DelCnf2 => "\r\nYOU ARE ABOUT TO DELETE THIS CHARACTER PERMANENTLY.\r\n\
+ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: "
+            .to_string(),
             ConState::Playing => {
                 if let Some(cid) = self
                     .state
@@ -2020,6 +2620,14 @@ mod tests {
             .insert(conn, Descriptor::new(conn, host.to_string()));
     }
 
+    /// Attach a descriptor and answer the CON_QANSI colour question so the
+    /// connection sits at GetName (tests written against the pre-#198 flow).
+    async fn attach_descriptor_at_name(game: &mut Game, conn: ConnId, host: &str) {
+        attach_descriptor_host(game, conn, host);
+        game.nanny(conn, "y".to_string()).await;
+        assert_eq!(descriptor_state(game, conn), ConState::GetName);
+    }
+
     fn descriptor_state(game: &Game, conn: ConnId) -> ConState {
         game.state.descriptors.get(&conn).unwrap().state
     }
@@ -2174,7 +2782,7 @@ mod tests {
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db);
         let conn = ConnId(1);
-        attach_descriptor(&mut game, conn);
+        attach_descriptor_at_name(&mut game, conn, "example.test").await;
 
         game.nanny(conn, "Alice".to_string()).await;
         assert_eq!(descriptor_state(&game, conn), ConState::ConfirmName);
@@ -2220,7 +2828,7 @@ mod tests {
 
         let mut game = test_game(db.clone());
         let conn = ConnId(2);
-        attach_descriptor(&mut game, conn);
+        attach_descriptor_at_name(&mut game, conn, "example.test").await;
 
         game.nanny(conn, "Bob".to_string()).await;
         game.nanny(conn, "y".to_string()).await;
@@ -2235,6 +2843,12 @@ mod tests {
         let accepted = game.pending.get(&conn).unwrap().rolled;
 
         game.nanny(conn, "y".to_string()).await;
+        // C start_player: creation ends at MOTD -> PRESS RETURN -> MENU (#198).
+        assert_eq!(descriptor_state(&game, conn), ConState::ReadMotd);
+        game.nanny(conn, String::new()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::Menu);
+        game.nanny(conn, "1".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::Playing);
 
         let saved = db.load_player("Bob").await.unwrap();
         assert_eq!(saved.idnum, 2);
@@ -2271,7 +2885,7 @@ mod tests {
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db.clone());
         let conn = ConnId(3);
-        attach_descriptor(&mut game, conn);
+        attach_descriptor_at_name(&mut game, conn, "example.test").await;
 
         game.nanny(conn, "First".to_string()).await;
         game.nanny(conn, "y".to_string()).await;
@@ -2283,6 +2897,8 @@ mod tests {
         game.nanny(conn, "a".to_string()).await;
         game.nanny(conn, "c".to_string()).await;
         game.nanny(conn, "y".to_string()).await;
+        game.nanny(conn, String::new()).await; // RMOTD -> MENU
+        game.nanny(conn, "1".to_string()).await; // enter the game
 
         let saved = db.load_player("First").await.unwrap();
         assert_eq!(saved.idnum, 1);
@@ -2303,7 +2919,7 @@ mod tests {
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db);
         let conn = ConnId(5);
-        attach_descriptor_host(&mut game, conn, "sub.blocked.test");
+        attach_descriptor_at_name(&mut game, conn, "sub.blocked.test").await;
 
         game.nanny(conn, "Denied".to_string()).await;
         game.nanny(conn, "y".to_string()).await;
@@ -2335,7 +2951,7 @@ mod tests {
         db.create_player(&ch, "secret").await.unwrap();
         let mut game = test_game(db);
         let conn = ConnId(6);
-        attach_descriptor_host(&mut game, conn, "blocked.test");
+        attach_descriptor_at_name(&mut game, conn, "blocked.test").await;
 
         game.nanny(conn, "Blocked".to_string()).await;
         assert_eq!(descriptor_state(&game, conn), ConState::GetOldPassword);
@@ -2408,5 +3024,127 @@ mod tests {
         fn race_index_for_test(&self) -> i32 {
             self.player.race as u8 as i32
         }
+    }
+
+    #[tokio::test]
+    async fn wrong_password_reprompts_then_disconnects_at_max_bad_pws() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        let conn = ConnId(20);
+        attach_descriptor_at_name(&mut game, conn, "example.test").await;
+
+        let seed = crate::character::Character::new_player(
+            "Pwtest".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        db.create_player(&seed, "right").await.unwrap();
+        game.nanny(conn, "Pwtest".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::GetOldPassword);
+
+        // First failure: re-prompt (C max_bad_pws = 2) (#194).
+        game.nanny(conn, "wrong".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::GetOldPassword);
+        assert!(game
+            .state
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("Wrong password."));
+        assert_eq!(db.load_player("Pwtest").await.unwrap().bad_pws, 1);
+
+        // Second failure: disconnect.
+        game.nanny(conn, "wrong".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::Close);
+        assert!(game
+            .state
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("Wrong password... disconnecting."));
+    }
+
+    #[tokio::test]
+    async fn duplicate_login_usurps_the_live_body() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        let seed = crate::character::Character::new_player(
+            "Dupe".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        db.create_player(&seed, "pw").await.unwrap();
+
+        // First login walks all the way into the game.
+        let c1 = ConnId(21);
+        attach_descriptor_at_name(&mut game, c1, "a.test").await;
+        game.nanny(c1, "Dupe".to_string()).await;
+        game.nanny(c1, "pw".to_string()).await;
+        game.nanny(c1, String::new()).await;
+        game.nanny(c1, "1".to_string()).await;
+        assert_eq!(descriptor_state(&game, c1), ConState::Playing);
+        let body = game.state.descriptors.get(&c1).unwrap().character.unwrap();
+
+        // Second login on another connection takes the body over (#218).
+        let c2 = ConnId(22);
+        attach_descriptor_at_name(&mut game, c2, "b.test").await;
+        game.nanny(c2, "Dupe".to_string()).await;
+        game.nanny(c2, "pw".to_string()).await;
+        assert_eq!(descriptor_state(&game, c2), ConState::Playing);
+        assert_eq!(game.state.descriptors.get(&c2).unwrap().character, Some(body));
+        // The old socket is detached and closing, with the usurp message.
+        assert_eq!(game.state.descriptors.get(&c1).unwrap().character, None);
+        assert_eq!(descriptor_state(&game, c1), ConState::Close);
+        assert!(game
+            .state
+            .descriptors
+            .get(&c1)
+            .unwrap()
+            .outbuf
+            .contains("This body has been usurped!"));
+        // Exactly one entity carries the idnum.
+        let owners: Vec<CharId> = game
+            .state
+            .descriptors
+            .values()
+            .filter_map(|d| d.character)
+            .collect();
+        assert_eq!(owners, vec![body]);
+    }
+
+    #[tokio::test]
+    async fn menu_option_zero_says_goodbye() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        let conn = ConnId(23);
+        attach_descriptor_at_name(&mut game, conn, "example.test").await;
+        game.nanny(conn, String::new()).await;
+        // QANSI 'y' lands at GetName, not ReadMotd; walk: the ReadMotd arm
+        // is reachable directly for this check.
+        if let Some(d) = game.state.descriptors.get_mut(&conn) {
+            d.state = ConState::ReadMotd;
+        }
+        game.nanny(conn, String::new()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::Menu);
+        game.nanny(conn, "9".to_string()).await;
+        assert!(game
+            .state
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("That's not a menu choice!"));
+        assert_eq!(descriptor_state(&game, conn), ConState::Menu);
+        game.nanny(conn, "0".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::Close);
+        assert!(game
+            .state
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("land called reality"));
     }
 }

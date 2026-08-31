@@ -93,3 +93,6 @@ impl Default for Config {
 /// C config.c:174 `autosave_time = 5` - minutes between Crash_save_all /
 /// House_save_all sweeps (comm.c heartbeat autosave block).
 pub const AUTOSAVE_TIME: u32 = 5;
+/// C config.c:235 max_bad_pws: consecutive bad passwords before a login is
+/// disconnected (#194).
+pub const MAX_BAD_PWS: u32 = 2;

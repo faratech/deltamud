@@ -1413,3 +1413,49 @@ fn cap_first(s: &mut String) {
         }
     }
 }
+
+/// C comm.c:2749 check_multiplaying: count same-host connections. The shipped
+/// C build begins with `return 1;` ("While in development mode we wanna give
+/// our builders freedom..."), so the gate is DEAD in the oracle — reproduced
+/// here behind the same early-out, gated by MUD_ENFORCE_MULTIPLAY for
+/// operators who want the C logic live (default: C behavior).
+pub fn check_multiplaying(g: &GameState, hostname: &str) -> bool {
+    if std::env::var("MUD_ENFORCE_MULTIPLAY")
+        .map(|v| v != "0" && !v.is_empty())
+        .unwrap_or(false)
+    {
+        // The C logic, past the dev-mode bypass:
+        let mut num_links = 0u32;
+        let mut name: Option<String> = None;
+        for d in g.descriptors.values() {
+            let lvl_ch = d.character.or(d.original);
+            if let Some(cid) = lvl_ch {
+                let c = g.get_char(cid);
+                if c.map(|c| c.player.level >= LVL_IMPL).unwrap_or(false) {
+                    continue;
+                }
+                if c.map(|c| c.act_flags & crate::flags::PLR_MULTIOK != 0).unwrap_or(false) {
+                    continue;
+                }
+            }
+            if !d.host.eq_ignore_ascii_case(hostname) {
+                continue;
+            }
+            let this = lvl_ch
+                .and_then(|cid| g.get_char(cid))
+                .map(|c| c.get_name().to_string());
+            let this = match this {
+                Some(t) => t,
+                None => continue,
+            };
+            match &name {
+                None => name = Some(this),
+                Some(n) if n.eq_ignore_ascii_case(&this) => continue,
+                _ => num_links += 1,
+            }
+        }
+        return num_links < 2;
+    }
+    // C: `return 1; // While in development mode we wanna give our builders freedom...`
+    true
+}

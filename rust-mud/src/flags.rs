@@ -47,6 +47,8 @@ pub const PRF2_INTANGIBLE: i64 = 1 << 9;
 // raw C bitfield, persisted as-is): PLR_FROZEN is (1<<2), PLR_INVSTART (1<<14).
 pub const PLR_FROZEN: i64 = 1 << 2;
 pub const PLR_DELETED: i64 = 1 << 10;
+/// structs.h:199 PLR_MULTIOK — the player is cleared for multi-play.
+pub const PLR_MULTIOK: i64 = 1 << 17;
 pub const PLR_INVSTART: i64 = 1 << 14;
 
 // MOB act flags (subset).

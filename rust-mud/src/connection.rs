@@ -232,6 +232,9 @@ impl TelnetFilter {
 /// the nested-input stack (Batch 1 Pillar D groundwork: `editor`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConState {
+    /// CON_QANSI: the boot-time colour question (comm.c sends `ANSI`; the
+    /// answer sets PRF_COLOR_1|2 before the name prompt) (#198).
+    QAnsi,
     GetName,
     GetOldPassword,
     ConfirmName, // "Did I get that right (Y/N)?"
@@ -244,8 +247,19 @@ pub enum ConState {
     GetClass,
     GetHometown,
     RollStats,
+    /// CON_RMOTD: "PRESS RETURN" after the MOTD / a menu sub-page (#198).
     ReadMotd,
+    /// CON_MENU: the DeltaMUD main menu, options 0-8 (#198).
     Menu,
+    /// CON_EXDESC: menu option 2, the multi-line description editor.
+    ExDesc,
+    /// CON_CHPWD_GETOLD / GETNEW / VRFY: menu option 7 password change.
+    ChPwdGetOld,
+    ChPwdGetNew,
+    ChPwdVerify,
+    /// CON_DELCNF1 / DELCNF2: menu option 8 self-delete confirmation.
+    DelCnf1,
+    DelCnf2,
     Playing,
     Close,
 }
@@ -317,6 +331,15 @@ pub struct Descriptor {
     // Scratch during login / char creation.
     pub temp_name: Option<String>,
     pub temp_password: Option<String>,
+    /// C d->bad_pws: consecutive password failures THIS connection; at
+    /// max_bad_pws (2) the connection is dropped (#194).
+    pub bad_pws: u32,
+    /// The CON_QANSI answer, applied to the character at creation/login
+    /// (C sets PRF_COLOR_1|2 on d->character right away) (#198).
+    pub wants_colour: Option<bool>,
+    /// Menu option 2's finished description, applied to the player at
+    /// enter-game (C edits d->character->player.description directly) (#198).
+    pub temp_description: Option<String>,
 }
 
 impl Descriptor {
@@ -329,7 +352,7 @@ impl Descriptor {
             id,
             host,
             raw_fd,
-            state: ConState::GetName,
+            state: ConState::QAnsi,
             editors: Vec::new(),
             gmcp: false,
             character: None,
@@ -341,6 +364,9 @@ impl Descriptor {
             input_queue: std::collections::VecDeque::new(),
             temp_name: None,
             temp_password: None,
+            bad_pws: 0,
+            wants_colour: None,
+            temp_description: None,
         }
     }
 

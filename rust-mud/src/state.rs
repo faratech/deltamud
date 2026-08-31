@@ -137,6 +137,11 @@ pub struct GameState {
     pub policies: String,
     pub motd: String,
     pub imotd: String,
+    /// C `startup` (text/startup): the pre-login banner sent after the colour
+    /// question (db.c STARTUP_FILE) (#198).
+    pub startup: String,
+    /// C `background` (text/background): main-menu option 3's page (#198).
+    pub background: String,
     pub circlemud: String,
     pub config: Config,
     pub pulse: u64,
@@ -189,6 +194,8 @@ impl GameState {
             policies: String::new(),
             motd: String::new(),
             imotd: String::new(),
+            startup: String::new(),
+            background: String::new(),
             circlemud: String::new(),
             config,
             pulse: 0,

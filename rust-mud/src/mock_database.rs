@@ -87,6 +87,11 @@ impl crate::DatabaseInterface for MockDatabase {
         }
     }
 
+    async fn get_password_hash(&self, name: &str) -> Result<Option<String>> {
+        let players = self.players.lock().unwrap();
+        Ok(players.get(&name.to_lowercase()).map(|s| s.password.clone()))
+    }
+
     async fn delete_deleted_players(&self) -> Result<u64> {
         let mut players = self.players.lock().unwrap();
         let before = players.len();

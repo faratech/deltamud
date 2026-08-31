@@ -3101,6 +3101,13 @@ pub fn do_dc(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 use std::sync::atomic::{AtomicI32, Ordering};
 static CIRCLE_RESTRICT: AtomicI32 = AtomicI32::new(0);
 
+/// circle_restrict for the nanny login gates (C's boot-loop global;
+/// interpreter.c:1826 refuses new characters, :1981 refuses
+/// level < circle_restrict) (#202).
+pub fn circle_restrict() -> i32 {
+    CIRCLE_RESTRICT.load(Ordering::Relaxed)
+}
+
 pub fn do_wizlock(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let (name, _rest) = one_argument(arg);
     let when: &str;

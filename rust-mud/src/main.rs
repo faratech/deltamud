@@ -324,6 +324,9 @@ pub trait DatabaseInterface: Send + Sync {
         self.save_player(character).await
     }
     async fn verify_password(&self, name: &str, password: &str) -> Result<bool>;
+    /// The stored password hash, for the automatic legacy-hash upgrade at
+    /// login (C interpreter.c:1914-1952 password_needs_upgrade path) (#219).
+    async fn get_password_hash(&self, name: &str) -> Result<Option<String>>;
     async fn delete_deleted_players(&self) -> Result<u64>;
     async fn clan_member_counts(&self) -> Result<Vec<(i32, i32)>>;
     /// C clan.c:242-255 clan_destroy: shift every player row's clan past the
@@ -360,6 +363,9 @@ impl DatabaseInterface for database::Database {
     }
     async fn verify_password(&self, name: &str, p: &str) -> Result<bool> {
         self.verify_password(name, p).await
+    }
+    async fn get_password_hash(&self, name: &str) -> Result<Option<String>> {
+        self.get_password_hash(name).await
     }
     async fn delete_deleted_players(&self) -> Result<u64> {
         self.delete_deleted_players().await

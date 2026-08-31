@@ -80,6 +80,10 @@ enum EditTarget {
     CharField { cid: CharId, field: StrField },
     /// `string` immortal field edit on an object.
     ObjField { oid: ObjId, field: StrField },
+    /// Main-menu option 2: the pre-login description editor. The finished
+    /// text lands on Descriptor.temp_description (no Character entity exists
+    /// yet) and is applied to the player at enter-game (#198).
+    LoginDescription,
     /// `tedit` — CON_TEXTED: write the saved buffer to a text file (OLC_STORAGE).
     TextFile(std::path::PathBuf),
 }
@@ -193,6 +197,12 @@ pub fn delete_doubledollar(s: &str) -> String {
 /// the StringEdit context and registers the (Plain) edit purpose.
 pub fn start_string_editing(g: &mut GameState, conn: ConnId, max_len: usize) {
     push_editor(g, conn, max_len, EditTarget::Plain);
+}
+
+/// Main-menu option 2 (pre-login): a description editor whose finished text
+/// lands on Descriptor.temp_description (#198).
+pub fn start_login_description_editing(g: &mut GameState, conn: ConnId, max_len: usize) {
+    push_editor(g, conn, max_len, EditTarget::LoginDescription);
 }
 
 /// Open a note editor whose save installs the body into `obj`'s
@@ -530,6 +540,13 @@ fn finish_editor(g: &mut GameState, conn: ConnId, terminator: i32) {
         EditTarget::Plain => {
             if !saved {
                 send_to_q(g, conn, "Message aborted.\r\n");
+            }
+        }
+        EditTarget::LoginDescription => {
+            if saved {
+                if let Some(d) = g.descriptors.get_mut(&conn) {
+                    d.temp_description = Some(buffer.clone());
+                }
             }
         }
     }

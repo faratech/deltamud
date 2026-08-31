@@ -90,6 +90,14 @@ impl Database {
         Ok(row.is_some())
     }
 
+    pub async fn get_password_hash(&self, name: &str) -> Result<Option<String>> {
+        let mut conn = self.pool.get_conn().await?;
+        let stored: Option<String> = conn
+            .exec_first("SELECT pwd FROM player_main WHERE name = ?", (name,))
+            .await?;
+        Ok(stored)
+    }
+
     pub async fn verify_password(&self, name: &str, password: &str) -> Result<bool> {
         let mut conn = self.pool.get_conn().await?;
         let stored: Option<String> = conn

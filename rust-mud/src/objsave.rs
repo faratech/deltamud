@@ -774,6 +774,14 @@ pub fn crash_delete_crashfile(g: &GameState, ch: CharId) {
     crash_delete_file(g, ch);
 }
 
+/// Name-keyed variant for the menu self-delete path, where no Character
+/// entity exists yet (C interpreter.c:2412 Crash_delete_file) (#198).
+pub fn crash_delete_file_by_name(lib_path: &str, name: &str) {
+    if let Some(path) = crash_filename(lib_path, name) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 fn crash_delete_file(g: &GameState, ch: CharId) {
     let name = get_name(g, ch);
     if let Some(path) = crash_filename(&g.config.lib_path, &name) {
