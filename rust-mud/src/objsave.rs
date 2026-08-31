@@ -584,6 +584,77 @@ fn serialize_objects(g: &GameState, ch: CharId) -> String {
     out
 }
 
+/// Convert C-binary rent records to the in-memory text pipeline lines
+/// (issue #95): header line + one OBJ line per element with the container
+/// locate code negated (locate < 0 == inside container row).
+fn rent_to_text(
+    g: &GameState,
+    rent: &crate::cformat::CRentInfo,
+    elems: &[crate::cformat::CObjFileElem],
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = write!(
+        out,
+        "RENT {} {} {} {} {}\n",
+        rent.rentcode, rent.time, rent.net_cost_per_diem, rent.gold, rent.account
+    );
+    for e in elems {
+        // C Crash_load does read_object(item_number, VIRTUAL) and copies the
+        // proto, overriding the stored fields - the C record carries no type,
+        // wear flags or names. Derive those from the obj proto here.
+        let proto = g.obj_protos.get(&(e.item_number as i32));
+        let ty = proto.map(|p| p.obj_type as i32).unwrap_or(9);
+        let wear = proto.map(|p| p.wear_flags.bits()).unwrap_or(0);
+        let cost = proto.map(|p| p.cost).unwrap_or(0);
+        let rentp = proto.map(|p| p.rent).unwrap_or(0);
+        let name = proto
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "object".into());
+        let short = proto
+            .map(|p| p.short_desc.clone())
+            .unwrap_or_else(|| "an object".into());
+        let long = proto.map(|p| p.description.clone()).unwrap_or_default();
+        let _ = write!(
+            out,
+            "OBJ {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+            e.locate as i32,
+            e.item_number,
+            ty,
+            wear,
+            e.extra_flags,
+            e.weight,
+            cost,
+            rentp,
+            e.timer,
+            e.min_level,
+            e.bitvector,
+            e.curr_slots,
+            e.total_slots,
+            e.value[0],
+            e.value[1],
+            e.value[2],
+            e.value[3],
+            e.affected.iter().filter(|(l, _)| *l != 0).count()
+        );
+        for (l, m) in e.affected {
+            if l != 0 {
+                let _ = write!(out, " {} {}", l, m);
+            }
+        }
+        let sanitize = |s: &str| s.replace('|', "/").replace(['\n', '\r'], " ");
+        let _ = write!(
+            out,
+            "|{}|{}|{}|{}\n",
+            sanitize(&name),
+            sanitize(&short),
+            sanitize(&long),
+            ""
+        );
+    }
+    out
+}
+
 fn write_rent_header(rent: &RentInfo) -> String {
     format!(
         "RENT {} {} {} {} {}\n",
@@ -617,9 +688,84 @@ fn write_crash_file(g: &GameState, ch: CharId, rent: &RentInfo) -> bool {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    // Issue #95: with MUD_CFORMAT_FILES=true the rent file is written as
+    // C's raw rent_info + obj_file_elem stream so the C binary can read it.
+    if std::env::var("MUD_CFORMAT_FILES").map(|v| v == "true").unwrap_or(false) {
+        let rent_c = crate::cformat::CRentInfo {
+            time: rent.time,
+            rentcode: rent.rentcode,
+            net_cost_per_diem: rent.net_cost_per_diem,
+            gold: rent.gold,
+            account: rent.account,
+            nitems: count_rent_items(g, ch),
+        };
+        let elems: Vec<crate::cformat::CObjFileElem> = cformat_elems(g, ch);
+        let bytes = crate::cformat::encode_rent_file(&rent_c, &elems);
+        return std::fs::write(&path, bytes).is_ok();
+    }
     let mut body = write_rent_header(rent);
     body.push_str(&serialize_objects(g, ch));
     std::fs::write(&path, body).is_ok()
+}
+
+/// Count carried+worn items for the C nitems field (rent_info).
+fn count_rent_items(g: &GameState, ch: CharId) -> i32 {
+    let mut n = g.get_char(ch).map(|c| c.carrying.len()).unwrap_or(0);
+    n += g
+        .get_char(ch)
+        .map(|c| c.equipment.iter().flatten().count())
+        .unwrap_or(0);
+    n as i32
+}
+
+/// Convert carried+worn objects to C obj_file_elem records (worn first per
+/// Crash_crashsave's slot loop, then inventory), containers flattened
+/// depth-first after their parent record (C Crash_save recursion).
+fn cformat_elems(g: &GameState, ch: CharId) -> Vec<crate::cformat::CObjFileElem> {
+    fn elem_for(g: &GameState, oid: ObjId, locate: i64) -> crate::cformat::CObjFileElem {
+        let o = g.get_obj(oid);
+        let o = match o {
+            Some(o) => o,
+            None => {
+                return crate::cformat::obj_to_c_elem(0, 0, 0, 0, [0; 4], 0, 0, -1, 0, 0, &[])
+            }
+        };
+        crate::cformat::obj_to_c_elem(
+            o.item_number,
+            locate,
+            o.curr_slots,
+            o.total_slots,
+            o.values,
+            o.extra_flags.bits() as i32,
+            o.weight,
+            o.timer,
+            o.bitvector,
+            o.level as i32,
+            &o.affects,
+        )
+    }
+    fn recurse(g: &GameState, oid: ObjId, locate: i64, out: &mut Vec<crate::cformat::CObjFileElem>) {
+        out.push(elem_for(g, oid, locate));
+        for child in g.get_obj(oid).map(|o| o.contains.clone()).unwrap_or_default() {
+            // C stores children at -(row+1); the row index is approximate here
+            // (one row per container) but the recursive order matches.
+            recurse(g, child, -1, out);
+        }
+    }
+    let mut out = Vec::new();
+    // Worn equipment: slot j -> locate j+1.
+    if let Some(c) = g.get_char(ch) {
+        for (j, slot) in c.equipment.iter().enumerate() {
+            if let Some(oid) = slot {
+                recurse(g, *oid, (j + 1) as i64, &mut out);
+            }
+        }
+        // Inventory at locate 0.
+        for oid in c.carrying.clone() {
+            recurse(g, oid, 0, &mut out);
+        }
+    }
+    out
 }
 
 /// Crash_delete_crashfile (objsave.c:161): remove the player's plrobjs
@@ -905,6 +1051,20 @@ pub fn crash_load_full(g: &mut GameState, ch: CharId) -> CrashLoadResult {
         Some(p) => p,
         None => return CrashLoadResult::CrashOrNone,
     };
+    // Issue #95: a C-written plrobjs file is a raw rent_info header (56 B)
+    // followed by 80-byte obj_file_elem records. Detect it by the first
+    // bytes - the Rust text format always starts with "RENT " - convert the
+    // records to the text pipeline's format in memory, and continue through
+    // the existing (already C-faithful) load logic.
+    if let Ok(bytes) = std::fs::read(&path) {
+        if !bytes.is_empty() && !bytes.starts_with(b"RENT ") {
+            if let Some((rent, elems)) = crate::cformat::decode_rent_file(&bytes) {
+                let text = rent_to_text(g, &rent, &elems);
+                std::fs::write(&path, &text).ok(); // normalize in place
+                return crash_load_full(g, ch);
+            }
+        }
+    }
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) => {

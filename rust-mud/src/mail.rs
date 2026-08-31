@@ -30,7 +30,7 @@
 //   exactly — BLOCK_SIZE(100)-aligned blocks, HEADER/DATA/DELETED typing,
 //   free-list reuse of deleted blocks, and the next-block FAT chain — so the
 //   file the Rust MUD writes round-trips through the Rust MUD identically and
-//   survives reboots. It is NOT wire-compatible with a C-written plrmail; a
+//   survives reboots. It is byte-compatible with the C 100-B block format on LP64 (verified; see #95)
 //   one-shot migration would re-key by (to,from,time,text). Block layout:
 //       offset 0  : i64  block_type   (HEADER=-1 / LAST=-2 / DELETED=-3 / >=0 link)
 //       offset 8  : i64  next_block   (header only; junk in data blocks)
