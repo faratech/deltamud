@@ -2009,7 +2009,7 @@ fn send_weather_messages(
         _ => return,
     };
 
-    let mut delivered = HashSet::new();
+    let mut delivered: HashSet<RoomRnum> = HashSet::new();
     let scan_radius = radius * 2;
     for y in (cy - scan_radius)..=(cy + scan_radius) {
         for x in (cx - scan_radius)..=(cx + scan_radius) {
@@ -2033,8 +2033,12 @@ fn send_weather_messages(
                 s.push_str(".\r\n");
                 s
             };
+            // C maputils.c:1891-1948: MARK only guards the CENTRE cell; the
+            // wzonecontrol fan-out re-sends for every covering cell, so
+            // controlled-zone players receive the (differently suffixed)
+            // message per covering storm cell (#197).
             for rnum in weather_message_rooms(g, x, y) {
-                if delivered.insert(rnum) {
+                if outdoor_room_has_people(g, rnum) {
                     g.send_to_room(rnum, &msg, None);
                 }
             }
