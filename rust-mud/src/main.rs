@@ -7,6 +7,7 @@
 
 mod act;
 mod aedit;
+mod balance_audit;
 mod alias;
 mod arena;
 mod auction;
