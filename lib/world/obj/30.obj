@@ -7,6 +7,274 @@ A heavy brick of solid gold sits here.~
 0 0 0 0 0 0
 20 50000 5000
 c 1
+#3030
+spade trench~
+a trench spade~
+A long-handled entrenching spade lies here, its blade honed to an edge.~
+~
+5 0 8193
+0 3 8 5 30 30
+8 900 90
+c 1
+L 30
+E
+spade~
+Half digging tool and half club, the garrison's own answer to having run
+out of everything else.~
+#3031
+brigandine salt~
+salt-crusted brigandine~
+A coat of salt-stiffened leather scales lies laced together here.~
+~
+9 0 9
+12 0 0 0 40 40
+18 3200 320
+c 1
+L 30
+E
+brigandine~
+The Marches garrison wore these into the last winter of the war.  The salt
+has gone white at every seam, but the lacquer still turns a blade.~
+#3032
+cloak march scout~
+a march-scout cloak~
+A grey riding cloak, patched with army blanket, lies folded here.~
+~
+9 64 32769
+9 0 0 0 45 45
+4 2600 260
+c 1
+L 32
+A
+2 1
+A
+17 3
+E
+cloak~
+The scouts who ranged ahead of the line wore grey so that the ash would
+not give them away.  It still works.~
+#3033
+musket rifle deserter~
+a deserter's rifle-musket~
+A long rifle-musket leans here, its lock oiled and its pan dry.~
+~
+5 0 8193
+0 2 10 11 35 35
+12 1500 150
+c 1
+L 33
+E
+musket rifle~
+Somebody has kept this one loaded for thirty years.  The stock is carved
+with eleven notches, and the twelfth is half finished.~
+#3034
+shield salt field~
+a salt-field shield~
+A round shield crusted white with salt lies here.~
+~
+9 0 513
+14 0 0 0 40 40
+15 2800 280
+c 1
+L 35
+E
+shield~
+The salt has grown into the grain of the wood and made it harder than
+iron.  A hand's-breadth of the rim has been worn smooth by one grip.~
+#3035
+gauntlets garrison~
+garrison gauntlets~
+A pair of heavy iron-backed gauntlets lies here.~
+~
+9 0 129
+10 0 0 0 40 40
+5 1400 140
+c 1
+L 35
+A
+1 1
+E
+gauntlets~
+Stiff, cold, and impossible to feel anything through, which in the
+Marches was the point.~
+#3036
+bracers orchard wight~
+orchard-wight bracers~
+A pair of black wooden bracers rests here, grown from one piece.~
+~
+9 64 4097
+9 0 0 0 45 45
+4 2400 240
+c 1
+L 36
+A
+2 2
+A
+17 3
+E
+bracers~
+Cut from the heart of a blighted tree, they are warm to the touch and
+never quite dry.~
+#3037
+helm great trench warden~
+a trench-warden great-helm~
+A heavy iron great-helm with a rusted visor rests here.~
+~
+9 0 17
+17 0 0 0 45 45
+10 3600 360
+c 1
+L 38
+A
+17 4
+E
+helm~
+The visor is welded half shut.  Whatever the wardens were watching for,
+they did not want to see it clearly.~
+#3038
+rosary ash sister~
+an ash-sister rosary~
+A rosary of grey beads lies coiled here, each one carved with a name.~
+~
+9 64 5
+8 0 0 0 45 45
+1 2000 200
+c 1
+L 38
+A
+4 2
+A
+12 20
+E
+rosary~
+The Ash-Sisters carried one bead for every burial and would not be
+buried until they had run out of beads.~
+#3039
+fist stone golem~
+a siege-golem fist-stone~
+A fused ball of stone and slag lies here, bigger than a man's head.~
+~
+5 64 8193
+0 4 14 6 50 50
+30 5200 520
+c 1
+L 40
+A
+1 2
+E
+fist~
+The knuckles are still in it.  Somebody poured this around a hand and
+let it set.~
+#3040
+sword narrowed serren~
+Serren's narrowed blade~
+A grey sword, sharpened to a hand's width too narrow, lies here.~
+~
+5 67 8193
+0 5 22 3 60 60
+12 120000 6000
+c 1
+L 45
+A
+22 6
+A
+17 4
+E
+sword~
+The last officer of Fort Sunder sharpened this blade after every patrol
+until there was more edge than sword.  It has never once been sheathed
+in anger since the war ended, because she is still waiting.~
+#3041
+banner last standard~
+the Last Banner~
+The standard of Fort Sunder lies here, folded with parade care.~
+~
+9 67 1025
+16 0 0 0 60 60
+6 90000 9000
+c 1
+L 45
+A
+13 12
+A
+22 4
+E
+banner~
+The cloth is grey plate gone black at the fold, and the device on it has
+been repainted so many times that no two coats agree on what it was.~
+#3042
+greaves warden tower~
+the warden's tower greaves~
+Iron greaves, scaled for somebody nine feet tall, stand here.~
+~
+9 64 33
+22 0 0 0 55 55
+16 6500 650
+c 1
+L 48
+A
+17 6
+E
+greaves~
+The Warden of the Leaning Tower has stood in them since the garrison
+died, and the greaves have taken the shape of the stance.~
+#3043
+sigil sundered standard~
+the Sundered Standard sigil~
+A heavy iron signet rings here, its face split clean in two.~
+~
+9 67 3
+10 0 0 0 60 60
+1 110000 11000
+c 1
+L 50
+A
+22 8
+A
+17 5
+E
+sigil~
+The seal of Fort Sunder, broken deliberately at the surrender and never
+reunited.  Half of it is still missing.~
+#3044
+coin grave~
+a grave-coin~
+A single coin of no real mint lies here.~
+~
+8 0 1
+0 0 0 0 0 0
+1 120 12
+c 1
+E
+coin~
+The Marches bury their dead with a coin for the ferryman.  Nobody now
+living knows whose face it is, and the dead have not complained.~
+#3045
+pay chit garrison~
+a garrison pay-chit~
+A stamped brass chit for one soldier's pay lies here.~
+~
+13 0 1
+0 0 0 0 0 0
+1 40 4
+c 1
+E
+chit~
+Redeemable at the Fort Sunder quartermaster, which burned in the same
+week as the quartermaster.~
+#3046
+sack scrap scavenger~
+a scavenger's scrap sack~
+A patched sack of rusted iron and bad luck sits here.~
+~
+15 0 1
+40 0 -1 0 0 0
+6 200 20
+c 1
+E
+sack~
+Everything worth a farthing and most things that are not.  The scavenger
+who owns it can tell you the price of each, and will.~
 #3082
 bag divine holding~
 the Divine Bag of Holding~
