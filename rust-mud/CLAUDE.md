@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-`rust-mud/` is a from-scratch Rust reimplementation of DeltaMUD (a CircleMUD 3.0 derivative). It is a broad, near-complete Rust port with a layer of modern improvements, but it is **not exact C feature parity yet**. ~83 modules / ~75k lines.
+`rust-mud/` is a from-scratch Rust reimplementation of DeltaMUD (a CircleMUD 3.0 derivative). It is a broad, near-complete Rust port with a layer of modern improvements. As of the 2026-08 parity program (GitHub issues #96-#347, epic #348) all confirmed fidelity gaps from the 12-subsystem audit are closed; the remaining deliberate divergences (C-bug repairs) are registered in `COMPATIBILITY.md`.
 
 For high-level status, read `README.md`. For operational compatibility caveats, read `COMPATIBILITY.md`. This file is the detailed agent/developer guide.
 
@@ -37,7 +37,7 @@ Recently resolved tracker-backed parity fixes:
 cd /web/deltamud/rust-mud
 cargo build                 # debug
 cargo build --release       # optimized (LTO+strip; ~1.5 min from clean)
-cargo test                  # 221 tests across commands, combat, DG, OLC, nanny/login, persistence, and protocol helpers
+cargo test                  # 328 tests across commands, combat, DG, OLC, nanny/login, persistence, and protocol helpers
 cargo test <name>           # a single test by substring
 cargo clippy --all-targets  # lint (CI runs this; not gated)
 

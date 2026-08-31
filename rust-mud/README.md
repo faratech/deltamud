@@ -1,6 +1,6 @@
 # DeltaMUD — Rust Edition
 
-A broad Rust reimplementation of DeltaMUD (a CircleMUD 3.0 derivative), plus a layer of modern improvements. The C source at `/web/deltamud/src` is the authoritative reference; this port is intended to match its output strings, world-file formats, numeric formulas, and database schema while replacing the C pointer graph with an idiomatic single-owner design. It is not exact C feature parity yet; see `COMPATIBILITY.md` for the current gap list.
+A broad Rust reimplementation of DeltaMUD (a CircleMUD 3.0 derivative), plus a layer of modern improvements. The C source at `/web/deltamud/src` is the authoritative reference; this port matches its output strings, world-file formats, numeric formulas, and database schema while replacing the C pointer graph with an idiomatic single-owner design. The 2026-08 parity program (GitHub issues #96-#347, epic #348) closed every confirmed fidelity gap from the 12-subsystem audit; the handful of places where the port deliberately repairs a C bug are registered in `COMPATIBILITY.md`.
 
 ~83 modules / ~75k lines. Builds clean and boots against the original `lib/` world files.
 
@@ -18,7 +18,7 @@ The Rust port has the broad DeltaMUD feature surface in place, including the sta
 - **Persistence**: 83-column `player_main` + `player_affects` + `player_skills` (MySQL), Rust-format object rent/crash files, crypt-compatible passwords; offline-player immortal ops via an async bridge.
 - **Immortal tooling**: the full `act.wizard` command set, god-command (GCMD) permission bits, `can_edit_zone`, autowiz, on-disk syslog, the player-index table.
 
-Known remaining C-parity gaps are tracked in `COMPATIBILITY.md` and GitHub issues. The highest-risk area is direct C/Rust runtime persistence-file compatibility.
+No open fidelity-gap issues remain (epic #348). Deliberate divergences — places where the C oracle is buggy and the port repairs it — are listed in the `COMPATIBILITY.md` divergence register. C-format runtime persistence files (plrobjs rent/crash, hcontrol, clans.dat, boards) are read automatically and can be written with `MUD_CFORMAT_FILES=true` (#95).
 
 ### Modern improvements over the C version
 - **Idiomatic Rust core**: a single-owner `GameState` (id-indexed `IndexMap`/`Vec` arenas, `Copy` ids instead of locked pointers) — deadlock-free, with async (Tokio) only at the socket edge. No `Arc<RwLock>` entity graph.
