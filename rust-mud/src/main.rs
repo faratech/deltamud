@@ -481,10 +481,15 @@ async fn main() -> Result<()> {
     // Capture ROOM_DEATH rooms for the dts_are_dumps dump registration (C
     // assign_rooms reads world[] directly; our table build has no GameState
     // borrow, so we stash the vnums first). dts_are_dumps is YES in DeltaMUD.
+    // C assign_rooms (spec_assign.c:152-166) iterates i < top_of_world over
+    // the LOADED world only - the 2M+ surface-map block is spliced after and
+    // its synthetic death rooms must not get dump spec procs (#238).
     let death_rooms: Vec<types::RoomVnum> = state
         .rooms
         .iter()
-        .filter(|r| r.room_flags.contains(room::RoomFlags::DEATH))
+        .filter(|r| {
+            r.room_flags.contains(room::RoomFlags::DEATH) && r.map_x.is_none()
+        })
         .map(|r| r.number)
         .collect();
     spec_assign::set_death_trap_rooms(death_rooms);
