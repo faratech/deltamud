@@ -305,7 +305,7 @@ fn get_name_by_id(g: &GameState, id: i64) -> String {
     m.id_to_name
         .get(&id)
         .map(|s| cap_first(s))
-        .unwrap_or_else(|| "Mota".to_string())
+        .unwrap_or_else(|| "(null)".to_string())
 }
 
 // ---------------------------------------------------------------------------

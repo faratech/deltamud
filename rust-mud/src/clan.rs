@@ -1437,7 +1437,7 @@ fn clan_who(g: &mut GameState, ch: CharId) {
 
     let mut count = 0;
     for d in connected_players(g) {
-        if get_clan(g, d) == num && get_clan_rank(g, d) > 0 && g.can_see(ch, d) {
+        if get_clan(g, d) == num && get_clan_rank(g, d) > 0 && g.can_see(d, ch) {
             count += 1;
             let (lvl, class_abbr, name) = match g.get_char(d) {
                 Some(c) => (

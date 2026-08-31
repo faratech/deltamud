@@ -497,11 +497,12 @@ fn do_quest_buy(g: &mut GameState, ch: CharId, questman: CharId, arg2: &str) {
             );
         }
         Reward::Training(n) => {
-            // GET_TRAINING maps to a not-yet-ported `training` ubyte; track it
-            // on wins-free scaffolding is unavailable, so we apply it where the
-            // C does (training counter). Until the field lands the act() lines
-            // still fire and points are spent, matching the player-visible path.
-            let _ = n;
+            // C quest.c:468-488: GET_TRAINING(ch) += n after spending the
+            // points. The old 'field not ported' comment was stale - the
+            // field exists - so 1500 qp bought nothing (#166).
+            if let Some(c) = g.get_char_mut(ch) {
+                c.training = c.training.saturating_add(*n as u8);
+            }
             act(
                 g,
                 "$N gives 1 training session to $n.",

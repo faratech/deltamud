@@ -523,8 +523,8 @@ pub fn do_bid(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         return;
     }
     // Below the 5%-over threshold where there IS a bidder, or a zero bid.
-    if (bid < (cur_bid as f64 * 1.05) as i64 && bidder_id >= 0) || bid == 0 {
-        let need = (cur_bid as f64 * 1.05 + 1.0).floor() as i64;
+    if (bid as f64) < cur_bid as f64 * 1.05 && bidder_id >= 0 || bid == 0 {
+        let need = (cur_bid as f64 * 1.05 + 1.0).round() as i64;
         g.send_to_char(
             ch,
             &format!(
