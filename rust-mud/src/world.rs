@@ -89,6 +89,12 @@ pub struct MobileProto {
     pub description: String,
     pub level: Level,
     pub hitpoints: i32,
+    /// C db.c stores the HP dice parts in the proto (hit=nodice, mana=
+    /// sizedice, move=bonus) and read_mobile rolls max_hit = dice(nd, sd) +
+    /// bonus (db.c:1790-1798). Loader-parsed protos carry the parsed triple;
+    /// constructors that set hitpoints directly use (0, 0, hitpoints) so the
+    /// roll degenerates to hitpoints. (issue #230)
+    pub hit_dice: (i32, i32, i32),
     pub experience: Experience,
     pub gold: Gold,
     pub position: Position,
@@ -180,8 +186,13 @@ impl GameState {
         mob.act_flags = proto.act_flags;
         mob.affect_flags = proto.affect_flags;
         mob.position = proto.position;
-        mob.points.hit = proto.hitpoints.max(1);
-        mob.points.max_hit = mob.points.hit;
+        // C read_mobile (db.c:1790-1798): max_hit is rolled from the proto's
+        // HP dice, max_hit = dice(nodice, sizedice) + bonus, then hit is set
+        // to max_hit. Loader protos carry the parsed 'Hd+H' triple (#230).
+        let (hp_nd, hp_sd, hp_bonus) = proto.hit_dice;
+        let max_hit = self.rng.dice(hp_nd, hp_sd) + hp_bonus;
+        mob.points.hit = max_hit;
+        mob.points.max_hit = max_hit;
         mob.points.mana = 100;
         mob.points.max_mana = 100;
         mob.points.move_points = 80;
@@ -558,5 +569,77 @@ impl GameState {
             z.age = 0;
         }
         summary
+    }
+}
+
+#[cfg(test)]
+mod hit_dice_tests {
+    use super::*;
+    use crate::config::Config;
+
+    fn bare_proto(hit_dice: (i32, i32, i32)) -> MobileProto {
+        MobileProto {
+            vnum: 2000,
+            name: "test mob".into(),
+            short_desc: "the test mob".into(),
+            long_desc: "the test mob stands here.".into(),
+            description: String::new(),
+            level: 10,
+            hitpoints: hit_dice.0,
+            hit_dice,
+            experience: 0,
+            gold: 0,
+            position: Position::Standing,
+            default_pos: Position::Standing,
+            sex: Gender::Male,
+            alignment: 0,
+            act_flags: 0,
+            affect_flags: 0,
+            armor: 100,
+            hitroll: 0,
+            damroll: 0,
+            damnodice: 1,
+            damsizedice: 2,
+            power: 0,
+            mpower: 0,
+            defense: 0,
+            mdefense: 0,
+            technique: 0,
+            abilities: None,
+            attack_type: 0,
+        }
+    }
+
+    #[test]
+    fn mob_max_hit_is_rolled_from_hp_dice_not_the_dice_count() {
+        // Issue #230 / C db.c:1790-1798: '1d1+665' must roll
+        // dice(1, 1) + 665 = 666, not collapse to the dice count (1).
+        let mut g = GameState::new(Config::default());
+        g.rng.srandom(12345);
+        let mut proto = bare_proto((1, 1, 665));
+        proto.vnum = 2000;
+        g.mob_protos.insert(2000, proto);
+        let cid = g.load_mobile(2000).expect("mob loads");
+        let mob = g.get_char(cid).unwrap();
+        assert_eq!(mob.points.max_hit, 666);
+        assert_eq!(mob.points.hit, 666);
+    }
+
+    #[test]
+    fn classic_format_hp_dice_roll_nd_sd_plus_bonus() {
+        // Classic 'Hd+H' e.g. 2d10+50 -> dice(2, 10) + 50.
+        let mut g = GameState::new(Config::default());
+        g.rng.srandom(999);
+        let mut proto = bare_proto((2, 10, 50));
+        proto.vnum = 2001;
+        g.mob_protos.insert(2001, proto);
+        let cid = g.load_mobile(2001).unwrap();
+        let mob = g.get_char(cid).unwrap();
+        let expected = {
+            let mut r = crate::rng::Rng::new(999);
+            r.dice(2, 10) + 50
+        };
+        assert_eq!(mob.points.max_hit, expected);
+        assert!(mob.points.max_hit >= 52 && mob.points.max_hit <= 70);
     }
 }

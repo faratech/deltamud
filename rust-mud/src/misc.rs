@@ -1009,6 +1009,7 @@ mod tests {
             description: String::new(),
             level,
             hitpoints: 1,
+            hit_dice: (0, 0, 1),
             experience: 0,
             gold: 0,
             position: Position::Standing,

@@ -588,7 +588,7 @@ impl FileLoader {
         let sex = (*pos_parts.get(2).unwrap_or(&0)).clamp(0, 2) as u8;
 
         // Hitpoints + damage dice from the stats line, format-aware.
-        let (hitpoints, damnodice, damsizedice) = Self::parse_mob_dice(stats_line);
+        let ((hp_nd, hp_sd, hp_bonus), damnodice, damsizedice) = Self::parse_mob_dice(stats_line);
 
         // Enhanced ('E'): parse espec ability lines until a lone 'E'.
         // Mirrors parse_enhanced_mob / interpret_espec in db.c.
@@ -642,7 +642,8 @@ impl FileLoader {
             long_desc,
             description,
             level,
-            hitpoints,
+            hitpoints: hp_nd.max(1),
+            hit_dice: (hp_nd, hp_sd, hp_bonus),
             experience,
             gold,
             position: Position::from_u8(position),
@@ -712,19 +713,28 @@ impl FileLoader {
         (g(1), g(2), g(3), g(4), g(5))
     }
 
-    /// Extract HP base + damage dice from a stats line for both formats.
-    /// Classic ` lvl thac0 ac Hd+H Dd+D` -> hit=t3, damnodice=t6, damsizedice=t7.
-    /// X `Xlvl pw mpw def mdef tech Hd+H Dd` -> hit=t6, damnodice=t9, damsizedice=t10.
-    fn parse_mob_dice(stats_line: &str) -> (i32, i32, i32) {
+    /// Extract the HP dice triple + damage dice from a stats line for both
+    /// formats. The HP triple is (nodice, sizedice, bonus) exactly as C's
+    /// parse_simple_mob stores it (hit/mana/move of the proto); read_mobile
+    /// then rolls max_hit = dice(nodice, sizedice) + bonus (#230).
+    fn parse_mob_dice(stats_line: &str) -> ((i32, i32, i32), i32, i32) {
         let nums = Self::stat_numbers(stats_line);
         let trimmed = stats_line.trim();
         let g = |idx: usize| -> i32 { nums.get(idx).copied().unwrap_or(0) };
         if trimmed.starts_with('X') || trimmed.starts_with('x') {
             // t0=lvl t1..t5=combat t6=hit t7=mana t8=move t9=damnodice t10=damsizedice
-            (g(6).max(1), g(9).max(1), g(10).max(1))
+            (
+                (g(6), g(7), g(8)),
+                g(9).max(1),
+                g(10).max(1),
+            )
         } else {
             // t0=lvl t1=thac0 t2=ac t3=hit t4=mana t5=move t6=damnodice t7=damsizedice t8=damroll
-            (g(3).max(1), g(6).max(1), g(7).max(1))
+            (
+                (g(3), g(4), g(5)),
+                g(6).max(1),
+                g(7).max(1),
+            )
         }
     }
 

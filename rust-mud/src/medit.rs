@@ -1106,6 +1106,7 @@ fn save_internally(g: &mut GameState, conn: ConnId) {
         description: m.description.clone(),
         level: m.level.clamp(0, 255) as Level,
         hitpoints: m.hit.max(1),
+        hit_dice: (0, 0, m.hit.max(1)),
         experience: m.exp,
         gold: m.gold as Gold,
         position: Position::from_u8(m.position.clamp(0, 9) as u8),
