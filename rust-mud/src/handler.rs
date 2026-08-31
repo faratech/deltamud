@@ -16,8 +16,10 @@ const SECS_PER_MUD_DAY: i64 = 24 * SECS_PER_MUD_HOUR;
 const SECS_PER_MUD_MONTH: i64 = 35 * SECS_PER_MUD_DAY;
 const SECS_PER_MUD_YEAR: i64 = 17 * SECS_PER_MUD_MONTH;
 
-/// Port of CircleMUD isname(): true if `arg` is a whole keyword in `namelist`
-/// (case-insensitive, whole-word — NOT prefix, matching C exactly).
+/// Port of CircleMUD isname() (handler.c:59): true if `arg` abbreviates any
+/// whitespace-separated keyword in `namelist` — case-insensitive PREFIX match
+/// via is_abbrev, so "swo" matches "sword" (issue #216). is_abbrev rejects an
+/// empty abbreviation, matching the guard below.
 pub fn isname(arg: &str, namelist: &str) -> bool {
     if arg.is_empty() {
         return false;
@@ -25,7 +27,7 @@ pub fn isname(arg: &str, namelist: &str) -> bool {
     let arg = arg.to_lowercase();
     namelist
         .split_whitespace()
-        .any(|word| word.to_lowercase() == arg)
+        .any(|word| word.to_lowercase().starts_with(&arg))
 }
 
 /// Parse "3.sword" -> (3, "sword"); "sword" -> (1, "sword").
@@ -682,6 +684,24 @@ mod tests {
     use crate::connection::Descriptor;
     use crate::object::{Object, ObjectAffect, ObjectType};
     use crate::types::{Class, Race};
+
+    #[test]
+    fn isname_matches_by_prefix_like_c_is_abbrev() {
+        // C isname() tokenizes the namelist and is_abbrev()es each token
+        // (handler.c:59-76), so any unambiguous prefix of a keyword hits.
+        assert!(isname("swo", "sword long sharp"));
+        assert!(isname("SWORD", "sword long sharp"));
+        assert!(isname("lon", "sword long sharp"));
+        assert!(isname("sword", "sword long sharp"));
+        // Not a prefix of any single token.
+        assert!(!isname("ord", "sword long sharp"));
+        assert!(!isname("swordlong", "sword long sharp"));
+        // is_abbrev("") is false in C (utils.c), preserved by the guard.
+        assert!(!isname("", "sword long sharp"));
+        // Tokens longer than the arg still match; arg longer than token does not.
+        assert!(isname("s", "sword"));
+        assert!(!isname("swords", "sword"));
+    }
 
     fn fresh_game() -> GameState {
         GameState::new(Config::default())
