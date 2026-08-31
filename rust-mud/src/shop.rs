@@ -121,7 +121,6 @@ const MSG_CANT_KILL_KEEPER: &str = "Get out of here before I call the guards!";
 // config.c / structs.h gates used by the shop (the pawnshop-in-jail logic and
 // IS_GOD; these mirror the values already used across the Rust port).
 const JAIL_NUM: RoomVnum = 400;
-const PK_ALLOWED: bool = false;
 const PLR_KILLER: i64 = 1 << 0;
 
 // structs.h ITEM_* (RAW item-type integers as stored in the shop file and as
@@ -1225,7 +1224,7 @@ fn buy_price(g: &GameState, obj: ObjId, shop: &ShopData) -> i32 {
 
 fn sell_price(g: &GameState, ch: CharId, obj: ObjId, shop: &ShopData) -> i32 {
     let mut value = (obj_cost(g, obj) as f32 * shop.profit_sell) as i32;
-    if !PK_ALLOWED && plr_killer(g, ch) && in_room(g, ch) == g.real_room(JAIL_NUM) && value > 75000
+    if !g.pk_allowed && plr_killer(g, ch) && in_room(g, ch) == g.real_room(JAIL_NUM) && value > 75000
     {
         value = 75000;
     }
@@ -1536,7 +1535,7 @@ fn shopping_buy(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_i
     if !is_ok(g, keeper, ch, &shop) {
         return;
     }
-    if !PK_ALLOWED && plr_killer(g, ch) && in_room(g, ch) == g.real_room(JAIL_NUM) {
+    if !g.pk_allowed && plr_killer(g, ch) && in_room(g, ch) == g.real_room(JAIL_NUM) {
         keeper_say(g, keeper, MSG_NO_SELL_PAWN);
         return;
     }
@@ -1910,7 +1909,7 @@ fn shopping_list(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_
     if !is_ok(g, keeper, ch, &shop) {
         return;
     }
-    if !PK_ALLOWED && plr_killer(g, ch) && in_room(g, ch) == g.real_room(JAIL_NUM) {
+    if !g.pk_allowed && plr_killer(g, ch) && in_room(g, ch) == g.real_room(JAIL_NUM) {
         keeper_say(g, keeper, MSG_NO_SELL_PAWN);
         return;
     }

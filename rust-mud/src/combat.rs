@@ -57,7 +57,6 @@ const PRF2_INTANGIBLE: i64 = 1 << 9;
 const AFF_R_CHARGED: i64 = 1 << 26;
 
 // config.c — PvP gating (pk_allowed is false on this MUD).
-const PK_ALLOWED: bool = false;
 const PK_VICTIM_MIN: Level = 10;
 // Position multiplier hack (fight.c) keys off POS_FIGHTING's ordinal (8).
 const POS_FIGHTING_ORD: i32 = Position::Fighting as i32;
@@ -102,7 +101,7 @@ pub fn set_fighting(g: &mut GameState, ch: CharId, victim: CharId) {
     }
     // PK bookkeeping: on a non-PK MUD, attacking another player in a
     // jurisdicted, non-peaceful area flags the attacker as a KILLER (fight.c).
-    if !PK_ALLOWED {
+    if !g.pk_allowed {
         check_killer(g, ch, victim);
     }
 }
@@ -1009,7 +1008,7 @@ fn do_actual_damage(
     }
 
     // PK flagging on a non-PK MUD (fight.c do_actual_damage ~892).
-    if !PK_ALLOWED {
+    if !g.pk_allowed {
         check_killer(g, ch, victim);
     }
 
@@ -1357,7 +1356,7 @@ fn update_position(g: &mut GameState, ch: CharId) {
 }
 
 fn newbie_pvp_block_message(g: &GameState, ch: CharId, victim: CharId) -> Option<&'static str> {
-    if PK_ALLOWED
+    if g.pk_allowed
         || ch == victim
         || (crate::arena::is_arena_combatant(ch) && crate::arena::is_arena_combatant(victim))
     {

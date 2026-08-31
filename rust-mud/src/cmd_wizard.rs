@@ -5211,9 +5211,18 @@ pub fn do_set(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         name = n;
         rest = r;
     } else if name.eq_ignore_ascii_case("Legal_PKS") && ch_level >= LVL_GRGOD {
-        // pk_allowed global not surfaced; mirror the report line.
+        // C act.wizard.c:3914-3921: this really flips the pk_allowed global that
+        // do_hit/do_kill/murder, fight.c's killer flagging and the PvP spell
+        // guards all read.
         let (mode, _r) = half_chop(&rest);
-        let allowed = mode.eq_ignore_ascii_case("ON");
+        let mut allowed = g.pk_allowed;
+        if mode.eq_ignore_ascii_case("OFF") {
+            allowed = false;
+        }
+        if mode.eq_ignore_ascii_case("ON") {
+            allowed = true;
+        }
+        g.pk_allowed = allowed;
         g.send_to_char(
             ch,
             &format!(
@@ -7433,5 +7442,61 @@ WorldMap:\n",
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
         assert!(out.contains("[  100]"), "out: {}", out);
         assert!(!out.contains("You can't edit the zone"));
+    }
+
+    // ---- #206: `set Legal_PKS` flips the live PvP gate ---------------------
+
+    #[test]
+    fn set_legal_pks_flips_the_live_pvp_gate() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let god = connected_player(&mut g, ConnId(1), "God", LVL_GRGOD);
+        let alpha = connected_player(&mut g, ConnId(2), "Alpha", 20);
+        let beta = connected_player(&mut g, ConnId(3), "Beta", 20);
+        g.char_to_room(god, room);
+        g.char_to_room(alpha, room);
+        g.char_to_room(beta, room);
+
+        do_set(&mut g, god, "Legal_PKS ON", 0);
+        assert!(g.pk_allowed, "the gate must actually open");
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("Legal PKs are now Allowed."));
+
+        // The do_hit murder-redirect is `if (!pk_allowed)` in C — it must not
+        // fire once the gate is open.
+        crate::cmd_offensive::do_hit(&mut g, alpha, "beta", 0);
+        let out = &g.descriptors.get(&ConnId(2)).unwrap().outbuf;
+        assert!(
+            !out.contains("Use 'murder' to hit another player."),
+            "out: {}",
+            out
+        );
+
+        do_set(&mut g, god, "Legal_PKS OFF", 0);
+        assert!(!g.pk_allowed, "the gate must actually close");
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("Legal PKs are now Disallowed."));
+    }
+
+    #[test]
+    fn set_legal_pks_requires_grgod() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMMORT);
+        g.char_to_room(imm, room);
+
+        do_set(&mut g, imm, "Legal_PKS ON", 0);
+
+        assert!(!g.pk_allowed, "a sub-GRGOD immortal cannot open the gate");
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(!out.contains("Legal PKs are now"), "out: {}", out);
     }
 }

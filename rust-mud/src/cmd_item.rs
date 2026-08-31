@@ -101,7 +101,6 @@ const W_FACE: usize = 21;
 // Config (config.c) — jail / donation rooms, PvP, weapon restrictions.
 const JAIL_NUM: RoomVnum = 400;
 const DONATION_ROOM_1: RoomVnum = 146;
-const PK_ALLOWED: bool = false;
 const WEAPONRESTRICTIONS: i32 = 0;
 
 // Spell/affect numbers (spells.h).
@@ -948,7 +947,7 @@ fn is_killer(g: &GameState, ch: CharId) -> bool {
 }
 
 fn perform_drop_gold(g: &mut GameState, ch: CharId, amount: i32, mode: i32, rdr: Option<RoomRnum>) {
-    if !PK_ALLOWED && is_killer(g, ch) && in_jail(g, ch) {
+    if !g.pk_allowed && is_killer(g, ch) && in_jail(g, ch) {
         g.send_to_char(ch, "Sorry. You can't do that when you're in jail.\r\n");
         return;
     }
@@ -1033,7 +1032,7 @@ fn perform_drop(
     sname: &str,
     rdr: Option<RoomRnum>,
 ) -> i32 {
-    if !PK_ALLOWED && is_killer(g, ch) && in_jail(g, ch) {
+    if !g.pk_allowed && is_killer(g, ch) && in_jail(g, ch) {
         g.send_to_char(ch, "Sorry. You can't do that when you're in jail.\r\n");
         return 0;
     }
