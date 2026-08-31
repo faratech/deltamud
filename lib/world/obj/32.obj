@@ -1,0 +1,324 @@
+#3200
+halberd ash warder~
+an ash-warder halberd~
+A long halberd leans here, its axe-head black with baked ash.~
+~
+5 64 8193
+0 5 26 3 65 65
+24 62000 6200
+c 1
+L 60
+A
+17 5
+E
+halberd~
+The spire warders were not soldiers and never were.  They were the
+thing the spire had instead of soldiers, and this was the argument
+they were issued.~
+#3201
+collar cinder hound~
+a cinder-hound collar~
+A broad iron collar lies here, warm to the touch.~
+~
+9 64 5
+20 0 0 0 65 65
+5 44000 4400
+c 1
+L 62
+A
+22 4
+E
+collar~
+There is no buckle.  Whatever wears it was never meant to be able to
+take it off.~
+#3202
+gauntlets forge thrall~
+forge-thrall gauntlets~
+Heavy chained gauntlets lie here, scarred with spark burns.~
+~
+9 64 129
+26 0 0 0 70 70
+9 58000 5800
+c 1
+L 65
+A
+1 2
+A
+17 3
+E
+gauntlets~
+The chains are not decoration.  They run back over the shoulder and
+down, and there is no ring at the end of them to hook to.~
+#3203
+greathelm saint iron~
+an iron-saint greathelm~
+A helm worked as a saint's serene face rests here.~
+~
+9 64 17
+36 0 0 0 75 75
+12 96000 9600
+c 1
+L 70
+A
+17 5
+E
+greathelm~
+The face is smiling.  It is the only thing in the Gallery that is.~
+#3204
+signet councillor grey~
+the grey-councillor signet~
+A plain lead signet ring lies here, unmarked.~
+~
+9 67 3
+14 0 0 0 75 75
+1 210000 21000
+c 1
+L 70
+A
+17 6
+A
+22 4
+E
+signet~
+Every councillor's ring is blank.  The council holds that the office
+wears the man, and not the other way about.~
+#3205
+sickle salt gardener~
+the gardener's salt-sickle~
+A curved sickle of glassy salt lies here, edge still wet.~
+~
+5 67 8193
+0 5 32 3 80 80
+7 175000 17500
+c 1
+L 75
+A
+22 8
+E
+sickle~
+The Gardener of the Vitarium prunes with it.  What grows in the
+Vitarium is not plants, and does not object to the pruning.~
+#3206
+plating heart vitarium~
+vitarium heart-plating~
+A cuirass of layered green and black plate stands here.~
+~
+9 64 9
+44 0 0 0 80 80
+28 320000 32000
+c 1
+L 75
+A
+13 30
+A
+17 8
+E
+plating~
+It is grown, not forged, and it is warm, and once a year it puts out
+a leaf that somebody prunes off with the salt-sickle.~
+#3207
+aegis ash glass~
+an ash-and-glass aegis~
+A shield of black glass fused over ash lies here.~
+~
+9 67 513
+40 0 0 0 80 80
+20 340000 34000
+c 1
+L 80
+A
+17 8
+E
+aegis~
+Blows land on it with a sound like a far-off bell and stop there.
+It has never once been seen to crack, which the wardens find more
+upsetting than the alternative.~
+#3208
+orb spellforge warlock~
+the warlock's spellforge orb~
+A hollow glass orb rests here, holding a fire that does not move.~
+~
+9 67 16385
+16 0 0 0 80 80
+6 380000 38000
+c 1
+L 80
+A
+20 8
+A
+12 50
+E
+orb~
+It was drawn from the Spellforge Void and sealed before the thing
+inside finished arriving.  Ilyra is in no hurry to open it.~
+#3209
+sabatons chain wrought~
+chain-wrought sabatons~
+A pair of sabatons of interlinked black chain stand here.~
+~
+9 64 65
+34 0 0 0 85 85
+11 130000 13000
+c 1
+L 85
+A
+2 2
+A
+17 6
+E
+sabatons~
+They walk a half-step behind the wearer and arrive a half-step after.
+Nobody who owns a pair has ever explained why they keep them.~
+#3210
+stole grey prelate~
+the Grey Prelate's stole~
+A long grey stole lies here, weighted at both ends with lead.~
+~
+9 67 1025
+36 0 0 0 85 85
+7 290000 29000
+c 1
+L 85
+A
+4 2
+A
+12 40
+A
+17 9
+E
+stole~
+The order it belongs to has one sacrament, and the stole is what it
+is administered in.~
+#3211
+crown ashes vhalor~
+Vhalor's crown of ashes~
+A crown of compacted ash and iron lies here, and it is burning.~
+~
+9 67 17
+48 0 0 0 90 90
+16 600000 60000
+c 1
+L 90
+A
+22 10
+A
+17 8
+E
+crown~
+Every claimant to the Spire has added a handful of ash to it.  It has
+never gone out, and it has never burned anybody who had not asked.~
+#3212
+band spire warden~
+the spire-warden band~
+A thin iron band lies here, inscribed all the way around.~
+~
+9 67 3
+16 0 0 0 90 90
+1 430000 43000
+c 1
+L 90
+A
+17 9
+A
+22 6
+E
+band~
+The inscription is a roster of every warden of the Spire, and it is
+still being written.~
+#3213
+mantle council grey~
+the grey council mantle~
+A heavy mantle of grey wool lies here, clasped in black iron.~
+~
+9 67 32769
+40 0 0 0 90 90
+12 480000 48000
+c 1
+L 90
+A
+13 30
+A
+17 8
+E
+mantle~
+Worn in council, out of council, and finally into the ground.  The
+wool has never been washed and never needs to be.~
+#3214
+flame first~
+the First Flame~
+A blade of white and orange fire lies here, and it does not flicker.~
+~
+5 67 8193
+0 8 48 12 95 95
+18 900000 90000
+c 1
+L 95
+A
+22 12
+A
+17 6
+E
+flame~
+It was lit in the Tomb of the First Flame and it has never been
+carried further than the Crown of the Spire, because nothing that
+carried it has come back down the Ashen Stair.~
+#3215
+breastplate furnace heart~
+the furnace-heart breastplate~
+A cuirass of black iron lies here, glowing faintly at the seams.~
+~
+9 67 9
+54 0 0 0 95 95
+34 850000 85000
+c 1
+L 95
+A
+22 8
+A
+17 12
+A
+13 40
+E
+breastplate~
+A furnace was drawn out of the Furnace Throat and hammered flat, and
+it has not entirely agreed to the new shape.~
+#3216
+coin ash~
+an ash-drift coin~
+A coin of pale ash-grey metal lies here.~
+~
+8 0 1
+0 0 0 0 0 0
+1 900 90
+c 1
+E
+coin~
+The Spire pays its warders in its own metal, which can only be spent
+back at the Spire.  Nobody has ever minded.~
+#3217
+nodule slag~
+a slag nodule~
+A rough nodule of fused forge-slag lies here.~
+~
+8 0 1
+0 0 0 0 0 0
+3 2500 250
+c 1
+E
+nodule~
+The foundry casts these off hourly.  The foundry has never once
+stopped, and nobody living remembers lighting it.~
+#3218
+decree council~
+a grey council decree~
+A sheet of grey vellum lies here, inscribed in a clerk's hand.~
+~
+13 0 1
+0 0 0 0 0 0
+1 60 6
+c 1
+E
+decree~
+It has been read into the record, entered, and lost, which is the
+customary fate of grey council decrees.~
+$~

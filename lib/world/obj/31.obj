@@ -1,3 +1,227 @@
+#3100
+shield kite templar~
+a drowned-templar kite shield~
+A tall kite shield stands here, green with thirty years of water.~
+~
+9 64 513
+18 0 0 0 50 50
+18 26000 2600
+c 1
+L 45
+A
+17 5
+E
+shield~
+The templars of the Cloister went down holding these in front of the
+nave doors.  The arms of the last one are still inside.~
+#3101
+clapper bell sacristy~
+a sacristy bell-clapper~
+A bronze bell-clapper, heavy as a man's leg, lies here.~
+~
+5 64 8193
+0 4 16 5 55 55
+22 30000 3000
+c 1
+L 50
+A
+17 4
+E
+clapper~
+Someone took the time to swing it as a weapon rather than let it hang.
+The bell above the nave has been silent ever since.~
+#3102
+lens reading stacks~
+the drowned-stacks reading lens~
+A disc of green glass in a brass frame rests here.~
+~
+9 64 16385
+10 0 0 0 50 50
+2 34000 3400
+c 1
+L 50
+A
+3 2
+A
+12 25
+E
+lens~
+Through it, the drowned library's pages are legible.  Without it, they
+are only wet.~
+#3103
+chain reliquary~
+a reliquary chain~
+A chain of small silver reliquary boxes hangs here.~
+~
+9 64 5
+14 0 0 0 55 55
+3 38000 3800
+c 1
+L 55
+A
+17 5
+E
+chain~
+Nine boxes, eight of them empty.  The brothers stopped asking where the
+ninth one's contents went.~
+#3104
+quill iron scriptorium~
+the scriptorium iron quill~
+A writing quill of black iron lies here, nib first.~
+~
+5 64 8193
+0 3 18 14 55 55
+3 27000 2700
+c 1
+L 55
+A
+17 3
+E
+quill~
+It writes in a hand that is not yours and does not stop when you do.~
+#3105
+vestments warden green~
+the green-warden vestments~
+Robes of drowned green velvet hang here, heavy with water.~
+~
+9 64 9
+28 0 0 0 60 60
+14 58000 5800
+c 1
+L 60
+A
+17 6
+A
+12 20
+E
+vestments~
+The Green Warden has worn these in the nave since the water came in,
+and the velvet has never once dried.~
+#3106
+waders cloister~
+cloister waders~
+A pair of thigh-high leather waders stands here.~
+~
+9 0 65
+20 0 0 0 60 60
+8 16000 1600
+c 1
+L 60
+A
+5 1
+E
+waders~
+Practical, unglamorous, and the only reason half the brothers can still
+reach the crossing at low water.~
+#3107
+crozier abbess~
+the Abbess's crozier~
+A crozier of green bronze stands here, crook uppermost.~
+~
+5 67 8193
+0 5 24 5 65 65
+14 160000 16000
+c 1
+L 65
+A
+12 40
+A
+20 6
+E
+crozier~
+The crook is worked as a wave, closing.  It is warm, and the warmth has
+nowhere to come from.~
+#3108
+signet bell tower~
+the bell-tower signet~
+A wide silver signet ring lies here, set with a tiny green bell.~
+~
+9 64 3
+12 0 0 0 65 65
+1 95000 9500
+c 1
+L 65
+A
+2 2
+A
+17 4
+E
+signet~
+Rung once, it answers from somewhere under the water.  Nobody has been
+brave enough to ring it twice.~
+#3109
+shroud sanctified~
+a sanctified shroud~
+A grey burial shroud lies here, folded around nothing at all.~
+~
+9 67 1025
+26 0 0 0 70 70
+9 190000 19000
+c 1
+L 70
+A
+13 25
+A
+17 7
+E
+shroud~
+Woven for the Abbess Drowned and never used, because she was already
+under the water when they finished it.~
+#3110
+rope bell ulmot~
+Brother Ulmot's bell-rope~
+A tarred bell-rope lies coiled here, its end frayed to a brush.~
+~
+9 64 2049
+22 0 0 0 70 70
+6 140000 14000
+c 1
+L 70
+A
+5 2
+A
+14 25
+E
+rope~
+Brother Ulmot pulled this every hour for forty years.  His grip is
+still the shape of the thing, and will not close around anything else.~
+#3111
+coin votive~
+a drowned votive coin~
+A small green-crusted coin lies here.~
+~
+8 0 1
+0 0 0 0 0 0
+1 400 40
+c 1
+E
+coin~
+Thrown into the flooded nave by pilgrims who could not afford candles.~
+#3112
+vial green water~
+a vial of green water~
+A stoppered glass vial of green water sits here.~
+~
+17 64 1
+5 4 0 0 0 0
+2 900 90
+c 1
+E
+vial~
+It does not matter which room you fill it in.  It comes up green.~
+#3113
+psalter rotted~
+a rotted psalter~
+A psalter lies open here, its pages gone to pulp.~
+~
+13 0 1
+0 0 0 0 0 0
+3 20 2
+c 1
+E
+psalter~
+The ink has lifted cleanly off the page and settled on the inside of
+the cover, whole, as though the book had simply given up.~
 #3160
 belt invisibility~
 the Belt of Invisibility~
