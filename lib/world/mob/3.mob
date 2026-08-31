@@ -46,4 +46,16 @@ X18 40 40 40 40 40 1d1+220 1d12
 150 5000
 9 9 0
 E
+#304
+courier caravan river locris~
+the Locris River Courier~
+The Locris River Courier tightens a satchel full of sealed letters.
+~
+   Ferry town to capitol and back, the Courier carries every
+seal from Locris to Itrius.  Ask nicely and hear the road news.~
+2 0 0 E
+X15 40 40 40 40 40 1d1+180 2d6
+90 2600
+9 9 0
+E
 $

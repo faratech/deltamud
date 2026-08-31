@@ -85,6 +85,7 @@ mod spell_parser;
 mod spells;
 mod state;
 mod syslog;
+mod town_life;
 mod whohtml;
 mod trigedit;
 mod types;
@@ -461,6 +462,10 @@ async fn main() -> Result<()> {
     // rnums are untouched, records GameState.map_start_rnum, and wires the city
     // EntryPoint links so do_enter/do_leave and weather damage work.
     maputils::integrate_map_rooms(&mut state);
+
+    // Deltania Breathes: precompute the cross-town caravan routes over the
+    // (now spliced) surface map. Must run after integrate_map_rooms.
+    town_life::boot_town_life(&state);
 
     // Load socials (CircleMUD boot_social_messages); spliced into command
     // lookup as a fallback since they are not in the static command table.

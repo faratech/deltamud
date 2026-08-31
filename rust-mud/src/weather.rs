@@ -331,3 +331,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+#[cfg(test)]
+pub mod test_clock {
+    use super::*;
+
+    /// Force the mud hour for tests that drive hour-gated behaviour
+    /// (town_life schedules and caravans).
+    pub fn set_hour(h: i32) {
+        let mtx = CLOCK.get_or_init(|| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            Mutex::new(reset_time(now, &Config::default().lib_path))
+        });
+        let mut tw = mtx.lock().unwrap();
+        tw.hours = h;
+    }
+}

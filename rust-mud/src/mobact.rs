@@ -311,6 +311,15 @@ pub fn mobile_activity(g: &mut GameState) {
             continue;
         }
 
+        // ---- 1c. Living-world directed npcs (Deltania Breathes) ---------
+        // Scheduled townsfolk and caravans are table-driven: town_life owns
+        // their whole turn (commute step + occasional bark) and the generic
+        // scavenge/wander/aggression AI below must not fight them.
+        if crate::town_life::is_directed(g, ch) {
+            crate::town_life::drive(g, ch);
+            continue;
+        }
+
         // ---- 2. Scavenger pickup ---------------------------------------
         if mob_flagged(g, ch, MOB_SCAVENGER) {
             scavenge(g, ch);
