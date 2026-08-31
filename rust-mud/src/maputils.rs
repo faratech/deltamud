@@ -46,7 +46,7 @@ use crate::room::{Room, SectorType};
 use crate::spell_parser::SPELL_REDIRECT_CHARGE;
 use crate::state::GameState;
 use crate::types::*;
-use log::info;
+use log::{info, warn};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
@@ -1874,10 +1874,13 @@ pub fn do_togglemap(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 /// glyph's sector/name/desc, and map_x/map_y set so the renderer + do_enter/leave
 /// recognise it. Map vnums are virtual (>= 2_000_000) so they never collide with
 /// real vnums in room_index.
-pub fn integrate_map_rooms(g: &mut GameState) {
+pub fn integrate_map_rooms(g: &mut GameState) -> EntryPointReport {
     // Already spliced? (idempotent — a second boot/copyover must not double-add.)
     if g.map_start_rnum.is_some() {
-        return;
+        return EntryPointReport {
+            linked: Vec::new(),
+            unresolved: Vec::new(),
+        };
     }
 
     let lib = g.config.lib_path.clone();
@@ -1891,7 +1894,11 @@ pub fn integrate_map_rooms(g: &mut GameState) {
         }
         let m = tbl.get(&lib).unwrap();
         if !m.is_active() {
-            return; // No worldmap file / corrupt map: nothing to splice.
+            // No worldmap file / corrupt map: nothing to splice.
+            return EntryPointReport {
+                linked: Vec::new(),
+                unresolved: Vec::new(),
+            };
         }
         // glyph -> (name, desc, sect, move_cost) so we can build each room
         // without the lock.
@@ -1959,19 +1966,81 @@ pub fn integrate_map_rooms(g: &mut GameState) {
     // We always populate the bidirectional link (so do_enter/do_leave work for
     // every EntryPoint) AND, when a DIR is present, also create the directional
     // exits exactly as C does.
-    for ep in &entry_points {
+    let report = apply_entry_points(g, &entry_points);
+    for failure in &report.unresolved {
+        warn!(
+            "SYSERR: EntryPoint at map ({}, {}) -> room {} unresolvable: {}",
+            failure.x, failure.y, failure.interior_vnum, failure.reason
+        );
+    }
+    if report.unresolved.is_empty() {
+        info!(
+            "EntryPoints: {} linked (all resolved)",
+            report.linked.len()
+        );
+    } else {
+        warn!(
+            "EntryPoints: {} linked, {} UNRESOLVED (see SYSERR lines above)",
+            report.linked.len(),
+            report.unresolved.len()
+        );
+    }
+    report
+}
+
+/// Outcome of linking one EntryPoint directive: the (x, y) it failed at and
+/// why. `linked` carries the map rnum <-> interior rnum pairs that succeeded.
+pub(crate) struct EntryPointReport {
+    linked: Vec<(usize, usize)>,
+    unresolved: Vec<EntryPointFailure>,
+}
+
+struct EntryPointFailure {
+    x: i32,
+    y: i32,
+    interior_vnum: RoomVnum,
+    reason: &'static str,
+}
+
+/// The EntryPoint application half of integrate_map_rooms, split out so boot
+/// diagnostics (and tests) can see which directives failed to resolve instead
+/// of the C behaviour of dropping them silently (a typo'd coordinate or a
+/// renamed interior vnum otherwise reads as "the gate is just gone").
+fn apply_entry_points(g: &mut GameState, entry_points: &[EntryPoint]) -> EntryPointReport {
+    let mut report = EntryPointReport {
+        linked: Vec::new(),
+        unresolved: Vec::new(),
+    };
+    for ep in entry_points {
         let map_rnum = match g.map_coords_to_rnum(ep.x, ep.y) {
             Some(r) => r,
-            None => continue, // find_room_by_coords == NOWHERE
+            None => {
+                report.unresolved.push(EntryPointFailure {
+                    x: ep.x,
+                    y: ep.y,
+                    interior_vnum: ep.interior_vnum,
+                    reason: "no map cell at those coordinates",
+                });
+                continue;
+            }
         };
         let interior_rnum = match g.real_room(ep.interior_vnum) {
             Some(r) => r,
-            None => continue, // real_room(ernum) == NOWHERE
+            None => {
+                report.unresolved.push(EntryPointFailure {
+                    x: ep.x,
+                    y: ep.y,
+                    interior_vnum: ep.interior_vnum,
+                    reason: "interior room vnum is not loaded",
+                });
+                continue;
+            }
         };
 
         // Bidirectional link (do_enter from the map cell, do_leave from interior).
         g.rooms[map_rnum].linkrnum = Some(interior_rnum);
         g.rooms[interior_rnum].linkmapnum = Some(map_rnum);
+        report.linked.push((map_rnum, interior_rnum));
 
         // Directional exits, when a DIR was given (C: read_map ~494-501).
         if let Some(dir) = ep.dir {
@@ -1992,6 +2061,7 @@ pub fn integrate_map_rooms(g: &mut GameState) {
             }
         }
     }
+    report
 }
 
 /// A plain open passage exit to `to_vnum` (CREATE of room_direction_data in C
@@ -3038,6 +3108,139 @@ WorldMap:\n",
         let corpse = *g.rooms[room].contents.first().expect("weather corpse");
         let obj = g.get_obj(corpse).unwrap();
         (obj.short_description.clone(), obj.description.clone())
+    }
+
+    #[test]
+    fn entry_points_link_and_report_unresolvable() {
+        // One good no-DIR link, one off-map coordinate, one interior vnum that
+        // is not loaded. Only the good link may take effect; the failures must
+        // come back in the report instead of vanishing (C dropped them
+        // silently, so a typo'd gate just "didn't work").
+        let dir = temp_lib_with_worldmap(
+            "entry-points",
+            5,
+            5,
+            "EntryPoint: 2 2 100\n\
+             EntryPoint: 9 9 100\n\
+             EntryPoint: 3 3 999\n",
+        );
+        let mut cfg = Config::default();
+        cfg.lib_path = dir.to_string_lossy().to_string();
+        let mut g = GameState::new(cfg);
+        let interior = g.add_room(Room::new(
+            100,
+            0,
+            "Gate Interior".to_string(),
+            String::new(),
+        ));
+
+        let report = integrate_map_rooms(&mut g);
+
+        // Coordinates fold on the torus (WRAPX/WRAPY), so both directives with
+        // a live interior resolve: (2,2) directly, (9,9) wrapped onto (4,4).
+        let cell_2_2 = g.map_coords_to_rnum(2, 2).unwrap();
+        let cell_9_9 = g.map_coords_to_rnum(9, 9).unwrap();
+        assert_ne!(cell_2_2, cell_9_9);
+        assert_eq!(g.room(cell_2_2).linkrnum, Some(interior));
+        assert_eq!(g.room(cell_9_9).linkrnum, Some(interior));
+        assert_eq!(g.room(interior).linkmapnum, Some(cell_9_9)); // last link wins
+        assert_eq!(report.linked.len(), 2);
+        // The directive naming interior 999 has no loaded room: reported, not
+        // silently dropped.
+        assert_eq!(report.unresolved.len(), 1);
+        assert!(report.unresolved[0].reason.contains("not loaded"));
+        assert_eq!(report.unresolved[0].interior_vnum, 999);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn real_lib_links_temple_and_all_three_towns() {
+        // The shipped lib (sibling of the crate); skip on exotic checkouts.
+        let lib = concat!(env!("CARGO_MANIFEST_DIR"), "/../lib");
+        if !std::path::Path::new(&format!("{}/world/worldmap", lib)).exists() {
+            return;
+        }
+        let mut g = crate::state::GameState::new(Config::default());
+        g.config.lib_path = lib.to_string();
+        crate::file_loader::FileLoader::load_world(&mut g, lib).await.unwrap();
+        let report = integrate_map_rooms(&mut g);
+
+        // Temple of Itrius (uncommented 2026-08-31), the three Itrius gates,
+        // and the new Newhaven / Oranthalon / Locris links — every directive
+        // in world/worldmap must resolve.
+        assert!(
+            report.unresolved.is_empty(),
+            "unresolved EntryPoints: {:?}",
+            report.unresolved.iter().map(|f| (f.x, f.y, f.interior_vnum)).collect::<Vec<_>>()
+        );
+        assert_eq!(report.linked.len(), 7);
+
+        // Each interior's `leave` leads back to a real surface cell at the
+        // authored coordinates.
+        for (interior_vnum, x, y) in [(100i32, 6, 82), (210, 17, 41), (600, 6, 60), (300, 29, 88)] {
+            let rnum = g.real_room(interior_vnum).expect("interior room");
+            let map_rnum = g.room(rnum).linkmapnum.expect("interior linked to map");
+            assert_eq!(g.room(map_rnum).map_x, Some(x), "vnum {}", interior_vnum);
+            assert_eq!(g.room(map_rnum).map_y, Some(y), "vnum {}", interior_vnum);
+            assert_eq!(
+                g.room(map_rnum).linkrnum,
+                Some(rnum),
+                "enter/leave round trip for vnum {}",
+                interior_vnum
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn real_lib_towns_walkable_from_itrius() {
+        // The world-connects half of the EntryPoint work: from the Itrius east
+        // gate a player must be able to WALK to each new town's enter cell
+        // without crossing an impassable sector or unswimmable water.
+        let lib = concat!(env!("CARGO_MANIFEST_DIR"), "/../lib");
+        if !std::path::Path::new(&format!("{}/world/worldmap", lib)).exists() {
+            return;
+        }
+        let mut g = crate::state::GameState::new(Config::default());
+        g.config.lib_path = lib.to_string();
+        crate::file_loader::FileLoader::load_world(&mut g, lib).await.unwrap();
+        integrate_map_rooms(&mut g);
+
+        let walkable = |r: &Room| r.mapmv > 0 && r.sector_type != SectorType::WaterNoSwim;
+        let start = g
+            .map_coords_to_rnum(10, 82)
+            .expect("Itrius east gate cell");
+        let mut seen = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::from([start]);
+        seen.insert(start);
+        while let Some(r) = queue.pop_front() {
+            let (x, y) = (
+                g.room(r).map_x.expect("map cell x"),
+                g.room(r).map_y.expect("map cell y"),
+            );
+            for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                if let Some(n) = g.map_coords_to_rnum(x + dx, y + dy) {
+                    if seen.insert(n) && walkable(g.room(n)) {
+                        queue.push_back(n);
+                    }
+                }
+            }
+        }
+        // BFS entered passable neighbours; re-root at the gate itself so the
+        // gate cell counts as reached terrain.
+        seen.insert(start);
+        for (vnum, x, y) in [(210i32, 17, 41), (600, 6, 60), (300, 29, 88)] {
+            let cell = g
+                .map_coords_to_rnum(x, y)
+                .unwrap_or_else(|| panic!("cell {},{} for vnum {}", x, y, vnum));
+            assert!(
+                seen.contains(&cell),
+                "town vnum {} (cell {},{}) is not walkable from Itrius",
+                vnum,
+                x,
+                y
+            );
+        }
     }
 
     #[test]
