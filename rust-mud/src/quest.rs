@@ -945,9 +945,11 @@ fn generate_quest(g: &mut GameState, ch: CharId, questman: CharId) {
     }
 
     // Otherwise: a kill-the-mob quest.
+    // C quest.c:871/881/893 uses GET_NAME - the mob's KEYWORD list - not the
+    // room-display short description (#176).
     let victim_name = g
         .get_char(victim)
-        .map(|c| c.display_for_others())
+        .map(|c| c.get_name().to_string())
         .unwrap_or_default();
     match g.rng.number(0, 1) {
         0 => {

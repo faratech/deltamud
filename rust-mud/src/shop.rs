@@ -2313,8 +2313,10 @@ fn list_detailed_shop(g: &mut GameState, ch: CharId, shop: &ShopData, shop_idx: 
         g.send_to_char(
             ch,
             &format!(
-                "Shopkeeper: {} (#{}), Special Function: No\r\n",
-                kname, shop.keeper
+                "Shopkeeper: {} (#{}) Special Function: {}\r\n",
+                kname,
+                shop.keeper,
+                if shop_func(shop.keeper).is_some() { "Yes" } else { "No" }
             ),
         );
         // Live coins, if an instance exists.
