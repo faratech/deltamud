@@ -607,9 +607,21 @@ async fn handle_input(&mut self, conn_id: ConnId, input: String) {
             self.nanny(conn_id, input).await;
         }
 
-        // Re-send the appropriate prompt unless the connection is closing.
+        // Re-send the appropriate prompt unless the connection is closing or
+        // the nanny arm printed its own inline prompt.
+        let suppress = self
+            .state
+            .descriptors
+            .get_mut(&conn_id)
+            .map(|d| d.suppress_prompt)
+            .unwrap_or(false);
+        if suppress {
+            if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                d.suppress_prompt = false;
+            }
+        }
         let st = self.state.descriptors.get(&conn_id).map(|d| d.state);
-        if st.is_some() && st != Some(ConState::Close) {
+        if st.is_some() && st != Some(ConState::Close) && !suppress {
             self.write_prompt(conn_id);
         }
     }
@@ -726,7 +738,12 @@ async fn handle_input(&mut self, conn_id: ConnId, input: String) {
                     || reserved_or_fill_word(&name)
                     || !crate::ban::valid_name_in(&self.state, &name)
                 {
-                    self.out(conn_id, "Invalid name, please try another.\r\n");
+                    // C interpreter.c:1739: the message carries its own
+                    // 'Name: ' prompt.
+                    self.out(conn_id, "Invalid name, please try another.\r\nName: ");
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.suppress_prompt = true;
+                    }
                     return;
                 }
                 let exists = self.db.player_exists(&name).await.unwrap_or(false);
@@ -775,6 +792,7 @@ async fn handle_input(&mut self, conn_id: ConnId, input: String) {
                         }
                         return;
                     }
+                    self.out(conn_id, "New character.\r\n");
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                         d.state = ConState::GetNewPassword;
                     }
@@ -934,8 +952,17 @@ for access.\r\n\r\n",
                 }
             }
             ConState::GetNewPassword => {
-                if input.len() < 3 {
-                    self.out(conn_id, "Password too short.\r\n");
+                // C interpreter.c:2043-2045: empty, >64, <3, or equal to the
+                // name are all 'Illegal password.' with a 'Password: ' retry.
+                if input.is_empty()
+                    || input.len() > 64
+                    || input.len() < 3
+                    || input.eq_ignore_ascii_case(&self.descriptor_name(conn_id))
+                {
+                    self.out(conn_id, "\r\nIllegal password.\r\nPassword: ");
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.suppress_prompt = true;
+                    }
                     return;
                 }
                 if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
@@ -956,10 +983,12 @@ for access.\r\n\r\n",
                         d.state = ConState::GetNewbie;
                     }
                 } else {
-                    self.out(conn_id, "Passwords don't match.\r\n");
+                    // C interpreter.c:2057: '...start over.' + inline prompt.
+                    self.out(conn_id, "\r\nPasswords don't match... start over.\r\nPassword: ");
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                         d.temp_password = None;
                         d.state = ConState::GetNewPassword;
+                        d.suppress_prompt = true;
                     }
                 }
             }
@@ -989,7 +1018,14 @@ for access.\r\n\r\n",
                             d.state = ConState::GetRace;
                         }
                     }
-                    None => self.out(conn_id, "That is not a sex..\r\n"),
+                    None => {
+                        // C interpreter.c:2145: the retry carries its own
+                        // 'What IS your sex? ' prompt.
+                        self.out(conn_id, "That is not a sex..\r\nWhat IS your sex? ");
+                        if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                            d.suppress_prompt = true;
+                        }
+                    }
                 }
             }
             ConState::GetRace => {
@@ -3542,5 +3578,72 @@ mod tests {
             abilities: None,
             attack_type: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn creation_password_guards_match_c() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        let conn = ConnId(50);
+        attach_descriptor_at_name(&mut game, conn, "example.test").await;
+
+        game.nanny(conn, "Guard".to_string()).await;
+        game.nanny(conn, "y".to_string()).await;
+        // "New character." banner precedes the password prompt (C 1774).
+        assert!(game
+            .state
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("New character."));
+
+        // C interpreter.c:2043-2045: >64 chars, name-equality, and <3 all
+        // refuse with 'Illegal password.' (#319).
+        for bad in ["a", &"x".repeat(65), "Guard"] {
+            game.nanny(conn, bad.to_string()).await;
+            assert_eq!(descriptor_state(&game, conn), ConState::GetNewPassword);
+            assert!(game
+                .state
+                .descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("Illegal password."));
+        }
+
+        // A legal password proceeds; mismatch shows C's 'start over.' text.
+        game.nanny(conn, "goodpw".to_string()).await;
+        game.nanny(conn, "otherpw".to_string()).await;
+        assert!(game
+            .state
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("Passwords don't match... start over."));
+        assert_eq!(descriptor_state(&game, conn), ConState::GetNewPassword);
+    }
+
+    #[tokio::test]
+    async fn sex_retry_uses_c_inline_prompt() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        let conn = ConnId(51);
+        attach_descriptor_at_name(&mut game, conn, "example.test").await;
+        game.nanny(conn, "Sexer".to_string()).await;
+        game.nanny(conn, "y".to_string()).await;
+        game.nanny(conn, "pw12345".to_string()).await;
+        game.nanny(conn, "pw12345".to_string()).await;
+        game.nanny(conn, "y".to_string()).await; // newbie
+        game.nanny(conn, "q".to_string()).await; // invalid sex
+        assert!(game
+            .state
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("That is not a sex..\r\nWhat IS your sex? "));
+        assert_eq!(descriptor_state(&game, conn), ConState::GetSex);
     }
 }

@@ -31,20 +31,20 @@ text buffers.
 - The static command table matches C order, and active command handlers are
   wired.
 
-### Not safe to share directly
+### Runtime persistence files (#95 closed)
 
-Do not point the Rust server at production C runtime persistence files without
-backups and a deliberate migration/compatibility pass. The high-risk files are:
+`src/cformat.rs` holds byte-exact codecs for the C on-disk records, verified
+against gcc-computed struct layouts: `rent_info` (56 B) + `obj_file_elem`
+(80 B), `house_control_rec` (928 B), `clan_info` (304 B), and board
+`board_msginfo` (32 B) + NUL-blob bodies. Player mail was already byte
+compatible.
 
-- Rent/crash player object files under `lib/plrobjs/`
-- House object/control files under `lib/house/` and `lib/etc/hcontrol`
-- Board message files
-- Clan data files
-- Mail data files
-
-The C server writes raw structs for several of these formats. The Rust port
-uses Rust-specific text/binary formats for safety and portability. That is
-easier to debug, but it is not byte-compatible with the C runtime files.
+- **Reads:** C-format files are auto-detected and loaded (rent/crash plrobjs,
+  hcontrol, clans.dat, boards). Rust text formats remain readable.
+- **Writes:** setting `MUD_CFORMAT_FILES=true` makes the Rust server WRITE the
+  C formats; the default remains the Rust text formats. Do not mix writers on
+  the same live files without backups (a file written by one format family is
+  still readable by the other at boot, but prefer one writer).
 
 ## SQL Player Data
 
@@ -83,18 +83,32 @@ Known builder/world gaps:
   audit. Inline OLC text buffers share the generic runtime `modify.rs` parser
   for the C-style string-editor slash command set.
 
+## Divergence Register (deliberate deviations from the C oracle)
+
+Policy: where the C oracle itself is buggy, the Rust port implements the
+correct behavior and records it here. Everything else matches the C.
+
+| Area | Divergence | C behavior (oracle) | Rust behavior | Tracker |
+|---|---|---|---|---|
+| DG `mjunk` | Branch inversion repaired | FIND_INDIV runs the "all" loop with arg+4; "all"/"all.x" extracts ONE item (dg_mobcmd.c:196-217) | The intended per-item / all branches work | #152 |
+| DG `wait 0` | Robustness | `--time == 0` becomes -1 and the trigger wedges forever (dg_event.c:82) | `wait 0` fires on the next pulse | #157 |
+| DG `wat` | Correct addressing | Passes the vnum where an rnum is required, so the wrong room is affected whenever vnum != rnum (dg_wldcmd.c:572-579) | Resolves the room correctly | #162 |
+| `stat`/`score` Played | Arithmetic repair | Prints `(played/3600) % 60` as minutes, so >60 h wraps (act.wizard.c:867) | Correct h/m arithmetic | #214 |
+| zedit ZONE_TOP clamp | Uses the builder zone number | Clamps with the zone-table INDEX (`OLC_ZNUM * 100`, zedit.c:1722) | Clamps with the zone number (the intent) | #285 |
+| sedit new-product abort | Menu stays in context | The -1 abort path shows the ROOMS menu (a copy-paste slip, sedit.c:1176) | Re-shows the products menu | #296 |
+| aedit numeric fields | Clamped | An `&&` of mutually-exclusive tests makes the range check unreachable, so ANY integer is stored and later indexes tables out of range (aedit.c:601/616) | Clamped to the legal range | #297 |
+| medit/sedit numeric prompts | Stricter guard | Only `""`/`-<nondigit>` are rejected, so `abc` applies atoi()==0 (medit.c:893, sedit.c:897) | Non-numeric input re-prompts; nothing is stored | #302 |
+| `build off` | Reachable | `real_room(atoi("off")) < 0` runs first, so C ALWAYS rejects `build off` as a bad room (act.other.c:328-335) | `build off` performs the off action | #320 |
+| redit special-exit `-1` | Menu stays in context | After clearing a special-exit destination, C re-displays the regular exit menu (a copy-paste slip at redit.c:1210) | Re-displays the special-exit menu | #268 |
+| Multiplay gate | Matches shipped C | `check_multiplaying` begins with `return 1` ("development mode"), so multi-boxing is never blocked (comm.c:2749) | Same default; the full C counting logic is live behind `MUD_ENFORCE_MULTIPLAY=1` | #219 |
+
 ## Runtime Fidelity Gaps
 
-The Rust port is no longer an early basic-command prototype. No open runtime
-fidelity gap is currently known from the latest tracker-backed audit.
-
-## Combat and Gameplay Fidelity Gaps
-
-Known correctness gaps from the latest parity pass:
-
-- No open combat-specific tracker item is currently known from the latest
-  parity pass. Continue using the C build as the oracle for exact damage text,
-  death side effects, and equipment durability edge cases.
+The 2026-08 parity program (GitHub issues #96-#347, epic #348) audited all 12
+subsystem buckets function-by-function against the C oracle. All confirmed
+gaps are closed; remaining items are the deliberate divergences registered
+above. Continue using the C build (`/web/deltamud/bin/circle`) as the oracle
+for exact output text when porting anything new.
 
 ## Safe Operating Guidance
 

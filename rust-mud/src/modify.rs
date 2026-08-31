@@ -1243,8 +1243,10 @@ pub fn page_active(conn: ConnId) -> bool {
 /// (C make_prompt's d->showstr_page / d->showstr_count) (#229).
 pub fn page_position(conn: ConnId) -> (usize, usize) {
     let guard = pagers().lock().unwrap();
+    // C prints the 0-based showstr_page (comm.c:1222), so the first page
+    // reads "(0/N)".
     match guard.get(&conn) {
-        Some(p) => (p.page + 1, p.pages.len()),
+        Some(p) => (p.page, p.pages.len()),
         None => (0, 0),
     }
 }

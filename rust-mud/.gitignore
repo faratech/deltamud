@@ -21,7 +21,9 @@ Thumbs.db
 
 # Logs
 *.log
-syslog
+# runtime mudlog file (C LOGFILE) — but NOT src/syslog.rs, the source
+/syslog
+/lib/syslog
 
 # Environment variables
 .env
