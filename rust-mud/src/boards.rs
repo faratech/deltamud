@@ -541,8 +541,12 @@ pub fn board_show(g: &mut GameState, board_type: usize, ch: CharId, arg: &str) -
             buf.push_str(&format!("{:<2} : {}\r\n", i + 1, m.heading));
         }
     }
-    // page_string(ch->desc, buf, 1) — no pager yet; send directly.
-    g.send_to_char(ch, &buf);
+    // C boards.c:324: page_string(ch->desc, buf, 1) (#168).
+    if let Some(conn) = g.get_char(ch).and_then(|c| c.desc) {
+        crate::modify::page_string(g, conn, &buf);
+    } else {
+        g.send_to_char(ch, &buf);
+    }
     true
 }
 
@@ -603,8 +607,12 @@ pub fn board_display(g: &mut GameState, board_type: usize, ch: CharId, arg: &str
     }
 
     let buffer = format!("Message {} : {}\r\n\r\n{}\r\n", msg, m.heading, m.message);
-    // page_string(ch->desc, buffer, 1) — send directly (no pager yet).
-    g.send_to_char(ch, &buffer);
+    // C boards.c:382: page_string(ch->desc, buffer, 1) (#168).
+    if let Some(conn) = g.get_char(ch).and_then(|c| c.desc) {
+        crate::modify::page_string(g, conn, &buffer);
+    } else {
+        g.send_to_char(ch, &buffer);
+    }
     true
 }
 

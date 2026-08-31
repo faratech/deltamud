@@ -735,12 +735,10 @@ fn plr_killer(g: &GameState, ch: CharId) -> bool {
 /// open/close; every shipped DeltaMUD shop uses open=0 close>=24 (always open),
 /// so the gate is a no-op in practice and this local computation matches.
 fn mud_hour() -> i32 {
-    const SECS_PER_MUD_HOUR: i64 = 75;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    ((now / SECS_PER_MUD_HOUR) % 24) as i32
+    // C shop.c:126-133 compares SHOP_OPEN against time_info.hours - the
+    // advanced MUD clock (weather.rs frozen clock), not the wall clock,
+    // so shop hours track the game day (#172).
+    crate::weather::time_now().0
 }
 
 /// Translate the Rust ObjectType enum back to the raw structs.h ITEM_* integer

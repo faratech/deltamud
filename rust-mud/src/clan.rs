@@ -945,7 +945,7 @@ fn clan_apply(g: &mut GameState, ch: CharId, arg: &str) {
         send_clan_format(g, ch);
         return;
     }
-    let num: i32 = arg1.trim().parse().unwrap_or(-1);
+    let num: i32 = atoi_like_c(&arg1);
     if num >= 0 && num < num_of_clans() {
         g.send_to_char(
             ch,
@@ -1301,7 +1301,7 @@ fn clan_who_title(g: &mut GameState, ch: CharId, arg: &str) {
         send_clan_format(g, ch);
         return;
     }
-    let num: i32 = arg1.trim().parse().unwrap_or(-1);
+    let num: i32 = atoi_like_c(&arg1);
     if num < 0 || num > num_of_clans() - 1 {
         g.send_to_char(ch, "That clan number does not exist.\r\n");
         return;
@@ -1532,7 +1532,6 @@ fn clan_roster(g: &mut GameState, ch: CharId) {
         g.send_to_char(ch, "No clan members!\r\n");
     }
     let members = with_clan(num, |c| c.members).unwrap_or(0);
-    g.send_to_char(ch, &format!("\r\nTotal clan members: &c{}&n\r\n", members));
     g.send_to_char(ch, "------------------------------------\r\n");
 }
 
@@ -1557,7 +1556,7 @@ fn clan_new_owner(g: &mut GameState, ch: CharId, arg: &str) {
             return;
         }
     };
-    let num: i32 = arg1.trim().parse().unwrap_or(-1);
+    let num: i32 = atoi_like_c(&arg1);
     if num < 0 || num > num_of_clans() - 1 {
         g.send_to_char(ch, "That clan doesn't exist.\r\n");
         return;
@@ -1598,7 +1597,7 @@ fn set_clanroom(g: &mut GameState, ch: CharId, arg: &str) {
         send_clan_format(g, ch);
         return;
     }
-    let num: i32 = arg1.trim().parse().unwrap_or(-1);
+    let num: i32 = atoi_like_c(&arg1);
     if num < 0 || num > num_of_clans() - 1 {
         g.send_to_char(ch, "No such clan.\r\n");
         return;
@@ -2081,4 +2080,13 @@ mod tests {
         assert!(out.contains("You promote Offline to Officer.\r\n"));
         let _ = std::fs::remove_dir_all(lib);
     }
+}
+
+
+/// C atoi semantics: leading digits only, no digits => 0 (clan.c:515/1292
+/// apply to clan 0 for any non-numeric argument; #173).
+fn atoi_like_c(s: &str) -> i32 {
+    let t = s.trim();
+    let digits: String = t.chars().take_while(|c| c.is_ascii_digit() || *c == '-').collect();
+    digits.parse().unwrap_or(0)
 }
