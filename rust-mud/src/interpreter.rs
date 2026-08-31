@@ -21,7 +21,8 @@ sell sip steal take tan taste train use withdraw nosummon chain";
 const CMDS_DEAD_CAN_USE: &str = "qui quit look who say north south east west up down ' emote";
 
 /// Fill words skipped by one_argument (CircleMUD fill[]).
-const FILL_WORDS: &[&str] = &["in", "from", "with", "the", "on", "at", "to", "of"];
+// C interpreter.c:696-706 fill[] - NO "of" (issue #227).
+const FILL_WORDS: &[&str] = &["in", "from", "with", "the", "on", "at", "to"];
 
 fn is_fill_word(w: &str) -> bool {
     FILL_WORDS.iter().any(|f| f.eq_ignore_ascii_case(w))
@@ -166,6 +167,11 @@ pub(crate) fn run_command(g: &mut GameState, ch: CharId, input: &str) {
         return;
     }
 
+    if act_flags & PLR_FROZEN != 0 && level < LVL_IMPL {
+        g.send_to_char(ch, CMD_FROZEN_MSG);
+        return;
+    }
+
     // Room special-exit interception (interpreter.c:799): a standing player who
     // types the room special exit's ex_name moves through it, pre-empting normal
     // dispatch (and the "Huh?!?" fallthrough). C passes the whole input line;
@@ -205,11 +211,7 @@ pub(crate) fn run_command(g: &mut GameState, ch: CharId, input: &str) {
         break;
     }
 
-    if act_flags & PLR_FROZEN != 0 && level < LVL_IMPL {
-        g.send_to_char(ch, CMD_FROZEN_MSG);
-        return;
-    }
-
+    
     let entry = match found {
         Some(e) => e,
         None => {
