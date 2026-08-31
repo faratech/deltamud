@@ -106,6 +106,34 @@ fn is_password_state(s: ConState) -> bool {
     )
 }
 
+/// C comm.c:894-903: every drained input command resets the idle timer and,
+/// if the character was pulled into the void by check_idling, returns them to
+/// their previous room with "$n has returned." (issue #217).
+fn reset_idle_on_input(g: &mut GameState, ch: CharId) {
+    if let Some(c) = g.get_char_mut(ch) {
+        c.timer = 0;
+    }
+    let was_in = g.get_char(ch).and_then(|c| c.was_in_room);
+    if let Some(room) = was_in {
+        if g.get_char(ch).and_then(|c| c.in_room).is_some() {
+            g.char_from_room(ch);
+        }
+        g.char_to_room(ch, room);
+        if let Some(c) = g.get_char_mut(ch) {
+            c.was_in_room = None;
+        }
+        crate::act::act(
+            g,
+            "$n has returned.",
+            true,
+            ch,
+            None,
+            crate::act::ActArg::None,
+            crate::act::To::Room,
+        );
+    }
+}
+
 /// Run a player command through the interpreter inside catch_unwind so a panic
 /// in any single command (bad index, arithmetic overflow in debug, a stray
 /// unwrap deep in the world) is contained to that command instead of killing
@@ -467,6 +495,7 @@ impl Game {
                 None => continue,
             };
             if let Some(ch) = self.state.descriptors.get(&cid).and_then(|d| d.character) {
+                reset_idle_on_input(&mut self.state, ch);
                 let mut input = queued.line;
                 if !queued.aliased {
                     match crate::alias::alias_expand(&self.state, ch, &input) {
@@ -1888,6 +1917,46 @@ mod tests {
     fn ban_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn drained_input_resets_idle_timer_and_returns_from_void() {
+        // C comm.c:894-903 (#217): a drained command zeroes the idle timer
+        // and returns a void-idled character to their previous room.
+        let mut g = GameState::new(Config::default());
+        g.add_room(crate::room::Room::new(3001, 30, "Home".into(), "".into()));
+        g.add_room(crate::room::Room::new(3002, 30, "Elsewhere".into(), "".into()));
+        let mut ch =
+            crate::character::Character::new_player("Idler".to_string(), Class::Warrior, Race::Human);
+        ch.timer = 9; // past the >8 void threshold
+        let cid = g.create_char(ch);
+
+        let conn = ConnId(77);
+        g.descriptors.insert(conn, Descriptor::new(conn, "example.test".to_string()));
+        let mut observer = crate::character::Character::new_player(
+            "Watcher".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        observer.desc = Some(conn);
+        let obs = g.create_char(observer);
+        g.descriptors.get_mut(&conn).unwrap().character = Some(obs);
+
+        g.char_to_room(obs, 0);
+        g.char_to_room(cid, 0);
+        // Simulate the void pull (limits.rs check_idling): was_in saved, char
+        // parked elsewhere.
+        g.get_char_mut(cid).unwrap().was_in_room = Some(0);
+        g.char_to_room(cid, 1);
+
+        reset_idle_on_input(&mut g, cid);
+
+        let c = g.get_char(cid).unwrap();
+        assert_eq!(c.timer, 0, "drained command must reset the idle timer");
+        assert_eq!(c.in_room, Some(0));
+        assert_eq!(c.was_in_room, None);
+        let out = &g.descriptors.get(&conn).unwrap().outbuf;
+        assert!(out.contains("has returned"), "observer saw: {out:?}");
     }
 
     fn temp_ban_lib(name: &str, badsites: &str) -> String {
