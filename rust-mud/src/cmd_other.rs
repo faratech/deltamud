@@ -786,9 +786,11 @@ fn really_quit(g: &mut GameState, ch: CharId) {
         return;
     } else if pos < Position::Stunned {
         g.send_to_char(ch, "You die before your time...\r\n");
-        // die(ch, NULL): combat death. The combat module owns extraction; we
-        // request close so the loop performs the death/save path.
-        request_quit_close(g, ch);
+        // C act.other.c:442: die(ch, NULL) - a full combat death (corpse, XP
+        // penalty, condition/criminal side effects). The old path just closed
+        // the socket, saving the player intact at negative HP: an exploitable
+        // death dodge (#310).
+        crate::combat::die(g, None, ch);
         return;
     }
 

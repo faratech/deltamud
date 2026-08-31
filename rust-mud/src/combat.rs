@@ -882,7 +882,7 @@ fn do_actual_damage(
         .map(|c| c.position <= Position::Dead)
         .unwrap_or(true)
     {
-        die(g, ch, victim);
+        die(g, Some(ch), victim);
         return;
     }
 
@@ -1088,7 +1088,7 @@ fn do_actual_damage(
         .map(|c| c.position == Position::Dead)
         .unwrap_or(false)
     {
-        die(g, ch, victim);
+        die(g, Some(ch), victim);
     }
 }
 
@@ -1470,26 +1470,36 @@ pub fn raw_kill(g: &mut GameState, victim: CharId, killer: Option<CharId>) {
 }
 
 /// Handle a death: messages, loot to a corpse, extract NPC / respawn PC.
-fn die(g: &mut GameState, killer: CharId, victim: CharId) {
-    stop_fighting(g, killer);
+/// C fight.c die(ch, killer): killer may be NULL (quit-while-dying, env
+/// deaths) - XP award, quest credit and PK side effects then do not apply
+/// (#310). pub(crate) so cmd_other's do_quit can route through it.
+pub(crate) fn die(g: &mut GameState, killer: Option<CharId>, victim: CharId) {
+    if let Some(k) = killer {
+        stop_fighting(g, k);
+    }
     stop_fighting(g, victim);
 
     // Arena fatalities are handled by the arena subsystem (concede/restore);
     // skip the normal corpse/respawn path if so.
-    if crate::arena::arena_combat_death(g, killer, victim) {
+    if killer
+        .map(|k| crate::arena::arena_combat_death(g, k, victim))
+        .unwrap_or(false)
+    {
         return;
     }
 
     let is_npc = g.get_char(victim).map(|c| c.is_npc).unwrap_or(false);
     // Award/log combat-kill side effects before die() clears victim flags.
-    if killer != victim {
-        award_kill_experience(g, killer, victim);
+    if let Some(k) = killer {
+        if k != victim {
+            award_kill_experience(g, k, victim);
+        }
+        if is_npc {
+            // Mark the kill against any active autoquest (fight.c PLR_QUESTOR).
+            crate::quest::quest_on_kill(g, k, victim);
+        }
+        handle_pc_kill_side_effects(g, k, victim);
     }
-    if is_npc && killer != victim {
-        // Mark the kill against any active autoquest (fight.c PLR_QUESTOR).
-        crate::quest::quest_on_kill(g, killer, victim);
-    }
-    handle_pc_kill_side_effects(g, killer, victim);
 
     apply_death_penalty(g, victim);
     if !g.char_exists(victim) {
@@ -1498,7 +1508,7 @@ fn die(g: &mut GameState, killer: CharId, victim: CharId) {
 
     // DG death trigger fires before the corpse/extract (death_mtrigger). C
     // raw_kill suppresses the death cry when the trigger returns false.
-    let cry = crate::dg_triggers::death_mtrigger(g, victim, Some(killer));
+    let cry = crate::dg_triggers::death_mtrigger(g, victim, killer);
 
     act(
         g,
@@ -2856,7 +2866,7 @@ mod tests {
         g.char_to_room(killer, room);
         g.char_to_room(victim, room);
 
-        die(&mut g, killer, victim);
+        die(&mut g, Some(killer), victim);
 
         let k = g.get_char(killer).unwrap();
         assert_eq!(k.points.exp, 199);
@@ -2898,7 +2908,7 @@ mod tests {
         g.char_to_room(follower, room);
         g.char_to_room(victim, room);
 
-        die(&mut g, leader, victim);
+        die(&mut g, Some(leader), victim);
 
         assert_eq!(g.get_char(leader).unwrap().points.exp, 150);
         assert_eq!(g.get_char(follower).unwrap().points.exp, 150);
@@ -2945,7 +2955,7 @@ mod tests {
         g.char_to_room(killer, room);
         g.char_to_room(victim, room);
 
-        die(&mut g, killer, victim);
+        die(&mut g, Some(killer), victim);
 
         let v = g.get_char(victim).unwrap();
         assert_eq!(v.points.exp, crate::limits::exp_to_level(9) + 300);
@@ -2983,7 +2993,7 @@ mod tests {
         g.char_to_room(killer, room);
         g.char_to_room(victim, room);
 
-        die(&mut g, killer, victim);
+        die(&mut g, Some(killer), victim);
 
         let v = g.get_char(victim).unwrap();
         assert_eq!(v.in_room, Some(limbo));
@@ -3042,7 +3052,7 @@ mod tests {
         g.char_to_room(victim, room);
         g.char_to_room(imm, room);
 
-        die(&mut g, killer, victim);
+        die(&mut g, Some(killer), victim);
 
         let k = g.get_char(killer).unwrap();
         assert_eq!(k.in_room, Some(jail));
@@ -3093,7 +3103,7 @@ mod tests {
         g.char_to_room(killer, room);
         g.char_to_room(victim, room);
 
-        die(&mut g, killer, victim);
+        die(&mut g, Some(killer), victim);
 
         assert!(g
             .descriptors
