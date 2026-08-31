@@ -165,4 +165,17 @@ X45 300 300 300 300 300 1d1+1800 2d45
 5000 70000
 9 9 2
 E
+#3050
+questmaster quest master marches herald~
+the Herald of the Marches~
+A weathered herald shelters under the Sundered Marches' broken arch.
+~
+   Even a sundered land keeps faith with its couriers.  The herald
+keeps the marchers' ledger of undone deeds.  Type 'autoquest request'
+to hear one.~
+262146 0 0 E
+X38 40 40 40 40 40 1d1+600 2d8
+400 20000
+9 9 0
+E
 $

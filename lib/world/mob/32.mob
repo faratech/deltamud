@@ -158,4 +158,16 @@ X99 550 550 550 550 550 1d1+9000 4d85
 25000 350000
 9 9 1
 E
+#3210
+questmaster quest master spire warden~
+the Spire Warden~
+The Spire Warden watches the Ashen Spire's approaches, ledger under arm.
+~
+   The Warden records every debt owed to the mountain of ash.
+Type 'autoquest request' to hear one.~
+262146 0 0 E
+X68 40 40 40 40 40 1d1+1400 2d12
+900 80000
+9 9 0
+E
 $

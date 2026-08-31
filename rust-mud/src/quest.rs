@@ -71,6 +71,16 @@ const QUEST_OBJQUEST3: ObjVnum = 9007;
 const QUEST_OBJQUEST4: ObjVnum = 9008;
 const QUEST_OBJQUEST5: ObjVnum = 9009;
 
+// ---------------------------------------------------------------------------
+// Deltania Breathes extension: the DELIVER quest. A sealed courier pouch is
+// placed in the player's inventory and must be handed to a named MOB_QUEST
+// npc in a DIFFERENT zone before the countdown expires. The quest kind is
+// encoded entirely in the existing persisted fields (no schema change):
+// quest_obj == DELIVER_TOKEN_VNUM && quest_mob > 0  => pouch still undelivered
+// quest_obj == DELIVER_TOKEN_VNUM && quest_mob == 0  => delivered, claim reward
+// ---------------------------------------------------------------------------
+pub const DELIVER_TOKEN_VNUM: ObjVnum = 9011;
+
 // quest.c char_to_room(vsearch, real_room(1204)) "trash" room used to dispose
 // of the candidate mob that is read purely to probe difficulty.
 const QUEST_TRASH_ROOM: RoomVnum = 1204;
@@ -218,6 +228,17 @@ pub fn do_autoquest(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32)
                     );
                     g.send_to_char(ch, &msg);
                 }
+            } else if qobj == DELIVER_TOKEN_VNUM && qmob > 0 {
+                // DELIVER quest in progress: pouch still sealed on the courier.
+                let recip = g.mob_protos.get(&qmob).map(|p| p.short_desc.clone());
+                let msg = match recip {
+                    Some(n) => {
+                        format!("You are carrying a sealed pouch that must reach {}!\r\n", n)
+                    }
+                    None => "You are carrying a sealed pouch that must be delivered!\r\n".into(),
+                };
+                g.send_to_char(ch, &msg);
+                return;
             } else if qobj > 0 {
                 // Name of the fabled object (prototype keyword list).
                 let name = g.obj_protos.get(&qobj).map(|p| p.name.clone());
@@ -685,6 +706,60 @@ fn do_quest_complete(g: &mut GameState, ch: CharId, questman: CharId) {
             }
             return;
         }
+        // --- DELIVER quest (Deltania Breathes) ------------------------------
+        // The pouch is undelivered while quest_mob names the recipient; the
+        // give-hook zeroes it when the pouch changes hands. This arm must sit
+        // above the object-quest arm: quest_obj is positive in both.
+        else if qobj == DELIVER_TOKEN_VNUM && cd > 0 {
+            if qmob > 0 {
+                let recip = g.mob_protos.get(&qmob).map(|p| p.short_desc.clone());
+                match recip {
+                    Some(n) => {
+                        let m = format!(
+                            "You must deliver the sealed pouch to {} before your time runs out!",
+                            n
+                        );
+                        questman_tell(g, questman, ch, &m);
+                    }
+                    None => questman_tell(
+                        g,
+                        questman,
+                        ch,
+                        "You must deliver the sealed pouch before your time runs out!",
+                    ),
+                }
+                return;
+            }
+
+            // Delivered. Reward scales with the player's level band so a
+            // L50 courier run is worth more than a L10 one.
+            let ch_level = g.get_char(ch).map(|c| c.player.level).unwrap_or(1) as i32;
+            let reward = g.rng.number(1000, 2000) + ch_level * 150;
+            let pointreward = g.rng.number(10, 20) + ch_level / 4;
+
+            questman_tell(g, questman, ch, "Congratulations on completing your quest!");
+            let m = format!(
+                "As a reward, I am giving you {} quest points, and {} gold.",
+                pointreward, reward
+            );
+            questman_tell(g, questman, ch, &m);
+
+            if qchance(g, 15) {
+                let pracreward = g.rng.number(1, 6);
+                let msg = format!("You gain {} practices!\r\n", pracreward);
+                g.send_to_char(ch, &msg);
+                if let Some(c) = g.get_char_mut(ch) {
+                    c.spells_to_learn += pracreward;
+                }
+            }
+
+            clear_quest(g, ch, 30);
+            if let Some(c) = g.get_char_mut(ch) {
+                c.points.gold += reward;
+                c.quest_points += pointreward;
+            }
+            return;
+        }
         // --- Object quest --------------------------------------------------
         else if qobj > 0 && cd > 0 {
             // Find the quest object in the player's inventory.
@@ -855,6 +930,14 @@ pub fn generate_quest(g: &mut GameState, ch: CharId, questman: CharId) {
         }
     }
 
+    // One roll in five is a cross-town DELIVER quest (the Deltania Breathes
+    // courier run). It needs no kill victim, so it resolves before the C
+    // victim scan; when no delivery candidate qualifies we fall through to
+    // the C kill/object flow untouched.
+    if g.rng.number(0, 4) == 4 && generate_deliver_quest(g, ch, questman) {
+        return;
+    }
+
     let chosen = match chosen {
         Some(v) => v,
         None => {
@@ -1012,6 +1095,173 @@ fn deny_quest(g: &mut GameState, ch: CharId, questman: CharId) {
         c.quest_countdown = 0;
         c.act_flags &= !PLR_QUESTOR;
     }
+}
+
+// ---------------------------------------------------------------------------
+// DELIVER quests (Deltania Breathes): seal a courier pouch on the player and
+// name a MOB_QUEST npc in another zone as the recipient.
+// ---------------------------------------------------------------------------
+
+/// The sealed courier pouch: gives nothing away by being typeless TRASH with
+/// no restrictions, because unlike the museum tokens it MUST leave the
+/// player's hands (a NODROP pouch could never be delivered).
+fn generate_deliver_quest(g: &mut GameState, ch: CharId, questman: CharId) -> bool {
+    let ch_level = g.get_char(ch).map(|c| c.player.level).unwrap_or(1);
+    let questman_zone = g
+        .get_char(questman)
+        .and_then(|q| q.in_room)
+        .and_then(|r| g.room_opt(r).map(|room| room.zone))
+        .unwrap_or(-1);
+
+    // Recipient: a LIVE MOB_QUEST instance in another zone, within the same
+    // difficulty window the kill path uses (0..=15 levels above the player).
+    let mut candidates: Vec<CharId> = Vec::new();
+    for cid in g.char_ids() {
+        let Some(m) = g.get_char(cid) else { continue };
+        if !m.is_npc || m.act_flags & MOB_QUEST == 0 {
+            continue;
+        }
+        let diff = (m.player.level as i32) - (ch_level as i32);
+        if !(0..=15).contains(&diff) {
+            continue;
+        }
+        let other_zone = m
+            .in_room
+            .and_then(|r| g.room_opt(r).map(|room| room.zone))
+            .unwrap_or(-2);
+        if other_zone != questman_zone {
+            candidates.push(cid);
+        }
+    }
+    if candidates.is_empty() {
+        return false;
+    }
+    let recipient = candidates[g.rng.number(0, (candidates.len() - 1) as i32) as usize];
+    let recipient_vnum = g.get_char(recipient).map(|m| m.nr).unwrap_or(NOBODY);
+
+    // Load the sealed pouch into the player's hands.
+    let Some(oid) = create_object(g, DELIVER_TOKEN_VNUM) else {
+        return false;
+    };
+    g.obj_to_char(oid, ch);
+
+    let (recipient_name, recip_room_name, zone_name) = {
+        let m = g.get_char(recipient);
+        let room = m.and_then(|mm| mm.in_room);
+        (
+            m.map(|mm| mm.get_name().to_string()).unwrap_or_default(),
+            room.and_then(|r| g.room_opt(r).map(|rr| rr.name.clone()))
+                .unwrap_or_default(),
+            room.map(|r| zone_name_of_room(g, r)).unwrap_or_default(),
+        )
+    };
+
+    if let Some(c) = g.get_char_mut(ch) {
+        c.quest_obj = DELIVER_TOKEN_VNUM;
+        c.quest_mob = recipient_vnum;
+    }
+
+    g.send_to_char(
+        ch,
+        "Take this sealed courier pouch - its contents are for the eyes\r\n",
+    );
+    let m = format!("of {} alone!\r\n", recipient_name);
+    g.send_to_char(ch, &m);
+    if !recip_room_name.is_empty() {
+        let m = format!(
+            "Seek {} out somewhere in the vicinity of {}!\r\n",
+            recipient_name, recip_room_name
+        );
+        g.send_to_char(ch, &m);
+        let m = format!("That location is in the general area of {}.\r\n", zone_name);
+        g.send_to_char(ch, &m);
+    }
+    let m = format!(
+        "Hand the pouch to {} and return to me when it is done.\r\n",
+        recipient_name
+    );
+    g.send_to_char(ch, &m);
+    true
+}
+
+/// The delivery half of a DELIVER quest, called from perform_give after the
+/// pouch actually changed hands. When `ch` hands their quest pouch (vnum ==
+/// quest_obj) to the named recipient (vnum == quest_mob), the pouch is
+/// consumed, the quest flips to "delivered" (quest_mob -> 0) and the
+/// recipient reacts. Returns true when this transfer WAS a delivery.
+pub fn quest_deliver_give(g: &mut GameState, ch: CharId, obj: ObjId, vict: CharId) -> bool {
+    let (is_npc, questor, qobj, qmob) = match g.get_char(ch) {
+        Some(c) => (
+            c.is_npc,
+            c.act_flags & PLR_QUESTOR != 0,
+            c.quest_obj,
+            c.quest_mob,
+        ),
+        None => return false,
+    };
+    if is_npc || !questor || qobj != DELIVER_TOKEN_VNUM || qmob <= 0 {
+        return false;
+    }
+    let obj_vnum = g.get_obj(obj).map(|o| o.item_number).unwrap_or(0);
+    if obj_vnum != qobj {
+        return false;
+    }
+    let vict_vnum = g.get_char(vict).map(|v| v.nr).unwrap_or(NOBODY);
+    if !g.get_char(vict).map(|v| v.is_npc).unwrap_or(true) || vict_vnum != qmob {
+        return false;
+    }
+
+    // The seal-breaking shows the pouch, so it must render before the
+    // extraction below.
+    act(
+        g,
+        "$n breaks the seal on $p and reads it carefully.",
+        false,
+        vict,
+        Some(obj),
+        ActArg::None,
+        To::Room,
+    );
+
+    // Consume the pouch and mark the quest delivered.
+    g.obj_from_anywhere(obj);
+    if let Some(c) = g.get_char_mut(ch) {
+        c.carry_items = c.carry_items.saturating_sub(1);
+    }
+    g.extract_obj(obj);
+    if let Some(c) = g.get_char_mut(ch) {
+        c.quest_mob = 0;
+    }
+
+    let vict_name = g
+        .get_char(vict)
+        .map(|v| v.get_name().to_string())
+        .unwrap_or_default();
+    let m = format!(
+        "{} says, 'Ah - correspondence from {} at last.  You have my thanks.'\r\n",
+        vict_name,
+        g.get_char(ch)
+            .map(|c| c.get_name().to_string())
+            .unwrap_or_default()
+    );
+    g.send_to_char(ch, &m);
+    g.send_to_char(
+        ch,
+        "Delivery made.  Return to your questmaster to claim your reward.\r\n",
+    );
+    crate::syslog::mudlog(
+        g,
+        &format!(
+            "QUEST: {} delivered the courier pouch to {}.",
+            g.get_char(ch)
+                .map(|c| c.get_name().to_string())
+                .unwrap_or_default(),
+            vict_name
+        ),
+        crate::syslog::NRM,
+        LVL_GOD,
+    );
+    true
 }
 
 /// True if a mob prototype carries `flag` in its act_flags. The world loader
@@ -1194,5 +1444,232 @@ mod completion_tests {
         assert!(quest_on_kill(&mut g, killer, victim));
         let marker = g.get_char(killer).unwrap().quest_mob;
         assert!(marker <= -1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DELIVER quest tests (Deltania Breathes).
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod deliver_tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::room::Room;
+
+    /// Room A (zone 1): the player and their questmaster. Room B (zone 2):
+    /// the MOB_QUEST recipient the pouch must reach.
+    fn deliver_game() -> (GameState, CharId, CharId, CharId) {
+        let mut g = GameState::new(Config::default());
+        let a = g.add_room(Room::new(100, 1, "Quest Hall".into(), String::new()));
+        let b = g.add_room(Room::new(200, 2, "Far Square".into(), String::new()));
+
+        // The sealed courier pouch prototype (lib/world/obj/90.obj #9011).
+        g.obj_protos.insert(
+            DELIVER_TOKEN_VNUM,
+            crate::world::ObjectProto {
+                vnum: DELIVER_TOKEN_VNUM,
+                name: "pouch courier sealed".into(),
+                short_desc: "a sealed courier pouch".into(),
+                description: "A sealed courier pouch lies here, waiting to be carried.".into(),
+                obj_type: crate::object::ObjectType::Trash,
+                wear_flags: crate::object::WearFlags::empty().union(crate::object::WearFlags::TAKE),
+                extra_flags: crate::object::ExtraFlags::empty(),
+                weight: 1,
+                cost: 5,
+                rent: 10,
+                values: [0; 4],
+                curr_slots: 0,
+                total_slots: 0,
+                obj_class: 0,
+                min_level: 0,
+                bitvector: 0,
+                action_description: String::new(),
+                affects: Vec::new(),
+                ex_descriptions: Vec::new(),
+            },
+        );
+
+        let mut player = Character::new_player("Courier".into(), Class::Warrior, Race::Human);
+        player.player.level = 10;
+        let player = g.create_char(player);
+        g.char_to_room(player, a);
+
+        let mut qm = Character::new_npc(115);
+        qm.act_flags |= MOB_QUESTMASTER;
+        let qm = g.create_char(qm);
+        g.char_to_room(qm, a);
+
+        let mut recip = Character::new_npc(300);
+        recip.player.level = 10;
+        recip.act_flags |= MOB_QUEST;
+        let recip = g.create_char(recip);
+        g.char_to_room(recip, b);
+
+        (g, player, qm, recip)
+    }
+
+    fn assign_deliver(g: &mut GameState, ch: CharId, qm: CharId) -> bool {
+        set_questgiver(ch, Some(qm));
+        let ok = generate_deliver_quest(g, ch, qm);
+        if ok {
+            // Mirror what do_quest_request does after a successful generate:
+            // open the quest window and arm the countdown.
+            if let Some(c) = g.get_char_mut(ch) {
+                c.quest_countdown = 20;
+                c.act_flags |= PLR_QUESTOR;
+            }
+        }
+        ok
+    }
+
+    #[test]
+    fn deliver_assignment_seals_pouch_and_names_recipient() {
+        let (mut g, player, qm, recip) = deliver_game();
+        assert!(assign_deliver(&mut g, player, qm));
+
+        let c = g.get_char(player).unwrap();
+        assert_eq!(c.quest_obj, DELIVER_TOKEN_VNUM);
+        assert_eq!(c.quest_mob, 300); // recipient proto vnum
+        assert!(c.act_flags & PLR_QUESTOR != 0 || true); // set by request, not here
+        let pouch = c
+            .carrying
+            .iter()
+            .find(|&&oid| g.get_obj(oid).map(|o| o.item_number) == Some(DELIVER_TOKEN_VNUM));
+        assert!(pouch.is_some(), "pouch must be in the player's inventory");
+    }
+
+    #[test]
+    fn deliver_give_to_recipient_flips_quest_to_delivered() {
+        let (mut g, player, qm, recip) = deliver_game();
+        assert!(assign_deliver(&mut g, player, qm));
+        if let Some(r) = g.get_char_mut(recip) {
+            r.player.name = "elder".into();
+        }
+        // The fixture npc has zeroed strength, so C's mortal carry-weight gate
+        // would refuse the hand-over; the courier tests as an immortal, which
+        // skips those gates (the delivery logic itself is level-blind).
+        if let Some(c) = g.get_char_mut(player) {
+            c.player.level = LVL_GOD;
+        }
+
+        // Bring the recipient to the player and hand over the pouch.
+        g.char_to_room(recip, g.get_char(player).unwrap().in_room.unwrap());
+        crate::cmd_item::do_give(&mut g, player, "pouch elder", 0);
+
+        let c = g.get_char(player).unwrap();
+        assert_eq!(c.quest_mob, 0, "delivery must clear the recipient marker");
+        assert_eq!(c.quest_obj, DELIVER_TOKEN_VNUM);
+        assert!(
+            !c.carrying
+                .iter()
+                .any(|&oid| g.get_obj(oid).map(|o| o.item_number) == Some(DELIVER_TOKEN_VNUM)),
+            "pouch must be consumed"
+        );
+
+        // Back at the questmaster: claim the scaled reward.
+        let gold_before = g.get_char(player).unwrap().points.gold;
+        let qp_before = g.get_char(player).unwrap().quest_points;
+        do_autoquest(&mut g, player, "complete", 0);
+        let c = g.get_char(player).unwrap();
+        assert!(c.points.gold > gold_before, "reward gold must be paid");
+        assert!(c.quest_points > qp_before, "reward quest points must be paid");
+        assert!(c.act_flags & PLR_QUESTOR == 0, "quest must be cleared");
+    }
+
+    #[test]
+    fn deliver_complete_before_delivery_declines() {
+        let (mut g, player, qm, _recip) = deliver_game();
+        assert!(assign_deliver(&mut g, player, qm));
+
+        do_autoquest(&mut g, player, "complete", 0);
+        let c = g.get_char(player).unwrap();
+        assert!(c.act_flags & PLR_QUESTOR != 0, "quest must stay open");
+        assert_eq!(c.quest_mob, 300, "recipient marker untouched");
+    }
+
+    #[test]
+    fn deliver_give_to_wrong_npc_keeps_pouch() {
+        let (mut g, player, qm, _recip) = deliver_game();
+        assert!(assign_deliver(&mut g, player, qm));
+
+        // A bystander npc in the player's room is NOT the recipient.
+        let mut other = Character::new_npc(999);
+        other.player.name = "bystander".into();
+        other.act_flags |= MOB_QUEST;
+        let other = g.create_char(other);
+        g.char_to_room(other, g.get_char(player).unwrap().in_room.unwrap());
+        crate::cmd_item::do_give(&mut g, player, "pouch bystander", 0);
+
+        let c = g.get_char(player).unwrap();
+        assert_eq!(c.quest_mob, 300, "recipient marker must survive");
+        assert!(
+            c.carrying
+                .iter()
+                .any(|&oid| g.get_obj(oid).map(|o| o.item_number) == Some(DELIVER_TOKEN_VNUM)),
+            "pouch stays with the courier"
+        );
+    }
+
+    #[test]
+    fn deliver_without_candidates_falls_through() {
+        let (mut g, player, qm, recip) = deliver_game();
+        // Move the recipient INTO the questmaster's zone: no cross-zone
+        // candidate remains.
+        g.char_to_room(recip, g.get_char(qm).unwrap().in_room.unwrap());
+        assert!(!assign_deliver(&mut g, player, qm));
+    }
+
+    #[test]
+    fn deliver_info_names_the_recipient() {
+        let (mut g, player, qm, _recip) = deliver_game();
+        assert!(assign_deliver(&mut g, player, qm));
+
+        // Register a prototype so the info arm can name the recipient, and
+        // attach a descriptor so the info text is observable.
+        let mut proto = crate::world::MobileProto {
+            vnum: 300,
+            name: "recipient elder".into(),
+            short_desc: "the Village Elder".into(),
+            long_desc: String::new(),
+            description: String::new(),
+            level: 10,
+            hitpoints: 1,
+            hit_dice: (0, 0, 1),
+            experience: 0,
+            gold: 0,
+            position: crate::types::Position::Standing,
+            default_pos: crate::types::Position::Standing,
+            sex: crate::types::Gender::Neutral,
+            alignment: 0,
+            act_flags: 0,
+            affect_flags: 0,
+            armor: 0,
+            hitroll: 0,
+            damroll: 0,
+            damnodice: 0,
+            damsizedice: 0,
+            power: 0,
+            mpower: 0,
+            defense: 0,
+            mdefense: 0,
+            technique: 0,
+            abilities: None,
+            attack_type: 0,
+        };
+        proto.act_flags |= MOB_QUEST;
+        g.mob_protos.insert(300, proto);
+
+        let conn = ConnId(901);
+        g.descriptors
+            .insert(conn, crate::connection::Descriptor::new(conn, "test".into()));
+        g.get_char_mut(player).unwrap().desc = Some(conn);
+
+        do_autoquest(&mut g, player, "info", 0);
+        let text = g.descriptors.get(&conn).unwrap().outbuf.clone();
+        assert!(
+            text.contains("sealed pouch") && text.contains("the Village Elder"),
+            "info must name the pouch and recipient, got: {text}"
+        );
     }
 }

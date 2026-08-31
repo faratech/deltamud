@@ -154,4 +154,16 @@ X68 380 380 380 380 380 1d1+3200 2d60
 8000 110000
 9 9 2
 E
+#3120
+questmaster quest master cloister sacristan~
+the Cloister Sacristan~
+The sacristan of the Sunken Cloister tends its half-drowned shrine.
+~
+   What the flood took, the faithful still ransom back, one deed
+at a time.  Type 'autoquest request' to hear one.~
+262146 0 0 E
+X52 40 40 40 40 40 1d1+900 2d10
+600 40000
+9 9 0
+E
 $

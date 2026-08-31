@@ -117,4 +117,13 @@ A wooden token shaped like a blade lies here.~
 0 0 0 0 0 0
 1 0 0
 c 1
+#9011
+pouch courier sealed~
+a sealed courier pouch~
+A sealed courier pouch lies here, waiting to be carried.~
+~
+13 0 1
+0 0 0 0 0 0
+1 5 10
+c 1
 $~

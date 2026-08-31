@@ -1485,6 +1485,10 @@ fn perform_give(g: &mut GameState, ch: CharId, vict: CharId, obj: ObjId) {
             name_of(g, vict)
         ),
     );
+
+    // DELIVER quests (Deltania Breathes): handing the sealed courier pouch to
+    // its named recipient completes the delivery leg.
+    crate::quest::quest_deliver_give(g, ch, obj, vict);
 }
 
 fn item_names(g: &GameState, obj: ObjId) -> (String, i32) {
