@@ -1145,3 +1145,223 @@ fn add_follower(g: &mut GameState, ch: CharId, leader: CharId) {
 
 // pk_allowed (config) — DeltaMUD ships with player-killing disabled by default.
 const PK_ALLOWED: bool = false;
+
+/// C magic.c:65-117 `affect_update()`, called once per MUD hour from the
+/// heartbeat (comm.c:1038) right before point_update: decrements every
+/// affect's duration, prints the wear-off message, discharges an expiring
+/// AFF_R_CHARGED affect as self-damage, and runs the SKILL_ADRENALINE
+/// sustain/exhaustion branches (issue #96).
+pub fn affect_update(g: &mut GameState) {
+    let ids: Vec<CharId> = g.char_ids();
+    for cid in ids {
+        // C skips the PRF2_INTANGIBLE check for PCs only (!IS_NPC guard):
+        // intangible NPCs still age their affects.
+        let skip = match g.get_char(cid) {
+            Some(c) => !c.is_npc && (c.prf2_flags & crate::flags::PRF2_INTANGIBLE) != 0,
+            None => continue,
+        };
+        if skip {
+            continue;
+        }
+        affect_update_char(g, cid);
+    }
+}
+
+enum AfUpdate {
+    Keep,
+    Remove,
+}
+
+fn affect_update_char(g: &mut GameState, cid: CharId) {
+    let mut i = 0usize;
+    while g
+        .get_char(cid)
+        .map(|c| i < c.affected.len())
+        .unwrap_or(false)
+    {
+        let (stype, dur, modifier, bitvector) = {
+            let c = g.get_char(cid).unwrap();
+            let a = &c.affected[i];
+            (a.spell_type, a.duration, a.modifier, a.bitvector)
+        };
+        let mut action = AfUpdate::Keep;
+        // Adrenaline branch of the decremented affect: 1 = brink of death
+        // sustain, 2 = exhausted collapse, 3 = slow wear-off while upright.
+        let mut adrenaline: u8 = 0;
+        if dur >= 1 {
+            let new_dur = {
+                let c = g.get_char_mut(cid).unwrap();
+                c.affected[i].duration -= 1;
+                c.affected[i].duration
+            };
+            let (fighting, pos) = match g.get_char(cid) {
+                Some(c) => (c.fighting, c.position),
+                None => return,
+            };
+            if stype == SKILL_ADRENALINE && fighting.is_none() {
+                if pos < Position::Standing {
+                    adrenaline = if pos < Position::Sleeping { 1 } else { 2 };
+                    action = AfUpdate::Remove;
+                } else {
+                    adrenaline = 3;
+                }
+            }
+            let _ = new_dur;
+            match adrenaline {
+                1 => {
+                    g.send_to_char(cid, "The &Radrenaline&n flowing through your veins sustains you on the brink of &Kdeath&n!\r\n");
+                    let heal = g.rng.number(1, 500);
+                    let c = g.get_char_mut(cid).unwrap();
+                    c.points.hit += heal;
+                    c.position = Position::Standing;
+                }
+                2 => {
+                    g.send_to_char(cid, "Your &Radrenaline&n rush completely wears off, leaving you exhausted.\r\n");
+                    let c = g.get_char_mut(cid).unwrap();
+                    c.points.hit = (c.points.hit - new_dur * 100).max(10);
+                    c.points.move_points = (c.points.move_points - new_dur * 15).max(10);
+                }
+                3 => {
+                    g.send_to_char(cid, "Your &Radrenaline&n rush slowly wears off, leaving you tired.\r\n");
+                    let c = g.get_char_mut(cid).unwrap();
+                    c.points.hit = (c.points.hit - 100).max(10);
+                    c.points.move_points = (c.points.move_points - 15).max(0);
+                }
+                _ => {}
+            }
+        } else if dur == -1 {
+            // No action: unlimited duration (gods only!).
+        } else {
+            // Expiring. C suppresses the wear-off message when the next
+            // affect in the list is the same type still ticking (stacked
+            // affects show one message, on the last one to expire).
+            let show = stype > 0
+                && stype <= MAX_SPELLS
+                && match g.get_char(cid).unwrap().affected.get(i + 1) {
+                    None => true,
+                    Some(next) => next.spell_type != stype || next.duration > 0,
+                };
+            if show && stype <= 499 {
+                let msg = crate::constants::SPELL_WEAR_OFF_MSG
+                    .get(stype as usize)
+                    .copied()
+                    .unwrap_or("");
+                if !msg.is_empty() {
+                    g.send_to_char(cid, msg);
+                    g.send_to_char(cid, "\r\n");
+                    // C: an expiring redirect charge discharges into its
+                    // host as TYPE_UNDEFINED self-damage; this can kill and
+                    // extract the character.
+                    if bitvector == AFF_R_CHARGED {
+                        combat::damage_type(g, cid, cid, modifier, TYPE_UNDEFINED);
+                    }
+                }
+            }
+            action = AfUpdate::Remove;
+        }
+        if matches!(action, AfUpdate::Remove) {
+            // The discharge above may have extracted the character.
+            if let Some(c) = g.get_char_mut(cid) {
+                if i < c.affected.len() {
+                    c.affected.remove(i);
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod affect_update_tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::Descriptor;
+    use crate::types::ConnId;
+    use crate::types::Class;
+
+    fn spell_affect(stype: i32, duration: i32) -> Affect {
+        Affect {
+            spell_type: stype,
+            duration,
+            modifier: 0,
+            location: 0,
+            bitvector: 0,
+            caster: None,
+        }
+    }
+
+    #[test]
+    fn expiring_affect_prints_wear_off_message_and_is_removed() {
+        // SPELL_ARMOR (1) wears off with "You feel less protected."
+        let mut g = GameState::new(Config::default());
+        let mut ch =
+            Character::new_player("Af".to_string(), Class::Warrior, crate::types::Race::Human);
+        ch.affected.push(spell_affect(SPELL_ARMOR, 1));
+        let conn = ConnId(91);
+        ch.desc = Some(conn);
+        let cid = g.create_char(ch);
+
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "example.test".to_string()));
+        g.descriptors.get_mut(&conn).unwrap().character = Some(cid);
+
+        crate::magic::affect_update(&mut g);
+
+        // C magic.c:75: duration 1 only decrements to 0 on this pass; the
+        // expired affect (and its wear-off message) are handled next pass.
+        let c = g.get_char(cid).unwrap();
+        assert_eq!(c.affected.len(), 1);
+        assert_eq!(c.affected[0].duration, 0);
+        assert!(!g
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("less protected"));
+
+        crate::magic::affect_update(&mut g);
+
+        let c = g.get_char(cid).unwrap();
+        assert!(c.affected.is_empty(), "second pass removes the affect");
+        let out = &g.descriptors.get(&conn).unwrap().outbuf;
+        assert!(
+            out.contains("You feel less protected."),
+            "wear-off message missing, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn permanent_affect_never_expires() {
+        let mut g = GameState::new(Config::default());
+        let mut ch =
+            Character::new_player("Perm".to_string(), Class::Warrior, crate::types::Race::Human);
+        ch.affected.push(spell_affect(SPELL_ARMOR, -1));
+        ch.affected.push(spell_affect(SPELL_BLESS, 3));
+        let cid = g.create_char(ch);
+
+        crate::magic::affect_update(&mut g);
+
+        let c = g.get_char(cid).unwrap();
+        assert_eq!(c.affected.len(), 2, "permanent stays; ticking only decrements");
+        assert_eq!(c.affected[0].duration, -1);
+        assert_eq!(c.affected[1].spell_type, SPELL_BLESS);
+        assert_eq!(c.affected[1].duration, 2);
+    }
+
+    #[test]
+    fn ticking_affect_only_decrements() {
+        let mut g = GameState::new(Config::default());
+        let mut ch =
+            Character::new_player("Tick".to_string(), Class::Warrior, crate::types::Race::Human);
+        ch.affected.push(spell_affect(SPELL_BLESS, 5));
+        let cid = g.create_char(ch);
+
+        crate::magic::affect_update(&mut g);
+
+        let c = g.get_char(cid).unwrap();
+        assert_eq!(c.affected[0].duration, 4);
+        assert_eq!(c.affected.len(), 1);
+    }
+}

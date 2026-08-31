@@ -1515,6 +1515,9 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
         // (SECS_PER_MUD_HOUR=75 => 750 pulses): regen, hunger/thirst, idle,
         // object timers, corpse decay; weather advances the clock & sky.
         if pulse % 750 == 0 {
+            // C comm.c:1038: affect_update() runs every mud hour, right
+            // before point_update, aging spell/skill affects (issue #96).
+            crate::magic::affect_update(&mut self.state);
             crate::limits::point_update(&mut self.state);
             crate::weather::weather_and_time(&mut self.state);
         }
