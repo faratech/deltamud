@@ -23,4 +23,145 @@ X30 100 100 100 100 100 1d1+700 1d30
 500 20000
 9 9 0
 E
+#2151
+goblin picket sentry guard~
+the goblin picket~
+A goblin picket leans on its spear at the edge of the camp.
+~
+    The picket is a lean goblin in a coat of rings borrowed off
+something bigger, and its whole job is to watch the road and be
+somewhere else before the road watches back.  It has stopped
+leaning on the spear.
+~
+524352 0 0 E
+X21 105 105 105 105 105 1d1+500 1d32
+210 5250
+9 9 1
+E
+#2152
+warg goblin hound beast~
+a camp warg~
+A camp warg slinks between the trees, nose down.
+~
+    Half hound and half something the goblins should not have been
+breeding, the warg is grey, low to the ground and all shoulder.  It
+has learned that the camp feeds it and the forest does not, and it
+hunts the treeline for anything that looks like it came to be fed
+upon.
+~
+524384 0 0 E
+X21 105 105 105 105 105 1d1+500 1d32
+210 5250
+9 9 0
+E
+#2153
+goblin shaman herb priest~
+the goblin shaman~
+A goblin shaman counts feathers in the corner of her hut.
+~
+    She is small even for her kind and hung about with bundles of
+dried herb, yellow bone beads and the feathers of birds nobody has
+seen lately.  Her voice is a dry rattle, and the herds of the camp
+come to her door before they come to the chieftain's.
+~
+2621442 0 0 E
+X22 110 110 110 110 110 1d1+520 1d34
+220 5500
+9 9 2
+E
+#2154
+hobgoblin drillmaster sergeant~
+a hobgoblin drillmaster~
+A hobgoblin drillmaster counts the camp under its breath.
+~
+    Tall for a goblin and broad as a man, the drillmaster wears the
+camp's only honest uniform:  a blackened breastplate, a rank-knot
+of red cord at the shoulder, and a stick of ironwood it has never
+once had to use twice on the same goblin.  It is counting you
+already.
+~
+524352 0 0 E
+X22 110 110 110 110 110 1d1+520 1d34
+220 5500
+9 9 1
+E
+#2155
+bugbear overseer slave driver~
+a bugbear overseer~
+A bugbear overseer walks the camp with a lash coiled in its fist.
+~
+    The overseer stands a head taller than the goblins it drives and
+a good deal wider than any of them, yellow-fanged and stinking of
+the smoke pit.  It keeps the larder, the meat racks and the tally of
+who owes the camp a day's work, and it collects.
+~
+524352 0 0 E
+X23 115 115 115 115 115 1d1+550 1d36
+230 5750
+9 9 1
+E
+#2156
+kobold warlock sorcerer captive~
+a kobold warlock~
+A kobold warlock mutters over a bowl of river water.
+~
+    Brought down out of the caves as a slave and kept on as
+something more useful than a slave, the warlock is a small, wet-
+looking kobold whose horns have been ringed with copper by its
+masters.  It will tell you at length that it serves the goblins by
+choice, and its eyes stay on the door the whole time it says so.
+~
+2621504 0 0 E
+X23 115 115 115 115 115 1d1+550 1d36
+230 5750
+9 9 1
+E
+#2157
+goblin flesh-render butcher cook~
+a goblin flesh-render~
+A goblin flesh-render works at the hearth with a bone saw.
+~
+    The render is enormous through the arms and philosophically
+calm, and it does the camp's butchering, its cooking and most of
+its arithmetic about meat.  It regards you the way it regards the
+haunches on the rack, and it is very good at its work.
+~
+524290 0 0 E
+X24 120 120 120 120 120 1d1+570 1d38
+240 6000
+9 9 2
+E
+#2158
+hobgoblin legionnaire soldier~
+a hobgoblin legionnaire~
+A hobgoblin legionnaire stands the watch inside the hide hut.
+~
+    The legionnaire's kit is old, well kept and not of goblin
+make:  a curved shield, a short heavy spear and a helm that has
+been worn down to a dull shine.  It has served the camp longer
+than the chieftain has, and it intends to go on serving it
+afterwards.
+~
+524352 0 0 E
+X24 120 120 120 120 120 1d1+570 1d38
+240 6000
+9 9 1
+E
+#2159
+ghrask goblin war-chief chieftain chief~
+Ghrask, the Goblin War-Chief~
+Ghrask, the Goblin War-Chief, sits the stolen chair on its mound.
+~
+    Ghrask is not the largest goblin in the camp and does not need
+to be.  The boar-tusk crown is real, the wolf hide on the chair is
+real, and so is the ledger of debts the chieftain keeps in a
+skull by the throne, written in a hand that has clearly had
+practice.  Raids are called here, and the forest road out of the
+valley is closed because Ghrask closed it.
+~
+524290 0 0 E
+X25 125 125 125 125 125 1d1+600 2d21
+1500 9000
+9 9 1
+E
 $
