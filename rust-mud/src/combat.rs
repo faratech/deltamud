@@ -1181,6 +1181,67 @@ fn do_actual_damage(
             die(g, Some(ch), victim);
         }
     }
+
+    // Autoloot / autogold / autosplit (fight.c:1197-1242, #100): the three
+    // quality-of-life prefs act right after die() creates the corpse; none
+    // of them ran before, so corpses had to be looted by hand.
+    let ch_pc = g.get_char(ch).map(|c| !c.is_npc).unwrap_or(false);
+    let ch_killer = g
+        .get_char(ch)
+        .map(|c| c.act_flags & PLR_KILLER != 0)
+        .unwrap_or(false);
+    if ch_pc && !ch_killer && ch != victim {
+        let (v_npc, ch_prf, ch_grouped) = match g.get_char(ch) {
+            Some(c) => (
+                g.get_char(victim).map(|v| v.is_npc).unwrap_or(false),
+                c.prf2_flags,
+                c.affect_flags & AFF_GROUP != 0,
+            ),
+            None => return,
+        };
+        const PRF_AUTOLOOT: i64 = 1 << 24;
+        const PRF_AUTOSPLIT: i64 = 1 << 23;
+        const PRF_AUTOGOLD: i64 = 1 << 25;
+        let local_gold = if v_npc {
+            g.get_char(victim).map(|v| v.points.gold).unwrap_or(0)
+        } else {
+            0
+        };
+        let local_buf = local_gold.to_string();
+        let mut gold_before;
+        let mut gold_after;
+        if v_npc && g.get_char(ch).map(|c| c.prf2_flags & PRF_AUTOLOOT != 0).unwrap_or(false) {
+            gold_before = g.get_char(ch).map(|c| c.points.gold).unwrap_or(0);
+            crate::cmd_item::do_get(g, ch, "all corpse", 0);
+            gold_after = g.get_char(ch).map(|c| c.points.gold).unwrap_or(0);
+        } else {
+            gold_before = 0;
+            gold_after = 0;
+        }
+        if ch_grouped
+            && local_gold > 0
+            && ch_prf & PRF_AUTOSPLIT != 0
+            && ch_prf & PRF_AUTOLOOT != 0
+        {
+            if gold_after > gold_before {
+                crate::cmd_other::do_split(g, ch, &local_buf, 0);
+            }
+        }
+        if v_npc && g.get_char(ch).map(|c| c.prf2_flags & PRF_AUTOGOLD != 0).unwrap_or(false) {
+            gold_before = g.get_char(ch).map(|c| c.points.gold).unwrap_or(0);
+            crate::cmd_item::do_get(g, ch, "coins corpse", 0);
+            gold_after = g.get_char(ch).map(|c| c.points.gold).unwrap_or(0);
+        }
+        if ch_grouped
+            && local_gold > 0
+            && ch_prf & PRF_AUTOSPLIT != 0
+            && ch_prf & PRF_AUTOGOLD != 0
+        {
+            if gold_after > gold_before {
+                crate::cmd_other::do_split(g, ch, &local_buf, 0);
+            }
+        }
+    }
 }
 
 fn send_position_feedback(g: &mut GameState, ch: CharId, victim: CharId, dmg: i32) {
@@ -1920,6 +1981,33 @@ fn numdisplay(val: i64) -> String {
     out
 }
 
+
+/// C fight.c:296-318 corpse metadata: keywords are just "corpse"-suffixed
+/// GET_NAME, wear TAKE, extra ITEM_NODONATE, rent 100000, and the corpse
+/// weighs the dead character plus their load (so get/drop/carry math works).
+/// Applied by every corpse creator (#112). NODONATE is item-extra bit 9
+/// (structs.h ITEM_NODONATE).
+pub fn apply_corpse_metadata(obj: &mut crate::object::Object, g: &GameState, victim: CharId) {
+    use crate::object::{ExtraFlags, WearFlags};
+    obj.wear_flags |= WearFlags::TAKE;
+    obj.extra_flags |= ExtraFlags::from_bits_retain(1 << 3); // ITEM_NODONATE
+    obj.rent = 100000;
+    if let Some(c) = g.get_char(victim) {
+        let carried_w: i32 = c
+            .carrying
+            .iter()
+            .filter_map(|oid| g.get_obj(*oid).map(|o| o.weight))
+            .sum();
+        let worn_w: i32 = c
+            .equipment
+            .iter()
+            .flatten()
+            .filter_map(|oid| g.get_obj(*oid).map(|o| o.weight))
+            .sum();
+        obj.weight = c.player.weight as i32 + carried_w + worn_w;
+    }
+}
+
 fn make_corpse(g: &mut GameState, who: &str, victim: CharId) -> ObjId {
     let mut obj = Object::new(
         NOTHING,
@@ -1928,6 +2016,7 @@ fn make_corpse(g: &mut GameState, who: &str, victim: CharId) -> ObjId {
     );
     obj.description = format!("The corpse of {} is lying here.", who);
     obj.obj_type = ObjectType::Container;
+    apply_corpse_metadata(&mut obj, g, victim);
     // C fight.c:315-318: GET_OBJ_TIMER(corpse) = IS_NPC(ch) ?
 // max_npc_corpse_time (5) : max_pc_corpse_time (10) (config.c:120-121),
 // decremented once per mud hour by point_update. The flat 60 made

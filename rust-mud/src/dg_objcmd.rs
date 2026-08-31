@@ -1070,6 +1070,7 @@ fn make_corpse(g: &mut GameState, who: &str, victim: CharId) -> ObjId {
     );
     obj.description = format!("The corpse of {} is lying here.", who);
     obj.obj_type = ObjectType::Container;
+    crate::combat::apply_corpse_metadata(&mut obj, g, victim);
     // C fight.c:315-318: GET_OBJ_TIMER(corpse) = IS_NPC(ch) ?
 // max_npc_corpse_time (5) : max_pc_corpse_time (10) (config.c:120-121),
 // decremented once per mud hour by point_update. The flat 60 made
