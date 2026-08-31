@@ -123,6 +123,21 @@ Each activation is a registered, intentional divergence from the shipped C binar
 | Questmaster + targets + rewards | No mob carries MOB_QUESTMASTER/MOB_QUEST; the 12 reward objects and 5 tokens (9002…9010, 3082, 3160, 3161, 3163, 6814, 8620, 18702) were never authored | Authored at the C-hardcoded vnums with stub vault zones; 21 quest targets flagged across zones 11/14/16/20/21; questmaster mobs 120 (Itrius) and 2150 (zone 21). Reward display name "Midgaard Hero Vest" re-skinned to "Itrius Hero Vest" (vnums, order and QP prices preserved); authored mobs are SENTINEL-flagged |
 | Mob hunting | DeltaMUD dropped stock CircleMUD's `if (HUNTING(ch)) hunt_victim(ch);` driver — DG `mhunt` set HUNTING and nothing consumed it | Stock driver restored in mobile_activity after the awake/fighting gates, ending the mob's turn |
 
+### Finish-the-game Waves 5-7 (world completion, magic, web/ops)
+
+| Feature | C oracle state | Port state |
+|---|---|---|
+| Zones 21/22/11/15 placeholders | 132 rooms shipped as "You are in an unfinished room."; zone 15 titled with the builder's goodbye note | All finished in each zone's voice, exits bidirectionally consistent, all 11 DG trigger attachments preserved; zone 15 retitled "Jarik's Watch" |
+| The missing middle (L31-99) | Nothing between mob level 30 and two L100 town NPCs | Zone 30 Sundered Marches (L30-50), 31 Sunken Cloister (L45-70), 32 Ashen Spire (L60-99): 74 rooms, 31 mobs (4 MOB_QUEST-flagged per zone), chained 3044->3101->3200 |
+| SPELL_TELEPORT / SPELL_GROUP_RECALL | Handlers exist (spells.c:173 / magic.c:559) but never spello()'d; teleport had an inverted NULL check | Both registered with mortal level rows (MAG 46 / CLE 49); teleport excludes synthetic surface-map cells; the C NULL-check bug is fixed by construction in the port |
+| Web who-list (www_who) | make_who2html complete but gated behind a broken `if (!(www_who) > 0)` guard, a hardcoded /home/mulder path, a system("mv") shell-out, and an unregistered whoupd command | Native whohtml.rs: same page, configurable MUD_WWW_WHO_DIR, atomic tmp+rename, driven by www_who (MUD_WWW_WHO=1) from the heartbeat autosave block; whoupd live with C's rewww kept as alias |
+| Auto-reboot clock | setreboot armed a schedule (reboot_hr/min, warn_hr/min) that nothing consumed | The heartbeat consumes it: warning broadcast at the warn time, then save-all + OLC flush + graceful shutdown at the reboot time (MUD_AUTOREBOOT=1) |
+| pt_markable | Shipped NO: theft allowed, THIEF branding dead | Implemented behind MUD_PT_MARKABLE=1 (default matches the oracle) |
+| zone.lst | The stock CircleMUD fantasy catalog (54 zones, zero shipped) | Rewritten to the real 25-zone catalog |
+| Mage Guild (room 156), zone-6 room 601, 16.wld #1631 | Placeholder text | Finished |
+| 1.mob / 48.wld block order | Unsorted — breaks the legacy C loader's positional binary searches | Blocks sorted into vnum order (behavior-preserving; repairs 19 pre-existing C-side resolution failures) |
+| Deities | 15 selectable deities, zero mechanical consumers | Kept as flavor by design; documented |
+
 ## Runtime Fidelity Gaps
 
 The 2026-08 parity program (GitHub issues #96-#347, epic #348) audited all 12
