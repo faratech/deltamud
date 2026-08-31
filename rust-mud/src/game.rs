@@ -3644,13 +3644,21 @@ mod tests {
             .filter(|c| g.get_char(*c).map(|c| c.is_npc).unwrap_or(false))
             .filter_map(|c| g.get_char(c).map(|c| c.nr as u32))
             .collect();
-        println!("live quest-target candidates: {:?}", live);
+        // C rolls 50/50 between kill quests and object quests, denies
+        // probabilistically, and locks out re-requests on deny — so retry,
+        // clearing the deny lockout, until a KILL quest is assigned.
         let mut qmob = 0i32;
         for _ in 0..40 {
             crate::quest::do_autoquest(&mut g, pl, "request", 0);
             qmob = g.get_char(pl).unwrap().quest_mob;
             if qmob > 0 {
                 break;
+            }
+            if let Some(c) = g.get_char_mut(pl) {
+                c.next_quest = 0;
+                c.quest_obj = 0; // drop an object-quest draw; we want a kill quest
+                c.act_flags &= !(1 << 16); // PLR_QUESTOR
+                c.quest_countdown = 0;
             }
         }
         assert!(qmob > 0, "a kill-target quest must be assigned, got {}", qmob);

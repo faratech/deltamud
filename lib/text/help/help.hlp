@@ -73847,3 +73847,146 @@ of your practices to improve your knowledge of a skill or spell.
 PRACTICE with no argument lists what you know.  Practices are earned
 as you gain levels - and they are scarce, so spend them wisely.
 #0
+school
+Syntax: SCHOOL
+
+Available to characters of level 1-2, SCHOOL returns you to the
+Newbie School east of Itrius, where instructors teach the first
+lessons of every class.
+#0
+donate
+Syntax: DONATE <item>
+
+DONATE sends an item you carry to one of the kingdom's donation
+rooms, where anyone may take it.  A charitable way to empty your
+sack - the goods go to the next newcomer who needs them.
+#0
+clan
+Syntax: CLAN <apply|resign|info|list|who|roster|deposit|withdraw|...>
+
+Player-run orders sworn to the Crown.  CLAN LIST shows the chartered
+orders; CLAN APPLY <clan> petitions to join.  Members may deposit and
+withdraw gold from the clan vault while standing in the clan's room.
+See also: CSAY.
+#0
+arena
+Syntax: ARENA <join|leave|status>
+
+The Itrius Arena settles disputes in blood under referee's rules.
+ARENA JOIN signs the roster; combatants are backed up and restored
+by the arena magicians, and fleeing carries a penalty.  Spectators:
+OBSERVE <player>.
+#0
+brew
+Syntax: BREW <spell>
+
+Alchemists with the BREW skill may bottle a known spell as a potion.
+Requires an empty flask and the mana of the spell.
+#0
+forge
+Syntax: FORGE <weapon>
+
+Smiths with the FORGE skill may rework metal into arms at a forge.
+#0
+repair
+Syntax: REPAIR <item>
+
+The REPAIR skill restores damaged equipment: worn weapons and armor
+lose CONDITION in combat (examine items to see it) and crumble at
+zero.  REPAIR on the road mends a little; blacksmiths mend more.
+#0
+scan
+Syntax: SCAN <direction>
+
+Extends your vision one room in the given direction, revealing
+obvious contents.
+#0
+whois
+Syntax: WHOIS <player>
+
+Shows what the kingdom records say about a player: their title,
+guild, level, and when last seen.
+#0
+sacrifice
+Syntax: SACRIFICE <corpse>
+
+Sacrificing a corpse to the gods converts it to gold coins which
+appear in your purse.  The gods are not particular about whose
+corpse.
+#0
+retreat
+Syntax: RETREAT <direction>
+
+A fighting withdrawal: move in the given direction in the same
+breath as your escape, without turning your back.
+#0
+trip
+Syntax: TRIP <victim>
+
+A practiced Trip upends an opponent, dropping them to the ground.
+#0
+disarm
+Syntax: DISARM <victim>
+
+Knock a weapon from an opponent's grasp.
+#0
+berserk
+Syntax: BERSERK
+
+Fight in a blind rage: harder blows, poorer defense.  Not for the
+faint of constitution.
+#0
+meditate
+Syntax: MEDITATE
+
+Still the mind to recover mana faster while resting.
+#0
+chain
+Syntax: CHAIN
+
+Plant your footing so no blow can move you.  While chained you
+cannot be thrown about - but you cannot flee either.
+#0
+camouflage
+Syntax: CAMOUFLAGE
+
+Hide yourself in natural surroundings.  Only movement dispels it.
+#0
+deathblow
+Syntax: DEATHBLOW <victim>
+
+Finish a downed opponent with a single stroke.  Works only on those
+already lying at death's door.
+#0
+mount
+Syntax: MOUNT <animal>
+
+Climb onto a suitable mount.  Mounted riders move at the mount's
+pace.
+#0
+dismount
+Syntax: DISMOUNT
+
+Get off your mount.
+#0
+tame
+Syntax: TAME <animal>
+
+Soothe a wild animal into tamability.  Tamed beasts may be ridden
+and will defend their master.
+#0
+tan
+Syntax: TAN <corpse>
+
+Cure a fresh pelt into usable leather with the TAN skill.
+#0
+carve
+Syntax: CARVE <corpse>
+
+Butcher a fresh corpse for meat and hides with the CARVE skill.
+#0
+camp
+Syntax: CAMP
+
+Make camp where you stand: a safe, slow rest in the wilds.
+#0

@@ -1,7 +1,58 @@
 #300
-An unfinished room~
-You are in an unfinished room.
-~
+The Locris Ferry Landing~
+   The town of Locris Ferry straddles the river crossing.  The town
+square lies just north of the dock, and ferries still call here on
+their way downriver.~
 3 0 0
+D0
+~
+~
+0 0 310
+S
+#301
+The Locris Donation Room~
+   Spare goods for newcomers are racked along these walls.~
+3 8 0
+S
+#310
+The Locris Square~
+   The heart of Locris Ferry: a stone square, a temple bell, and the
+old ferry post.~
+3 0 0
+D2
+~
+~
+0 0 300
+D1
+~
+~
+0 0 311
+D3
+~
+~
+0 0 301
+D0
+~
+~
+0 0 312
+S
+#311
+The Ferry Market~
+   A small market hall where river traders sell to travelers.~
+3 8 0
+D3
+~
+~
+0 0 310
+S
+#312
+The Road to Itrius~
+   The overland road climbs away from the river toward Itrius, a
+three-day walk for the careful.~
+3 0 0
+D3
+~
+~
+0 0 310
 S
 $~

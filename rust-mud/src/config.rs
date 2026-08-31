@@ -11,13 +11,15 @@ pub const NUM_STARTROOMS: usize = 3;
 
 /// Per-hometown mortal start rooms (config.c `mortal_start_room[NUM_STARTROOMS + 1]`).
 /// Index 0 is the newbie loadroom element; indices 1..=NUM_STARTROOMS are the
-/// start towns. In this world every entry resolves to vnum 100; the table
-/// structure is ported verbatim so per-town divergence stays faithful.
+/// start towns. C's comment labels the four slots "Newbie loadroom / Itrius /
+/// Start Town 2 / Start Town 3"; the finish-the-game program built those
+/// towns (zones 2 and 3), so each slot now resolves to its own town
+/// (registered divergence: C shipped all four = 100).
 pub const MORTAL_START_ROOM: [RoomVnum; NUM_STARTROOMS + 1] = [
-    100, // Newbie loadroom element
+    200, // Newbie loadroom element -> the Newbie School (zone 2)
     100, // Itrius
-    100, // Start Town 2
-    100, // Start Town 3
+    210, // Start Town 2 (zone 2 town center)
+    300, // Start Town 3 (zone 3 town center)
 ];
 
 /// vnum of room that immortals enter at by default (config.c `immort_start_room`).
@@ -26,11 +28,17 @@ pub const IMMORT_START_ROOM: RoomVnum = 1204;
 /// vnum of room that frozen players enter at (config.c `frozen_start_room`).
 pub const FROZEN_START_ROOM: RoomVnum = 1202;
 
+/// C config.c: donation_room_2/3 shipped as NOWHERE ("room for expansion");
+/// the finish-the-game program built the towns that use them.
+pub const DONATION_ROOM_2: RoomVnum = 211; // Newhaven (zone 2)
+pub const DONATION_ROOM_3: RoomVnum = 301; // Locris Ferry (zone 3)
+
 #[derive(Clone)]
 pub struct Config {
     /// C config.c:59 `jail_num = 400`.
     pub jail_num: RoomVnum,
-    /// C config.c:77 `newbie_room = 2200`.
+    /// C config.c:77 `newbie_room` (finish-the-game: the school was built in
+    /// zone 2; C's placeholder value pointed at unrelated forest rooms).
     pub newbie_room: RoomVnum,
     pub database_url: String,
     pub lib_path: String,
@@ -54,7 +62,7 @@ impl Config {
             database_url: env::var("DATABASE_URL")
                 .unwrap_or_else(|_| "mysql://root:password@localhost/deltamud".to_string()),
             jail_num: 400,
-            newbie_room: 2200,
+            newbie_room: 200,
             lib_path: env::var("MUD_LIB_PATH").unwrap_or_else(|_| "./lib".to_string()),
             port: env::var("MUD_PORT")
                 .unwrap_or_else(|_| "4000".to_string())
@@ -79,7 +87,7 @@ impl Default for Config {
         Config {
             database_url: String::new(),
             jail_num: 400,
-            newbie_room: 2200,
+            newbie_room: 200,
             lib_path: "./lib".to_string(),
             port: 4000,
             use_compat_mode: false,

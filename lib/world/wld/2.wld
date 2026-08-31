@@ -1,7 +1,133 @@
 #200
-An unfinished room~
-You are in an unfinished room
-~
+The School Entry Hall~
+   The Itrius Newbie School opens before you: polished floors, torchlit walls,
+and a large notice board listing the first lessons of every craft.  Teachers
+wander the halls, and the road south leads to the town square.~
 2 0 0
+D2
+~
+~
+0 0 210
+S
+#201
+The Classroom of the Arcane~
+   Star charts cover the walls of this quiet classroom.  Aetheric symbols
+glow faintly along the chalk rails.~
+2 8 0
+D0
+~
+~
+0 0 200
+S
+#202
+The Classroom of Faith~
+   Benches face a simple altar where novices learn the old prayers and
+the discipline of healing hands.~
+2 8 0
+D0
+~
+~
+0 0 200
+S
+#203
+The Classroom of Shadows~
+   This dim classroom teaches quieter arts: the angle of a shadow, the
+weight of a step, the patience of empty pockets.~
+2 8 0
+D0
+~
+~
+0 0 200
+S
+#204
+The Training Yard~
+   Rack upon rack of wooden and blunted weapons line this open yard.
+Straw dummies wear the scars of a hundred first lessons.~
+2 0 0
+D0
+~
+~
+0 0 200
+S
+#205
+The Practice Hall~
+   A long hall where students drill the basic skills of their calling
+under a patient master's eye.~
+2 8 0
+D1
+~
+~
+0 0 210
+S
+#210
+The Town Square of Newhaven~
+   The young town of Newhaven grew up around the school.  A well stands
+at the center, roads lead in every direction, and the temple bell calls
+the faithful to the west.~
+2 0 0
+D0
+~
+~
+0 0 200
+D1
+~
+~
+0 0 212
+D2
+~
+~
+0 0 213
+D3
+~
+~
+0 0 211
+S
+#211
+The Donation Room of Newhaven~
+   Cast-off goods are stored here for anyone who needs a start in life.~
+2 8 0
+S
+#212
+The Newhaven Shop~
+   A cluttered but friendly shop.  A hand-painted sign hangs by the counter.~
+2 8 0
+D3
+~
+~
+0 0 210
+S
+#213
+The Temple of Newhaven~
+   A modest temple, but the altar's blessing reaches all of Newhaven.
+Recall spells carry the wounded safely here.~
+2 8 0
+D0
+~
+~
+0 0 210
+S
+#214
+The Eastern Road~
+   The eastern road runs toward the great city of Itrius, visible as
+a haze of chimney smoke on the horizon.~
+2 0 0
+D3
+~
+~
+0 0 210
+D1
+~
+~
+0 0 106
+S
+#219
+The School Gate~
+   The school's front gate looks out over the road to Itrius.  Most
+students, in time, walk east and do not look back.~
+2 0 0
+D1
+~
+~
+0 0 214
 S
 $~

@@ -1240,6 +1240,12 @@ pub fn do_drop(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
             mode = SCMD_DONATE;
             match g.rng.number(0, 2) {
                 0 => mode = SCMD_JUNK,
+                // C act.item.c ships donation_room_2/3 as NOWHERE "for
+                // expansion" with the selection commented out; the towns
+                // now exist, so the roll routes across all three (the
+                // junk 1-in-3 chance preserved).
+                1 => rdr = g.real_room(crate::config::DONATION_ROOM_2),
+                2 => rdr = g.real_room(crate::config::DONATION_ROOM_3),
                 _ => rdr = g.real_room(DONATION_ROOM_1),
             }
             if mode != SCMD_JUNK && rdr.is_none() {

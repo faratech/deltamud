@@ -381,4 +381,74 @@ X30 100 100 100 100 100 1d1+600 1d25
 100 5000
 9 9 0
 E
+#121
+city guard watch temple~
+the City Watch Guard
+~
+The Temple Guard polices the temple square.
+~
+    Members of the Itrius City Watch swear the king's peace:
+kill a citizen, and they will come for you.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+650 1d30
+200 15000
+9 9 0
+E
+#122
+city guard watch market~
+the City Watch Guard
+~
+The Market Guard keeps the peace along Main Street.
+~
+    Members of the Itrius City Watch swear the king's peace:
+kill a citizen, and they will come for you.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+650 1d30
+200 15000
+9 9 0
+E
+#123
+city guard watch gate~
+the City Watch Guard
+~
+The Gate Guard watches the western road.
+~
+    Members of the Itrius City Watch swear the king's peace:
+kill a citizen, and they will come for you.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+650 1d30
+200 15000
+9 9 0
+E
+#124
+city guard watch guild~
+the City Watch Guard
+~
+The Guild District Guard patrols past the guild doors.
+~
+    Members of the Itrius City Watch swear the king's peace:
+kill a citizen, and they will come for you.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+650 1d30
+200 15000
+9 9 0
+E
+#125
+city guard watch road~
+the City Watch Guard
+~
+The Road Guard walks the city's streets.
+~
+    Members of the Itrius City Watch swear the king's peace:
+kill a citizen, and they will come for you.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+650 1d30
+200 15000
+9 9 0
+E
 $

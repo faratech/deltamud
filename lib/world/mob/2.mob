@@ -1,1 +1,100 @@
+#200
+schoolmaster teacher master~
+the Schoolmaster~
+The Schoolmaster stands here, welcoming the newest students.
+~
+    A patient old adventurer, the Schoolmaster has forgotten more about
+Deltania than most people ever learn.  He directs newcomers to their
+classrooms and to the road.
+~
+2 0 0 E
+X5 20 20 20 20 20 1d1+60 1d8
+100 500
+9 9 0
+E
+#201
+mage teacher arcane~
+the Arcane Instructor~
+The Arcane Instructor is here, teaching the basics of magic.
+~
+    Star-chalk dusts the Arcane Instructor's robes.
+~
+2 0 0 E
+X5 20 20 20 20 20 1d1+60 1d8
+50 300
+9 9 0
+E
+#202
+cleric teacher faith~
+the Faith Instructor~
+The Faith Instructor is here, leading the morning psalms.
+~
+    The Faith Instructor's voice carries gently through the classroom.
+~
+2 0 0 E
+X5 20 20 20 20 20 1d1+60 1d8
+50 300
+9 9 0
+E
+#203
+thief teacher shadows~
+the Shadows Instructor~
+The Shadows Instructor is here, demonstrating quiet footsteps.
+~
+    You never quite catch the Shadows Instructor's eyes.
+~
+2 0 0 E
+X5 20 20 20 20 20 1d1+60 1d8
+50 300
+9 9 0
+E
+#204
+warrior teacher blades~
+the Blades Instructor~
+The Blades Instructor is here, correcting someone's grip.
+~
+    The Blades Instructor's blunted longsword has taught thousands.
+~
+2 0 0 E
+X5 20 20 20 20 20 1d1+60 1d8
+50 300
+9 9 0
+E
+#205
+artisan teacher craft~
+the Craft Instructor~
+The Craft Instructor is here, mending a student's work.
+~
+    The Craft Instructor believes everything is repairable twice.
+~
+2 0 0 E
+X5 20 20 20 20 20 1d1+60 1d8
+50 300
+9 9 0
+E
+#206
+shopkeeper newhaven trader~
+the Newhaven Shopkeeper~
+The Newhaven Shopkeeper waits patiently for customers.
+~
+    A former student who never left, the shopkeeper stocks essentials
+for fresh graduates.
+~
+2 0 0 E
+X5 20 20 20 20 20 1d1+60 1d8
+200 300
+9 9 0
+E
+#207
+guard newhaven watch~
+the Newhaven Guard~
+The Newhaven Guard keeps the peace around the school square.
+~
+    One sworn officer of Newhaven's tiny watch.
+~
+2 0 0 E
+X5 20 20 20 20 20 1d1+60 1d8
+50 300
+9 9 0
+E
 $

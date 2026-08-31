@@ -805,7 +805,7 @@ fn clear_quest(g: &mut GameState, ch: CharId, next_quest: i32) {
 // generate_quest — pick a target mob and either an object- or mob-quest.
 // ---------------------------------------------------------------------------
 
-fn generate_quest(g: &mut GameState, ch: CharId, questman: CharId) {
+pub fn generate_quest(g: &mut GameState, ch: CharId, questman: CharId) {
     // The C reads random mobs from the index up to 99 times, probing each for a
     // suitable difficulty + MOB_QUEST. We mirror that against mob_protos: a
     // candidate must be within difficulty 0..=15 (for mortals) and flagged
