@@ -181,11 +181,24 @@ pub fn perform_violence(g: &mut GameState) {
             if waiting {
                 continue;
             }
+            // MOB_MERCY (fight.c:1384-1387, #101): a mercy-flagged mob will
+            // not finish off a victim below POS_SLEEPING; both disengage.
+            let mercy = g
+                .get_char(ch)
+                .map(|c| c.is_npc && c.act_flags & (1 << 24) != 0)
+                .unwrap_or(false);
+            let v_pos = g.get_char(victim).map(|c| c.position).unwrap_or(Position::Dead);
+            if mercy && v_pos < Position::Sleeping {
+                stop_fighting(g, victim);
+                stop_fighting(g, ch);
+                continue;
+            }
         }
         if g.get_char(ch)
-            .map(|c| c.position != Position::Fighting)
+            .map(|c| c.position < Position::Fighting)
             .unwrap_or(true)
         {
+            g.send_to_char(ch, "You can't fight while sitting!!\r\n");
             continue;
         }
         let show_diag = g
@@ -206,9 +219,12 @@ pub fn perform_violence(g: &mut GameState) {
                     damage_worn_equipment_after_hit(g, ch);
                 }
             }
-        }
-        if g.get_char(ch).map(|c| c.is_npc).unwrap_or(false) {
-            crate::mobact::combat_mob_spec_pulse(g, ch);
+            // C fight.c:1478-1481: the MOB_SPEC/MOB_CASTER call sits inside
+            // the apr >= 0 block - a mob that earned no attacks does not
+            // proc (#109).
+            if g.get_char(ch).map(|c| c.is_npc).unwrap_or(false) {
+                crate::mobact::combat_mob_spec_pulse(g, ch);
+            }
         }
     }
 }
@@ -276,6 +292,10 @@ fn damage_worn_equipment_after_hit(g: &mut GameState, ch: CharId) {
         let total_slots = g.get_obj(oid).map(|o| o.total_slots).unwrap_or(0);
         if total_slots != 0 && g.rng.number(1, 100) <= condition {
             let damaged = if let Some(o) = g.get_obj_mut(oid) {
+                // C fight.c:1460 writes 'curr_slots = curr_slots--', a
+                // post-decrement no-op that silently neuters the decrement;
+                // we keep the AUTHOR'S INTENT (a real decrement) and list
+                // this C bug in the COMPATIBILITY.md register (#114).
                 o.curr_slots -= 1;
                 Some(o.short_description.clone())
             } else {
@@ -1150,11 +1170,16 @@ fn do_actual_damage(
     trigger_pc_escape_thresholds(g, ch, victim);
     rescue_linkdead_victim(g, victim);
 
-    if g.get_char(victim)
+    let v_dead = g
+        .get_char(victim)
         .map(|c| c.position == Position::Dead)
-        .unwrap_or(false)
-    {
-        die(g, Some(ch), victim);
+        .unwrap_or(false);
+    if v_dead {
+        // Arena fatalities settled in send_position_feedback's Dead arm
+        // (fight.c: match_over then return) - do not run die().
+        if !crate::arena::is_arena_combatant(victim) {
+            die(g, Some(ch), victim);
+        }
     }
 }
 
@@ -1216,16 +1241,29 @@ fn send_position_feedback(g: &mut GameState, ch: CharId, victim: CharId, dmg: i3
             );
         }
         Position::Dead => {
-            act(
-                g,
-                "$n is dead!  R.I.P.",
-                false,
-                victim,
-                None,
-                ActArg::None,
-                To::Room,
-            );
-            g.send_to_char(victim, "You are dead!  Sorry...\r\n");
+            // C fight.c:1056-1064: arena fatalities settle via match_over and
+            // return - die() is never reached; everyone else gets R.I.P.
+            // (die() itself prints nothing in C - the port printed both, #104).
+            if crate::arena::is_arena_combatant(victim) {
+                crate::arena::match_over(
+                    g,
+                    Some(ch),
+                    Some(victim),
+                    "(Fatality)",
+                    true,
+                );
+            } else {
+                act(
+                    g,
+                    "$n is dead!  R.I.P.",
+                    false,
+                    victim,
+                    None,
+                    ActArg::None,
+                    To::Room,
+                );
+                g.send_to_char(victim, "You are dead!  Sorry...\r\n");
+            }
         }
         _ => {
             if max_hit > 0 && dmg > max_hit / 4 {
@@ -1405,11 +1443,12 @@ fn update_position(g: &mut GameState, ch: CharId) {
     if let Some(c) = g.get_char_mut(ch) {
         let hp = c.points.hit;
         c.position = if hp > 0 {
-            if c.position == Position::Fighting {
-                Position::Fighting
-            } else {
-                c.position
+            // C fight.c:204-207: positive HP leaves positions above STUNNED
+            // alone but stands a STUNNED (or lower) character back up (#107).
+            if c.position > Position::Stunned {
+                return;
             }
+            Position::Standing
         } else if hp <= -11 {
             Position::Dead
         } else if hp <= -6 {
@@ -1576,16 +1615,9 @@ pub(crate) fn die(g: &mut GameState, killer: Option<CharId>, victim: CharId) {
     // raw_kill suppresses the death cry when the trigger returns false.
     let cry = crate::dg_triggers::death_mtrigger(g, victim, killer);
 
-    act(
-        g,
-        "$n is dead! R.I.P.",
-        false,
-        victim,
-        None,
-        ActArg::None,
-        To::Room,
-    );
-    g.send_to_char(victim, "You are dead!  Sorry...\r\n");
+    // C raw_kill/die() print no death lines - the R.I.P. pair belongs to
+    // damage()'s position switch (send_position_feedback here) and the old
+    // duplicate printed every death twice (#104).
 
     // death_cry (raw_kill): wail into this room + every open-exit neighbour.
     if cry {
@@ -1757,6 +1789,15 @@ fn award_kill_experience(g: &mut GameState, killer: CharId, victim: CharId) {
     if k.is_npc {
         return;
     }
+    // C fight.c:1121: the award fires only when the victim is an NPC or a
+    // connected player - killing a link-dead PC awards nothing (#114).
+    let awardable = g
+        .get_char(victim)
+        .map(|v| v.is_npc || v.desc.is_some())
+        .unwrap_or(false);
+    if !awardable {
+        return;
+    }
     if k.affect_flags & AFF_GROUP != 0 {
         group_gain(g, killer, victim);
     } else {
@@ -1839,11 +1880,13 @@ fn kill_exp(g: &GameState, victim: CharId, member_count: usize) -> i64 {
     if !v.is_npc {
         return 1;
     }
+    const MAX_EXP_GAIN: i64 = 1_000_000_000; // config.c:116
     if member_count <= 1 {
         ((v.points.exp as f64) * 0.666) as i64
     } else {
         v.points.exp / member_count as i64
     }
+    .min(MAX_EXP_GAIN)
     .max(1)
 }
 
