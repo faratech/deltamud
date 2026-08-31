@@ -1,0 +1,168 @@
+#3020
+scavenger march ash~
+a gaunt march-scavenger~
+A gaunt march-scavenger drags a sack of scrap through the ash.
+~
+    Bent under a load of rusted iron and wearing the remains of three
+different uniforms, the scavenger watches you with the flat appraisal
+of someone who has long since worked out what a body is worth by the
+pound.  Nothing about the Marches surprises this one any more.
+~
+64 0 0 E
+X31 155 155 155 155 155 1d1+700 1d46
+250 22000
+9 9 0
+E
+#3021
+crow march ash~
+a march crow~
+A march crow walks here, hopping over the ash.
+~
+    A grey crow with salt-stiffened feathers and a strut rather than a
+flight.  It has learned that the dead in the Marches stay where they
+fall, and it has no interest in anything that can still walk away.
+~
+128 0 0 E
+X30 150 150 150 150 150 1d1+650 1d45
+50 18000
+9 9 0
+E
+#3022
+reaver salt field~
+the Salt-Field Reaver~
+A huge figure in salt-crusted plate wades out of the ash.
+~
+    Once a champion of one of the armies that ruined this plain, the
+Reaver still wears the harness it died in, and the salt of the fields
+has grown over the joints in white scabs.  It carries a beheading
+sword in one fist and drags the other behind it, and it kills
+anything that crosses the furrows it walks.
+~
+524352 0 0 E
+X36 200 200 200 200 200 1d1+800 1d54
+1200 32000
+9 9 0
+E
+#3023
+deserter soldier rust~
+a rust-plated deserter~
+A deserter of the Marches garrisons eyes you sidelong.
+~
+    The coat is a garrison coat and the boots are somebody else's.  The
+deserter has been out here long enough to have stopped being a
+soldier and not long enough to have stopped being dangerous, and the
+rifle slung across the back is kept oiled and loaded.
+~
+96 0 0 E
+X33 175 175 175 175 175 1d1+730 1d49
+400 24000
+9 9 0
+E
+#3024
+wight orchard blighted~
+a blighted orchard wight~
+A black orchard wight hangs in the branches of a dead tree.
+~
+    What the shellfire did to the orchard it also did to the men who
+sheltered in it.  The wight is a lattice of black wood and blacker
+bone, and it comes apart of its own accord when it moves, which it
+does only when the living come near the rows.
+~
+64 0 0 E
+X38 210 210 210 210 210 1d1+850 1d57
+150 34000
+9 9 0
+E
+#3025
+corporal deserter~
+a deserter corporal~
+A deserter corporal counts a handful of bad coins.
+~
+    The corporal's rank is the only thing the war left intact, and it
+is used chiefly to decide who digs.  A scar runs from ear to collar,
+and the pay book in the breast pocket has been filled in with the
+names of men who were never paid.
+~
+64 0 0 E
+X35 190 190 190 190 190 1d1+780 1d52
+900 28000
+9 9 0
+E
+#3026
+ghoul siege~
+a siege ghoul~
+A siege ghoul drags itself up out of a shell-hole.
+~
+    The siege lines of the Marches were held by men who were buried in
+them, and some of them got up again.  This one still wears the wire
+and mud of the trench it crawled out of, and it has kept its appetite
+along with everything else.
+~
+524384 0 0 E
+X40 220 220 220 220 220 1d1+900 1d60
+500 38000
+9 9 0
+E
+#3027
+warden tower leaning~
+the Warden of the Leaning Tower~
+The Warden of the Leaning Tower stands in the shaft of the stair.
+~
+    A tall figure in the black harness of the old garrison, its face a
+blank of rusted iron, planted on the stair where the tower's tilt
+begins.  It has held this post since the garrison died, and it
+questions no one, because it has never needed to.
+~
+524290 0 0 E
+X42 250 250 250 250 250 1d1+1300 2d35
+2500 45000
+9 9 0
+E
+#3028
+sister ash marches~
+an Ash-Sister of the Marches~
+An Ash-Sister of the Marches walks the line with a censer.
+~
+    One of the order that came to bury the Marches and never finished.
+The Ash-Sister's robes are grey to the waist and black above it, and
+the censer she swings burns nothing at all.  She will speak with the
+living, and she will bury them afterwards with the same care.
+~
+2097216 0 0 E
+X44 240 240 240 240 240 1d1+1000 1d66
+1500 42000
+9 9 0
+E
+#3029
+golem siege broken~
+a broken siege golem~
+A broken siege golem stands rooted in the fallen bastion.
+~
+    Nine feet of iron and Siege-Works ironwork, built to walk through a
+gate and bring the wall down after it.  It walked, and it brought the
+wall down on itself, and it has stood in the wreckage since.  Its
+left arm ends in a ball of fused stone that it uses very well.
+~
+524290 0 0 E
+X48 280 280 280 280 280 1d1+1500 2d40
+700 52000
+9 9 0
+E
+#3042
+serren last banner~
+Serren, the Last Banner~
+Serren, the Last Banner, stands at the head of the hall.
+~
+    The last officer of Fort Sunder still holds the hall her garrison
+died defending, and she does not know that the war is over.  Her
+armour is grey plate gone black at the joints, the standard of the
+fort is wound about her left arm, and her sword has been sharpened so
+many times that the blade is a hand's width too narrow.  She offers
+every stranger one chance to leave.
+~
+2 0 0 E
+X45 300 300 300 300 300 1d1+1800 2d45
+5000 70000
+9 9 2
+E
+$

@@ -1,0 +1,524 @@
+#3200
+The Gate of Ash~
+   The basalt road comes up out of the flooded valley into a court of
+black stone, and the gate here is a wall of ash-coloured masonry with
+a single arch burnt through it.  Nothing grows in the court, and the
+ash lies in drifts against the wall like snow.  The Spire rises north,
+its crown lost in cloud.~
+32 0 5
+D2
+   The basalt road descends south into the drowned valley.
+~
+~
+0 0 3121
+D0
+   The arch leads north into the Ash Court.
+~
+arch gate~
+0 0 3201
+S
+#3201
+The Ash Court~
+   A great square of black basalt lies open to a sky the colour of old
+iron, and ash falls on it steadily and never accumulates:  something
+beneath the flagstones consumes it.  Galleries run along three sides,
+and stairs rise to the Spire's first hall on the north.~
+32 0 5
+D2
+   The gate of ash lies back south.
+~
+~
+0 0 3200
+D0
+   The Hall of Cinders opens north under a vault of black stone.
+~
+~
+0 0 3202
+D1
+   East, a stair of iron climbs the foundry wall.
+~
+~
+0 0 3203
+D3
+   West, a broken colonnade runs out along the court.
+~
+~
+0 0 3204
+S
+#3202
+The Hall of Cinders~
+   The hall's floor is a lake of living embers held behind a kerb of
+iron, and the heat here is a standing thing.  Suits of blackened mail
+stand in ranks along the walls, still in them, as if the wearers had
+simply stopped.  A stair climbs north to the galleries.~
+32 8 1
+D2
+   The Ash Court lies south through the hall doors.
+~
+~
+0 0 3201
+D4
+   A stair of iron climbs to the gallery of iron saints.
+~
+stair~
+1 0 3205
+D1
+   East, a door of glass opens onto a chamber of ash.
+~
+door glass~
+1 0 3206
+S
+#3203
+The Foundry Stair~
+   The stair is a spiral of black iron bolted to the inside of the
+Spire's wall, and it turns upward through a shaft of red light.
+Somewhere above, hammers are falling in a slow rhythm that never
+changes.~
+32 8 0
+D3
+   The stair comes down into the Ash Court to the west.
+~
+~
+0 0 3201
+D4
+   The shaft rises toward the foundry of the Spire.
+~
+stair iron~
+1 0 3207
+S
+#3204
+The Broken Colonnade~
+   Half the colonnade has gone down into the ash on the west side of
+the court, and the standing half carries a roof of grey slate.  The
+ash here has been swept into a path, and the path is used.  A door of
+iron stands at the colonnade's north end.~
+32 0 5
+D1
+   The Ash Court lies east across the open square.
+~
+~
+0 0 3201
+D0
+   The warden's vestibule lies north through the door of iron.
+~
+door iron~
+1 0 3208
+S
+#3205
+The Gallery of Iron Saints~
+   The gallery runs around the inside of the hall's vault, and its
+rail is hung with lamps that burn without oil.  Statues of saints of
+the old rite stand here in cast iron, each with its face hammered
+flat.  Ash lies along the rail in a fine grey line.~
+32 8 1
+D5
+   The stair comes down to the Hall of Cinders.
+~
+stair~
+1 0 3202
+D0
+   The gallery continues north toward the vitarium.
+~
+~
+0 0 3209
+S
+#3206
+The Chamber of Ash and Glass~
+   Everything in this chamber is either ash or glass:  the furniture
+has been fused, the floor has been glazed to a black mirror, and the
+air shimmers.  A coat of arms has been melted into the wall above the
+hearth and can no longer be read.~
+32 8 1
+D3
+   The Hall of Cinders lies west through the glass door.
+~
+door glass~
+1 0 3202
+D5
+   A trap in the floor drops into the ashen reliquary.
+~
+trap hatch~
+1 0 3210
+S
+#3207
+The Foundry of the Spire~
+   The foundry fills the whole width of the tower here, and a channel
+of white iron runs down its centre from a crucible the size of a
+room.  Moulds stand in rows on either side, and the men who work them
+do not look up.  The heat is not survivable for long.~
+32 8 1
+D5
+   The foundry stair drops away down the shaft.
+~
+stair iron~
+1 0 3203
+D0
+   North, the forge of chains runs along the channel.
+~
+~
+0 0 3211
+S
+#3208
+The Warden's Vestibule~
+   The vestibule is a small square room lined with spear racks and
+shield pegs, all of them full.  A brazier burns in the middle of the
+floor, and the walls have been whitewashed at some point in the last
+year, which is more than can be said for anything else in the Spire.~
+32 8 0
+D2
+   The broken colonnade lies south through the door of iron.
+~
+door iron~
+1 0 3204
+D4
+   A stair climbs to the warden's watch above.
+~
+stair~
+1 0 3212
+S
+#3209
+The Vitarium~
+   The vitarium is a glass-roofed hall of green things, and it is the
+only warm room in the Spire that smells of growing rather than of
+burning.  Beds of herbs and salvage-crops run in rows under the drip
+of a hundred small fountains.  The gardener keeps the rows weeded.~
+32 8 0
+D2
+   The gallery of iron saints lies back south.
+~
+~
+0 0 3205
+D1
+   East, a door of glass opens onto the garden of salt and fire.
+~
+door glass~
+1 0 3213
+S
+#3210
+The Ashen Reliquary~
+   The reliquary is a low vault of dry ash, and the Spire's dead are
+kept here in cases of black glass, ranked and labelled.  The cases
+are dusted.  Nothing else in the room has been disturbed in years.~
+32 8 1
+D4
+   The trap in the ceiling opens into the chamber of ash and glass.
+~
+hatch trap~
+1 0 3206
+D0
+   The ossuary of the Spire lies north through an arch of bone.
+~
+~
+0 0 3214
+S
+#3211
+The Forge of Chains~
+   Chains are made here, and have been for a very long time:  the
+walls are hung with them from vault to floor, links thick as an arm,
+each one stamped with the Spire's mark.  A channel of white iron runs
+down the middle of the floor, and the moulds stand open beside it.~
+32 8 1
+D2
+   The foundry lies back south along the iron channel.
+~
+~
+0 0 3207
+D4
+   A stair of chain and iron climbs to the chain bridge.
+~
+stair~
+1 0 3215
+S
+#3212
+The Warden's Watch~
+   The watch is a gallery above the Ash Court with a window of thick
+green glass on each face.  Logs, rosters and Tallies of Ash are
+pinned to the walls in careful columns.  The Spire's garrison keeps
+its records here, and keeps them well.~
+32 8 0
+D5
+   The stair comes down to the warden's vestibule.
+~
+stair~
+1 0 3208
+D0
+   North, a door of grey wood opens into the council hall.
+~
+door~
+1 0 3216
+S
+#3213
+The Garden of Salt and Fire~
+   The garden is a bed of white salt crust, and fire burns low out of
+it in a dozen places without consuming anything.  Nothing that grows
+in the vitarium would live here, and yet the rows are tended, and the
+tending is recent.~
+32 8 1
+D3
+   The vitarium lies west through the door of glass.
+~
+door glass~
+1 0 3209
+D4
+   A stair of black glass rises to the spellforge void.
+~
+stair~
+1 0 3217
+S
+#3214
+The Ossuary of the Spire~
+   The bones of the Spire's dead are set into the walls here in
+patterns that mean something, course upon course, to the height of
+three men.  The floor is clean swept ash.  A gallery of iron runs out
+east toward the tower's west stair.~
+32 8 1
+D2
+   The ashen reliquary lies south through the arch of bone.
+~
+~
+0 0 3210
+D1
+   East, a door of iron opens onto the stair to the tomb.
+~
+door~
+1 0 3218
+S
+#3215
+The Chain Bridge~
+   The bridge is a span of chain links laid flat and lashed with wire,
+and it crosses the tower's interior from wall to wall over a drop
+that has no visible bottom.  The heat of the foundry comes up out of
+it, and the chains ring faintly underfoot.~
+32 8 1
+D5
+   The stair of chain and iron drops to the forge of chains.
+~
+stair~
+1 0 3211
+D0
+   The bridge continues north to the ashen stair.
+~
+~
+0 0 3219
+S
+#3216
+The Hall of the Grey Council~
+   Twelve chairs of grey stone stand in a half circle, and ash has
+settled on eleven of them.  The hall's floor has been scrubbed, and
+the Spire's law is cut into the walls in letters of inlaid tin.  The
+twelfth chair is pulled out from the circle, as if someone has just
+left it.~
+32 8 0
+D2
+   The warden's watch lies south through the grey door.
+~
+door~
+1 0 3212
+D1
+   The council chamber lies east beyond the chairs.
+~
+~
+0 0 3220
+S
+#3217
+The Spellforge Void~
+   There is no floor here, in the ordinary sense:  the room is a void
+lit from below by a red glow, and a stair of black glass crosses it
+in a long curve.  Spells that are finished go down into the glow, and
+the glow burns them, and the light never dims.~
+32 8 1
+D5
+   The glass stair descends to the garden of salt and fire.
+~
+stair~
+1 0 3213
+D0
+   North, the void opens onto the warlock's circle.
+~
+~
+0 0 3221
+S
+#3218
+The Tomb of the First Flame~
+   The tomb is a small round chamber with a brazier at its centre that
+has burned, unattended, since the Spire was built.  The ash in it
+lies in a shape that is not a heap.  The walls carry a list of names
+that stops, abruptly, halfway down.~
+32 8 1
+D3
+   The ossuary of the Spire lies west through the low door.
+~
+door~
+1 0 3214
+D4
+   A stair of iron climbs to the furnace vault.
+~
+stair~
+1 0 3222
+S
+#3219
+The Ashen Stair~
+   The stair is cut into the living basalt of the tower and climbs
+through three full turns without a landing.  Ash lies on every step,
+and the steps above are worn in the middle.  Something very heavy
+comes up and down here.~
+32 8 1
+D2
+   The chain bridge lies back south across the drop.
+~
+~
+0 0 3215
+D4
+   The stair climbs toward the crown of the Spire.
+~
+stair~
+1 0 3223
+S
+#3220
+The Council Chamber~
+   The chamber is a long room with a table of grey stone and a map of
+the Sundered Marches worked into its top in tin and bone.  Small
+figures of iron stand on the map, and they have been moved recently,
+and often.~
+32 8 0
+D3
+   The hall of the grey council lies west.
+~
+~
+0 0 3216
+D4
+   A stair climbs to the astral gallery above.
+~
+stair~
+1 0 3224
+S
+#3221
+The Warlock's Circle~
+   A circle of runes has been cut into the basalt floor and inlaid
+with something that is not silver.  The air inside the circle stands
+quite still, and the ash falls around it, never into it.  Books stand
+open at the circle's edge, weighted with bones.~
+32 8 1
+D2
+   The spellforge void lies south across the glass stair.
+~
+~
+0 0 3217
+D1
+   The ward of silence lies east through a door of lead.
+~
+door lead~
+1 0 3225
+S
+#3222
+The Furnace Vault~
+   The vault is the Spire's heart:  a chamber of black basalt with a
+furnace in the middle of it that has no door and no flue.  The heat
+here is a weight on the shoulders.  Chains from the forge below come
+up through the floor and go down into the furnace, and are drawn out
+again, glowing.~
+32 8 1
+D5
+   The stair of iron drops back to the tomb of the first flame.
+~
+stair~
+1 0 3218
+D0
+   North, the furnace throat opens into blinding light.
+~
+~
+0 0 3226
+S
+#3223
+The Crown Approach~
+   The stair ends here at the tower's crown, in an open colonnade
+below a sky of ash.  Wind comes up the shaft of the stair and carries
+the smell of the drowned valley with it.  Far below, the Sundered
+Marches run out to the horizon on every side.~
+32 0 5
+D5
+   The ashen stair drops away down the shaft.
+~
+stair~
+1 0 3219
+D1
+   East, a short bridge of basalt runs to the crown.
+~
+~
+0 0 3227
+S
+#3224
+The Astral Gallery~
+   The gallery is a vault whose ceiling has been taken away entirely
+and replaced with a glass through which the stars can be seen, though
+it is day.  Instruments of brass and bone stand in ranks on the
+floor, and every one of them is pointing down.~
+32 8 0
+D5
+   The stair comes down from the council chamber.
+~
+stair~
+1 0 3220
+D1
+   East, a door of lead opens into the furnace throat.
+~
+door lead~
+1 0 3226
+S
+#3225
+The Ward of Silence~
+   The ward is a short corridor lined with lead, and no sound at all
+carries in it:  not footsteps, not the furnace, not the fall of ash
+outside.  The walls are warm to the touch, and words spoken here can
+be felt rather than heard.~
+32 8 1
+D3
+   The warlock's circle lies west through the lead door.
+~
+door lead~
+1 0 3221
+D4
+   A stair of lead climbs to the crown of the Spire.
+~
+stair~
+1 0 3227
+S
+#3226
+The Furnace Throat~
+   The throat is a shaft of white light and standing heat, and the
+steps that cross it are of iron, glowing at the edges.  The furnace
+roars here without sound.  Anything the Spire wishes to be rid of
+goes over the rail.~
+32 8 1
+D2
+   The furnace vault lies south beyond the heat.
+~
+~
+0 0 3222
+D3
+   The astral gallery lies west through the lead door.
+~
+door lead~
+1 0 3224
+S
+#3227
+The Crown of the Spire~
+   The crown is a platform of black basalt at the very top of the
+tower, and the ash falls upward here.  A throne of the same basalt
+stands at its centre, and the Spire's banner hangs from a pole
+behind it, heavy with grey frost.  The whole world lies below:
+the Marches, the drowned valley, and the small green fields of the
+living, far to the south.~
+32 0 5
+D3
+   West, the basalt bridge runs back to the crown approach.
+~
+~
+0 0 3223
+D5
+   The stair of lead descends into the ward of silence.
+~
+stair~
+1 0 3225
+S
+$~

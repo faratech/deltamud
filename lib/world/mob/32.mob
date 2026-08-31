@@ -1,0 +1,161 @@
+#3200
+warder spire ash~
+an ash-clad spire warder~
+An ash-clad spire warder watches you from the wall.
+~
+    The Spire's garrison marches in black lacquer and grey cloth, and
+the ash settles on both, so that a warder who stands still for an
+hour looks like a heap of cinders with a spear in it.  This one has
+not been still.  The visor never opens, and the warder never speaks
+except to give an order of the Spire's law.
+~
+96 0 0 E
+X62 310 310 310 310 310 1d1+2000 1d95
+600 75000
+9 9 0
+E
+#3201
+gatekeeper ashen~
+the Ashen Gatekeeper~
+The Ashen Gatekeeper stands under the burnt arch of the gate.
+~
+    Tall as two men in a harness of ash-grey plate, the Gatekeeper has
+held the Spire's gate since the Spire had a gate.  The visor is a
+narrow slot, the gauntlets are the size of a man's head, and the
+great sword it rests on has never once been drawn inside the walls.
+No one who has made it draw that sword outside the walls has
+described the result.
+~
+524290 0 0 E
+X66 360 360 360 360 360 1d1+2600 2d52
+3000 95000
+9 9 0
+E
+#3202
+hound cinder~
+a cinder hound~
+A cinder hound circles you at a distance.
+~
+    The Spire's hounds are cast in the foundry like anything else, and
+the cast is not a good one:  they are lean, they are wrong about the
+joints, and they burn at the mouth.  They hunt in the Ash Court and
+the foundry galleries, and they do not bark.
+~
+524384 0 0 E
+X64 330 330 330 330 330 1d1+2300 2d50
+300 85000
+9 9 0
+E
+#3203
+thrall forge chain~
+a chain-wrought forge thrall~
+A chain-wrought forge thrall pours white iron down the channel.
+~
+    The Spire does not feed its foundrymen;  it makes them.  A thrall
+is iron rod and grey cloth and a great deal of obedience, and it
+works the moulds in perfect time with the hammer above it.  The face
+is a stamped plate with a number, and the number is low.
+~
+64 0 0 E
+X68 340 340 340 340 340 1d1+2700 2d56
+400 95000
+9 9 0
+E
+#3204
+councillor grey~
+a grey councillor~
+A grey councillor of the Spire studies the tin map.
+~
+    The Council's members are chosen for their longevity rather than
+their wisdom, and they get both.  The councillor is robed in grey,
+barefoot on the cold stone, and it has not blinked in your presence.
+It is working out, patiently, what you cost and what you will fetch.
+~
+2097216 0 0 E
+X72 370 370 370 370 370 1d1+3100 2d60
+2500 110000
+9 9 0
+E
+#3205
+gardener vitarium~
+the Gardener of the Vitarium~
+The Gardener of the Vitarium trims a row of salvage-crops.
+~
+    The vitarium is the only green thing in the Spire, and the Gardener
+is the only reason.  Its hands are green to the wrist, its apron is
+black with ash and sap, and it has grown most of itself from cuttings
+over a very long time.  It will discuss soil with anyone, at length,
+and it does not like to be interrupted.
+~
+524352 0 0 E
+X75 400 400 400 400 400 1d1+3500 2d64
+3000 120000
+9 9 0
+E
+#3206
+elemental salt fire~
+a salt-and-fire elemental~
+A salt-and-fire elemental burns low across the white crust.
+~
+    The garden of salt and fire is fed by the spellforge below, and what
+leaks up out of the crust has learned to walk.  The elemental is a
+low, crawling ring of white flame with a body of salt crystal turning
+slowly inside it, and it leaves a line of black glass wherever it
+goes.
+~
+96 0 0 E
+X78 400 400 400 400 400 1d1+3800 2d68
+500 130000
+9 9 0
+E
+#3207
+ilyra warlock spire~
+Ilyra, the Warlock of the Spire~
+Ilyra, the Warlock of the Spire, stands inside the circle of runes.
+~
+    The Spire's spells are made by one person, and she has held the
+post for longer than the Council can prove.  Ilyra is tall, grey to
+the eyes, and quite untroubled;  the ash falls around her circle and
+never into it, and she regards that as the whole of the argument.
+Her fingers are stained to the second knuckle with whatever is inlaid
+in the floor, and she is very careful about who she lets stand downwind of her work.
+~
+2621442 0 0 E
+X85 460 460 460 460 460 1d1+5000 3d70
+9000 180000
+9 9 2
+E
+#3208
+prelate grey~
+the Grey Prelate~
+The Grey Prelate of the Spire rises from the twelfth chair.
+~
+    The Council's chair is a formality and the Prelate is not.  He is
+old in a way that the Spire's ash does not touch, dressed in grey
+vestments stitched with tin wire, and he speaks for the tower to the
+world and for the world to the tower.  He has kept the Spire fed,
+supplied and secret for three lifetimes, and he intends to keep it.
+~
+2097154 0 0 E
+X92 500 500 500 500 500 1d1+6500 3d80
+12000 240000
+9 9 1
+E
+#3209
+vhalor crown ashes~
+Vhalor, the Crown of Ashes~
+Vhalor, the Crown of Ashes, sits throned above the falling ash.
+~
+    Whatever Vhalor was when the Spire was raised, it is the Spire now:
+the tower's will wearing a shape of black plate and grey fire, seated
+on the basalt throne at the crown of the world's last fortress.  The
+banner behind the throne hangs with the frost of the upper air, and
+the ash falls upward about it and does not land.  It has been waiting
+a long time for someone to climb this far, and it is not grateful.
+~
+2 0 0 E
+X99 550 550 550 550 550 1d1+9000 4d85
+25000 350000
+9 9 1
+E
+$
