@@ -468,13 +468,13 @@ pub fn board_finish_write(g: &mut GameState, conn: ConnId, body: &str, save: boo
             msg.message = body.to_string();
         }
     } else {
-        // Abort: remove the reserved message if it is still the last one and
-        // still empty (no later writers shifted it). C frees the storage and
-        // the heading; here we drop the entry, mirroring "never committed".
+        // C boards.c:270-271 keeps the committed heading + slot on abort:
+        // the board shows the ghost entry and `read` answers 'That message
+        // seems to be empty.' The port deleted the entry instead (#171).
         if msg_index < guard.boards[board_type].len()
             && guard.boards[board_type][msg_index].message.is_empty()
         {
-            guard.boards[board_type].remove(msg_index);
+            // keep the reserved slot, as C does
         }
     }
     let path = board_file_path(&guard.lib_path, board_type);

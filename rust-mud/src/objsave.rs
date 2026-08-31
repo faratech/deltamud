@@ -932,6 +932,38 @@ pub fn crash_load_full(g: &mut GameState, ch: CharId) -> CrashLoadResult {
     let rent = parse_rent_header(header_line).unwrap_or_default();
     let orig_rent_code = rent.rentcode;
 
+    // C objsave.c:190-264 Crash_clean_file + config.c:177/180
+    // crash_file_timeout (10 real days) / rent_file_timeout (30 real days):
+    // stale files are DELETED (crash/forced/timed-out) or their items lost
+    // (rented). Without this the item-lease economy never lapses (#193).
+    {
+        const CRASH_FILE_TIMEOUT: f64 = 10.0 * 86400.0; // config.c:177
+        const RENT_FILE_TIMEOUT: f64 = 30.0 * 86400.0; // config.c:180
+        let age = (unix_now() - rent.time) as f64;
+        let limit = match rent.rentcode {
+            RENT_CRASH | RENT_FORCED | RENT_TIMEDOUT => CRASH_FILE_TIMEOUT,
+            RENT_RENTED => RENT_FILE_TIMEOUT,
+            _ => f64::INFINITY,
+        };
+        if age > limit {
+            let name = g
+                .get_char(ch)
+                .map(|c| c.get_name().to_string())
+                .unwrap_or_else(|| "unknown".into());
+            mudlog(
+                g,
+                &format!(
+                    "{}'s rent file is {} days old - deleting it.",
+                    name,
+                    (age / 86400.0) as i64
+                ),
+                LVL_IMMORT,
+            );
+            crash_delete_file(g, ch);
+            return CrashLoadResult::CrashOrNone;
+        }
+    }
+
     // Rented / timed-out: charge accrued rent or lose the equipment.
     if rent.rentcode == RENT_RENTED || rent.rentcode == RENT_TIMEDOUT {
         let secs_per_real_day = 86400.0f32;
