@@ -1840,6 +1840,8 @@ fn handle_pc_kill_side_effects(g: &mut GameState, killer: CharId, victim: CharId
 fn apply_death_penalty(g: &mut GameState, victim: CharId) {
     if let Some(rnum) = g.get_char(victim).and_then(|c| c.in_room) {
         crate::maputils::increase_blood(g, rnum);
+        crate::maputils::increase_snow(g, rnum);
+        crate::maputils::increase_snow(g, rnum);
     }
 
     let (exp, level, is_npc) = match g.get_char(victim) {

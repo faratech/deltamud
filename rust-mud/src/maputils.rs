@@ -2364,6 +2364,7 @@ fn weather_die(g: &mut GameState, ch: CharId, wtype: usize) {
 
     if let Some(rnum) = g.get_char(ch).and_then(|c| c.in_room) {
         increase_blood(g, rnum);
+        increase_snow(g, rnum);
         let name = g
             .get_char(ch)
             .map(|c| c.display_for_others())
@@ -2460,6 +2461,13 @@ pub fn blood_update(g: &mut GameState) {
             room.blood -= 1;
         }
     }
+}
+
+/// increase_snow(rm) (fight.c:197): bump a room's snow level by one, capped
+/// at 10 - snow accumulates where corpses fall in cold weather (#116).
+pub fn increase_snow(g: &mut GameState, rnum: RoomRnum) {
+    let room = g.room_mut(rnum);
+    room.snow = (room.snow + 1).min(10);
 }
 
 /// increase_blood(rm) (fight.c): bump a room's blood level by one, capped at 10.
