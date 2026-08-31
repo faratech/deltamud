@@ -2632,3 +2632,111 @@ mod tests {
         shops().lock().unwrap().clear();
     }
 }
+
+#[cfg(test)]
+mod shop_hours_tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::Descriptor;
+    use crate::room::Room;
+    use crate::types::{ConnId, Gender, Level, Position};
+
+    /// The living-world piece of shop hours (Deltania Breathes W3): the
+    /// three after-hours refusals are exact C strings, chosen by where the
+    /// mud hour falls relative to open1/close1/open2/close2.
+    #[test]
+    fn after_hours_refusals_pick_the_exact_c_message() {
+        // set_hour mutates the process-global CLOCK: serialize with the other
+        // hour-gated tests (town_life).
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let _guard = LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap();
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 1, "Shop".into(), String::new()));
+        let mut keeper = Character::new_npc(206);
+        keeper.player.level = 10;
+        keeper.position = Position::Standing;
+        let keeper = g.create_char(keeper);
+        g.char_to_room(keeper, room);
+        // keeper_say broadcasts to the ROOM: observe via a customer in the
+        // room rather than the keeper's own descriptor.
+        let conn = ConnId(902);
+        g.descriptors
+            .insert(conn, crate::connection::Descriptor::new(conn, "test".into()));
+        let mut customer = Character::new_player("Shopper".to_string(), Class::Warrior, Race::Human);
+        customer.player.level = 5;
+        let customer = g.create_char(customer);
+        g.char_to_room(customer, room);
+        if let Some(c) = g.get_char_mut(customer) {
+            c.desc = Some(conn);
+        }
+
+        // 09:00-17:00 shop (single window; open2/close2 mirror the first).
+        let mut shop = ShopData::new(1);
+        shop.open1 = 9;
+        shop.close1 = 17;
+        shop.open2 = 9;
+        shop.close2 = 17;
+        shop.keeper = 206;
+        shop.in_room = vec![100];
+
+        // C compares strictly: the shop is OPEN at hour == close1 and closes
+        // the hour after; with a single window the after-close refusal is
+        // "closed for the day".
+        for (hour, want) in [
+            (4, Some(MSG_NOT_OPEN_YET)),     // before open1
+            (8, Some(MSG_NOT_OPEN_YET)),
+            (9, None),                       // open on the hour
+            (12, None),
+            (17, None),                      // still open at close1 (strict <)
+            (18, Some(MSG_CLOSED_FOR_DAY)),
+            (23, Some(MSG_CLOSED_FOR_DAY)),
+        ] {
+            crate::weather::test_clock::set_hour(hour);
+            g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+            let open = is_open(&mut g, keeper, &shop, true);
+            let out = g.descriptors.get(&conn).unwrap().outbuf.clone();
+            match want {
+                None => {
+                    assert!(open, "hour {hour}: shop must be open");
+                    assert!(out.is_empty(), "hour {hour}: no refusal expected");
+                }
+                Some(msg) => {
+                    assert!(!open, "hour {hour}: shop must be closed");
+                    assert!(
+                        out.contains(msg),
+                        "hour {hour}: got {out:?}, want {msg:?}"
+                    );
+                }
+            }
+        }
+
+        // A two-window shop (09-12 and 14-20) exercises the mid-day gap:
+        // "we have closed, but come back later".
+        shop.open1 = 9;
+        shop.close1 = 12;
+        shop.open2 = 14;
+        shop.close2 = 20;
+        for (hour, want) in [
+            (12, None),                     // still open at close1
+            (13, Some(MSG_NOT_REOPEN_YET)), // the mid-day gap
+            (14, None),                     // reopened
+            (21, Some(MSG_CLOSED_FOR_DAY)),
+        ] {
+            crate::weather::test_clock::set_hour(hour);
+            g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+            let open = is_open(&mut g, keeper, &shop, true);
+            let out = g.descriptors.get(&conn).unwrap().outbuf.clone();
+            match want {
+                None => assert!(open, "hour {hour}: shop must be open"),
+                Some(msg) => {
+                    assert!(!open, "hour {hour}: shop must be closed");
+                    assert!(
+                        out.contains(msg),
+                        "hour {hour}: got {out:?}, want {msg:?}"
+                    );
+                }
+            }
+        }
+    }
+}
