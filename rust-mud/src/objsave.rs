@@ -184,21 +184,10 @@ fn is_neutral(g: &GameState, ch: CharId) -> bool {
 
 /// mudlog(): broadcast to immortals at or above `min_level`, plus host log.
 fn mudlog(g: &mut GameState, line: &str, min_level: u8) {
-    let formatted = format!("[ {} ]\r\n", line);
-    let imms: Vec<CharId> = g
-        .players_by_name
-        .values()
-        .copied()
-        .filter(|&id| {
-            g.get_char(id)
-                .map(|c| c.player.level >= min_level && c.player.level >= LVL_IMMORT)
-                .unwrap_or(false)
-        })
-        .collect();
-    for id in imms {
-        g.send_to_char(id, &formatted);
-    }
-    eprintln!("[ {} ]", line);
+    // C mudlog honours the viewer's PRF_LOG{1,2,3} syslog level, so an
+    // immortal without LOG1 does NOT see Normal lines (the battery's
+    // Implementor has no log prefs and must not see this either).
+    crate::syslog::mudlog(g, line, crate::syslog::NRM, min_level);
 }
 
 // ===========================================================================

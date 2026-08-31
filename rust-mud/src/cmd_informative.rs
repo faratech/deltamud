@@ -301,9 +301,15 @@ fn sprintbit(bits: i64, table: &[&str]) -> String {
 /// rcds(): immortal room-display string. CircleMUD prints the room vnum; we
 /// emit just the decimal vnum here (the C builds "vnum" into a static buffer).
 fn rcds(g: &GameState, rnum: RoomRnum) -> String {
-    g.room_opt(rnum)
-        .map(|r| r.number.to_string())
-        .unwrap_or_else(|| "?".to_string())
+    // C maputils.c:963 rcds: map rooms render as "%2dx%2d" coordinates, real
+    // rooms as the vnum right-aligned in a 5-column field.
+    match g.room_opt(rnum) {
+        Some(r) => match (r.map_x, r.map_y) {
+            (Some(x), Some(y)) => format!("{:>2}x{:>2}", x, y),
+            _ => format!("{:>5}", r.number),
+        },
+        None => "?".to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2173,13 +2179,9 @@ pub fn do_equipment(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
 }
 
 pub fn do_time(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    // World calendar/weather not in the contract; derive a stable in-game clock
-    // from the heartbeat pulse so the command renders the same structure.
-    let total_hours = (g.pulse / (PASSES_PER_SEC * 75)) as i64; // SECS_PER_MUD_HOUR=75
-    let hours = (total_hours % 24) as i32;
-    let day = ((total_hours / 24) % 35) as i32;
-    let month = (((total_hours / 24) / 35) % 17) as i32;
-    let year = ((total_hours / 24) / 35 / 17) as i32;
+    // The canonical mud clock (weather.rs TimeWeather: etc/date_record override
+    // + real-time advance), the same clock the shops/guards/sunlight use.
+    let (hours, day, month, year) = crate::weather::time_now();
 
     let hour12 = if hours % 12 == 0 { 12 } else { hours % 12 };
     let ampm = if hours >= 12 { "pm" } else { "am" };

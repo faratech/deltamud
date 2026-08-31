@@ -1,16 +1,5 @@
 Is the above text shown in color	y
 wish to be known|enter a name	Mulder
-Did I get that right	y
-Give me a password	pass
-retype password	pass
-completely new to MUDing	y
-sex	m
-Select a race	a
-Select a deity	a
-Select a class	c
-values acceptable	y
-PRESS RETURN	
-Make your choice	1
 Password:	pass
 PRESS RETURN	
 Make your choice	1

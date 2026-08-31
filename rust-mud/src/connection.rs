@@ -51,8 +51,11 @@ struct TelnetFilter {
     /// via `while (ISNEWL(*nl_pos)) nl_pos++;` (both CR and LF are ISNEWL), so
     /// `\r\n`, `\r\r`, `\n\n`, and `\r\n\r\n` (a double-Enter) each yield a
     /// single line, not one per char (BUG #27). We emit the line on the FIRST
-    /// terminator and swallow the rest of the run; the flag persists across
-    /// feed() calls so a run split across TCP reads still collapses.
+    /// terminator and swallow the rest of the run WITHIN one feed() call.
+    /// C's run-skip is per process_input pass (comm.c:1955-1960: the skip
+    /// starts from the emitted line's nl_pos), so a STANDALONE `\r\n` in a
+    /// later read is a fresh (empty) line — resetting the flag per feed()
+    /// reproduces that; a genuine `\r\n` pair always arrives in one read.
     in_newline_run: bool,
 }
 
@@ -108,6 +111,10 @@ impl TelnetFilter {
         caps: &mut Vec<ClientCap>,
         mut on_line: F,
     ) {
+        // C's newline-run skip is scoped to one process_input pass over the
+        // socket buffer (comm.c:1863-1877); it never spans two reads. Reset
+        // per feed so a standalone CR/LF in a later read is a fresh empty line.
+        self.in_newline_run = false;
         for &b in data {
             match self.state {
                 TelnetState::Data => match b {
@@ -698,9 +705,14 @@ mod telnet_tests {
     }
 
     #[test]
-    fn newline_run_collapses_across_split_reads() {
-        // A \r\n split across two TCP reads must still be one line break.
-        assert_eq!(lines_of(&[b"hi\r", b"\nthere\r\n"]), vec!["hi", "there"]);
+    fn standalone_newline_across_reads_is_an_empty_line() {
+        // C scopes the newline-run skip to one process_input pass
+        // (comm.c:1955-1960): the run from a previous read does NOT extend,
+        // so a standalone \n in the next read is a fresh EMPTY line — the
+        // input the parity battery and RETURN-style prompts rely on.
+        assert_eq!(lines_of(&[b"hi\r", b"\nthere\r\n"]), vec!["hi", "", "there"]);
+        // A genuine \r\n pair within one read still collapses to one break.
+        assert_eq!(lines_of(&[b"hi\r\nthere\r\n"]), vec!["hi", "there"]);
     }
 
     #[test]

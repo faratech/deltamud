@@ -70,19 +70,23 @@ mariadb --no-defaults --skip-ssl -u root --socket=/tmp/parity.sock deltamud < /t
 # --- fresh world copy (never share runtime files with the live lib) ---
 rm -rf $LIB
 cp -a /web/deltamud/lib $LIB
+# The date_record carries the LAST shutdown's calendar; drop it so both
+# servers seed their clock from this boot (seconds apart) and agree.
+rm -f $LIB/etc/date_record
 
 # --- C oracle ---
 mkdir -p /tmp/parity-c/bin
 mkdir -p /tmp/parity-c/lib/exec
 for b in autowiz scheck licheck; do [ -f /web/deltamud/bin/$b ] mkdir -p /tmp/parity-cmkdir -p /tmp/parity-c cp /web/deltamud/bin/$b /tmp/parity-c/bin/; done
 ln -sfn $LIB /tmp/parity-c/lib
+: > $LIB/USRCNT
 cd /tmp/parity-c
 MYSQL_USER=parity MYSQL_PASSWORD=parity /web/deltamud/bin/circle -q $PORT_C >$WORK/c.log 2>&1 &
 C_PID=$!
 
 # --- Rust server ---
 cd /tmp
-MUD_MOCK_DB=true MUD_PORT=$PORT_R MUD_LIB_PATH=$LIB MUD_RNG_SEED=$SEED \
+DATABASE_URL=mysql://root@127.0.0.1:3306/deltamud MUD_PORT=$PORT_R MUD_LIB_PATH=$LIB MUD_RNG_SEED=$SEED \
   /web/deltamud/rust-mud/target/release/deltamud >$WORK/r.log 2>&1 &
 R_PID=$!
 

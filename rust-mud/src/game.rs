@@ -63,9 +63,7 @@ pub const MENU: &str = "\r\n\
 &R[&n&C6&n&R]&n See who is online.\r\n\
 &R[&n&C7&n&R]&n Change password.\r\n\
 &R[&n&C8&n&R]&n Delete this character.\r\n\
-&B------------------------------&n\r\n\
-\r\n\
-   Make your choice: ";
+&B------------------------------&n\r\n\r\n   Make your choice: ";
 
 pub const ASK_NAME: &str = "\r\nPlease enter a name&R:&n ";
 
@@ -954,7 +952,6 @@ for access.\r\n\r\n",
                     self.state.extract_char(stub);
                 }
                 self.out(conn_id, "\r\n\n*** PRESS RETURN: ");
-                self.user_cntr(conn_id);
                 if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                     d.state = ConState::ReadMotd;
                 }
@@ -1627,6 +1624,9 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             ch.player.level = rec.player.level;
             ch.prf_flags = rec.prf_flags;
         }
+        // Route the stub's output to the logging-in connection (C runs these
+        // commands on d->character, which IS attached to the descriptor).
+        ch.desc = Some(conn_id);
         self.state.create_char(ch)
     }
 
