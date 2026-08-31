@@ -26,7 +26,7 @@
 
 use crate::act::{act, ActArg, To};
 use crate::flags::AFF_INVISIBLE;
-use crate::interpreter::{is_abbrev, one_argument};
+use crate::interpreter::is_abbrev;
 use crate::state::GameState;
 use crate::types::*;
 use std::collections::HashMap;
@@ -853,61 +853,12 @@ pub fn arenaentrancemaster(
 
 // ===========================================================================
 // do_observe (act.other.c) — an observer re-targets which combatant they watch.
+// The ACMD is dispatched from cmd_other::do_observe; this keeps a single
+// implementation (it needs get_char_vis's world scan, since the combatants are
+// in the pit rather than the observatory).
 // ===========================================================================
-pub fn do_observe(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
-    let in_observatory = in_room(g, ch) == g.real_room(ARENA_OBSERVEROOM);
-    if get_stat(ch) != ARENA_OBSERVER || !in_observatory {
-        g.send_to_char(ch, "You can't do that now! Get to the observatory!\r\n");
-        return;
-    }
-
-    let (arg, _) = one_argument(argument);
-
-    if arg.is_empty() {
-        let who = match observing_of(ch) {
-            Some(v) => get_name(g, v),
-            None => "nobody".to_string(),
-        };
-        g.send_to_char(
-            ch,
-            &format!("You're currently observing the actions of {}.\r\n", who),
-        );
-        return;
-    }
-
-    let victim = match g.get_char_room_vis(ch, &arg) {
-        Some(v) => v,
-        None => {
-            g.send_to_char(ch, "No such person around.\r\n");
-            return;
-        }
-    };
-
-    if level(g, victim) >= LVL_IMMORT && victim != ch {
-        g.send_to_char(ch, "You dare not.\r\n");
-        return;
-    }
-
-    if victim == ch {
-        deobserve(ch);
-        g.send_to_char(ch, "Ok. You're observing nobody now.\r\n");
-        return;
-    }
-
-    if !is_arena_combatant(victim) {
-        g.send_to_char(ch, "Hey! That person's not an arena combatant!\r\n");
-        return;
-    }
-
-    deobserve(ch);
-    linkobserve(ch, victim);
-    g.send_to_char(
-        ch,
-        &format!(
-            "You're now observing the actions of {}.\r\n",
-            get_name(g, victim)
-        ),
-    );
+pub fn do_observe(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
+    crate::cmd_other::do_observe(g, ch, argument, subcmd)
 }
 
 // ===========================================================================
