@@ -279,6 +279,27 @@ pub fn act_sleep(
                         continue;
                     }
                     rendered.push((to_id, perform_act(g, msg, ch, obj, &vict_obj, to_id)));
+                    // C comm.c:2416/2436: every NPC recipient (other than the
+                    // actor) gets act_mtrigger on the raw message, unless the
+                    // act originated inside the DG VM (dg_act_check; #138).
+                    if g.dg_act_check
+                        && g.get_char(to_id).map(|t| t.is_npc).unwrap_or(false)
+                    {
+                        let vict_char = match vict_obj {
+                            ActArg::Char(v) => Some(v),
+                            _ => None,
+                        };
+                        crate::dg_triggers::act_mtrigger(
+                            g,
+                            to_id,
+                            msg,
+                            Some(ch),
+                            vict_char,
+                            obj,
+                            None,
+                            None,
+                        );
+                    }
                 }
             }
             // C comm.c:2517-2538: arena OBSERVE_BY chains - every room message

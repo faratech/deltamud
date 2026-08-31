@@ -1497,7 +1497,12 @@ pub fn script_driver(g: &mut GameState, go: GoRef, trig: TrigId, type_: i32, mod
     SCRIPT_DEPTH.with(|d| d.set(depth + 1));
     sync_script_rng(g);
 
+    // C comm.c: dg_act_check is cleared while the VM runs so %echo%-style
+    // act() lines do not re-trigger act_mtrigger (#138).
+    let prev_check = g.dg_act_check;
+    g.dg_act_check = false;
     let result = script_driver_inner(g, go, trig, type_, mode);
+    g.dg_act_check = prev_check;
 
     SCRIPT_DEPTH.with(|d| d.set(d.get() - 1));
     result

@@ -127,6 +127,10 @@ pub struct GameState {
     pub circlemud: String,
     pub config: Config,
     pub pulse: u64,
+    /// C comm.c dg_act_check (DG_NO_TRIG): false while a DG script is
+    /// executing, so VM-originated act() lines do not re-fire act triggers
+    /// recursively (#138).
+    pub dg_act_check: bool,
     /// Set by `do_shutdown` (C `circle_shutdown = 1`). The Game run loop checks
     /// it after each command/pulse and exits via the graceful-shutdown path, so
     /// the `shutdown` immortal command actually halts the server (it previously
@@ -174,6 +178,7 @@ impl GameState {
             circlemud: String::new(),
             config,
             pulse: 0,
+            dg_act_check: true,
             map_start_rnum: None,
             max_map_x: 0,
             max_map_y: 0,
