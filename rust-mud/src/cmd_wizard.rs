@@ -7247,8 +7247,10 @@ WorldMap:\n",
     #[test]
     fn goto_with_map_coordinates_lands_on_the_surface_room() {
         let dir = lib_with_worldmap("cdsr", 12);
-        let mut cfg = Config::default();
-        cfg.lib_path = dir.to_string_lossy().to_string();
+        let cfg = Config {
+            lib_path: dir.to_string_lossy().to_string(),
+            ..Config::default()
+        };
         let mut g = GameState::new(cfg);
         crate::maputils::integrate_map_rooms(&mut g);
         let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
@@ -7267,8 +7269,10 @@ WorldMap:\n",
     #[test]
     fn goto_still_rejects_a_nonexistent_numeric_vnum() {
         let dir = lib_with_worldmap("cdsr-vnum", 8);
-        let mut cfg = Config::default();
-        cfg.lib_path = dir.to_string_lossy().to_string();
+        let cfg = Config {
+            lib_path: dir.to_string_lossy().to_string(),
+            ..Config::default()
+        };
         let mut g = GameState::new(cfg);
         crate::maputils::integrate_map_rooms(&mut g);
         let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
