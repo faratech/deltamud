@@ -578,6 +578,12 @@ impl Game {
                         }
                     }
                     self.enter_game(conn_id, false).await;
+                    // Cache the session password hash so `unlock <password>`
+                    // (act.other.c do_lockout) can verify against the real
+                    // account password (C compares against GET_PASSWD(ch)).
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.password_hash = Some(crate::password::hash_password(&input));
+                    }
                 } else {
                     self.out(conn_id, "Wrong password.\r\n");
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
@@ -606,6 +612,11 @@ impl Game {
                 if matches {
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                         d.state = ConState::GetNewbie;
+                        // Session password hash, for the `unlock` gate.
+                        d.password_hash = d
+                            .temp_password
+                            .as_ref()
+                            .map(|p| crate::password::hash_password(p));
                     }
                 } else {
                     self.out(conn_id, "Passwords don't match.\r\n");

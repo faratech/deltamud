@@ -132,6 +132,10 @@ pub struct GameState {
     /// the `shutdown` immortal command actually halts the server (it previously
     /// only broadcast a message and logged — the process never stopped).
     pub shutdown_requested: bool,
+    /// `nameserver_is_slow` (config.c:254, initialised to YES). Toggled by the
+    /// immortal `slowns` command (act.other.c do_gen_toggle SCMD_SLOWNS); the
+    /// resolver itself is not modelled, only the reported state.
+    pub nameserver_is_slow: bool,
 
     // Surface ("outside") world-map splice (maputils.c read_map). The 99x99
     // grid of map cells is appended to `rooms` *after* the real-room block, so
@@ -164,6 +168,8 @@ impl GameState {
             next_obj_id: 1,
             rng: Rng::default(),
             shutdown_requested: false,
+            // config.c:254 `int nameserver_is_slow = YES;`
+            nameserver_is_slow: true,
             credits: String::new(),
             news: String::new(),
             info: String::new(),

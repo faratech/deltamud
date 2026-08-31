@@ -1273,3 +1273,9 @@ pub(crate) fn reset_for_tests() {
 // per-flag handling is needed; this silences the unused-import lint while
 // documenting that backed-up affect flags include AFF_INVISIBLE et al.).
 const _: i64 = AFF_INVISIBLE;
+
+/// Test-only write access to GET_ARENASTAT (cmd_other::do_observe coverage).
+#[cfg(test)]
+pub fn set_stat_for_test(id: CharId, stat: u8) {
+    set_stat(id, stat);
+}

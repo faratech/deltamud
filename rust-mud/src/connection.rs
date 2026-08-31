@@ -314,6 +314,13 @@ pub struct Descriptor {
     // Scratch during login / char creation.
     pub temp_name: Option<String>,
     pub temp_password: Option<String>,
+    /// Hash of the password that opened this session, cached at login so the
+    /// synchronous `unlock` handler (act.other.c do_lockout) can verify a
+    /// `unlock <password>` against the real account password. C keeps
+    /// GET_PASSWD(ch) on the character itself; the Rust Character never carries
+    /// it, so the session hash lives on the descriptor. Empty after a copyover
+    /// recovery (which skips the nanny), where C would still have it.
+    pub password_hash: Option<String>,
 }
 
 impl Descriptor {
@@ -337,6 +344,7 @@ impl Descriptor {
             input_queue: std::collections::VecDeque::new(),
             temp_name: None,
             temp_password: None,
+            password_hash: None,
         }
     }
 
