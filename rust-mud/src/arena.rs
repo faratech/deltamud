@@ -1273,3 +1273,28 @@ pub(crate) fn reset_for_tests() {
 // per-flag handling is needed; this silences the unused-import lint while
 // documenting that backed-up affect flags include AFF_INVISIBLE et al.).
 const _: i64 = AFF_INVISIBLE;
+
+/// Observer fan-out used by act(): render one line per observer (from the
+/// perspective of the combatant they watch) and deliver it. Observers only -
+/// the combatant themself receives their own act lines through the normal
+/// room fan-out (C comm.c:2517-2538 OBSERVE_BY walk; issue #248).
+pub fn send_to_observers_rendered(
+    g: &mut GameState,
+    who: CharId,
+    render: &mut dyn FnMut(&mut GameState, CharId) -> String,
+) {
+    let s = get_stat(who);
+    if s == ARENA_NOT || s == ARENA_OBSERVER {
+        return;
+    }
+    let mut tmp = observe_by_of(who);
+    while let Some(t) = tmp {
+        if get_stat(t) == ARENA_OBSERVER
+            && g.get_char(t).map(|c| c.desc.is_some()).unwrap_or(false)
+        {
+            let line = render(g, t);
+            g.send_to_char(t, &line);
+        }
+        tmp = observe_by_of(t);
+    }
+}

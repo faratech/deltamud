@@ -281,6 +281,29 @@ pub fn act_sleep(
                     rendered.push((to_id, perform_act(g, msg, ch, obj, &vict_obj, to_id)));
                 }
             }
+            // C comm.c:2517-2538: arena OBSERVE_BY chains - every room message
+            // also reaches the observers of the actor and of the victim,
+            // rendered from the perspective of the combatant they watch
+            // (#248). Otherwise arena spectators see no combat text at all.
+            let observer_line_for = |g: &mut GameState, viewer: CharId| -> String {
+                perform_act(g, msg, ch, obj, &vict_obj, viewer)
+            };
+            if crate::arena::arena_stat(ch) != crate::arena::ARENA_NOT {
+                crate::arena::send_to_observers_rendered(
+                    g,
+                    ch,
+                    &mut |g: &mut GameState, viewer: CharId| observer_line_for(g, viewer),
+                );
+            }
+            if let Some(v) = vict {
+                if crate::arena::arena_stat(v) != crate::arena::ARENA_NOT {
+                    crate::arena::send_to_observers_rendered(
+                        g,
+                        v,
+                        &mut |g: &mut GameState, viewer: CharId| observer_line_for(g, viewer),
+                    );
+                }
+            }
         }
     }
 

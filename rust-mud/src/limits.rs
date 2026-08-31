@@ -500,7 +500,10 @@ pub fn advance_level(g: &mut GameState, ch: CharId) {
         BRF,
         min_level,
     );
-    // save_char(ch, NOWHERE) — async persistence handled by the save layer.
+    // C class.c:565: advance_level ends with save_char(ch, NOWHERE) - a
+    // crash between the level gain and the next autosave would lose the
+    // level/HP/practices (#257).
+    g.request_player_save(ch);
 }
 
 fn give_oldbie_reward(g: &mut GameState, ch: CharId) {
