@@ -270,7 +270,12 @@ impl FileLoader {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-
+                // C discrete_load (db.c:700-701): stop reading the file at
+                // the first vnum >= MAX_ROOM_VNUM (500000, structs.h:583)
+                // (#241).
+                if vnum >= 500000 {
+                    break;
+                }
                 // Read room name (tilde-terminated; strip trailing newline first)
                 line.clear();
                 reader.read_line(&mut line)?;
@@ -493,7 +498,8 @@ impl FileLoader {
             let start = i;
             match Self::parse_single_mob(vnum, &lines, &mut i) {
                 Ok(proto) => {
-                    world.mob_protos.insert(vnum, proto);
+                    // C real_mobile keeps the FIRST duplicate vnum (#241).
+                    world.mob_protos.entry(vnum).or_insert(proto);
                     parsed += 1;
                 }
                 Err(e) => {
@@ -531,11 +537,37 @@ impl FileLoader {
         Ok(())
     }
 
+
+    /// C db.c:1293-1296 & 1384-1388: when the article word (fname) is exactly
+    /// 'a', 'an' or 'the', the short description's first character is
+    /// lowercased. Objects' room descriptions additionally get their first
+    /// character UPPERCASED (db.c:1391-1393) (#240).
+    fn lower_article(desc: &mut String) {
+        let first_word = desc
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_lowercase();
+        if matches!(first_word.as_str(), "a" | "an" | "the") {
+            if let Some(c) = desc.get_mut(0..1) {
+                c.make_ascii_lowercase();
+            }
+        }
+    }
+
+    fn upper_first(desc: &mut String) {
+        if let Some(c) = desc.get_mut(0..1) {
+            c.make_ascii_uppercase();
+        }
+    }
+
     fn parse_single_mob(vnum: MobVnum, lines: &[&str], i: &mut usize) -> Result<MobileProto> {
         let name = Self::read_tilde_string(lines, i)?;
-        let short_desc = Self::read_tilde_string(lines, i)?;
+        let mut short_desc = Self::read_tilde_string(lines, i)?;
         let long_desc = Self::read_tilde_string(lines, i)?;
         let description = Self::read_tilde_string(lines, i)?;
+        // C db.c:1293-1296 lowercases only the short description.
+        Self::lower_article(&mut short_desc);
 
         // Flag line: ACTION_FLAGS AFF_FLAGS ALIGNMENT LETTER
         // (asciiflag_conv f1) (asciiflag_conv f2) (alignment) ({S|E})
@@ -927,9 +959,11 @@ impl FileLoader {
 
             // Four tilde-terminated strings (each may span lines).
             let keywords = Self::read_tilde_buf(&mut reader)?;
-            let short_desc = Self::read_tilde_buf(&mut reader)?;
-            let long_desc = Self::read_tilde_buf(&mut reader)?;
+            let mut short_desc = Self::read_tilde_buf(&mut reader)?;
+            let mut long_desc = Self::read_tilde_buf(&mut reader)?;
             let action_desc = Self::read_tilde_buf(&mut reader)?;
+            Self::lower_article(&mut short_desc);
+            Self::upper_first(&mut long_desc); // db.c:1391-1393 (#240)
 
             // type, extra flags, wear flags (flags may be ascii letters).
             line.clear();
@@ -1033,30 +1067,28 @@ impl FileLoader {
                 }
             }
 
-            world.obj_protos.insert(
+            // C real_object keeps the FIRST duplicate vnum (#241).
+            world.obj_protos.entry(vnum).or_insert_with(|| ObjectProto {
                 vnum,
-                ObjectProto {
-                    vnum,
-                    name: keywords,
-                    short_desc,
-                    description: long_desc,
-                    obj_type: ObjectType::from_i32(obj_type),
-                    wear_flags: WearFlags::from_bits_truncate(wear_flags),
-                    extra_flags: ExtraFlags::from_bits_truncate(extra_flags),
-                    weight,
-                    cost,
-                    rent,
-                    values,
-                    curr_slots,
-                    total_slots,
-                    obj_class,
-                    min_level,
-                    bitvector,
-                    action_description: action_desc,
-                    affects,
-                    ex_descriptions,
-                },
-            );
+                name: keywords,
+                short_desc,
+                description: long_desc,
+                obj_type: ObjectType::from_i32(obj_type),
+                wear_flags: WearFlags::from_bits_truncate(wear_flags),
+                extra_flags: ExtraFlags::from_bits_truncate(extra_flags),
+                weight,
+                cost,
+                rent,
+                values,
+                curr_slots,
+                total_slots,
+                obj_class,
+                min_level,
+                bitvector,
+                action_description: action_desc,
+                affects,
+                ex_descriptions,
+            });
         }
 
         Ok(())

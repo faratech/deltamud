@@ -250,7 +250,11 @@ impl GameState {
         let vnum = room.number;
         let rnum = self.rooms.len();
         self.rooms.push(room);
-        self.room_index.insert(vnum, rnum);
+        // C db.c:2729 real_room scans forward and keeps the FIRST match;
+        // insert() overwrote, so duplicate vnums resolved to the LAST room
+        // (#241). C also stops loading a file at vnum >= MAX_ROOM_VNUM
+        // (500000, structs.h:583) - enforced in the file loader.
+        self.room_index.entry(vnum).or_insert(rnum);
         rnum
     }
 
