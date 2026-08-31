@@ -171,17 +171,33 @@ fn sprinttype(idx: i32, table: &[&str]) -> String {
     "UNDEFINED".to_string()
 }
 
-/// sprintbit(): render a bit-flag long against a name table (CircleMUD).
+/// sprintbit() (utils.c:402-423): render a bit-flag long against a name table.
+/// C walks the vector right until it is exhausted (no 32-bit cap) while the
+/// name index `nr` freezes on the "\n" terminator, so every set bit above the
+/// table prints "UNDEFINED ". A negative vector is "<INVALID BITVECTOR>" and
+/// nothing set leaves "NOBITS ".
 fn sprintbit(bits: i64, table: &[&str]) -> String {
+    if bits < 0 {
+        return "<INVALID BITVECTOR>".to_string();
+    }
     let mut out = String::new();
-    for (i, name) in table.iter().enumerate() {
-        if *name == "\n" {
-            break;
+    let mut nr = 0usize;
+    let mut v = bits;
+    while v != 0 {
+        // C tests *names[nr] != '\n' — the first character, not the whole entry.
+        let known = nr < table.len() && !table[nr].starts_with('\n');
+        if (v & 1) != 0 {
+            if known {
+                out.push_str(table[nr]);
+                out.push(' ');
+            } else {
+                out.push_str("UNDEFINED ");
+            }
         }
-        if i < 32 && (bits & (1i64 << i)) != 0 {
-            out.push_str(name);
-            out.push(' ');
+        if known {
+            nr += 1;
         }
+        v >>= 1;
     }
     if out.is_empty() {
         out.push_str("NOBITS ");
@@ -601,9 +617,14 @@ fn find_target_room(g: &mut GameState, ch: CharId, rawroomstr: &str) -> Option<R
         return None;
     }
 
-    // cdsr(): named map-coordinate room shortcut — not modelled (returns -1).
+    // C act.wizard.c:206: cdsr() (maputils.c:1030) is tried FIRST — it resolves
+    // the surface-map "<x>x<y>" coordinate form, and (its trailing else) any
+    // bare numeric vnum. It yields NOWHERE on a malformed string or an
+    // out-of-range coordinate, letting the digit/mob/obj arms below run.
     let location: RoomRnum;
-    if roomstr
+    if let Some(r) = crate::dg_wldcmd::cdsr(g, &roomstr) {
+        location = r;
+    } else if roomstr
         .chars()
         .next()
         .map(|c| c.is_ascii_digit())
@@ -6908,5 +6929,108 @@ mod tests {
             .outbuf
             .contains("Rooms for zone 2"));
         crate::olc::olc_remove_from_save_list(2, crate::olc::OLC_SAVE_ROOM);
+    }
+
+    // ---- #195: sprintbit fidelity (utils.c:402-423) -----------------------
+
+    /// A table whose names run out well before bit 63 ("\n"-terminated, as the
+    /// C `*_bits[]` tables are).
+    const SHORT_TABLE: &[&str] = &["ALPHA", "BETA", "\n"];
+
+    #[test]
+    fn sprintbit_negative_vector_is_invalid_bitvector() {
+        assert_eq!(sprintbit(-1, SHORT_TABLE), "<INVALID BITVECTOR>");
+        assert_eq!(sprintbit(-(1i64 << 40), SHORT_TABLE), "<INVALID BITVECTOR>");
+    }
+
+    #[test]
+    fn sprintbit_set_bits_above_the_table_are_undefined() {
+        // Bits 0 and 1 have names; bit 40 is past the terminator and must still
+        // render (C keeps shifting until the vector is exhausted).
+        let bits = (1i64) | (1i64 << 1) | (1i64 << 40);
+        assert_eq!(sprintbit(bits, SHORT_TABLE), "ALPHA BETA UNDEFINED ");
+        // A lone out-of-table bit: no name, but not NOBITS either.
+        assert_eq!(sprintbit(1i64 << 40, SHORT_TABLE), "UNDEFINED ");
+        // Bit 63 sets the sign bit of C's signed `long`, so it takes the
+        // negative-vector branch there too.
+        assert_eq!(sprintbit(1i64 << 63, SHORT_TABLE), "<INVALID BITVECTOR>");
+    }
+
+    #[test]
+    fn sprintbit_zero_is_nobits() {
+        assert_eq!(sprintbit(0, SHORT_TABLE), "NOBITS ");
+    }
+
+    // ---- #200: cdsr() map-coordinate addressing in find_target_room -------
+
+    fn lib_with_worldmap(name: &str, size: usize) -> std::path::PathBuf {
+        let mut dir = std::env::temp_dir();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        dir.push(format!(
+            "deltamud-wiz-{}-{}-{}",
+            name,
+            std::process::id(),
+            unique
+        ));
+        std::fs::create_dir_all(dir.join("world")).unwrap();
+        let row = ".".repeat(size);
+        let mut map = String::from(
+            "NewSector: .\n\
+SectName: Field\n\
+SectShow: .\n\
+SectMove: 1\n\
+SectSect: Field\n\
+EndSector\n\
+WorldMap:\n",
+        );
+        for _ in 0..size {
+            map.push_str(&row);
+            map.push('\n');
+        }
+        map.push_str("~\n");
+        std::fs::write(dir.join("world").join("worldmap"), map).unwrap();
+        dir
+    }
+
+    #[test]
+    fn goto_with_map_coordinates_lands_on_the_surface_room() {
+        let dir = lib_with_worldmap("cdsr", 12);
+        let mut cfg = Config::default();
+        cfg.lib_path = dir.to_string_lossy().to_string();
+        let mut g = GameState::new(cfg);
+        crate::maputils::integrate_map_rooms(&mut g);
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        let start = g.add_room(Room::new(100, 0, "Start".to_string(), "Start.".to_string()));
+        g.char_to_room(imm, start);
+
+        let want = g.map_coords_to_rnum(3, 7).expect("map room spliced in");
+        do_goto(&mut g, imm, "3x7", 0);
+
+        assert_eq!(g.get_char(imm).unwrap().in_room, Some(want));
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(!out.contains("No room exists with that number."));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn goto_still_rejects_a_nonexistent_numeric_vnum() {
+        let dir = lib_with_worldmap("cdsr-vnum", 8);
+        let mut cfg = Config::default();
+        cfg.lib_path = dir.to_string_lossy().to_string();
+        let mut g = GameState::new(cfg);
+        crate::maputils::integrate_map_rooms(&mut g);
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        let start = g.add_room(Room::new(100, 0, "Start".to_string(), "Start.".to_string()));
+        g.char_to_room(imm, start);
+
+        do_goto(&mut g, imm, "999999", 0);
+
+        assert_eq!(g.get_char(imm).unwrap().in_room, Some(start));
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("No room exists with that number."));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
