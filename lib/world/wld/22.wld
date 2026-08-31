@@ -1104,7 +1104,11 @@ D3
 S
 #2235
 In the passage~
-You are in an unfinished room.
+     The passage is narrow and utterly lightless, its walls of
+rough-hewn rock rather than the dressed marble of the keep.  Dust
+lies thick underfoot, unbroken except where the tracks of rats
+have stitched it into seams.  Somewhere ahead, water drips with
+the patience of years.
 ~
 22 0 0
 D2
@@ -1118,7 +1122,10 @@ D3
 S
 #2236
 In a passage~
-You are in an unfinished room.
+     The passage makes a turn here, and the air grows colder as
+it leaves the heart of the keep.  A niche has been cut into the
+rock to hold a lamp, and the wick within is burnt down and stiff
+with age.  Cobwebs drape the corners like grey lace.
 ~
 22 0 0
 D0
@@ -1132,7 +1139,11 @@ D1
 S
 #2237
 In a passageway~
-You are in an unfinished room.
+     Deep under the keep, the passage runs on between walls that
+sweat in the damp.  Scratches score the lower courses of the stone
+at about the height of a man's shoulder -- long parallel lines, as
+if someone had been dragged along this way, or had dragged
+themselves.
 ~
 22 0 0
 D1
@@ -1146,8 +1157,11 @@ D2
 S
 #2238
 At a junction~
-You are in an unfinished room.
-Connect to tower...go u from here
+     The passage comes to a junction beneath a vault of
+untrimmed stone.  One branch runs on north into the dark, and a
+narrow spiral stair climbs upward from here, its treads worn
+hollow in their centres.  The air below is colder still, and the
+sound of water comes up through the floor.
 ~
 22 0 0
 D0
@@ -1158,10 +1172,21 @@ D3
 ~
 ~
 0 0 2237
+D4
+   A narrow spiral stair climbs upward.
+~
+
+~
+0 0 2269
 S
 #2239
 At the enterance~
-You are in an unfinished room.
+     The passage ends at a wall of dressed stone with no door in
+it, though the mortar has been picked at by hand and the lowest
+blocks sit a finger's width out of true.  An arrow slit lets in a
+single thin blade of grey light in which the dust hangs
+motionless.  Beyond the wall, faintly, you hear the keep going
+about its business.
 ~
 22 0 0
 D2
@@ -1171,7 +1196,11 @@ D2
 S
 #2240
 In the hallway~
-You are in an unfinished room.
+     The hall narrows here into a servants' way, walled in plain
+stone and lit only by the lamps of the gallery behind you.  A row
+of pegs holds a few shawls and a serving apron, all of them grey
+with dust, and a wheel of cheese sits on a shelf, hard as a
+millstone.
 ~
 22 0 0
 D0
@@ -1185,8 +1214,11 @@ D2
 S
 #2241
 In a hallway~
-You are in an unfinished room.
-Attach indoor playground to e from here....
+     The servants' way runs on between store-rooms, and the
+smell of tallow and dried herbs leaks under the doors.  In the
+east wall an archway has been blocked with rough stone and mortar,
+done in a hurry and abandoned half-finished.  Someone has chalked
+a tally of days upon the fresh masonry.
 ~
 22 0 0
 D0
@@ -1200,13 +1232,17 @@ D2
 S
 #2242
 Before the Atrium~
-You are in an unfinished room.
-attach atrium n from here
+     The way ends before a tall door of banded wood, bound in
+greened brass and carved with leaves gone blunter with age.  Warm
+air breathes around its edges, smelling of growing things and
+still water, and a bar of green-gold light lies across the floor
+beneath the door.
 ~
 22 0 0
 D0
 ~
-door~
+door
+~
 1 0 2273
 D2
 ~
@@ -1215,7 +1251,11 @@ D2
 S
 #2243
 In a hallway~
-You are in an unfinished room.
+     This hall runs south from the junction, its vaulted ceiling
+lost in shadow.  The carpet has been rolled up and stood against
+the wall, leaving the flags bare, and a suit of armour that once
+stood sentry here lies in pieces where it fell, rusted to the
+stone.
 ~
 22 0 0
 D0
@@ -1229,7 +1269,11 @@ D2
 S
 #2244
 In a Secret Passage~
-You are in an unfinished room.
+     Behind the bookshelf a passage runs west into the rock
+beneath the keep, narrow and dry as a tomb.  The air is cold and
+utterly still, and the dust on the steps leading down has been
+disturbed by nothing larger than a spider.  One shelf here stands
+empty, its books carried away one at a time.
 ~
 22 0 0
 D1
@@ -1243,8 +1287,12 @@ D5
 S
 #2245
 In a silent passage~
-You are in an unfinished room.
-attach catacombs/torchure chamber d from here.
+     A landing at the head of a broken stair.  The steps descend
+a little way and then stop at a tumbled mass of rubble, through
+which a black stillness breathes up from below -- the air of some
+place dug deeper than the keep's foundations.  Something has been
+carved into the wall of the landing: the word DRUNAMOUR, and
+beneath it, a date.
 ~
 22 0 0
 D4
@@ -1254,7 +1302,11 @@ D4
 S
 #2250
 At a junction~
-You are in an unfinished room.
+     The hall comes to a junction here beneath a rib of black
+marble.  Torches burn in brackets of wrought iron, though who
+lights them is a question the keep does not answer, and their
+light makes the walls run with oily reflections.  A doorway stands
+east and the hall goes on south, into a colder dark.
 ~
 22 0 0
 D0
@@ -1272,8 +1324,11 @@ D2
 S
 #2251
 Before a tower~
-You are in an unfinished room.
-attach tower w of here.
+     The hall ends at the foot of a round tower stair.  The
+first few steps rise cleanly enough, then the way up is choked
+from wall to wall by a fall of masonry, ancient and unmoving, with
+fine white dust still sifting from it.  A cold draught comes down
+from somewhere above, carrying the smell of pigeons.
 ~
 22 0 0
 D0
@@ -1283,20 +1338,27 @@ D0
 S
 #2252
 In a quiet hallway~
-You are in an unfinished room.
+     A narrow hallway of the servants' wing, quieter than the
+halls nearer the chamber.  Three doors stand about it, all closed
+and all rubbed pale about the latches by years of the same hands,
+and the floorboards have been swept clean enough to walk on in
+bare feet.
 ~
 22 0 0
 D0
 ~
-door~
+door
+~
 1 0 2256
 D1
 ~
-door~
+door
+~
 1 0 2253
 D2
 ~
-door~
+door
+~
 1 0 2255
 D3
 ~
@@ -1305,66 +1367,102 @@ D3
 S
 #2253
 In a servant's quarters~
-You are in an unfinished room.
+     A small room, kept neatly.  A cot with a blanket drawn up
+square, a washstand with jug and bowl, and a stool beneath the one
+window, which is shuttered and barred.  A dress of black velvet
+hangs from a peg on the door, brushed and ready, though its hem is
+frayed to ribbons.
 ~
 22 0 0
 D0
 ~
-door~
+door
+~
 1 0 2254
 D3
 ~
-door~
+door
+~
 1 0 2252
 S
 #2254
 A small closet~
-You are in an unfinished room.
+     A closet of shelved linen, smelling of lavender gone stale
+and of cedar.  Sheets, pillow-slips and table napkins are folded
+in tidy stacks, and on the topmost shelf stands a single child's
+shoe, put away with the rest of the household's things and
+forgotten.
 ~
 22 0 0
 D2
 ~
-door~
+door
+~
 1 0 2253
 S
 #2255
 In a servant's quarters~
-You are in an unfinished room.
+     Two cots, a chest and a cold brazier fill this little room.
+The chest stands open and empty, its lid sprung, and a looking
+glass has been taken down from the wall and laid face down on the
+floor.  Dust has gathered in the frame of its empty hook.
 ~
 22 0 0
 D0
 ~
-door~
+door
+~
 1 0 2252
 S
 #2256
 In a servant's quarters~
-You are in an unfinished room.
+     This room has been stripped bare: no bed, no chest, only
+the pale rectangles on the wall where things hung, and a scatter
+of straw in one corner.  Someone has dragged a fingernail, or
+something sharper, down the plaster beside the door, cutting a
+line from shoulder to floor.
 ~
 22 0 0
 D2
 ~
-door~
+door
+~
 1 0 2252
 S
 #2269
-Test room~
-exits work
+A Hidden Landing~
+     The spiral stair from below comes up into a small landing
+behind the wall of the audience chamber, ending at a panel that
+swings aside on pivots of leather.  From here the chamber beyond
+may be watched unseen: the dais, the throne, and the back of
+whoever sits in it.  The panel is worn glossy where hands have
+rested against it.
 ~
 22 0 0
 D4
 ~
 ~
 0 0 2226
+D5
+   A narrow spiral stair descends into the dark.
+~
+
+~
+0 0 2238
 S
 #2270
 In a classroom~
-You are in an unfinished room.
+     A schoolroom of the old family, kept as it was left.  Small
+desks of black oak stand in two rows, and one slate still rests
+on its desk with a sum half-worked in chalk.  A globe of the world
+stands in its brass ring by the window, and the tutor's cane lies
+across the master's desk.
 ~
 22 0 0
 D2
 ~
-door~
+door
+~
 1 0 2229
 S
 #2273
