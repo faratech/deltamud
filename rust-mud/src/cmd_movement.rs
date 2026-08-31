@@ -191,7 +191,7 @@ pub fn perform_move(g: &mut GameState, ch: CharId, dir: i32, need_specials_check
 /// do_simple_move: assumes the direction exists and is open. Charges movement
 /// by sector loss, applies the leave/arrive broadcasts (suppressed by sneak),
 /// relocates the char, and shows the new room. Returns true on success.
-fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check: bool) -> bool {
+pub(crate) fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check: bool) -> bool {
     let rnum = match g.get_char(ch).and_then(|c| c.in_room) {
         Some(r) => r,
         None => return false,

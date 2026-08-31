@@ -130,7 +130,7 @@ pub fn find_first_step(g: &GameState, src: RoomRnum, target: RoomRnum) -> i32 {
 // somewhere real, is not closed, and does not lead to an impassable map cell.
 // Used by do_track's random-stumble branch.
 // ---------------------------------------------------------------------------
-fn can_go(g: &GameState, ch: CharId, dir: usize) -> bool {
+pub(crate) fn can_go(g: &GameState, ch: CharId, dir: usize) -> bool {
     let rnum = match g.get_char(ch).and_then(|c| c.in_room) {
         Some(r) => r,
         None => return false,

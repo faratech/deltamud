@@ -748,7 +748,14 @@ pub fn do_flee(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
 
     for _ in 0..6 {
         let attempt = g.rng.number(0, (NUM_OF_DIRS - 1) as i32) as usize;
-        // CAN_GO(ch, attempt) && destination not a DEATH room.
+        // C act.offensive.c:383-385: candidate directions are gated on
+        // CAN_GO (utils.h:486-489: exit exists, resolved, NOT closed, and
+        // not an impassible map cell) and the destination is not a DEATH
+        // room. The port skipped the CAN_GO half, so players and pets fled
+        // through closed doors (#105).
+        if !crate::graph::can_go(g, ch, attempt) {
+            continue;
+        }
         let rnum = match g.get_char(ch).and_then(|c| c.in_room) {
             Some(r) => r,
             None => return,
@@ -773,7 +780,10 @@ pub fn do_flee(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
             ActArg::None,
             To::Room,
         );
-        if flee_simple_move(g, ch, attempt) {
+        // C act.offensive.c:388 calls do_simple_move(ch, attempt, TRUE), so
+        // fleeing pays movement points, respects chained/sneak/spec/DG gates
+        // and can land you in a death trap exactly like a normal move (#127).
+        if crate::cmd_movement::do_simple_move(g, ch, attempt, true) {
             g.send_to_char(ch, "You flee head over heels.\r\n");
             if was_fighting.is_some() && !is_npc(g, ch) && get_level(g, ch) >= minlevel {
                 if let Some(wf) = was_fighting {
@@ -809,46 +819,7 @@ pub fn do_flee(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
     g.send_to_char(ch, "PANIC!  You couldn't escape!\r\n");
 }
 
-/// Faithful port of the success path of do_simple_move(ch, dir, TRUE) that
-/// do_flee relies on: leave-broadcast, relocate, arrival-broadcast, then show
-/// the new room. cmd_movement::do_simple_move is private, so this reproduces
-/// its messages (without dragging followers, matching C's flee, which calls
-/// do_simple_move directly rather than perform_move).
-fn flee_simple_move(g: &mut GameState, ch: CharId, dir: usize) -> bool {
-    let rnum = match g.get_char(ch).and_then(|c| c.in_room) {
-        Some(r) => r,
-        None => return false,
-    };
-    let to_rnum = match g.room(rnum).exits[dir]
-        .as_ref()
-        .and_then(|e| g.real_room(e.to_room))
-    {
-        Some(r) => r,
-        None => return false,
-    };
-    stop_fighting(g, ch);
-    let leave = format!("$n leaves {}.", DIR_NAMES[dir]);
-    act(g, &leave, true, ch, None, ActArg::None, To::Room);
-    g.char_from_room(ch);
-    g.char_to_room(ch, to_rnum);
-    let arrive = format!("$n arrives from {}.", arrival_from(dir));
-    act(g, &arrive, true, ch, None, ActArg::None, To::Room);
-    if g.get_char(ch).and_then(|c| c.desc).is_some() {
-        crate::commands::look_at_room(g, ch, false);
-    }
-    true
-}
 
-/// arrival_from(dir) (mirrors cmd_movement's private helper).
-fn arrival_from(dir: usize) -> String {
-    if dir == UP {
-        "below".to_string()
-    } else if dir == DOWN {
-        "above".to_string()
-    } else {
-        format!("the {}", DIR_NAMES[REV_DIR[dir]])
-    }
-}
 
 // ===========================================================================
 // CHAIN FOOTING
