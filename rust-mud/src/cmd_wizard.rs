@@ -2034,6 +2034,15 @@ pub fn do_stat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 // ===========================================================================
 // do_shutdown
 // ===========================================================================
+/// utils.c:333 touch(): create an empty control file for the autorun
+/// supervisor (#211/#199).
+fn write_control_file(path: &str) {
+    if let Ok(mut f) = std::fs::File::create(path) {
+        use std::io::Write;
+        let _ = f.write_all(b"");
+    }
+}
+
 pub fn do_shutdown(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
     if subcmd != SCMD_SHUTDOWN {
         g.send_to_char(ch, "If you want to shut something down, say so!\r\n");
@@ -2055,18 +2064,26 @@ pub fn do_shutdown(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
             g,
             "&m[&YINFO&m]&n Rebooting.. come back in a minute or two.\r\n",
         );
+        // C act.wizard.c:1212: touch(FASTBOOT_FILE) - the autorun wrapper
+        // distinguishes reboot/stop/pause by these control files (#211).
+        write_control_file("lib/etc/.fastboot");
     } else if option.eq_ignore_ascii_case("now") {
         log_line(g, &format!("(GC) Shutdown NOW by {}.", cname));
         send_to_all(
             g,
             "&m[&YINFO&m]&n Rebooting.. come back in a minute or two.\r\n",
         );
+        write_control_file("lib/etc/.fastboot");
     } else if option.eq_ignore_ascii_case("die") {
         log_line(g, &format!("(GC) Shutdown by {}.", cname));
         send_to_all(g, "&m[&YINFO&m]&n Shutting down for maintenance.\r\n");
+        // C act.wizard.c:1230: touch(KILLSCRIPT_FILE).
+        write_control_file("lib/etc/.killscript");
     } else if option.eq_ignore_ascii_case("pause") {
         log_line(g, &format!("(GC) Shutdown by {}.", cname));
         send_to_all(g, "&m[&YINFO&m]&n Shutting down for maintenance.\r\n");
+        // C act.wizard.c:1238: touch(PAUSE_FILE).
+        write_control_file("lib/etc/pause");
     } else {
         g.shutdown_requested = false; // unknown option: do not halt
         g.send_to_char(ch, "Unknown shutdown option.\r\n");
