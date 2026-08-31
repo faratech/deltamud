@@ -81,6 +81,10 @@ const CONT_CLOSED: i32 = 1 << 2;
 // EX_HIDDEN (structs.h) — not surfaced in room.rs.
 const EX_HIDDEN: i32 = 1 << 4;
 
+// PLR_MAILING / PLR_MBUILDER (structs.h) — not in flags.rs.
+const PLR_MAILING: i64 = 1 << 5;
+const PLR_MBUILDER: i64 = 1 << 18;
+
 // Special level constants used by look_at_char / do_status.
 const LVL_HERO: u8 = 100;
 const LVL_DEMIGOD: u8 = 102;
@@ -722,12 +726,14 @@ fn list_all_char(g: &GameState, i: CharId, ch: CharId) -> String {
                     }
                 }
                 // C act.informative.c:383: NPC long descriptions render in
-                // yellow (CCYEL) (#330).
+                // yellow (CCYEL) (#330). No colour reset is appended: C sends
+                // only CCYEL and then the glow lines, so the glow text stays a
+                // *suffix* of the plain line - which list_char_to_char's
+                // strncmp stacking depends on (#342).
                 buf.push_str("&Y");
                 buf.push_str(long);
                 // sanctuary / convergence / autus / blind suffixes
                 push_aff_glows(&mut buf, c, hssh(c.player.sex));
-                buf.push_str("&n");
                 return buf;
             }
         }
@@ -872,7 +878,13 @@ fn list_char_to_char(g: &mut GameState, list: &[CharId], ch: CharId) {
         if line.is_empty() {
             continue;
         }
-        if let Some(slot) = lines.iter_mut().find(|(s, _)| *s == line) {
+        // C act.informative.c:553-561 stacks on a *prefix* match
+        // (!strncmp(line, lines[j], strlen(line))), so identical mobs that
+        // differ only by a trailing affect glow line still stack (#342).
+        let slot = lines
+            .iter_mut()
+            .find(|(s, _)| line.len() <= s.len() && s.starts_with(&line));
+        if let Some(slot) = slot {
             slot.1 += 1;
         } else {
             lines.push((line, 1));
@@ -937,6 +949,10 @@ fn do_auto_exits(g: &mut GameState, ch: CharId) {
         if g.real_room(exit.to_room).is_none() {
             continue;
         }
+        // C act.informative.c:645: hidden doors are invisible below LVL_IMMORT.
+        if exit.exit_info & EX_HIDDEN != 0 && !imm {
+            continue;
+        }
         let dchar = DIR_NAMES[door].chars().next().unwrap_or('?');
         if exit.exit_info & EX_CLOSED != 0 {
             buf.push(dchar);
@@ -946,8 +962,19 @@ fn do_auto_exits(g: &mut GameState, ch: CharId) {
             buf.push(' ');
         }
     }
+    // C act.informative.c:651-653: the room's special exit keyword is appended
+    // to the auto-exit line unless it is hidden from the viewer's level.
+    if let Some(spec) = g.room(rnum).special_exit.clone() {
+        if spec.ex_name.is_some() && (spec.exit_info & EX_HIDDEN == 0 || imm) {
+            if let Some(kw) = spec.keyword.as_deref() {
+                if !kw.is_empty() {
+                    buf.push_str(kw);
+                    buf.push(' ');
+                }
+            }
+        }
+    }
     let body = if buf.is_empty() { "None! " } else { &buf };
-    let _ = imm;
     g.send_to_char(ch, &format!("&C[ Exits: {}]&n\r\n", body));
 }
 
@@ -1640,6 +1667,15 @@ pub fn do_exits(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
     } else {
         g.send_to_char(ch, " None.\r\n");
     }
+
+    // Special exits in this room? hoy hoy! - Mulder (act.informative.c:724-731).
+    if let Some(spec) = g.room(rnum).special_exit.clone() {
+        if spec.keyword.is_some() && (spec.exit_info & EX_HIDDEN == 0 || imm) {
+            g.send_to_char(ch, "&CSpecial exits:&n\r\n");
+            let kw = spec.keyword.as_deref().unwrap_or("");
+            g.send_to_char(ch, &format!("&Y{:<5} &R-&n Special Exit\r\n", kw));
+        }
+    }
 }
 
 pub fn do_gold(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
@@ -1684,8 +1720,11 @@ pub fn do_mcheck(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     };
     let jurisdicted = {
         let r = g.room(rnum);
+        // IS_JURISDICTED (utils.h:236-237): SECT_CITY || SECT_INSIDE. The
+        // ROOM_INDOORS variant at 232-233 is commented out in the C source,
+        // so an indoor room outside a city is *not* jurdicted (#340).
         r.sector_type == crate::room::SectorType::City
-            || r.room_flags.contains(crate::room::RoomFlags::INDOORS)
+            || r.sector_type == crate::room::SectorType::Inside
     };
     if jurisdicted {
         g.send_to_char(ch, "This area is protected under jurisdiction.\r\n");
@@ -1862,6 +1901,10 @@ pub fn do_status(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         "&GAge       :&n {} years, {} months, {} days, {} hours old.\r\n",
         years, months, days, hours
     ));
+    // C act.informative.c:1328-1329: age.month == 0 && age.day == 0.
+    if months == 0 && days == 0 {
+        buf.push_str("&GBirthday  :&w It's your birthday today. Happy Birthday!&n\r\n");
+    }
 
     let played = c.player.time_played.max(0);
     let play_days = played / 86400;
@@ -2457,7 +2500,12 @@ pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         } else if c.affect_flags & AFF_INVISIBLE != 0 {
             line.push_str(" (invis)");
         }
-        if c.act_flags & PLR_WRITING != 0 {
+        // C act.informative.c:1899-1904. (The middle arm, STATE(d) in the OLC
+        // range, cats onto `buf` instead of `buf2` in the C source and so
+        // produces no output - the "(OLC)" tag never reaches the player.)
+        if c.act_flags & PLR_MAILING != 0 {
+            line.push_str(" (mailing)");
+        } else if c.act_flags & PLR_WRITING != 0 {
             line.push_str(" (writing)");
         }
         if c.prf_flags & PRF_AFK != 0 {
@@ -2506,6 +2554,16 @@ pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
                 }
             }
         }
+        // C act.informative.c:1934-1952: hardcoded newbie-school rooms
+        // 2200-2216, mortals only.
+        if lvl < LVL_IMMORT {
+            if let Some(r) = c.in_room {
+                let vnum = g.rooms[r].number;
+                if (2200..=2216).contains(&vnum) {
+                    line.push_str(" (In Newbie School)");
+                }
+            }
+        }
         if c.clan > -1 && c.clan_rank > 0 {
             if let Some((clan_name, rank_name)) =
                 crate::clan::clan_display_name_and_rank(c.clan, c.clan_rank)
@@ -2531,12 +2589,14 @@ pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     let wizards = immlist.len();
     let mortals = mortlist.len();
 
+    // C page_string()s each list (act.informative.c:2033/2039) and then a
+    // blank line.
     if wizards > 0 {
         let mut out = String::from(imm_header);
         for (_, l) in immlist.iter().rev() {
             out.push_str(l);
         }
-        g.send_to_char(ch, &out);
+        page_or_send_text(g, ch, &out);
         g.send_to_char(ch, "\r\n");
     }
     if mortals > 0 {
@@ -2544,17 +2604,17 @@ pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         for (_, l) in mortlist.iter().rev() {
             out.push_str(l);
         }
-        g.send_to_char(ch, &out);
+        page_or_send_text(g, ch, &out);
         g.send_to_char(ch, "\r\n");
     }
 
-    let mut summary = String::new();
-    if wizards + mortals == 0 {
-        summary.push_str("No wizards or mortals are currently visible to you.\r\n");
-        g.send_to_char(ch, &summary);
-        return;
-    }
+    // Summary (act.informative.c:2043-2054): the zero-visibility line falls
+    // through into the same buffer as the counts, then the boot-time high is
+    // appended in every case (#333).
     let mut tail = String::new();
+    if wizards + mortals == 0 {
+        tail.push_str("No wizards or mortals are currently visible to you.");
+    }
     if wizards > 0 {
         tail = format!(
             "There {} {} visible immortal{}{}",
@@ -2579,6 +2639,14 @@ pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         );
     }
     tail.push_str("\r\n");
+    if wizards + mortals > g.boot_high {
+        g.boot_high = wizards + mortals;
+    }
+    tail.push_str(&format!(
+        "There is a boot time high of {} player{}.\r\n",
+        g.boot_high,
+        if g.boot_high == 1 { "" } else { "s" }
+    ));
     g.send_to_char(ch, &tail);
 }
 
@@ -2754,8 +2822,10 @@ pub fn do_gen_ps(g: &mut GameState, ch: CharId, _arg: &str, subcmd: i32) {
             g.send_to_char(ch, &format!("{}\r\n", name));
         }
         6 => {
-            // SCMD_VERSION
+            // SCMD_VERSION (act.informative.c:2266-2269): the CircleMUD banner
+            // followed by the DG Scripts version line (#343).
             g.send_to_char(ch, constants::CIRCLEMUD_VERSION);
+            g.send_to_char(ch, constants::DG_SCRIPT_VERSION);
         }
         8 => {
             let body = g.motd.clone();
@@ -3173,16 +3243,38 @@ pub fn do_toggle(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     let lev = color_lev(&c) as usize;
     let color = CTYPES.get(lev).copied().unwrap_or("off");
 
+    // The layout is C's 25-piece format string, one Rust literal per C source
+    // line (concat! keeps the leading spaces that `\` continuations strip), so
+    // the three columns line up byte-for-byte with act.informative.c (#336).
     let buf = format!(
-        "Hit Pnt Display: {:<3}         Brief Mode: {:<3}     Summon Protect: {:<3}\r\n\
-   Move Display: {:<3}       Compact Mode: {:<3}            On Quest: {:<3}\r\n\
-   Mana Display: {:<3}             NoTell: {:<3}        Repeat Comm.: {:<3}\r\n\
- Auto Show Exit: {:<3}               Deaf: {:<3}          Wimp Level: {:<3}\r\n\
- Gossip Channel: {:<3}    Auction Channel: {:<3}       Grats Channel: {:<3}\r\n\
-   Auto Looting: {:<3}     Auto Splitting: {:<3}           Auto Gold: {:<3}\r\n\
-    Exp Display: {:<3}           AFK Mode: {:<3}               NoTic: {:<3}\r\n\
-   Mob Stacking: {:<3}          World Map: {:<3}         Color Level: {:<8}\r\n\
-          Mercy: {:<3}       Advanced Map: {:<3}\r\n",
+        concat!(
+            "Hit Pnt Display: {:<3}    ",
+            "     Brief Mode: {:<3}    ",
+            " Summon Protect: {:<3}\r\n",
+            "   Move Display: {:<3}    ",
+            "   Compact Mode: {:<3}    ",
+            "       On Quest: {:<3}\r\n",
+            "   Mana Display: {:<3}    ",
+            "         NoTell: {:<3}    ",
+            "   Repeat Comm.: {:<3}\r\n",
+            " Auto Show Exit: {:<3}    ",
+            "           Deaf: {:<3}    ",
+            "     Wimp Level: {:<3}\r\n",
+            " Gossip Channel: {:<3}    ",
+            "Auction Channel: {:<3}    ",
+            "  Grats Channel: {:<3}\r\n",
+            "   Auto Looting: {:<3}    ",
+            " Auto Splitting: {:<3}    ",
+            "      Auto Gold: {:<3}\r\n",
+            "    Exp Display: {:<3}    ",
+            "       AFK Mode: {:<3}    ",
+            "          NoTic: {:<3}\r\n",
+            "   Mob Stacking: {:<3}    ",
+            "      World Map: {:<3}    ",
+            "    Color Level: {:<8}\r\n",
+            "          Mercy: {:<3}    ",
+            "   Advanced Map: {:<3}\r\n",
+        ),
         onoff(p & PRF_DISPHP != 0),
         onoff(p & PRF_BRIEF != 0),
         onoff(p & PRF_SUMMONABLE == 0),
@@ -3263,6 +3355,9 @@ pub fn do_commands(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
             )
         })
         .unwrap_or((1, false, [0; 4]));
+    // IS_GOD(ch) (utils.h:560-561): !IS_NPC && any GCMD bitmap set. A granted
+    // god-command bit bypasses the per-command minimum level (#341).
+    let vict_is_god = !vict_npc && vict_gcmds.iter().any(|b| *b != 0);
 
     let mut buf = format!(
         "The following {}{} are available to {}:\r\n",
@@ -3278,7 +3373,10 @@ pub fn do_commands(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
             g.send_to_char(ch, &buf);
             return;
         }
-        let mut names = crate::cmd_social::social_commands_for_level(vict_level);
+        // C's socials share the command loop's level gate, so a god sees them
+        // all: request the list at the top level instead of the char's own.
+        let social_level = if vict_is_god { LVL_IMPL } else { vict_level };
+        let mut names = crate::cmd_social::social_commands_for_level(social_level);
         // C marks the static `insult` command as TYPE_SOCIAL after building the
         // merged command list, so it appears under `socials` and not `commands`.
         names.push("insult".to_string());
@@ -3317,7 +3415,9 @@ pub fn do_commands(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
         if !want_type_ok {
             continue;
         }
-        if vict_level < e.min_level && vict_level < LVL_GOD {
+        // C act.informative.c:2767: skip commands above the character's level
+        // unless IS_GOD(vict) — a granted GCMD bit shows the full list (#341).
+        if vict_level < e.min_level && !vict_is_god {
             continue;
         }
         if vict_npc {
@@ -3348,25 +3448,30 @@ pub fn do_commands(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
 // ---------------------------------------------------------------------------
 
 pub fn do_players(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    // Backed by a SQL query in C (SELECT name,act,level from player_main); the
-    // contract has no DB handle here, so list the currently-loaded players.
+    // C (act.informative.c:2801-2831) walks `SELECT name,act,level from
+    // player_main`, i.e. the whole player base; the boot-loaded player_table
+    // index carries the same name/act/level columns, so offline players are
+    // listed too (#334).
     let mut buf =
         String::from("\r\nKey:\r\n&RDeleted &YImmortal &BBuilder\r\n&GHero    &WMortal\r\n\r\n");
-    let mut names: Vec<(String, u8)> = g
-        .players_by_name
-        .values()
-        .filter_map(|&id| {
-            g.get_char(id)
-                .map(|c| (c.player.name.clone(), c.player.level))
-        })
+    let mut names: Vec<(String, u8, i64)> = g
+        .player_table
+        .iter()
+        .map(|p| (p.name.clone(), p.level, p.act_flags))
         .collect();
     names.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
     let mut count = 0;
-    for (name, level) in names {
-        let color = if level >= LVL_IMMORT {
+    for (name, level, act) in names {
+        // C: PLR_DELETED ? "&R" : level >= LVL_IMMORT ? "&Y" : level == LVL_HERO
+        //    ? "&G" : PLR_MBUILDER ? "&B" : "&W"
+        let color = if act & PLR_DELETED != 0 {
+            "&R"
+        } else if level >= LVL_IMMORT {
             "&Y"
         } else if level == LVL_HERO {
             "&G"
+        } else if act & PLR_MBUILDER != 0 {
+            "&B"
         } else {
             "&W"
         };
@@ -3377,10 +3482,10 @@ pub fn do_players(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
             buf.push_str("\r\n");
         }
     }
-    g.send_to_char(ch, &buf);
+    page_or_send_text(g, ch, &buf);
 }
 
-pub fn do_mudheal(g: &mut GameState, _ch: CharId, _arg: &str, _subcmd: i32) {
+pub fn do_mudheal(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     let players: Vec<CharId> = g.players_by_name.values().copied().collect();
     for p in players {
         if let Some(c) = g.get_char_mut(p) {
@@ -3389,12 +3494,48 @@ pub fn do_mudheal(g: &mut GameState, _ch: CharId, _arg: &str, _subcmd: i32) {
             c.points.move_points = c.points.max_move;
         }
         g.send_to_char(p, "You have been fully healed by the gods!\r\n");
-        // update_pos: a healthy character returns to standing if not fighting.
-        if let Some(c) = g.get_char_mut(p) {
-            if c.position < Position::Stunned && c.points.hit > 0 {
-                c.position = Position::Standing;
-            }
+        update_pos(g, p);
+    }
+    // C act.informative.c:2853-2854: the immortal audit trail.
+    let name = g
+        .get_char(ch)
+        .map(|c| c.get_name().to_string())
+        .unwrap_or_default();
+    let min_level = LVL_GRGOD.max(invis_level(g, ch));
+    crate::syslog::mudlog(
+        g,
+        &format!("(GC) mudheal by {}.", name),
+        crate::syslog::NRM,
+        min_level,
+    );
+}
+
+/// GET_INVIS_LEV(ch) as a Level (0 for mortals/NPCs).
+fn invis_level(g: &GameState, id: CharId) -> u8 {
+    g.get_char(id)
+        .map(|c| if c.is_npc { 0 } else { c.invis_level.clamp(0, 255) as u8 })
+        .unwrap_or(0)
+}
+
+/// update_pos (fight.c): recompute a character's position from HP. Local copy,
+/// as in cmd_create.rs / magic.rs / limits.rs.
+fn update_pos(g: &mut GameState, ch: CharId) {
+    if let Some(c) = g.get_char_mut(ch) {
+        let hp = c.points.hit;
+        if hp > 0 && c.position > Position::Stunned {
+            return;
         }
+        c.position = if hp > 0 {
+            Position::Standing
+        } else if hp <= -11 {
+            Position::Dead
+        } else if hp <= -6 {
+            Position::MortallyWounded
+        } else if hp <= -3 {
+            Position::Incapacitated
+        } else {
+            Position::Stunned
+        };
     }
 }
 
@@ -3492,31 +3633,67 @@ pub fn do_whois(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         g.send_to_char(ch, "Do a whois on which player?\r\n");
         return;
     }
-    // C reads the player file (retrieve_player_entry); the contract only exposes
-    // currently-loaded players, so resolve against those.
-    let victim = g.find_player_by_name(arg);
-    match victim {
-        Some(v) => {
-            let ch_level = g.get_char(ch).map(|c| c.player.level).unwrap_or(1);
-            let c = g.get_char(v).unwrap();
-            if ch_level < LVL_IMMORT && c.player.level >= LVL_IMMORT {
-                g.send_to_char(ch, "Information about immortals is unavailable.\r\n");
+    // C retrieve_player_entry() reads the pfile, so any player - online or not
+    // - is whois-able. The online character carries the full record; for a
+    // logged-off player we render from the boot-loaded player_table index
+    // (name/level/class/last_logon), which has no race column, so the race
+    // degrades to races.c's out-of-range "Undefined" (#345).
+    let online = g.find_player_by_name(arg);
+    let (name, level, race, class, logon) = match online {
+        Some(v) => match g.get_char(v) {
+            Some(c) => (
+                c.player.name.clone(),
+                c.player.level,
+                race_name(c.player.race).to_string(),
+                class_name(c.player.class).to_string(),
+                c.last_logon.timestamp(),
+            ),
+            None => return,
+        },
+        None => match g.player_index(arg).cloned() {
+            Some(p) => (
+                p.name,
+                p.level,
+                crate::races::race_name(-1).to_string(),
+                crate::class::class_name_i(p.class as i32).to_string(),
+                p.last_logon,
+            ),
+            None => {
+                g.send_to_char(ch, "There is no such player.\r\n");
                 return;
             }
-            let name = c.player.name.clone();
-            let level = c.player.level;
-            let race = race_name(c.player.race);
-            let class = class_name(c.player.class);
-            g.send_to_char(
-                ch,
-                &format!(
-                    "{} is a level {}, {} {}.\r\n{} was last on at (unknown)\r\n",
-                    name, level, race, class, name
-                ),
-            );
-        }
-        None => g.send_to_char(ch, "There is no such player.\r\n"),
+        },
+    };
+
+    let ch_level = g.get_char(ch).map(|c| c.player.level).unwrap_or(1);
+    if ch_level < LVL_IMMORT && level >= LVL_IMMORT {
+        g.send_to_char(ch, "Information about immortals is unavailable.\r\n");
+        return;
     }
+    // C (act.informative.c:3107-3109): ctime() already ends in '\n', so the
+    // "last on" line is followed by a blank line.
+    g.send_to_char(
+        ch,
+        &format!(
+            "{} is a level {}, {} {}.\r\n{} was last on at {}\r\n",
+            name,
+            level,
+            race,
+            class,
+            name,
+            ctime_str(logon)
+        ),
+    );
+}
+
+/// ctime(t) (POSIX): "Www Mmm dd hh:mm:ss yyyy\n".
+fn ctime_str(unix: i64) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_opt(unix, 0)
+        .single()
+        .map(|t| format!("{}\n", t.format("%a %b %e %T %Y")))
+        .unwrap_or_else(|| "unknown\n".to_string())
 }
 
 pub fn do_scan(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
@@ -3881,17 +4058,17 @@ mod tests {
     #[test]
     fn do_who_uses_the_c_race_and_class_abbrevs() {
         let mut g = GameState::new(Config::default());
-        let viewer = connected_player(&mut g, ConnId(1), "Watcher", 1);
-        let gob = connected_player(&mut g, ConnId(2), "Snarl", 5);
-        let mage = connected_player(&mut g, ConnId(3), "Spark", 6);
-        let kender = connected_player(&mut g, ConnId(4), "Tassel", 7);
+        let viewer = connected_player(&mut g, ConnId(46), "Watcher", 1);
+        let gob = connected_player(&mut g, ConnId(47), "Snarl", 5);
+        let mage = connected_player(&mut g, ConnId(48), "Spark", 6);
+        let kender = connected_player(&mut g, ConnId(49), "Tassel", 7);
         g.get_char_mut(gob).unwrap().player.race = Race::Goblin;
         g.get_char_mut(mage).unwrap().player.class = Class::MagicUser;
         g.get_char_mut(kender).unwrap().player.race = Race::Kender;
 
         do_who(&mut g, viewer, "", 0);
 
-        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        let out = &g.descriptors.get(&ConnId(46)).unwrap().outbuf;
         assert!(out.contains("Gob"), "goblin race tag missing: {}", out);
         assert!(!out.contains("Dro"), "no drow in the room: {}", out);
         assert!(
@@ -3919,12 +4096,12 @@ mod tests {
     #[test]
     fn do_who_class_filter_uses_c_menu_letters() {
         let mut g = GameState::new(Config::default());
-        let viewer = connected_player(&mut g, ConnId(1), "Seer", 1);
-        let mage = connected_player(&mut g, ConnId(2), "Zap", 4);
-        let warrior = connected_player(&mut g, ConnId(3), "Bash", 5);
-        let thief = connected_player(&mut g, ConnId(4), "Sneak", 6);
-        let cleric = connected_player(&mut g, ConnId(5), "Pray", 7);
-        let artisan = connected_player(&mut g, ConnId(6), "Craft", 8);
+        let viewer = connected_player(&mut g, ConnId(51), "Seer", 1);
+        let mage = connected_player(&mut g, ConnId(52), "Zap", 4);
+        let warrior = connected_player(&mut g, ConnId(53), "Bash", 5);
+        let thief = connected_player(&mut g, ConnId(54), "Sneak", 6);
+        let cleric = connected_player(&mut g, ConnId(55), "Pray", 7);
+        let artisan = connected_player(&mut g, ConnId(56), "Craft", 8);
         g.get_char_mut(mage).unwrap().player.class = Class::MagicUser;
         g.get_char_mut(warrior).unwrap().player.class = Class::Warrior;
         g.get_char_mut(thief).unwrap().player.class = Class::Thief;
@@ -3940,13 +4117,13 @@ mod tests {
             ("e", "Craft", "Pray"),  // Artisan
         ];
         for (letter, hit, miss) in cases {
-            for conn in 1..=6 {
-                g.descriptors
-                    .get_mut(&ConnId(conn))
-                    .map(|d| d.outbuf.clear());
+            for conn in 51..=56 {
+                if let Some(d) = g.descriptors.get_mut(&ConnId(conn)) {
+                    d.outbuf.clear();
+                }
             }
             do_who(&mut g, viewer, &format!("-c {}", letter), 0);
-            let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+            let out = &g.descriptors.get(&ConnId(51)).unwrap().outbuf;
             assert!(out.contains(hit), "who -c {} should match {}: {}", letter, hit, out);
             assert!(
                 !out.contains(miss),
@@ -3956,5 +4133,416 @@ mod tests {
                 out
             );
         }
+    }
+
+    /// #333: 'who' ends with the counts line *and* C's boot-time high line,
+    /// including in the nothing-visible case, and pages the lists.
+    #[test]
+    fn do_who_ends_with_the_boot_high_line() {
+        let mut g = GameState::new(Config::default());
+        let viewer = connected_player(&mut g, ConnId(1), "Loner", 1);
+        let _buddy = connected_player(&mut g, ConnId(2), "Pal", 1);
+
+        do_who(&mut g, viewer, "", 0);
+        let out = out_of(&mut g, ConnId(1));
+        assert!(
+            out.contains("There are 2 visible mortals.\r\nThere is a boot time high of 2 players.\r\n"),
+            "{}",
+            out
+        );
+
+        // Nobody visible ('who -i' with two mortals online): the zero case
+        // still gets the counts line and the boot-time high.
+        g.descriptors.get_mut(&ConnId(1)).unwrap().outbuf.clear();
+        do_who(&mut g, viewer, "-i", 0);
+        let out = out_of(&mut g, ConnId(1));
+        assert!(
+            out.contains(
+                "No wizards or mortals are currently visible to you.\r\nThere is a boot time high of 2 players.\r\n"
+            ),
+            "{}",
+            out
+        );
+    }
+
+    /// #333: a mortal composing mail is tagged " (mailing)" and a mortal in the
+    /// hardcoded newbie-school rooms (2200-2216) gets " (In Newbie School)".
+    #[test]
+    fn do_who_tags_mailing_and_newbie_school() {
+        let mut g = GameState::new(Config::default());
+        let r_jail = g.add_room(Room::new(2200, 0, "Jail".to_string(), "J.".to_string()));
+        let viewer = connected_player(&mut g, ConnId(43), "Watcher", 105);
+        let mailer = connected_player(&mut g, ConnId(44), "Composer", 5);
+        let pupil = connected_player(&mut g, ConnId(45), "Pupil", 5);
+        g.get_char_mut(mailer).unwrap().act_flags |= PLR_MAILING;
+        g.char_to_room(pupil, r_jail);
+
+        do_who(&mut g, viewer, "", 0);
+
+        let out = out_of(&mut g, ConnId(43));
+        assert!(out.contains("(mailing)"), "{}", out);
+        assert!(out.contains("(In Newbie School)"), "{}", out);
+    }
+
+    /// #334: 'players' lists the persisted player base (the boot index), not
+    /// just who is online, with C's Deleted/Builder colour arms, and pages.
+    #[test]
+    fn do_players_lists_offline_rows_with_deleted_and_builder_colours() {
+        let mut g = GameState::new(Config::default());
+        let ch = connected_player(&mut g, ConnId(61), "Admin", 105);
+        g.get_char_mut(ch).unwrap().idnum = 1;
+        g.update_player_index(1, "Admin", 105, 0, "");
+        // Two offline rows: one deleted, one mortal builder.
+        g.update_player_index(2, "Goner", 5, 0, "");
+        g.player_table
+            .iter_mut()
+            .find(|p| p.name == "Goner")
+            .unwrap()
+            .act_flags |= PLR_DELETED;
+        g.update_player_index(3, "Bricklayer", 5, 0, "");
+        g.player_table
+            .iter_mut()
+            .find(|p| p.name == "Bricklayer")
+            .unwrap()
+            .act_flags |= PLR_MBUILDER;
+
+        do_players(&mut g, ch, "", 0);
+
+        let out = out_of(&mut g, ConnId(61));
+        assert!(out.contains("&RGoner"), "deleted row is red: {}", out);
+        assert!(out.contains("&BBricklayer"), "builder row is blue: {}", out);
+        assert!(out.contains("&WAdmin") || out.contains("&YAdmin"), "{}", out);
+    }
+
+    /// #345: whois resolves an offline player from the index and renders C's
+    /// "last on at <ctime()>" line (ctime's trailing newline included).
+    #[test]
+    fn do_whois_resolves_offline_players_from_the_index() {
+        let mut g = GameState::new(Config::default());
+        let ch = connected_player(&mut g, ConnId(1), "Curious", 5);
+        let now = chrono::Utc::now().timestamp();
+        g.update_player_index(7, "Sleeper", 12, now, "example.host");
+
+        do_whois(&mut g, ch, "Sleeper", 0);
+
+        let out = out_of(&mut g, ConnId(1));
+        assert!(
+            out.contains("Sleeper is a level 12,"),
+            "offline player resolves: {}",
+            out
+        );
+        assert!(out.contains("Sleeper was last on at "), "{}", out);
+        assert!(!out.contains("(unknown)"), "{}", out);
+
+        do_whois(&mut g, ch, "Nobody", 0);
+        assert!(
+            out_of(&mut g, ConnId(1)).contains("There is no such player."),
+            "{}",
+            out_of(&mut g, ConnId(1))
+        );
+    }
+
+    /// #346: the birthday line fires when the MUD age has month == 0 && day == 0.
+    #[test]
+    fn do_status_emits_the_birthday_line() {
+        let mut g = GameState::new(Config::default());
+        let ch = connected_player(&mut g, ConnId(1), "Birthday", 10);
+        const SECS_PER_MUD_HOUR: i64 = 75;
+        const SECS_PER_MUD_DAY: i64 = 24 * SECS_PER_MUD_HOUR;
+        const SECS_PER_MUD_YEAR: i64 = 17 * 35 * SECS_PER_MUD_DAY;
+        g.get_char_mut(ch).unwrap().player.time_birth =
+            chrono::Utc::now().timestamp() - SECS_PER_MUD_YEAR;
+
+        do_status(&mut g, ch, "", 0);
+
+        let out = out_of(&mut g, ConnId(1));
+        assert!(
+            out.contains("&GBirthday  :&w It's your birthday today. Happy Birthday!&n"),
+            "{}",
+            out
+        );
+    }
+
+    /// #336: 'toggle' reproduces C's three-column layout byte for byte. The
+    /// expected text is built from C's own 26 format pieces (act.informative.c
+    /// 2594-2627) with the values a fresh character carries.
+    #[test]
+    fn do_toggle_matches_the_c_layout() {
+        let mut g = GameState::new(Config::default());
+        let ch = connected_player(&mut g, ConnId(1), "Toggler", 10);
+
+        do_toggle(&mut g, ch, "", 0);
+
+        let out = out_of(&mut g, ConnId(1));
+        let expected = format!(
+            concat!(
+                "Hit Pnt Display: {}    ",
+                "     Brief Mode: {}    ",
+                " Summon Protect: {}\r\n",
+                "   Move Display: {}    ",
+                "   Compact Mode: {}    ",
+                "       On Quest: {}\r\n",
+                "   Mana Display: {}    ",
+                "         NoTell: {}    ",
+                "   Repeat Comm.: {}\r\n",
+                " Auto Show Exit: {}    ",
+                "           Deaf: {}    ",
+                "     Wimp Level: {}\r\n",
+                " Gossip Channel: {}    ",
+                "Auction Channel: {}    ",
+                "  Grats Channel: {}\r\n",
+                "   Auto Looting: {}    ",
+                " Auto Splitting: {}    ",
+                "      Auto Gold: {}\r\n",
+                "    Exp Display: {}    ",
+                "       AFK Mode: {}    ",
+                "          NoTic: {}\r\n",
+                "   Mob Stacking: {}    ",
+                "      World Map: {}    ",
+                "    Color Level: {}\r\n",
+                "          Mercy: {}    ",
+                "   Advanced Map: {}\r\n",
+            ),
+            // C's %-3s pads to three columns; the values below are a fresh
+            // character's (all preferences clear, wimp 0, colour off).
+            "OFF", "OFF", "ON ", "OFF", "OFF", "NO ", "OFF", "OFF", "YES", "OFF", "NO ", "OFF",
+            "ON ", "ON ", "ON ", "OFF", "OFF", "OFF", "OFF", "OFF", "ON ", "ON ", "ON ",
+            "off     ", "OFF", "OFF",
+        );
+        assert!(
+            out.contains(&expected),
+            "toggle layout differs from C.\nexpected:\n{}\nactual:\n{}",
+            expected,
+            out
+        );
+    }
+
+    /// #340: mcheck follows C's IS_JURISDICTED = SECT_CITY || SECT_INSIDE, so an
+    /// indoor room outside a city is not jurdicted and a city room is.
+    #[test]
+    fn do_mcheck_uses_the_city_or_inside_rule() {
+        let mut g = GameState::new(Config::default());
+        let mut indoors = Room::new(1001, 0, "In".to_string(), "In.".to_string());
+        indoors.sector_type = crate::room::SectorType::Inside;
+        indoors.room_flags |= crate::room::RoomFlags::empty();
+        let r_in = g.add_room(indoors);
+        let mut field = Room::new(1002, 0, "Field".to_string(), "F.".to_string());
+        field.sector_type = crate::room::SectorType::Field;
+        field.room_flags |= crate::room::RoomFlags::INDOORS;
+        let r_field = g.add_room(field);
+
+        let ch = connected_player(&mut g, ConnId(1), "Patrol", 10);
+        g.char_to_room(ch, r_field);
+        do_mcheck(&mut g, ch, "", 0);
+        assert!(
+            out_of(&mut g, ConnId(1))
+                .contains("This area is not under jurisdiction."),
+            "indoor non-city is not jurdicted: {}",
+            out_of(&mut g, ConnId(1))
+        );
+
+        let mut city = Room::new(1003, 0, "City".to_string(), "C.".to_string());
+        city.sector_type = crate::room::SectorType::City;
+        let r_city = g.add_room(city);
+        g.descriptors.get_mut(&ConnId(1)).unwrap().outbuf.clear();
+        g.char_to_room(ch, r_city);
+        do_mcheck(&mut g, ch, "", 0);
+        assert!(
+            out_of(&mut g, ConnId(1))
+                .contains("This area is protected under jurisdiction."),
+            "{}",
+            out_of(&mut g, ConnId(1))
+        );
+        let _ = r_in;
+    }
+
+    /// #341: C's `!IS_GOD(vict)` bypass (act.informative.c:2767) applies to the
+    /// shared command/socials loop, so a mortal granted any GCMD bit sees the
+    /// level-capped socials too ('snowball' is min_level 30 in lib/misc/socials)
+    /// while a plain mortal does not.
+    #[test]
+    fn do_commands_god_bits_bypass_the_level_gate() {
+        crate::cmd_social::boot_socials(Some("../lib/misc/socials"));
+        let mut g = GameState::new(Config::default());
+        let mortal = connected_player(&mut g, ConnId(1), "Plain", 5);
+        let favoured = connected_player(&mut g, ConnId(2), "Favoured", 5);
+        g.get_char_mut(favoured).unwrap().godcmds1 |= 1;
+
+        do_commands(&mut g, mortal, "", 1);
+        let plain = out_of(&mut g, ConnId(1));
+        assert!(plain.contains("accuse"), "{}", plain);
+        assert!(
+            !plain.contains("snowball"),
+            "a plain level-5 mortal sees no level-30 social: {}",
+            plain
+        );
+
+        do_commands(&mut g, favoured, "", 1);
+        let blessed = out_of(&mut g, ConnId(2));
+        assert!(
+            blessed.contains("snowball"),
+            "a granted mortal sees socials above their level: {}",
+            blessed
+        );
+
+        // The 'commands' list itself is unchanged for both (every TYPE_CMD
+        // entry has minimum_level 0 in the C table), i.e. the bypass does not
+        // leak privileged commands into it.
+        g.descriptors.get_mut(&ConnId(1)).unwrap().outbuf.clear();
+        g.descriptors.get_mut(&ConnId(2)).unwrap().outbuf.clear();
+        do_commands(&mut g, mortal, "", 0);
+        let plain_cmds = out_of(&mut g, ConnId(1));
+        do_commands(&mut g, favoured, "", 0);
+        let blessed_cmds = out_of(&mut g, ConnId(2));
+        assert_eq!(
+            plain_cmds, blessed_cmds,
+            "the god-bit bypass must not add wiz commands"
+        );
+        assert!(!plain_cmds.contains("shutdown"));
+    }
+
+    /// #342: identical lines differing only by a trailing affect glow stack,
+    /// matching C's strncmp prefix comparison.
+    #[test]
+    fn list_char_to_char_stacks_on_a_prefix_match() {
+        let mut g = GameState::new(Config::default());
+        let r = g.add_room(Room::new(1001, 0, "R".to_string(), "R.".to_string()));
+        let viewer = connected_player(&mut g, ConnId(1), "Looker", 5);
+        g.char_to_room(viewer, r);
+
+        // Two mobs whose room lines are identical except that one carries the
+        // sanctuary glow (a suffix of the line).
+        let make_guard = |g: &mut GameState, name: &str, conn: ConnId| {
+            let mut mob = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+            mob.is_npc = true;
+            mob.long_desc = Some("the city guard stands here.\r\n".to_string());
+            mob.desc = Some(conn);
+            let id = g.create_char(mob);
+            g.char_to_room(id, r);
+            id
+        };
+        let plain = make_guard(&mut g, "GuardOne", ConnId(2));
+        let glowing = make_guard(&mut g, "GuardTwo", ConnId(3));
+        g.get_char_mut(glowing).unwrap().affect_flags |= AFF_SANCTUARY;
+
+        // C compares each new line against the stored ones with
+        // strncmp(new, stored, strlen(new)), i.e. a later *shorter* line merges
+        // into an earlier longer one - so the glowing guard must be listed
+        // first for the plain line to collapse into it.
+        list_char_to_char(&mut g, &[glowing, plain], viewer);
+
+        let out = out_of(&mut g, ConnId(1));
+        // With C's prefix match both guards share the counted glowing line;
+        // with an exact-match comparison neither stacks and no [ 2] appears.
+        assert!(out.contains("[  2]"), "pair stacked on the prefix: {}", out);
+    }
+
+    /// #343: 'version' appends the DG Scripts version line.
+    #[test]
+    fn do_version_lists_the_dg_scripts_version() {
+        let mut g = GameState::new(Config::default());
+        let ch = connected_player(&mut g, ConnId(1), "Version", 5);
+
+        do_gen_ps(&mut g, ch, "", 6);
+
+        let out = out_of(&mut g, ConnId(1));
+        assert!(
+            out.contains("DG Scripts Version 0.99 Patch Level 5a    8/98\r\n"),
+            "{}",
+            out
+        );
+    }
+
+    /// #344: mudheal restores position via update_pos and mudlogs the GC line.
+    #[test]
+    fn do_mudheal_updates_position_and_mudlogs() {
+        let mut g = GameState::new(Config::default());
+        let god = connected_player(&mut g, ConnId(1), "Healer", 105);
+        let hurt = connected_player(&mut g, ConnId(2), "Hurt", 5);
+        g.get_char_mut(hurt).unwrap().points.hit = 1;
+        g.get_char_mut(hurt).unwrap().position = Position::Stunned;
+
+        do_mudheal(&mut g, god, "", 0);
+
+        let c = g.get_char(hurt).unwrap();
+        assert_eq!(c.position, Position::Standing, "update_pos stands them up");
+        assert_eq!(c.points.hit, c.points.max_hit);
+    }
+
+    /// #332: 'exits'/'autoexits' hide EX_HIDDEN doors from mortals, and both
+    /// list the room's special exit.
+    #[test]
+    fn exits_cover_hidden_doors_and_special_exits() {
+        let mut g = GameState::new(Config::default());
+        let mut here = Room::new(1001, 0, "Here".to_string(), "H.".to_string());
+        here.special_exit = Some(crate::room::SpecialExit {
+            general_description: None,
+            keyword: Some("portal".to_string()),
+            ex_name: Some("a shimmering portal".to_string()),
+            leave_msg: None,
+            exit_info: 0,
+            key: NOTHING,
+            to_room: 1002,
+        });
+        here.exits[NORTH] = Some(Exit {
+            description: None,
+            keyword: None,
+            exit_info: EX_HIDDEN,
+            key: NOTHING,
+            to_room: 1003,
+        });
+        let r_here = g.add_room(here);
+        let mut over = Room::new(1002, 0, "Over".to_string(), "O.".to_string());
+        over.special_exit = Some(crate::room::SpecialExit {
+            general_description: None,
+            keyword: Some("back".to_string()),
+            ex_name: Some("the way back".to_string()),
+            leave_msg: None,
+            exit_info: 0,
+            key: NOTHING,
+            to_room: 1001,
+        });
+        let r_over = g.add_room(over);
+        let mut secret = Room::new(1003, 0, "Secret".to_string(), "S.".to_string());
+        secret.exits[SOUTH] = Some(Exit {
+            description: None,
+            keyword: None,
+            exit_info: 0,
+            key: NOTHING,
+            to_room: 1001,
+        });
+        let r_secret = g.add_room(secret);
+
+        let mortal = connected_player(&mut g, ConnId(1), "Mortal", 5);
+        let imm = connected_player(&mut g, ConnId(2), "Immy", 105);
+
+        g.char_to_room(mortal, r_here);
+        do_exits(&mut g, mortal, "", 0);
+        let out = out_of(&mut g, ConnId(1));
+        assert!(out.contains("&CSpecial exits:&n"), "{}", out);
+        assert!(out.contains("portal"), "{}", out);
+        assert!(!out.contains("Secret"), "hidden door leaks: {}", out);
+
+        // The hidden north is filtered out of the auto-exit line too.
+        do_auto_exits(&mut g, mortal);
+        let out = out_of(&mut g, ConnId(1));
+        assert!(out.contains("[ Exits: portal ]"), "{}", out);
+
+        // The immortal sees the same room's hidden door.
+        g.char_to_room(imm, r_here);
+        do_auto_exits(&mut g, imm);
+        let imm_view = out_of(&mut g, ConnId(2));
+        assert!(imm_view.contains("[ Exits: n portal ]"), "{}", imm_view);
+
+        // From the secret side its exit south is ordinary and shows up.
+        g.char_to_room(mortal, r_secret);
+        do_auto_exits(&mut g, mortal);
+        let mortal_view = out_of(&mut g, ConnId(1));
+        assert!(mortal_view.contains("[ Exits: s ]"), "{}", mortal_view);
+        let _ = r_over;
+    }
+
+    fn out_of(g: &mut GameState, conn: ConnId) -> String {
+        g.descriptors.get(&conn).unwrap().outbuf.clone()
     }
 }

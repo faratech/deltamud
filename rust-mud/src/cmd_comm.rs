@@ -1711,9 +1711,9 @@ mod tests {
         // match, so it resolves to the second matching PC in the other room.
         // A PC-name lookup would answer NOPERSON here.
         for conn in 1..=3 {
-            g.descriptors
-                .get_mut(&ConnId(conn))
-                .map(|d| d.outbuf.clear());
+            if let Some(d) = g.descriptors.get_mut(&ConnId(conn)) {
+                d.outbuf.clear();
+            }
         }
         do_tell(&mut g, god, "2.victim hi", 0);
         assert!(

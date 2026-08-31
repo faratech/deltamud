@@ -126,6 +126,11 @@ pub struct GameState {
     pub pfileclean_requested: bool,
     pub player_save_requests: Vec<CharId>,
 
+    /// do_who's `boot_high` (act.informative.c): the highest simultaneous
+    /// visible-player count seen this boot, reported as "There is a boot time
+    /// high of N players." Updated by do_who as C does; reset on boot.
+    pub boot_high: usize,
+
     next_char_id: u64,
     next_obj_id: u64,
 
@@ -183,6 +188,7 @@ impl GameState {
             deferred_db_ops: Vec::new(),
             pfileclean_requested: false,
             player_save_requests: Vec::new(),
+            boot_high: 0,
             next_char_id: 1,
             next_obj_id: 1,
             rng: Rng::default(),
