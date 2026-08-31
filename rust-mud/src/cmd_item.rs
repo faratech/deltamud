@@ -400,6 +400,10 @@ fn name_to_drinkcon(g: &mut GameState, oid: ObjId, liquid: i32) {
 // ===========================================================================
 
 fn perform_put(g: &mut GameState, ch: CharId, obj: ObjId, cont: ObjId) {
+    // C act.item.c:39: perform_put vetoes on drop_otrigger first (#139).
+    if !crate::dg_triggers::drop_otrigger(g, obj, ch) {
+        return;
+    }
     if obj_weight(g, cont) + obj_weight(g, obj) > obj_val(g, cont, 0) {
         act(
             g,
@@ -682,7 +686,10 @@ fn boxkill(g: &mut GameState, ch: CharId, obj: ObjId) {
 }
 
 fn perform_get_from_container(g: &mut GameState, ch: CharId, obj: ObjId, cont: ObjId, mode: i32) {
-    if mode == FIND_OBJ_INV || can_take_obj(g, ch, obj) {
+    // C act.item.c:223: containers veto via get_otrigger too (#140).
+    if mode == FIND_OBJ_INV
+        || (can_take_obj(g, ch, obj) && crate::dg_triggers::get_otrigger(g, obj, ch))
+    {
         if is_carrying_n(g, ch) >= can_carry_n(g, ch) {
             act(
                 g,
@@ -783,7 +790,9 @@ fn get_from_container(g: &mut GameState, ch: CharId, cont: ObjId, arg: &str, mod
 }
 
 fn perform_get_from_room(g: &mut GameState, ch: CharId, obj: ObjId) -> bool {
-    if can_take_obj(g, ch, obj) {
+    // C act.item.c:302: `if (can_take_obj(ch, obj) && get_otrigger(obj, ch))`
+    // - an OTRIG_GET script can veto the pickup (issue #140/#C3).
+    if can_take_obj(g, ch, obj) && crate::dg_triggers::get_otrigger(g, obj, ch) {
         g.obj_from_anywhere(obj);
         g.obj_to_char(obj, ch);
         act(
@@ -994,6 +1003,16 @@ fn perform_drop_gold(g: &mut GameState, ch: CharId, amount: i32, mode: i32, rdr:
         g.send_to_char(ch, "Sorry. You can't do that when you're in jail.\r\n");
         return;
     }
+    // C act.item.c:488-493: drop_wtrigger may veto a gold drop; the veto
+    // extracts the minted money object and stops (#139).
+    if amount > 0 && mode == SCMD_DROP {
+        let money = crate::combat::create_money(g, amount);
+        if !crate::dg_triggers::drop_wtrigger(g, money, ch) {
+            g.extract_obj(money);
+            return;
+        }
+        g.extract_obj(money);
+    }
 
     let gold = g.get_char(ch).map(|c| c.points.gold).unwrap_or(0);
     if amount <= 0 {
@@ -1098,6 +1117,14 @@ fn perform_drop(
         return 0;
     }
 
+    // C act.item.c:534-536: drop_otrigger vetoes any drop/put-away; for a
+    // real SCMD_DROP, drop_wtrigger (a world drop trigger) vetoes too (#139).
+    if !crate::dg_triggers::drop_otrigger(g, obj, ch) {
+        return 0;
+    }
+    if mode == SCMD_DROP && !crate::dg_triggers::drop_wtrigger(g, obj, ch) {
+        return 0;
+    }
     if obj_stat(g, obj, ITEM_NODROP) {
         let line = format!("You can't {} $p, it must be CURSED!", sname);
         act(g, &line, false, ch, Some(obj), ActArg::None, To::Char);
@@ -1358,6 +1385,13 @@ fn perform_give(g: &mut GameState, ch: CharId, vict: CharId, obj: ObjId) {
             );
             return;
         }
+        // C act.item.c:753: give_otrigger / receive_mtrigger gate the gift
+        // before the transfer (#141).
+        if !crate::dg_triggers::give_otrigger(g, obj, ch, vict)
+            || !crate::dg_triggers::receive_mtrigger(g, vict, ch, obj)
+        {
+            return;
+        }
         if obj_weight(g, obj) + is_carrying_w(g, vict) > can_carry_w(g, vict) {
             act(
                 g,
@@ -1478,6 +1512,8 @@ fn perform_give_gold(g: &mut GameState, ch: CharId, vict: CharId, amount: i32) {
     act(g, &line, false, ch, None, ActArg::Char(vict), To::Vict);
     let line = format!("$n gives {} to $N.", money_desc(amount));
     act(g, &line, true, ch, None, ActArg::Char(vict), To::NotVict);
+    // C act.item.c:823: MTRIG_BRIBE fires after the gold changes hands (#142).
+    crate::dg_triggers::bribe_mtrigger(g, vict, ch, amount);
 
     if is_npc || level < LVL_GOD {
         watchdog_mudlog(
@@ -2730,6 +2766,10 @@ fn perform_remove(g: &mut GameState, ch: CharId, pos: usize) {
         Some(o) => o,
         None => return,
     };
+    // C act.item.c:1712: remove_otrigger can veto taking an item off (#143).
+    if !crate::dg_triggers::remove_otrigger(g, obj, ch) {
+        return;
+    }
     if is_carrying_n(g, ch) >= can_carry_n(g, ch) {
         act(
             g,
