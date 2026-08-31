@@ -648,7 +648,7 @@ pub fn spell_charm(
         g.send_to_char(ch, "You can't have any followers of your own!\r\n");
     } else if is_affected(g, victim, AFF_CHARM) || level < get_level(g, victim) {
         g.send_to_char(ch, "You fail.\r\n");
-    } else if !PK_ALLOWED && !is_npc(g, victim) {
+    } else if !g.pk_allowed && !is_npc(g, victim) {
         g.send_to_char(ch, "You fail - shouldn't be doing it anyway.\r\n");
     } else if circle_follow(g, victim, ch) {
         g.send_to_char(ch, "Sorry, following in circles can not be allowed.\r\n");
@@ -1654,8 +1654,6 @@ fn stop_follower(g: &mut GameState, ch: CharId) {
         c.master = None;
     }
 }
-
-const PK_ALLOWED: bool = false;
 
 #[cfg(test)]
 mod tests {

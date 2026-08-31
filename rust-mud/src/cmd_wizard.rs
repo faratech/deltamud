@@ -171,22 +171,83 @@ fn sprinttype(idx: i32, table: &[&str]) -> String {
     "UNDEFINED".to_string()
 }
 
-/// sprintbit(): render a bit-flag long against a name table (CircleMUD).
+/// sprintbit() (utils.c:402-423): render a bit-flag long against a name table.
+/// C walks the vector right until it is exhausted (no 32-bit cap) while the
+/// name index `nr` freezes on the "\n" terminator, so every set bit above the
+/// table prints "UNDEFINED ". A negative vector is "<INVALID BITVECTOR>" and
+/// nothing set leaves "NOBITS ".
 fn sprintbit(bits: i64, table: &[&str]) -> String {
+    if bits < 0 {
+        return "<INVALID BITVECTOR>".to_string();
+    }
     let mut out = String::new();
-    for (i, name) in table.iter().enumerate() {
-        if *name == "\n" {
-            break;
+    let mut nr = 0usize;
+    let mut v = bits;
+    while v != 0 {
+        // C tests *names[nr] != '\n' — the first character, not the whole entry.
+        let known = nr < table.len() && !table[nr].starts_with('\n');
+        if (v & 1) != 0 {
+            if known {
+                out.push_str(table[nr]);
+                out.push(' ');
+            } else {
+                out.push_str("UNDEFINED ");
+            }
         }
-        if i < 32 && (bits & (1i64 << i)) != 0 {
-            out.push_str(name);
-            out.push(' ');
+        if known {
+            nr += 1;
         }
+        v >>= 1;
     }
     if out.is_empty() {
         out.push_str("NOBITS ");
     }
     out
+}
+
+/// The C `CON_*` ordinal of a descriptor state, for
+/// `sprinttype(d->connected, connected_types, …)` (act.wizard.c:912-914). The
+/// ordinals are the contract — `constants::CONNECTED_TYPES` is laid out in
+/// structs.h order (CON_PLAYING 0 … CON_QDEITY 31).
+fn conn_state_index(state: ConState) -> i32 {
+    match state {
+        ConState::Playing => 0,         // CON_PLAYING
+        ConState::Close => 1,           // CON_CLOSE
+        ConState::GetName => 2,         // CON_GET_NAME
+        ConState::ConfirmName => 3,     // CON_NAME_CNFRM
+        ConState::GetOldPassword => 4,  // CON_PASSWORD
+        ConState::GetNewPassword => 5,  // CON_NEWPASSWD
+        ConState::ConfirmPassword => 6, // CON_CNFPASSWD
+        ConState::GetSex => 7,          // CON_QSEX
+        ConState::GetClass => 8,        // CON_QCLASS
+        ConState::ReadMotd => 9,        // CON_RMOTD
+        ConState::Menu => 10,           // CON_MENU
+        ConState::GetRace => 23,        // CON_QRACE
+        ConState::RollStats => 24,      // CON_QROLLSTATS
+        ConState::GetHometown => 25,    // CON_QHOMETOWN
+        ConState::GetNewbie => 27,      // CON_NEWBIE
+        ConState::GetDeity => 31,       // CON_QDEITY
+        ConState::ExDesc => 11,         // CON_EXDESC
+        ConState::ChPwdGetOld => 12,    // CON_CHPWD_GETOLD
+        ConState::ChPwdGetNew => 13,    // CON_CHPWD_GETNEW
+        ConState::ChPwdVerify => 14,    // CON_CHPWD_VRFY
+        ConState::DelCnf1 => 15,        // CON_DELCNF1
+        ConState::DelCnf2 => 16,        // CON_DELCNF2
+        ConState::QAnsi => 22,          // CON_QANSI
+    }
+}
+
+/// IS_GOD() (utils.h:560): `!IS_NPC(ch) && (godcmds1 || godcmds2 || godcmds3
+/// || godcmds4)` — a granted-command test, NOT a level test. A level-100
+/// mortal handed bits via `set cmdgeneral on` is a god; a level-103 immortal
+/// with no bits is not. (shop.rs carries the same corrected helper for its own
+/// gates.)
+pub fn is_god(g: &GameState, id: CharId) -> bool {
+    g.get_char(id)
+        .map(|c| {
+            !c.is_npc && (c.godcmds1 != 0 || c.godcmds2 != 0 || c.godcmds3 != 0 || c.godcmds4 != 0)
+        })
+        .unwrap_or(false)
 }
 
 /// Numeric `is_number` (CircleMUD): non-empty and all-digit (optionally signed).
@@ -601,9 +662,14 @@ fn find_target_room(g: &mut GameState, ch: CharId, rawroomstr: &str) -> Option<R
         return None;
     }
 
-    // cdsr(): named map-coordinate room shortcut — not modelled (returns -1).
+    // C act.wizard.c:206: cdsr() (maputils.c:1030) is tried FIRST — it resolves
+    // the surface-map "<x>x<y>" coordinate form, and (its trailing else) any
+    // bare numeric vnum. It yields NOWHERE on a malformed string or an
+    // out-of-range coordinate, letting the digit/mob/obj arms below run.
     let location: RoomRnum;
-    if roomstr
+    if let Some(r) = crate::dg_wldcmd::cdsr(g, &roomstr) {
+        location = r;
+    } else if roomstr
         .chars()
         .next()
         .map(|c| c.is_ascii_digit())
@@ -690,6 +756,8 @@ pub fn do_echo(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
         .get_char(ch)
         .map(|c| c.prf_flags & PRF_NOREPEAT != 0)
         .unwrap_or(false);
+    // Snapshot the sender's PRF2 bits for the intangible filter below.
+    let ch_prf2 = g.get_char(ch).map(|c| c.prf2_flags).unwrap_or(0);
     for vict in people {
         if vict == ch {
             if ch_norepeat {
@@ -713,6 +781,20 @@ pub fn do_echo(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
             continue;
         }
         if subcmd == SCMD_EMOTE {
+            // C act.wizard.c:149: an intangible sender who is not building
+            // hides the emote from mortal recipients who are not themselves
+            // intangible.
+            let (vict_prf2, vict_level) = g
+                .get_char(vict)
+                .map(|c| (c.prf2_flags, c.player.level))
+                .unwrap_or((0, 0));
+            if (ch_prf2 & PRF2_INTANGIBLE) != 0
+                && (ch_prf2 & PRF2_MBUILDING) == 0
+                && (vict_prf2 & PRF2_INTANGIBLE) == 0
+                && vict_level < LVL_IMMORT
+            {
+                continue;
+            }
             // PERS(ch, vict): visible name else "someone".
             let pers = if g.can_see(vict, ch) {
                 name.clone()
@@ -1100,7 +1182,16 @@ fn do_stat_room(g: &mut GameState, ch: CharId) {
         ),
     );
     let flagstr = sprintbit(flags, constants::ROOM_BITS);
-    g.send_to_char(ch, &format!("SpecProc: {}, Flags: {}\r\n", "None", flagstr));
+    // C act.wizard.c:473-474: (rm->func == NULL) ? "None" : "Exists".
+    let room_spec = crate::spec_assign::get_room_spec(room_vnum).is_some();
+    g.send_to_char(
+        ch,
+        &format!(
+            "SpecProc: {}, Flags: {}\r\n",
+            if room_spec { "Exists" } else { "None" },
+            flagstr
+        ),
+    );
 
     g.send_to_char(ch, "Description:\r\n");
     if has_desc {
@@ -1317,7 +1408,9 @@ fn do_stat_object(g: &mut GameState, ch: CharId, j: ObjId) {
         &format!("Name: '&y{}&n', Aliases: {}\r\n", short, namelist),
     );
     let typestr = sprinttype(otype, constants::ITEM_TYPES);
-    let rnum = "None"; // obj_index rnum/specproc not surfaced
+    // C act.wizard.c:605-610: obj_index[GET_OBJ_RNUM(j)].func ? "Exists" : "None".
+    let obj_spec = crate::spec_assign::get_obj_spec(vnum).is_some();
+    let rnum = if obj_spec { "Exists" } else { "None" };
     g.send_to_char(
         ch,
         &format!(
@@ -1534,7 +1627,8 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
     let mob_vnum = kc.nr;
     let title = kc.player.title.clone();
     let trust = kc.trust;
-    let is_god = !npc && kc.player.level >= LVL_GOD;
+    // C act.wizard.c:828 prints IS_GOD(k) — the granted-command bits.
+    let gcmd = is_god(g, k);
     let long_descr = kc.long_desc.clone();
     let class = kc.player.class as i32;
     let klevel = kc.player.level;
@@ -1560,6 +1654,11 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
     let followers = kc.followers.clone();
     let affected = kc.affected.clone();
     let connected = kc.desc.is_some();
+    // C sprinttype(k->desc->connected, connected_types) — the real state.
+    let conn_state = kc
+        .desc
+        .and_then(|conn| g.descriptors.get(&conn))
+        .map(|d| d.state);
     let hometown = kc.player.hometown;
     let talks = kc.talks;
     let clan = kc.clan;
@@ -1583,6 +1682,37 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
         .get(&mob_vnum)
         .map(|m| m.damsizedice)
         .unwrap_or(0);
+    // C act.wizard.c:1000-1002: mob_index[GET_MOB_RNUM(k)].func ? "Exists" : "None".
+    let mob_spec = crate::spec_assign::get_mob_spec(mob_vnum).is_some();
+    // C act.wizard.c:908: attack_hit_text[k->mob_specials.attack_type].singular.
+    let attack_type = g
+        .mob_protos
+        .get(&mob_vnum)
+        .map(|m| m.attack_type)
+        .unwrap_or(0);
+    let attack_word = constants::ATTACK_HIT_TEXT
+        .get(attack_type.clamp(0, constants::ATTACK_HIT_TEXT.len() as i32 - 1) as usize)
+        .map(|(s, _)| (*s).to_string())
+        .unwrap_or_else(|| "hit".to_string());
+    // C act.wizard.c:847-850 / 870-873 / 887-890: MaxWeapon, practices-per,
+    // and the hit/mana/move regen rates.
+    let maxweapon = constants::LVL_MAXDMG_WEAPON
+        .get(klevel as usize)
+        .copied()
+        .unwrap_or(0);
+    let learn_per = constants::INT_APP
+        .get((abils.intel as i32).clamp(0, constants::INT_APP.len() as i32 - 1) as usize)
+        .map(|a| a.learn)
+        .unwrap_or(0);
+    let nstl = constants::WIS_APP
+        .get((abils.wis as i32).clamp(0, constants::WIS_APP.len() as i32 - 1) as usize)
+        .map(|a| a.bonus)
+        .unwrap_or(0);
+    let (hit_regen, mana_regen, move_regen) = (
+        crate::limits::hit_gain(g, k),
+        crate::limits::mana_gain(g, k),
+        crate::limits::move_gain(g, k),
+    );
 
     let sexstr = match sex {
         Gender::Neutral => "NEUTRAL-SEX",
@@ -1622,7 +1752,7 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
             "Title: {}     Trust: {}     God-Commands: {}",
             title.clone().unwrap_or_else(|| "<None>".to_string()),
             trust,
-            if is_god { "&YYes&n\r\n" } else { "No\r\n" }
+            if gcmd { "&YYes&n\r\n" } else { "No\r\n" }
         ),
     );
 
@@ -1650,7 +1780,7 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
     let lvl_line = if klevel < LVL_IMMORT {
         format!(
             "{}{}, Lev: [&y{:2}&n], XP: [&y{:7}&n], Align: [{:4}], MaxWeapon: [{}], Cstat: [{}]\r\n",
-            class_label, classstr, klevel, exp, align, 0, citizen + 1
+            class_label, classstr, klevel, exp, align, maxweapon, citizen + 1
         )
     } else {
         format!(
@@ -1686,7 +1816,14 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
             ch,
             &format!(
                 "Hometown: [{}], Speaks: [{}/{}/{}], (STL[{}]/per[{}]/NSTL[{}]) Clan: [{}]\r\n",
-                hometown, talks[0] as i32, talks[1] as i32, talks[2] as i32, practices, 0, 0, clan
+                hometown,
+                talks[0] as i32,
+                talks[1] as i32,
+                talks[2] as i32,
+                practices,
+                learn_per,
+                nstl,
+                clan
             ),
         );
     }
@@ -1705,13 +1842,13 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
             "Hit p.:[&g{}/{}+{}&n]  Mana p.:[&g{}/{}+{}&n]  Move p.:[&g{}/{}+{}&n]\r\n",
             points.hit,
             points.max_hit,
-            0,
+            hit_regen,
             points.mana,
             points.max_mana,
-            0,
+            mana_regen,
             points.move_points,
             points.max_move,
-            0
+            move_regen
         ),
     );
     g.send_to_char(
@@ -1741,10 +1878,13 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
         }
     );
     if is_mob {
-        buf.push_str(", Attack type: hit"); // attack_hit_text table not surfaced
+        buf.push_str(&format!(", Attack type: {}", attack_word));
     }
-    if connected {
-        buf.push_str(", Connected: Playing");
+    if let Some(st) = conn_state {
+        buf.push_str(&format!(
+            ", Connected: {}",
+            sprinttype(conn_state_index(st), constants::CONNECTED_TYPES)
+        ));
     }
     if !npc {
         // Arena status block (GET_ARENASTAT), matching act.wizard.c do_stat_character.
@@ -1842,7 +1982,9 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
             ch,
             &format!(
                 "Mob Spec-Proc: {}, NPC Bare Hand Dam: {}d{}\r\n",
-                "None", damnodice, damsizedice
+                if mob_spec { "Exists" } else { "None" },
+                damnodice,
+                damsizedice
             ),
         );
     }
@@ -1975,10 +2117,33 @@ pub fn do_stat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         // of re-entering this `file` branch and deferring forever.
         if rest.is_empty() {
             g.send_to_char(ch, "Stats on which player?\r\n");
-        } else if try_defer_offline(g, ch, &rest, &format!("stat player {}", rest)) {
-            // deferred to the async bridge
         } else {
-            g.send_to_char(ch, "There is no such player.\r\n");
+            // C act.wizard.c:1140-1143: retrieve_player_entry(), then refuse a
+            // target whose level exceeds the requester's — "Sorry, you can't
+            // do that." — before any record is rendered. The target's level
+            // comes from the live character when online, else the persistent
+            // player index (C's player_table, which retrieve_player_entry
+            // walks).
+            let online = get_player_vis(g, ch, &rest);
+            let target_level = match online {
+                Some(v) => Some(level_of(g, v)),
+                None => g.player_index(&rest).map(|p| p.level),
+            };
+            match target_level {
+                None => g.send_to_char(ch, "There is no such player.\r\n"),
+                Some(lvl) if lvl > level_of(g, ch) => {
+                    g.send_to_char(ch, "Sorry, you can't do that.\r\n")
+                }
+                Some(_) => match online {
+                    Some(v) => do_stat_character(g, ch, v),
+                    // Offline: the async bridge loads the record, replays
+                    // `stat player <name>` so the online path renders it, then
+                    // saves + extracts (C retrieve_player_entry/insert_player_entry).
+                    None => {
+                        try_defer_offline(g, ch, &rest, &format!("stat player {}", rest));
+                    }
+                },
+            }
         }
     } else if is_abbrev(&kind, "object") {
         if rest.is_empty() {
@@ -2241,9 +2406,18 @@ pub fn do_return(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         None => return,
     };
     g.send_to_char(ch, "You return to your original body.\r\n");
-    // If someone switched into the original body, C close_socket()s them; that
-    // descriptor handoff is owned by the connection layer — here we simply
-    // restore the descriptor to the original character.
+    // C act.wizard.c:1346-1347: "if someone switched into your original body,
+    // disconnect them". Their descriptor is marked Close, which the game loop
+    // treats exactly like do_quit.
+    let occupant = g.get_char(original).and_then(|c| c.desc);
+    if let Some(occ) = occupant {
+        if let Some(d) = g.descriptors.get_mut(&occ) {
+            d.state = ConState::Close;
+        }
+        if let Some(o) = g.get_char_mut(original) {
+            o.desc = None;
+        }
+    }
     if let Some(d) = g.descriptors.get_mut(&conn) {
         d.character = Some(original);
         d.original = None;
@@ -2448,6 +2622,13 @@ pub fn do_vstat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let number = atoi(&numstr);
     if number < 0 {
         g.send_to_char(ch, "A NEGATIVE number??\r\n");
+        return;
+    }
+    // C act.wizard.c:1481-1484: the builder gate fires before real_mobile() /
+    // real_object(), so an out-of-zone vnum is refused without the mobile ever
+    // being instantiated into room 0.
+    if level_of(g, ch) < LVL_IMMORT && !can_edit_zone(g, ch, real_zone(g, number)) {
+        g.send_to_char(ch, "You don't have permissions to that zone.\r\n");
         return;
     }
     if is_abbrev(&kind, "mob") {
@@ -4004,7 +4185,9 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 "  {:5} players in game  {:5} connected\r\n",
                 players, connected
             ));
-            buf.push_str(&format!("  {:5} registered\r\n", g.players_by_name.len()));
+            // C act.wizard.c:2800: top_of_p_table + 1 — the persistent player
+            // index, not the set of currently instantiated PCs.
+            buf.push_str(&format!("  {:5} registered\r\n", g.player_table.len()));
             buf.push_str(&format!(
                 "  {:5} mobiles          {:5} prototypes\r\n",
                 mobiles,
@@ -5017,8 +5200,10 @@ pub fn do_set(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let mut is_mob = false;
 
     let ch_level = level_of(g, ch);
-    let is_god = !is_npc(g, ch) && ch_level >= LVL_GOD;
-    if !is_god && ch_level < LVL_IMMORT {
+    // C act.wizard.c:3895: `if (!IS_GOD(ch) && GET_LEVEL(ch) < LVL_IMMORT)`.
+    // IS_GOD is the granted-command test, so a sub-immortal holding bits is
+    // admitted where a plain level check would reject them.
+    if !is_god(g, ch) && ch_level < LVL_IMMORT {
         g.send_to_char(ch, "Huh?!?\r\n");
         return;
     }
@@ -5058,9 +5243,18 @@ pub fn do_set(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         name = n;
         rest = r;
     } else if name.eq_ignore_ascii_case("Legal_PKS") && ch_level >= LVL_GRGOD {
-        // pk_allowed global not surfaced; mirror the report line.
+        // C act.wizard.c:3914-3921: this really flips the pk_allowed global that
+        // do_hit/do_kill/murder, fight.c's killer flagging and the PvP spell
+        // guards all read.
         let (mode, _r) = half_chop(&rest);
-        let allowed = mode.eq_ignore_ascii_case("ON");
+        let mut allowed = g.pk_allowed;
+        if mode.eq_ignore_ascii_case("OFF") {
+            allowed = false;
+        }
+        if mode.eq_ignore_ascii_case("ON") {
+            allowed = true;
+        }
+        g.pk_allowed = allowed;
         g.send_to_char(
             ch,
             &format!(
@@ -5181,6 +5375,24 @@ pub fn do_rlist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
     let first = atoi(&a);
     let last = atoi(&b);
+    // C act.wizard.c:4091-4100: a mortal builder may only enumerate the zone(s)
+    // they own, checked on both arguments before any range validation.
+    if level_of(g, ch) < LVL_IMMORT {
+        if !can_edit_zone(g, ch, real_zone(g, first)) {
+            g.send_to_char(
+                ch,
+                "You can't edit the zone supplied by the first argument.\r\n",
+            );
+            return;
+        }
+        if !can_edit_zone(g, ch, real_zone(g, last)) {
+            g.send_to_char(
+                ch,
+                "You can't edit the zone supplied by the second argument.\r\n",
+            );
+            return;
+        }
+    }
     if first < 0 || first > MAX_ROOM_VNUM || last < 0 || last > MAX_ROOM_VNUM {
         g.send_to_char(
             ch,
@@ -5226,6 +5438,23 @@ pub fn do_mlist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
     let first = atoi(&a);
     let last = atoi(&b);
+    // C act.wizard.c:4146-4155: same two-gate builder check as rlist.
+    if level_of(g, ch) < LVL_IMMORT {
+        if !can_edit_zone(g, ch, real_zone(g, first)) {
+            g.send_to_char(
+                ch,
+                "You can't edit the zone supplied by the first argument.\r\n",
+            );
+            return;
+        }
+        if !can_edit_zone(g, ch, real_zone(g, last)) {
+            g.send_to_char(
+                ch,
+                "You can't edit the zone supplied by the second argument.\r\n",
+            );
+            return;
+        }
+    }
     if first < 0 || first > MAX_ROOM_VNUM || last < 0 || last > MAX_ROOM_VNUM {
         g.send_to_char(
             ch,
@@ -5268,6 +5497,23 @@ pub fn do_olist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
     let first = atoi(&a);
     let last = atoi(&b);
+    // C act.wizard.c:4199-4208: same two-gate builder check as rlist.
+    if level_of(g, ch) < LVL_IMMORT {
+        if !can_edit_zone(g, ch, real_zone(g, first)) {
+            g.send_to_char(
+                ch,
+                "You can't edit the zone supplied by the first argument.\r\n",
+            );
+            return;
+        }
+        if !can_edit_zone(g, ch, real_zone(g, last)) {
+            g.send_to_char(
+                ch,
+                "You can't edit the zone supplied by the second argument.\r\n",
+            );
+            return;
+        }
+    }
     if first < 0 || first > MAX_ROOM_VNUM || last < 0 || last > MAX_ROOM_VNUM {
         g.send_to_char(
             ch,
@@ -5332,6 +5578,13 @@ pub fn do_mcasters(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     const MOB_CASTER: i64 = 1 << 21;
 
     let magic_user = crate::spec_procs::magic_user as crate::spec_assign::SpecFn;
+    // C act.wizard.c:4489-4494 filters on mob_index[i].func == magic_user alone.
+    // That binding comes from two places: the static ASSIGNMOB table, and
+    // db.c:1346-1349, which sets `mob_index[i].func = magic_user` for EVERY
+    // MOB_CASTER prototype while the mob file loads. So C lists flag-only
+    // casters too — the bit merely picks the "(Type: CASTER)" label — and the
+    // disjunction below is the faithful rendering of that combined binding, not
+    // an extra filter.
     let mut casters: Vec<_> = g
         .mob_protos
         .values()
@@ -6730,16 +6983,50 @@ mod tests {
         let mut g = GameState::new(Config::default());
         let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
         g.mob_protos
-            .insert(3095, mobile_proto(3095, "a magic user", 0));
-        g.mob_protos
-            .insert(4000, mobile_proto(4000, "a flagged non-caster", MOB_CASTER));
+            .insert(4000, mobile_proto(4000, "a flagged caster", MOB_CASTER));
+        // Mob 1 (puff) carries a spec proc that is NOT magic_user, and no flag.
+        g.mob_protos.insert(1, mobile_proto(1, "puff", 0));
 
         do_mcasters(&mut g, imm, "", 0);
 
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
         assert!(out.starts_with("Spellcasting mobs:\r\n"));
-        assert!(out.contains("[3095] a magic user (Type: ASSIGNED)\r\n"));
-        assert!(out.contains("[4000] a flagged non-caster (Type: CASTER)\r\n"));
+        // db.c:1346-1349 binds magic_user to every MOB_CASTER prototype at load,
+        // so C's `mob_index[i].func == magic_user` lists it (label CASTER).
+        assert!(out.contains("[4000] a flagged caster (Type: CASTER)\r\n"));
+        // A mob with neither the flag nor a magic_user binding is not listed.
+        assert!(!out.contains("puff"));
+    }
+
+    // ---- #215: `show stats` counts registered players from the index -------
+
+    #[test]
+    fn show_stats_counts_registered_players_from_the_persistent_index() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        g.char_to_room(imm, room);
+        // Three persistent rows, of which only `Imm` is instantiated.
+        g.update_player_index(1, "Imm", LVL_IMPL, 0, "test");
+        g.update_player_index(2, "Offline", 12, 0, "test");
+        g.update_player_index(3, "Gone", 20, 0, "test");
+
+        show_stats_case_4(&mut g, imm);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("Current stats:"), "out: {}", out);
+        assert!(out.contains("players in game"), "out: {}", out);
+        let line = out
+            .lines()
+            .find(|l| l.contains("registered"))
+            .expect("registered line");
+        assert!(line.contains("3"), "expected 3 registered, got: {}", line);
+    }
+
+    /// `show stats` case 4 (act.wizard.c:2780-2811) — the dispatcher arm that
+    /// prints the "Current stats:" block.
+    fn show_stats_case_4(g: &mut GameState, ch: CharId) {
+        do_show(g, ch, "stats", 0);
     }
 
     #[test]
@@ -6901,5 +7188,499 @@ mod tests {
             .outbuf
             .contains("Rooms for zone 2"));
         crate::olc::olc_remove_from_save_list(2, crate::olc::OLC_SAVE_ROOM);
+    }
+
+    // ---- #195: sprintbit fidelity (utils.c:402-423) -----------------------
+
+    /// A table whose names run out well before bit 63 ("\n"-terminated, as the
+    /// C `*_bits[]` tables are).
+    const SHORT_TABLE: &[&str] = &["ALPHA", "BETA", "\n"];
+
+    #[test]
+    fn sprintbit_negative_vector_is_invalid_bitvector() {
+        assert_eq!(sprintbit(-1, SHORT_TABLE), "<INVALID BITVECTOR>");
+        assert_eq!(sprintbit(-(1i64 << 40), SHORT_TABLE), "<INVALID BITVECTOR>");
+    }
+
+    #[test]
+    fn sprintbit_set_bits_above_the_table_are_undefined() {
+        // Bits 0 and 1 have names; bit 40 is past the terminator and must still
+        // render (C keeps shifting until the vector is exhausted).
+        let bits = (1i64) | (1i64 << 1) | (1i64 << 40);
+        assert_eq!(sprintbit(bits, SHORT_TABLE), "ALPHA BETA UNDEFINED ");
+        // A lone out-of-table bit: no name, but not NOBITS either.
+        assert_eq!(sprintbit(1i64 << 40, SHORT_TABLE), "UNDEFINED ");
+        // Bit 63 sets the sign bit of C's signed `long`, so it takes the
+        // negative-vector branch there too.
+        assert_eq!(sprintbit(1i64 << 63, SHORT_TABLE), "<INVALID BITVECTOR>");
+    }
+
+    #[test]
+    fn sprintbit_zero_is_nobits() {
+        assert_eq!(sprintbit(0, SHORT_TABLE), "NOBITS ");
+    }
+
+    // ---- #200: cdsr() map-coordinate addressing in find_target_room -------
+
+    fn lib_with_worldmap(name: &str, size: usize) -> std::path::PathBuf {
+        let mut dir = std::env::temp_dir();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        dir.push(format!(
+            "deltamud-wiz-{}-{}-{}",
+            name,
+            std::process::id(),
+            unique
+        ));
+        std::fs::create_dir_all(dir.join("world")).unwrap();
+        let row = ".".repeat(size);
+        let mut map = String::from(
+            "NewSector: .\n\
+SectName: Field\n\
+SectShow: .\n\
+SectMove: 1\n\
+SectSect: Field\n\
+EndSector\n\
+WorldMap:\n",
+        );
+        for _ in 0..size {
+            map.push_str(&row);
+            map.push('\n');
+        }
+        map.push_str("~\n");
+        std::fs::write(dir.join("world").join("worldmap"), map).unwrap();
+        dir
+    }
+
+    #[test]
+    fn goto_with_map_coordinates_lands_on_the_surface_room() {
+        let dir = lib_with_worldmap("cdsr", 12);
+        let cfg = Config {
+            lib_path: dir.to_string_lossy().to_string(),
+            ..Config::default()
+        };
+        let mut g = GameState::new(cfg);
+        crate::maputils::integrate_map_rooms(&mut g);
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        let start = g.add_room(Room::new(100, 0, "Start".to_string(), "Start.".to_string()));
+        g.char_to_room(imm, start);
+
+        let want = g.map_coords_to_rnum(3, 7).expect("map room spliced in");
+        do_goto(&mut g, imm, "3x7", 0);
+
+        assert_eq!(g.get_char(imm).unwrap().in_room, Some(want));
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(!out.contains("No room exists with that number."));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn goto_still_rejects_a_nonexistent_numeric_vnum() {
+        let dir = lib_with_worldmap("cdsr-vnum", 8);
+        let cfg = Config {
+            lib_path: dir.to_string_lossy().to_string(),
+            ..Config::default()
+        };
+        let mut g = GameState::new(cfg);
+        crate::maputils::integrate_map_rooms(&mut g);
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        let start = g.add_room(Room::new(100, 0, "Start".to_string(), "Start.".to_string()));
+        g.char_to_room(imm, start);
+
+        do_goto(&mut g, imm, "999999", 0);
+
+        assert_eq!(g.get_char(imm).unwrap().in_room, Some(start));
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("No room exists with that number."));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ---- #204: stat's MaxWeapon / practices-per / regen rates --------------
+
+    #[test]
+    fn do_stat_character_reports_maxweapon_practices_per_and_regen() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        let vict = connected_player(&mut g, ConnId(2), "Mort", 10);
+        g.char_to_room(imm, room);
+        g.char_to_room(vict, room);
+        {
+            let c = g.get_char_mut(vict).unwrap();
+            c.spells_to_learn = 7;
+            c.aff_abils.intel = 18; // int_app[18].learn == 50
+            c.aff_abils.wis = 18; // wis_app[18].bonus == 5
+        }
+        let hit_regen = crate::limits::hit_gain(&g, vict);
+
+        do_stat_character(&mut g, imm, vict);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        // lvl_maxdmg_weapon[10] == 20 (config.c).
+        assert!(out.contains("MaxWeapon: [20]"), "out: {}", out);
+        assert!(out.contains("(STL[7]/per[50]/NSTL[5])"), "out: {}", out);
+        // The regen column is the live rate, not a literal 0.
+        assert!(hit_regen != 0, "expected a non-zero hit regen");
+        assert!(out.contains(&format!("+{}", hit_regen)), "out: {}", out);
+    }
+
+    // ---- #213: stat's Spec-Proc / attack-type / connected lookups ----------
+
+    #[test]
+    fn do_stat_character_reports_mob_spec_proc_attack_type_and_connection() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        g.char_to_room(imm, room);
+        // Mob vnum 1 (puff) carries a statically assigned spec proc.
+        g.mob_protos.insert(1, mobile_proto(1, "puff", 0));
+        g.mob_protos.get_mut(&1).unwrap().attack_type = 4; // attack_hit_text[4] == "bite"
+        let mob = g.create_char(Character::new_npc(1));
+        g.char_to_room(mob, room);
+
+        do_stat_character(&mut g, imm, mob);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("Mob Spec-Proc: Exists"), "out: {}", out);
+        assert!(out.contains(", Attack type: bite"), "out: {}", out);
+        // C only prints the Connected field when the char has a descriptor; a
+        // freshly loaded mobile does not.
+        assert!(!out.contains(", Connected:"), "out: {}", out);
+    }
+
+    #[test]
+    fn do_stat_character_reports_connected_state_for_a_live_player() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        g.char_to_room(imm, room);
+        g.descriptors.get_mut(&ConnId(1)).unwrap().state = ConState::Menu;
+
+        do_stat_character(&mut g, imm, imm);
+
+        // sprinttype(d->connected, connected_types): CON_MENU -> "Main Menu".
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains(", Connected: Main Menu"), "out: {}", out);
+    }
+
+    #[test]
+    fn stat_reports_room_and_object_spec_procs() {
+        let mut g = GameState::new(Config::default());
+        // Room 3031 is the stock pet-shop entrance (spec_assign.c ASSIGNROOM).
+        let plain = g.add_room(Room::new(100, 0, "Plain".to_string(), "Plain.".to_string()));
+        let petshop = g.add_room(Room::new(3031, 30, "Pets".to_string(), "Pets.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        g.char_to_room(imm, petshop);
+        do_stat_room(&mut g, imm);
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("SpecProc: Exists"));
+
+        // Object vnum 20 is the generic portal (ASSIGNOBJ 20 portal).
+        let obj = g.create_obj(Object::new(
+            20,
+            "portal".to_string(),
+            "a shimmering portal".to_string(),
+        ));
+        g.descriptors.get_mut(&ConnId(1)).unwrap().outbuf.clear();
+        g.char_to_room(imm, plain);
+        do_stat_object(&mut g, imm, obj);
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("SpecProc: Exists"), "out: {}", out);
+    }
+
+    // ---- #205: IS_GOD is a granted-command test, not a level test ----------
+
+    #[test]
+    fn set_admits_a_bit_holding_mortal_and_stat_reports_god_commands() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        let mortal = connected_player(&mut g, ConnId(2), "Granted", 100);
+        g.char_to_room(imm, room);
+        g.char_to_room(mortal, room);
+        g.get_char_mut(mortal).unwrap().godcmds4 = 1; // set cmdgeneral on
+
+        // (a) A sub-immortal with bits reaches set's field list.
+        do_set(&mut g, mortal, "Granted God_Commands on", 0);
+        let out = &g.descriptors.get(&ConnId(2)).unwrap().outbuf;
+        assert!(!out.contains("Huh?!?"), "out: {}", out);
+
+        // (b) stat prints God-Commands from the bits, not the level.
+        g.descriptors.get_mut(&ConnId(1)).unwrap().outbuf.clear();
+        do_stat_character(&mut g, imm, mortal);
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("God-Commands: &YYes&n"), "out: {}", out);
+    }
+
+    #[test]
+    fn stat_god_commands_is_no_for_a_bitless_immortal() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_GOD);
+        g.char_to_room(imm, room);
+
+        do_stat_character(&mut g, imm, imm);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("God-Commands: No\r\n"), "out: {}", out);
+    }
+
+    // ---- #201: `stat file` refuses a target above the requester ------------
+
+    #[test]
+    fn stat_file_refuses_a_higher_level_target() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMMORT);
+        let imp = connected_player(&mut g, ConnId(2), "Imp", LVL_IMPL);
+        g.char_to_room(imm, room);
+        g.char_to_room(imp, room);
+        g.update_player_index(imp_idnum(&g, imp), "Imp", LVL_IMPL, 0, "test");
+
+        do_stat(&mut g, imm, "file Imp", 0);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("Sorry, you can't do that."), "out: {}", out);
+        assert!(!out.contains("IDNum:"), "no record was rendered: {}", out);
+    }
+
+    fn imp_idnum(g: &GameState, id: CharId) -> i64 {
+        g.get_char(id).map(|c| c.idnum).unwrap_or(0)
+    }
+
+    #[test]
+    fn stat_file_still_renders_an_equal_or_lower_level_target() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        let mort = connected_player(&mut g, ConnId(2), "Mort", 10);
+        g.char_to_room(imm, room);
+        g.char_to_room(mort, room);
+
+        do_stat(&mut g, imm, "file Mort", 0);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("IDNum:"), "out: {}", out);
+        assert!(!out.contains("Sorry, you can't do that."), "out: {}", out);
+    }
+
+    // ---- #209: vstat refuses an out-of-zone vnum before instantiating ------
+
+    #[test]
+    fn vstat_denies_an_out_of_zone_vnum_for_a_builder() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        // Zone 0 belongs to "Bob"; the builder "Sally" may not edit it.
+        g.zones.push(test_zone(0, 99, "Bob"));
+        let builder = connected_player(&mut g, ConnId(1), "Sally", 1);
+        g.char_to_room(builder, room);
+        g.mob_protos
+            .insert(1200, mobile_proto(1200, "receptionist", 0));
+
+        do_vstat(&mut g, builder, "mob 1200", 0);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(
+            out.contains("You don't have permissions to that zone."),
+            "out: {}",
+            out
+        );
+        // The mobile was never instantiated into room 0.
+        assert!(g.char_ids().iter().all(|c| !is_npc(&g, *c)));
+    }
+
+    // ---- #203: rlist/mlist/olist builder gates -----------------------------
+
+    #[test]
+    fn rlist_mlist_olist_deny_a_zone_the_builder_does_not_own() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        g.zones.push(test_zone(0, 99, "Bob"));
+        let builder = connected_player(&mut g, ConnId(1), "Sally", 1);
+        g.char_to_room(builder, room);
+
+        do_rlist(&mut g, builder, "0 99", 0);
+        do_mlist(&mut g, builder, "0 99", 0);
+        do_olist(&mut g, builder, "0 99", 0);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("You can't edit the zone supplied by the first argument."));
+        assert!(!out.contains("No rooms were found"));
+        assert!(!out.contains("No mobiles were found"));
+        assert!(!out.contains("No objects were found"));
+    }
+
+    #[test]
+    fn rlist_lets_an_immortal_enumerate_any_zone() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Hall".to_string(), "A hall.".to_string()));
+        g.zones.push(test_zone(0, 99, "Bob"));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMMORT);
+        g.char_to_room(imm, room);
+
+        do_rlist(&mut g, imm, "0 200", 0);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("[  100]"), "out: {}", out);
+        assert!(!out.contains("You can't edit the zone"));
+    }
+
+    // ---- #206: `set Legal_PKS` flips the live PvP gate ---------------------
+
+    #[test]
+    fn set_legal_pks_flips_the_live_pvp_gate() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let god = connected_player(&mut g, ConnId(1), "God", LVL_GRGOD);
+        let alpha = connected_player(&mut g, ConnId(2), "Alpha", 20);
+        let beta = connected_player(&mut g, ConnId(3), "Beta", 20);
+        g.char_to_room(god, room);
+        g.char_to_room(alpha, room);
+        g.char_to_room(beta, room);
+
+        do_set(&mut g, god, "Legal_PKS ON", 0);
+        assert!(g.pk_allowed, "the gate must actually open");
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("Legal PKs are now Allowed."));
+
+        // The do_hit murder-redirect is `if (!pk_allowed)` in C — it must not
+        // fire once the gate is open.
+        crate::cmd_offensive::do_hit(&mut g, alpha, "beta", 0);
+        let out = &g.descriptors.get(&ConnId(2)).unwrap().outbuf;
+        assert!(
+            !out.contains("Use 'murder' to hit another player."),
+            "out: {}",
+            out
+        );
+
+        do_set(&mut g, god, "Legal_PKS OFF", 0);
+        assert!(!g.pk_allowed, "the gate must actually close");
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("Legal PKs are now Disallowed."));
+    }
+
+    #[test]
+    fn set_legal_pks_requires_grgod() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMMORT);
+        g.char_to_room(imm, room);
+
+        do_set(&mut g, imm, "Legal_PKS ON", 0);
+
+        assert!(!g.pk_allowed, "a sub-GRGOD immortal cannot open the gate");
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(!out.contains("Legal PKs are now"), "out: {}", out);
+    }
+
+    // ---- #208: emote's PRF2_INTANGIBLE recipient filter --------------------
+
+    #[test]
+    fn intangible_non_builder_emote_is_hidden_from_mortals() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let ghost = connected_player(&mut g, ConnId(1), "Ghost", LVL_IMMORT);
+        let mort = connected_player(&mut g, ConnId(2), "Mort", 10);
+        g.char_to_room(ghost, room);
+        g.char_to_room(mort, room);
+        g.get_char_mut(ghost).unwrap().prf2_flags |= PRF2_INTANGIBLE;
+
+        do_echo(&mut g, ghost, "drifts through the wall.", SCMD_EMOTE);
+
+        // The sender still sees it; the mortal does not.
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("drifts through the wall."));
+        assert!(!g
+            .descriptors
+            .get(&ConnId(2))
+            .unwrap()
+            .outbuf
+            .contains("drifts through the wall."));
+
+        // A builder ghost (PRF2_MBUILDING) is delivered to mortals again.
+        g.get_char_mut(ghost).unwrap().prf2_flags |= PRF2_MBUILDING;
+        g.descriptors.get_mut(&ConnId(2)).unwrap().outbuf.clear();
+        do_echo(&mut g, ghost, "drifts through the wall.", SCMD_EMOTE);
+        assert!(g
+            .descriptors
+            .get(&ConnId(2))
+            .unwrap()
+            .outbuf
+            .contains("drifts through the wall."));
+
+        // So is an emote seen by a mortal who is themselves intangible.
+        g.get_char_mut(ghost).unwrap().prf2_flags &= !PRF2_MBUILDING;
+        g.get_char_mut(mort).unwrap().prf2_flags |= PRF2_INTANGIBLE;
+        g.descriptors.get_mut(&ConnId(2)).unwrap().outbuf.clear();
+        do_echo(&mut g, ghost, "drifts through the wall.", SCMD_EMOTE);
+        assert!(g
+            .descriptors
+            .get(&ConnId(2))
+            .unwrap()
+            .outbuf
+            .contains("drifts through the wall."));
+    }
+
+    // ---- #212: return disconnects an occupant of the original body ---------
+
+    #[test]
+    fn return_disconnects_a_body_snatcher() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let owner = connected_player(&mut g, ConnId(1), "Owner", LVL_IMPL);
+        let body = connected_player(&mut g, ConnId(2), "Snatcher", LVL_IMPL);
+        g.char_to_room(owner, room);
+        g.char_to_room(body, room);
+
+        // `owner` is currently possessing `host`; `body` has meanwhile switched
+        // into `host` (the immortal's original body) with ConnId(2).
+        let host = g.create_char(Character::new_npc(1234));
+        g.char_to_room(host, room);
+        g.get_char_mut(host).unwrap().desc = Some(ConnId(2));
+        {
+            let d = g.descriptors.get_mut(&ConnId(1)).unwrap();
+            d.state = ConState::Playing;
+            d.character = Some(owner);
+            d.original = Some(host);
+        }
+        {
+            let d = g.descriptors.get_mut(&ConnId(2)).unwrap();
+            d.state = ConState::Playing;
+            d.character = Some(host);
+            d.original = Some(body);
+        }
+        g.get_char_mut(owner).unwrap().desc = Some(ConnId(1));
+        g.get_char_mut(body).unwrap().desc = Some(ConnId(2));
+
+        do_return(&mut g, owner, "", 0);
+
+        assert_eq!(
+            g.descriptors.get(&ConnId(2)).unwrap().state,
+            ConState::Close,
+            "the occupant's connection must be dropped"
+        );
+        // The original body is re-attached to the returning player's connection.
+        assert_eq!(g.get_char(host).unwrap().desc, Some(ConnId(1)));
+        assert_eq!(g.get_char(owner).unwrap().desc, None);
+        assert_eq!(g.descriptors.get(&ConnId(1)).unwrap().character, Some(host));
+        assert_eq!(g.descriptors.get(&ConnId(1)).unwrap().original, None);
     }
 }

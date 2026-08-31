@@ -823,3 +823,99 @@ pub fn do_start_init(g: &mut GameState, ch: CharId) {
         c.last_logon = chrono::Utc::now();
     }
 }
+
+// ---------------------------------------------------------------------------
+// do_newbie (act.wizard.c:4013-4034) — the finishing touch C applies right
+// after do_start for a brand-new character: the starter kit (obj 190, "an
+// unfinished player's guide", lib/world/obj/1.obj:225), recall level cleared,
+// and wimp level set to 1 so a fresh PC auto-flees at 1 hp like C's.
+// ---------------------------------------------------------------------------
+
+/// Obj vnums handed to every new character (C `give_obj[]`, terminated by -1).
+const NEWBIE_GIVE_OBJ: &[ObjVnum] = &[190];
+
+pub fn do_newbie(g: &mut GameState, ch: CharId) {
+    // C is only ever called for PCs; bail on a missing/NPC id.
+    if g.get_char(ch).map(|c| c.is_npc).unwrap_or(true) {
+        return;
+    }
+    for &vnum in NEWBIE_GIVE_OBJ {
+        if let Some(oid) = g.load_object(vnum) {
+            g.obj_to_char(oid, ch);
+        }
+    }
+    if let Some(c) = g.get_char_mut(ch) {
+        c.recall_level = 0; // GET_RECALL_LEV
+        c.wimp_level = 1; // GET_WIMP_LEV
+    }
+}
+
+#[cfg(test)]
+mod newbie_tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::object::{ExtraFlags, WearFlags};
+    use crate::room::Room;
+    use crate::world::ObjectProto;
+
+    fn object_proto(vnum: ObjVnum, short: &str) -> ObjectProto {
+        ObjectProto {
+            vnum,
+            name: short.to_string(),
+            short_desc: short.to_string(),
+            description: format!("{} is here.", short),
+            obj_type: crate::object::ObjectType::Other,
+            wear_flags: WearFlags::TAKE,
+            extra_flags: ExtraFlags::empty(),
+            weight: 1,
+            cost: 0,
+            rent: 0,
+            values: [0; 4],
+            curr_slots: 0,
+            total_slots: 0,
+            obj_class: -1,
+            min_level: 0,
+            bitvector: 0,
+            action_description: String::new(),
+            affects: Vec::new(),
+            ex_descriptions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn do_newbie_gives_the_guide_and_sets_wimpy_and_recall() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        g.obj_protos
+            .insert(190, object_proto(190, "a players guide"));
+        let ch = g.create_char(Character::new_player(
+            "Newbie".to_string(),
+            Class::Warrior,
+            Race::Human,
+        ));
+        g.char_to_room(ch, room);
+
+        do_newbie(&mut g, ch);
+
+        let c = g.get_char(ch).unwrap();
+        assert_eq!(c.wimp_level, 1, "C sets GET_WIMP_LEV to 1");
+        assert_eq!(c.recall_level, 0, "C clears GET_RECALL_LEV");
+        assert_eq!(c.carrying.len(), 1, "obj 190 must be in the inventory");
+        let carried = c.carrying[0];
+        assert_eq!(g.get_obj(carried).unwrap().item_number, 190);
+    }
+
+    #[test]
+    fn do_newbie_is_a_no_op_for_an_npc() {
+        let mut g = GameState::new(Config::default());
+        g.obj_protos
+            .insert(190, object_proto(190, "a players guide"));
+        let mob = g.create_char(Character::new_npc(1));
+
+        do_newbie(&mut g, mob);
+
+        assert_eq!(g.get_char(mob).unwrap().carrying.len(), 0);
+        assert_eq!(g.get_char(mob).unwrap().wimp_level, 0);
+    }
+}

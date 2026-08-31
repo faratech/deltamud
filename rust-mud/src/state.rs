@@ -154,6 +154,11 @@ pub struct GameState {
     /// the `shutdown` immortal command actually halts the server (it previously
     /// only broadcast a message and logged — the process never stopped).
     pub shutdown_requested: bool,
+    /// C `pk_allowed` (config.c:53, `int pk_allowed = NO`). The live PvP gate
+    /// read by do_hit/do_kill/murder, the killer-flagging path in fight.c and
+    /// the PvP spell guards; toggled by `set Legal_PKS ON|OFF`
+    /// (act.wizard.c:3914-3921).
+    pub pk_allowed: bool,
 
     // Surface ("outside") world-map splice (maputils.c read_map). The 99x99
     // grid of map cells is appended to `rooms` *after* the real-room block, so
@@ -187,6 +192,7 @@ impl GameState {
             next_obj_id: 1,
             rng: Rng::default(),
             shutdown_requested: false,
+            pk_allowed: false,
             credits: String::new(),
             news: String::new(),
             info: String::new(),

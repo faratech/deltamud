@@ -1695,7 +1695,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
 
     /// Load (or, for fresh chars, re-load) the player, place them in the
     /// world, and start play.
-    async fn enter_game(&mut self, conn_id: ConnId, _is_new: bool) {
+    async fn enter_game(&mut self, conn_id: ConnId, is_new: bool) {
         // C interpreter.c enter_player_game. The record was usually already
         // loaded at password-verify (pending_load) — consume it so login hits
         // the DB once.
@@ -1921,9 +1921,14 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
 
         // C interpreter.c menu '1' (2261-2268): WELC_MESSG, then for a fresh
         // character do_start + START_MESSG + do_newbie; then the first look.
+        // do_start ran in create_and_enter (before the DB write); do_newbie —
+        // the starter item (obj 190, "an unfinished player's guide"),
+        // recall level and wimpy 1 — runs here, in the world, past crash_load
+        // (issue #207).
         self.state.send_to_char(id, WELC_MESSG);
         if is_new_char {
             self.state.send_to_char(id, START_MESSG);
+            crate::class::do_newbie(&mut self.state, id);
         }
         crate::cmd_informative::look_at_room(&mut self.state, id, true);
         // C 2271-2272: "You have mail waiting."

@@ -70,7 +70,6 @@ const CLASS_WARRIOR: Class = Class::Warrior;
 const CLASS_THIEF: Class = Class::Thief;
 
 // config.c — PvP gating.
-const PK_ALLOWED: bool = false;
 // config.c — pk_victim_min: a PC below this level can't be flagged/attacked.
 const PK_VICTIM_MIN: Level = 10;
 
@@ -252,7 +251,7 @@ pub fn do_assist(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         );
         return;
     }
-    if !PK_ALLOWED && !is_npc(g, opponent) {
+    if !g.pk_allowed && !is_npc(g, opponent) {
         act(
             g,
             "Use 'murder' if you really want to attack $N.",
@@ -331,7 +330,7 @@ pub fn do_hit(g: &mut GameState, ch: CharId, argument: &str, mut subcmd: i32) {
         return;
     }
 
-    if !PK_ALLOWED {
+    if !g.pk_allowed {
         if !is_npc(g, vict) && !is_npc(g, ch) {
             // C act.offensive.c:106-113: two arena combatants may 'hit' each
             // other - the command is rewritten to SCMD_MURDER (#126).
@@ -478,7 +477,7 @@ pub fn do_target(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
         );
         return;
     }
-    if !PK_ALLOWED {
+    if !g.pk_allowed {
         if !is_npc(g, vict) && !is_npc(g, ch) && subcmd != SCMD_MURDER {
             g.send_to_char(ch, "Use 'murder' to hit another player.\r\n");
             return;

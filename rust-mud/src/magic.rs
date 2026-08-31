@@ -487,7 +487,7 @@ pub fn mag_affects(
         }
         SPELL_SLEEP => {
             // !pk_allowed && !IS_NPC(ch) && !IS_NPC(victim) -> no PvP sleep.
-            if !PK_ALLOWED && !is_npc(g, ch) && !is_npc(g, victim) {
+            if !g.pk_allowed && !is_npc(g, ch) && !is_npc(g, victim) {
                 return;
             }
             if mob_flagged(g, victim, MOB_NOSLEEP) {
@@ -1098,7 +1098,7 @@ pub fn mag_areas(g: &mut GameState, _level: i32, ch: CharId, spellnum: i32) {
             continue;
         }
         // No PvP if pk disabled.
-        if !PK_ALLOWED && !ch_npc && !is_npc(g, tch) {
+        if !g.pk_allowed && !ch_npc && !is_npc(g, tch) {
             continue;
         }
         // Players can't hit their own charmed pets.
@@ -1208,7 +1208,6 @@ fn add_follower(g: &mut GameState, ch: CharId, leader: CharId) {
 }
 
 // pk_allowed (config) — DeltaMUD ships with player-killing disabled by default.
-const PK_ALLOWED: bool = false;
 
 /// C magic.c:65-117 `affect_update()`, called once per MUD hour from the
 /// heartbeat (comm.c:1038) right before point_update: decrements every
@@ -1433,3 +1432,4 @@ mod affect_update_tests {
         assert_eq!(c.affected.len(), 1);
     }
 }
+
