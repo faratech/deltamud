@@ -77,7 +77,8 @@ rm -f $LIB/etc/date_record
 # --- C oracle ---
 mkdir -p /tmp/parity-c/bin
 mkdir -p /tmp/parity-c/lib/exec
-for b in autowiz scheck licheck; do [ -f /web/deltamud/bin/$b ] mkdir -p /tmp/parity-cmkdir -p /tmp/parity-c cp /web/deltamud/bin/$b /tmp/parity-c/bin/; done
+mkdir -p /tmp/parity-c/bin /tmp/parity-c/lib/exec
+for b in autowiz scheck licheck; do [ -f /web/deltamud/bin/$b ] && cp /web/deltamud/bin/$b /tmp/parity-c/bin/; done
 ln -sfn $LIB /tmp/parity-c/lib
 : > $LIB/USRCNT
 cd /tmp/parity-c
