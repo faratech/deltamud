@@ -692,7 +692,7 @@ fn write_crash_file(g: &GameState, ch: CharId, rent: &RentInfo) -> bool {
     // C's raw rent_info + obj_file_elem stream so the C binary can read it.
     if std::env::var("MUD_CFORMAT_FILES").map(|v| v == "true").unwrap_or(false) {
         let rent_c = crate::cformat::CRentInfo {
-            time: rent.time,
+            time: rent.time as i32,
             rentcode: rent.rentcode,
             net_cost_per_diem: rent.net_cost_per_diem,
             gold: rent.gold,
@@ -731,7 +731,7 @@ fn cformat_elems(g: &GameState, ch: CharId) -> Vec<crate::cformat::CObjFileElem>
             }
         };
         crate::cformat::obj_to_c_elem(
-            o.item_number,
+            o.item_number as i64,
             locate,
             o.curr_slots,
             o.total_slots,

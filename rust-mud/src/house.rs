@@ -413,6 +413,22 @@ fn owner_exists(g: &GameState, idnum: i64) -> bool {
     g.get_name_by_id(idnum).is_some()
 }
 
+/// Map a C record onto the Rust control record (guests carried as idnums).
+fn control_from_c(r: crate::cformat::CHouseControlRec) -> HouseControlRec {
+    HouseControlRec {
+        vnum: r.vnum as RoomVnum,
+        atrium: r.atrium as RoomVnum,
+        exit_num: r.exit_num as i32,
+        built_on: r.built_on,
+        mode: r.mode,
+        owner: r.owner,
+        owner_name: String::new(),
+        guests: r.guests,
+        guest_names: Vec::new(),
+        last_payment: r.last_payment,
+    }
+}
+
 pub fn house_boot(g: &mut GameState) {
     let path = hcontrol_path(&g.config.lib_path);
     let text = match std::fs::read_to_string(&path) {
@@ -423,7 +439,30 @@ pub fn house_boot(g: &mut GameState) {
         }
     };
 
-    let parsed = parse_control_file(&text);
+    // Issue #95: with MUD_CFORMAT_FILES=true (or when the file is not our
+    // text format), lib/etc/hcontrol is read as C's raw 928-byte
+    // house_control_rec records.
+    let parsed = if std::env::var("MUD_CFORMAT_FILES").map(|v| v == "true").unwrap_or(false)
+        || !text.trim_start().starts_with('H')
+    {
+        let bytes = std::fs::read(&path).unwrap_or_default();
+        let recs = crate::cformat::decode_hcontrol(&bytes);
+        recs.into_iter()
+            .map(|r| crate::cformat::CHouseControlRec {
+                vnum: r.vnum,
+                atrium: r.atrium,
+                exit_num: r.exit_num,
+                built_on: r.built_on,
+                mode: r.mode,
+                owner: r.owner,
+                guests: r.guests,
+                last_payment: r.last_payment,
+            })
+            .map(control_from_c)
+            .collect()
+    } else {
+        parse_control_file(&text)
+    };
     let mut accepted: Vec<HouseControlRec> = Vec::new();
     let mut to_load: Vec<RoomVnum> = Vec::new();
 
