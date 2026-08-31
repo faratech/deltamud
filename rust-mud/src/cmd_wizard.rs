@@ -5334,6 +5334,24 @@ pub fn do_rlist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
     let first = atoi(&a);
     let last = atoi(&b);
+    // C act.wizard.c:4091-4100: a mortal builder may only enumerate the zone(s)
+    // they own, checked on both arguments before any range validation.
+    if level_of(g, ch) < LVL_IMMORT {
+        if !can_edit_zone(g, ch, real_zone(g, first)) {
+            g.send_to_char(
+                ch,
+                "You can't edit the zone supplied by the first argument.\r\n",
+            );
+            return;
+        }
+        if !can_edit_zone(g, ch, real_zone(g, last)) {
+            g.send_to_char(
+                ch,
+                "You can't edit the zone supplied by the second argument.\r\n",
+            );
+            return;
+        }
+    }
     if first < 0 || first > MAX_ROOM_VNUM || last < 0 || last > MAX_ROOM_VNUM {
         g.send_to_char(
             ch,
@@ -5379,6 +5397,23 @@ pub fn do_mlist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
     let first = atoi(&a);
     let last = atoi(&b);
+    // C act.wizard.c:4146-4155: same two-gate builder check as rlist.
+    if level_of(g, ch) < LVL_IMMORT {
+        if !can_edit_zone(g, ch, real_zone(g, first)) {
+            g.send_to_char(
+                ch,
+                "You can't edit the zone supplied by the first argument.\r\n",
+            );
+            return;
+        }
+        if !can_edit_zone(g, ch, real_zone(g, last)) {
+            g.send_to_char(
+                ch,
+                "You can't edit the zone supplied by the second argument.\r\n",
+            );
+            return;
+        }
+    }
     if first < 0 || first > MAX_ROOM_VNUM || last < 0 || last > MAX_ROOM_VNUM {
         g.send_to_char(
             ch,
@@ -5421,6 +5456,23 @@ pub fn do_olist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
     let first = atoi(&a);
     let last = atoi(&b);
+    // C act.wizard.c:4199-4208: same two-gate builder check as rlist.
+    if level_of(g, ch) < LVL_IMMORT {
+        if !can_edit_zone(g, ch, real_zone(g, first)) {
+            g.send_to_char(
+                ch,
+                "You can't edit the zone supplied by the first argument.\r\n",
+            );
+            return;
+        }
+        if !can_edit_zone(g, ch, real_zone(g, last)) {
+            g.send_to_char(
+                ch,
+                "You can't edit the zone supplied by the second argument.\r\n",
+            );
+            return;
+        }
+    }
     if first < 0 || first > MAX_ROOM_VNUM || last < 0 || last > MAX_ROOM_VNUM {
         g.send_to_char(
             ch,
@@ -7345,5 +7397,41 @@ WorldMap:\n",
         );
         // The mobile was never instantiated into room 0.
         assert!(g.char_ids().iter().all(|c| !is_npc(&g, *c)));
+    }
+
+    // ---- #203: rlist/mlist/olist builder gates -----------------------------
+
+    #[test]
+    fn rlist_mlist_olist_deny_a_zone_the_builder_does_not_own() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        g.zones.push(test_zone(0, 99, "Bob"));
+        let builder = connected_player(&mut g, ConnId(1), "Sally", 1);
+        g.char_to_room(builder, room);
+
+        do_rlist(&mut g, builder, "0 99", 0);
+        do_mlist(&mut g, builder, "0 99", 0);
+        do_olist(&mut g, builder, "0 99", 0);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("You can't edit the zone supplied by the first argument."));
+        assert!(!out.contains("No rooms were found"));
+        assert!(!out.contains("No mobiles were found"));
+        assert!(!out.contains("No objects were found"));
+    }
+
+    #[test]
+    fn rlist_lets_an_immortal_enumerate_any_zone() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Hall".to_string(), "A hall.".to_string()));
+        g.zones.push(test_zone(0, 99, "Bob"));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMMORT);
+        g.char_to_room(imm, room);
+
+        do_rlist(&mut g, imm, "0 200", 0);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("[  100]"), "out: {}", out);
+        assert!(!out.contains("You can't edit the zone"));
     }
 }
