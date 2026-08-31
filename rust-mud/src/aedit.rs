@@ -913,6 +913,12 @@ fn aedit_save_internally(g: &mut GameState, conn: ConnId) {
 }
 
 /// Write the entire social table back to misc/socials (C aedit_save_to_disk).
+/// olc.rs 'olc aedit save' entry (#275).
+pub fn save_all_actions(g: &mut GameState) {
+    let lib = g.config.lib_path.clone();
+    aedit_save_to_disk(&lib);
+}
+
 fn aedit_save_to_disk(lib_path: &str) {
     let path = format!("{}/{}", lib_path.trim_end_matches('/'), SOCMESS_REL);
 

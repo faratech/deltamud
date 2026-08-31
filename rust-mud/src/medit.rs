@@ -273,6 +273,12 @@ pub fn do_medit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         changed: false,
         ddesc_buf: String::new(),
     };
+    // C olc.c:198-212: refuse when another descriptor is editing the same
+    // entity (issue #272).
+    if states().lock().unwrap().values().any(|s| s.vnum == st.vnum) {
+        g.send_to_char(ch, "That mobile is currently being edited by someone else.\r\n");
+        return;
+    }
     states().lock().unwrap().insert(conn, st);
     olc::set_active(conn, EditorKind::Medit);
     disp_menu(g, conn);

@@ -637,11 +637,33 @@ pub fn do_olc(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
                 return;
             }
             SCMD_OLC_HEDIT => {
-                g.send_to_char(ch, "Saving all help entries.\r\n");
+                // C olc.c:314-321/343-348: mudlog then dispatch
+                // hedit_save_to_disk (#275).
+                let name = g
+                    .get_char(ch)
+                    .map(|c| c.get_name().to_string())
+                    .unwrap_or_default();
+                crate::syslog::mudlog(
+                    g,
+                    &format!("OLC: {} saves help entries.", name),
+                    crate::syslog::NRM,
+                    LVL_GOD,
+                );
+                crate::hedit::save_all_help(g);
                 return;
             }
             SCMD_OLC_AEDIT => {
-                g.send_to_char(ch, "Saving all actions.\r\n");
+                let name = g
+                    .get_char(ch)
+                    .map(|c| c.get_name().to_string())
+                    .unwrap_or_default();
+                crate::syslog::mudlog(
+                    g,
+                    &format!("OLC: {} saves all actions.", name),
+                    crate::syslog::NRM,
+                    LVL_GOD,
+                );
+                crate::aedit::save_all_actions(g);
                 return;
             }
             _ => {}

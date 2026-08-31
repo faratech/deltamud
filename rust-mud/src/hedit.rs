@@ -605,6 +605,12 @@ fn hedit_save_internally(g: &mut GameState, conn: ConnId) {
 }
 
 /// Write the entire help table back to text/help/help.hlp in load_help format.
+/// olc.rs 'olc hedit save' entry (#275).
+pub fn save_all_help(g: &mut GameState) {
+    let lib = g.config.lib_path.clone();
+    hedit_save_to_disk(&lib);
+}
+
 fn hedit_save_to_disk(lib_path: &str) {
     let dir = format!("{}/{}", lib_path.trim_end_matches('/'), HLP_REL_DIR);
     let tmp = format!("{}/{}.new", dir, HELP_FILE);

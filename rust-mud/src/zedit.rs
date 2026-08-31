@@ -266,6 +266,11 @@ pub fn do_zedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         cur: 0,
         level_of_editor: level,
     };
+    // C olc.c:198-212 (#272): key on the zone being edited.
+    if states().lock().unwrap().values().any(|s| s.zone_number == st.zone_number) {
+        g.send_to_char(ch, "That zone is currently being edited by someone else.\r\n");
+        return;
+    }
     states().lock().unwrap().insert(conn, st);
     olc::set_active(conn, EditorKind::Zedit);
     disp_menu(g, conn);
