@@ -1023,24 +1023,23 @@ fn is_substring(sub: &str, string: &str) -> bool {
     let needle = sub.to_lowercase();
     let hb = hay.as_bytes();
     let nb = needle.as_bytes();
-    let mut start = 0usize;
-    while let Some(rel) = hay[start..].find(&needle) {
-        let pos = start + rel;
-        let before_ok = pos == 0 || {
-            let prev = hb[pos - 1];
-            prev.is_ascii_whitespace() || (prev as char).is_ascii_punctuation()
-        };
-        let end = pos + nb.len();
-        let after_ok = end == hb.len() || {
-            let next = hb[end];
-            next.is_ascii_whitespace() || (next as char).is_ascii_punctuation()
-        };
-        if before_ok && after_ok {
-            return true;
-        }
-        start = pos + 1;
-    }
-    false
+    // C dg_triggers.c:155-174: str_str finds the FIRST occurrence only and
+    // the boundary check applies to that one match - a later occurrence of
+    // the keyword never rescues the match (#151).
+    let pos = match hay.find(&needle) {
+        Some(p) => p,
+        None => return false,
+    };
+    let before_ok = pos == 0 || {
+        let prev = hb[pos - 1];
+        prev.is_ascii_whitespace() || (prev as char).is_ascii_punctuation()
+    };
+    let end = pos + nb.len();
+    let after_ok = end == hb.len() || {
+        let next = hb[end];
+        next.is_ascii_whitespace() || (next as char).is_ascii_punctuation()
+    };
+    before_ok && after_ok
 }
 
 /// word_check (dg_triggers.c): true if `str_` contains any word/phrase from the

@@ -646,7 +646,16 @@ fn resolve_char_field(
             Some(v) => format!("{}{}", UID_CHAR, char_id(v)),
             None => String::new(),
         },
-        "riding" | "ridden_by" => String::new(), // mounts not modelled here
+        // C dg_scripts.c:1325-1337: %actor.riding%/%actor.ridden_by% emit the
+        // mount/rider UID; both fields exist on Character here (#156).
+        "riding" => match ch.riding {
+            Some(m) => format!("{}{}", UID_CHAR, char_id(m)),
+            None => String::new(),
+        },
+        "ridden_by" => match ch.ridden_by {
+            Some(r) => format!("{}{}", UID_CHAR, char_id(r)),
+            None => String::new(),
+        },
         "vnum" => if ch.is_npc { ch.nr } else { -1 }.to_string(),
         "str" => ch.aff_abils.str.to_string(),
         "stradd" => {
@@ -1604,7 +1613,13 @@ fn script_driver_inner(g: &mut GameState, go: GoRef, trig: TrigId, type_: i32, m
             // multiple cases to one body: no-op
         } else {
             // Substitute, then dispatch a directive or a real command.
-            let cmd = var_subst(g, go, trig, p);
+            // C dg_scripts.c:1503-1563 var_subst writes into a
+            // MAX_INPUT_LENGTH (256) buffer - long substitutions are clipped
+            // (#160).
+            let mut cmd = var_subst(g, go, trig, p);
+            if cmd.len() > 256 {
+                cmd.truncate(256);
+            }
             let lc = cmd.trim_start();
 
             if let Some(rest) = strip_kw(lc, "eval ") {
@@ -1633,7 +1648,9 @@ fn script_driver_inner(g: &mut GameState, go: GoRef, trig: TrigId, type_: i32, m
                 process_wait(g, go, trig, &cmd, cl);
                 return ret_val;
             } else if lc.starts_with("version") {
-                // log version; no-op visible effect
+                // C dg_scripts.c:2378-2379: 'version' mudlogs the DG banner
+                // to immortals (#161).
+                crate::syslog::mudlog(g, "DG Scripts Version 0.99 Patch Level 5a    8/98", crate::syslog::NRM, LVL_GOD);
             } else {
                 // Real command — dispatch by trigger type. The DG command
                 // modules (dg_mobcmd / dg_objcmd / dg_wldcmd) own the m*/o*/w*

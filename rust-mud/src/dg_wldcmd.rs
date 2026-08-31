@@ -727,15 +727,23 @@ fn do_wdamage(g: &mut GameState, room: RoomRnum, argument: &str) {
         if !g.char_exists(ch) {
             continue;
         }
-        // wdamage's negative-amount heal path (C: send "rejuvinated", return).
+        // C dg_wldcmd.c:509-517: an immortal target `return`s (not
+        // `continue`s) even in the 'all' form, and the negative-amount heal
+        // path returns UNCONDITIONALLY after the first target - the port
+        // looped over everyone (#158).
         if dam < 0 {
             if is_immortal(g, ch) {
-                continue;
+                return;
             }
             if let Some(c) = g.get_char_mut(ch) {
                 c.points.hit -= dam; // dam<0 => heal
             }
             g.send_to_char(ch, "You feel rejuvinated.\r\n");
+            return;
+        }
+        // C dg_wldcmd.c:505-510: immortals are skipped in the 'all' form and
+        // END the command in the single-target form.
+        if is_immortal(g, ch) {
             if !all {
                 return;
             }
