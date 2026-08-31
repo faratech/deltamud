@@ -592,10 +592,13 @@ pub fn do_olc(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
         } else if subcmd == SCMD_OLC_HEDIT || subcmd == SCMD_OLC_AEDIT {
             number = 0;
         } else if subcmd == SCMD_OLC_ZEDIT && level >= LVL_IMPL {
-            if buf1.len() >= 3 && "new".starts_with(buf1.as_str()) && !buf2.is_empty() {
-                // zedit new <num> — zedit autocreates on first edit, so hand the
-                // number straight to do_zedit.
-                crate::zedit::do_zedit(g, ch, &buf2, 0);
+            if buf1.len() >= 3 && buf1.starts_with("new") && !buf2.is_empty() {
+                // C zedit.c:153-330: 'olc zedit new <zone>' CREATES the zone
+                // (six stub files + index append + zone-table insert) and
+                // then exits - it does not enter the editor (also fixes the
+                // strn_cmp prefix inversion, #263).
+                let zone_num: i32 = buf2.trim().parse().unwrap_or(-1);
+                crate::zedit::zedit_new_zone(g, ch, zone_num);
             } else {
                 g.send_to_char(ch, "Specify a new zone number.\r\n");
             }

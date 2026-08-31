@@ -1995,3 +1995,111 @@ mod tests {
         assert!(can_edit_vnum_zone(&g, imp, 250));
     }
 }
+
+/// C zedit.c:153-330 zedit_new_zone + zedit_create_index: create the six
+/// stub files, append the new zone to every world index file, and insert the
+/// zone into the live zone table ('olc zedit new <zone>'; issue #263).
+const LVL_BUILDER_LEVEL: u8 = 100;
+
+pub fn zedit_new_zone(g: &mut GameState, ch: CharId, vzone_num: i32) {
+    const MAX_ZONE_NUM: i32 = 999;
+    if vzone_num < 0 {
+        g.send_to_char(ch, "You can't make negative zones.\r\n");
+        return;
+    }
+    if vzone_num > MAX_ZONE_NUM {
+        g.send_to_char(ch, "That is higher then highest zone allowed.\r\n");
+        return;
+    }
+    let room = vzone_num * 100;
+    if g
+        .zones
+        .iter()
+        .any(|z| z.number * 100 <= room && z.top >= room)
+    {
+        g.send_to_char(ch, "A zone already covers that area.\r\n");
+        return;
+    }
+
+    let lib = g.config.lib_path.clone().trim_end_matches('/').to_string();
+    let write = |rel: &str, body: &str| -> std::io::Result<()> {
+        let path = std::path::Path::new(&lib).join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, body)
+    };
+
+    let mut wrote = true;
+    if write(&format!("world/zon/{}.zon", vzone_num), &format!("#{}\nNew Zone~\n~\n{} 30 2\n0 0 0\nS\n$\n", vzone_num, vzone_num * 100 + 99)).is_err() {
+        wrote = false;
+    }
+    if wrote && write(&format!("world/wld/{}.wld", vzone_num), &format!("#{}\nThe Beginning~\nNot much here.\n~\n{} 0 0\nS\n$\n", vzone_num * 100, vzone_num)).is_err() {
+        wrote = false;
+    }
+    if wrote && write(&format!("world/mob/{}.mob", vzone_num), "$\n").is_err() {
+        wrote = false;
+    }
+    if wrote && write(&format!("world/obj/{}.obj", vzone_num), "$\n").is_err() {
+        wrote = false;
+    }
+    if wrote && write(&format!("world/shp/{}.shp", vzone_num), "$~\n").is_err() {
+        wrote = false;
+    }
+    if wrote && write(&format!("world/trg/{}.trg", vzone_num), "$~\n").is_err() {
+        wrote = false;
+    }
+    if !wrote {
+        crate::syslog::mudlog(g, "SYSERR: OLC: Can't write new zone file", crate::syslog::BRF, LVL_IMPL);
+        g.send_to_char(ch, "Could not write zone file.\r\n");
+        return;
+    }
+
+    // zedit_create_index: append the new file to each index (alphabetical by
+    // filename, like C's loop over the dir listing reading index file order).
+    for ext in ["zon", "wld", "mob", "obj", "shp", "trg"] {
+        let index_path = std::path::Path::new(&lib)
+            .join(format!("world/{}", ext))
+            .join("index");
+        let mut content = std::fs::read_to_string(&index_path).unwrap_or_default();
+        content.push_str(&format!("{}.{}\n", vzone_num, ext));
+        let _ = std::fs::write(&index_path, content);
+    }
+
+    // Insert the live zone in number order.
+    let zone = crate::world::Zone {
+        number: vzone_num,
+        name: "New Zone".into(),
+        builders: String::new(),
+        lifespan: 30,
+        age: 0,
+        top: vzone_num * 100 + 99,
+        reset_mode: 2,
+        min_level: 0,
+        max_level: 0,
+        status_mode: 0,
+        map_x: None,
+        map_y: None,
+        reset_commands: Vec::new(),
+    };
+    let pos = g
+        .zones
+        .iter()
+        .position(|z| z.number > vzone_num)
+        .unwrap_or(g.zones.len());
+    g.zones.insert(pos, zone);
+
+    crate::syslog::mudlog(
+        g,
+        &format!("OLC: {} creates new zone #{}", get_name(g, ch), vzone_num),
+        crate::syslog::BRF,
+        LVL_BUILDER_LEVEL.max(g.get_char(ch).map(|c| c.invis_level as u8).unwrap_or(0)),
+    );
+    g.send_to_char(ch, "Zone created successfully.\r\n");
+}
+
+fn get_name(g: &GameState, ch: CharId) -> String {
+    g.get_char(ch)
+        .map(|c| c.get_name().to_string())
+        .unwrap_or_else(|| "someone".into())
+}
