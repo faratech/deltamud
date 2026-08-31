@@ -719,7 +719,13 @@ async fn handle_input(&mut self, conn_id: ConnId, input: String) {
                     return;
                 }
                 let name = normalize_name(&input);
-                if !valid_name(&name) {
+                // C interpreter.c:1747-1752: _parse_name length/alpha checks,
+                // fill_word/reserved_word, and Valid_Name (xnames substrings +
+                // mob-keyword collisions) (#223).
+                if !valid_name(&name)
+                    || reserved_or_fill_word(&name)
+                    || !crate::ban::valid_name_in(&self.state, &name)
+                {
                     self.out(conn_id, "Invalid name, please try another.\r\n");
                     return;
                 }
@@ -2366,8 +2372,41 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                 (t, d.state == ConState::Close)
             };
             if !text.is_empty() {
+                // C comm.c:1637-1642 (#221): the whole buffer (output + prompt)
+                // is proc_color'd with the viewer's colour mode — mortals in a
+                // magic-fog room get the -1 scramble, others get
+                // clr(ch, C_NRM) (level >= 2 renders, below strips).
+                let mode = {
+                    let ch_id = self
+                        .state
+                        .descriptors
+                        .get(&conn_id)
+                        .and_then(|d| d.character);
+                    match ch_id.map(|c| self.state.get_char(c)).flatten() {
+                        Some(c) => {
+                            let in_fog = c
+                                .in_room
+                                .map(|r| {
+                                    self.state.room(r).weather
+                                        == crate::maputils::WEATHER_MAGICFOG as i32
+                                })
+                                .unwrap_or(false);
+                            if in_fog && c.player.level < LVL_IMMORT {
+                                -1
+                            } else if crate::olc::colour_level(&self.state, ch_id.unwrap()) >= 2 {
+                                1
+                            } else {
+                                0
+                            }
+                        }
+                        None => 1,
+                    }
+                };
+                let rendered = crate::connection::proc_color(&text, mode, |max| {
+                    1 + self.state.rng.dice(1, max)
+                });
                 if let Some(tx) = self.outputs.get(&conn_id) {
-                    let _ = tx.send(render_color(&text)).await;
+                    let _ = tx.send(rendered).await;
                 }
             }
             if closing {
@@ -2764,6 +2803,21 @@ fn valid_name(name: &str) -> bool {
     // C: MAX_NAME_LENGTH == 20 (structs.h) — the player-name field is 20+1, and
     // the nanny name-entry path caps names at MAX_NAME_LENGTH, not 16 (BUG #16).
     name.len() >= 2 && name.len() <= 20 && name.chars().all(|c| c.is_ascii_alphabetic())
+}
+
+/// C interpreter.c:694-718: fill words ("in from with the on at to") and the
+/// reserved list ("a an self me all room someone something") are both refused
+/// as player names (#223).
+fn reserved_or_fill_word(name: &str) -> bool {
+    const RESERVED: &[&str] = &[
+        "a", "an", "self", "me", "all", "room", "someone", "something",
+    ];
+    crate::interpreter::FILL_WORDS
+        .iter()
+        .any(|f| f.eq_ignore_ascii_case(name))
+        || RESERVED
+            .iter()
+            .any(|r| r.eq_ignore_ascii_case(name))
 }
 
 #[cfg(test)]
@@ -3377,5 +3431,69 @@ mod tests {
         );
         assert_eq!(Game::perform_subst("say Hi", "^zzz^qqq"), None);
         assert_eq!(Game::perform_subst("say Hi", "^Hi"), None);
+    }
+
+    #[test]
+    fn reserved_and_fill_words_are_rejected_as_names() {
+        // C interpreter.c:694-718 (#223).
+        assert!(reserved_or_fill_word("me"));
+        assert!(reserved_or_fill_word("all"));
+        assert!(reserved_or_fill_word("something"));
+        assert!(reserved_or_fill_word("the"));
+        assert!(!reserved_or_fill_word("Thrall"));
+    }
+
+    #[tokio::test]
+    async fn mob_keyword_names_are_rejected() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        // A mob prototype whose keywords include "dragon".
+        let proto = test_mob_proto(3001, "red dragon Dragon");
+        game.state.mob_protos.insert(3001, proto);
+        let conn = ConnId(40);
+        attach_descriptor_at_name(&mut game, conn, "example.test").await;
+        game.nanny(conn, "dragon".to_string()).await;
+        // Still at GetName with the C refusal, not ConfirmName.
+        assert_eq!(descriptor_state(&game, conn), ConState::GetName);
+        assert!(game
+            .state
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("Invalid name, please try another."));
+    }
+
+    fn test_mob_proto(vnum: MobVnum, name: &str) -> crate::world::MobileProto {
+        crate::world::MobileProto {
+            vnum,
+            name: name.to_string(),
+            short_desc: name.to_string(),
+            long_desc: format!("{} is here.\r\n", name),
+            description: String::new(),
+            level: 1,
+            hitpoints: 1,
+            hit_dice: (0, 0, 1),
+            experience: 0,
+            gold: 0,
+            position: Position::Standing,
+            default_pos: Position::Standing,
+            sex: Gender::Neutral,
+            alignment: 0,
+            act_flags: 0,
+            affect_flags: 0,
+            armor: 0,
+            hitroll: 0,
+            damroll: 0,
+            damnodice: 1,
+            damsizedice: 1,
+            power: 0,
+            mpower: 0,
+            defense: 0,
+            mdefense: 0,
+            technique: 0,
+            abilities: None,
+            attack_type: 0,
+        }
     }
 }

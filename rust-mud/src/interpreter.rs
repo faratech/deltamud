@@ -22,7 +22,7 @@ const CMDS_DEAD_CAN_USE: &str = "qui quit look who say north south east west up 
 
 /// Fill words skipped by one_argument (CircleMUD fill[]).
 // C interpreter.c:696-706 fill[] - NO "of" (issue #227).
-const FILL_WORDS: &[&str] = &["in", "from", "with", "the", "on", "at", "to"];
+pub const FILL_WORDS: &[&str] = &["in", "from", "with", "the", "on", "at", "to"];
 
 fn is_fill_word(w: &str) -> bool {
     FILL_WORDS.iter().any(|f| f.eq_ignore_ascii_case(w))

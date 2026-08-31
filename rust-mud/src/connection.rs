@@ -718,3 +718,133 @@ mod telnet_tests {
         assert_eq!(lines_of(&[seq]), vec!["x", ""]);
     }
 }
+
+// ---------------------------------------------------------------------------
+// colour.c port: COLOURLIST / is_colour / proc_color (#221). C's table is
+// indexed by is_colour() code values; `&`-codes expand when the viewer's
+// colour level >= C_NRM, are stripped below it, and are randomly scrambled
+// (mode -1) for mortals standing in magic fog.
+// ---------------------------------------------------------------------------
+
+const COLOURLIST: [&str; 30] = [
+    "\x1B[0;0m", // 0 CNRM
+    "\x1B[0;31m", // 1 CRED
+    "\x1B[0;32m", // 2 CGRN
+    "\x1B[0;33m", // 3 CYEL
+    "\x1B[0;34m", // 4 CBLU
+    "\x1B[0;35m", // 5 CMAG
+    "\x1B[0;36m", // 6 CCYN
+    "\x1B[0;37m", // 7 CWHT
+    "\x1B[1;31m", // 8 BRED
+    "\x1B[1;32m", // 9 BGRN
+    "\x1B[1;33m", // 10 BYEL
+    "\x1B[1;34m", // 11 BBLU
+    "\x1B[1;35m", // 12 BMAG
+    "\x1B[1;36m", // 13 BCYN
+    "\x1B[1;37m", // 14 BWHT
+    "\x1B[41m",   // 15 BKRED
+    "\x1B[42m",   // 16 BKGRN
+    "\x1B[43m",   // 17 BKYEL
+    "\x1B[44m",   // 18 BKBLU
+    "\x1B[45m",   // 19 BKMAG
+    "\x1B[46m",   // 20 BKCYN
+    "\x1B[47m",   // 21 BKWHT
+    "&",          // 22 CAMP
+    "\\",        // 23 CSLH
+    "\x1B[40m",   // 24 BKBLK
+    "\x1B[0;30m", // 25 CBLK (&k)
+    "\x1B[5m",    // 26 CFSH (&f)
+    "\x1B[7m",    // 27 CRVS (&v)
+    "\x1B[4m",    // 28 CUDL (&u)
+    "\x1B[1;30m", // 29 BBLK (&K)
+];
+
+const MAX_COLORS: i32 = 28;
+
+/// C color.c is_colour: the `&x` code char -> COLOURLIST index, or -1.
+fn is_colour(code: char) -> i32 {
+    match code {
+        'k' => 25,
+        'r' => 1,
+        'g' => 2,
+        'y' => 3,
+        'b' => 4,
+        'm' => 5,
+        'c' => 6,
+        'w' => 7,
+        'K' => 29,
+        'R' => 8,
+        'G' => 9,
+        'Y' => 10,
+        'B' => 11,
+        'M' => 12,
+        'C' => 13,
+        'W' => 14,
+        // Backgrounds: '0' (black) is BKBLK at index 24; '1'..'7' are
+        // BKRED..BKWHT at 15..21.
+        '0' => 24,
+        '1' | '2' | '3' | '4' | '5' | '6' | '7' => 14 + (code as u8 - b'0') as i32,
+        '&' => 22,
+        '\\' => 23,
+        'n' => 0,
+        'f' => 26,
+        'v' => 27,
+        'u' => 28,
+        _ => -1,
+    }
+}
+
+/// C color.c proc_color. `colour`: >0 renders codes, 0 strips them, -1
+/// scrambles every code to a random 1..=14 colour (magic fog). `rng` supplies
+/// the scramble draws (C number(1,14)); pass the game RNG.
+pub fn proc_color<R: FnMut(i32) -> i32>(text: &str, colour: i32, mut rand: R) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let bytes: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut j = 0usize;
+    let mut lastcol = 0i32;
+    let mut lastcol2 = 0i32;
+    let is_num = |c: char| c.is_ascii_digit();
+    while j < bytes.len() {
+        let c;
+        if j + 3 < bytes.len()
+            && bytes[j] == '\\'
+            && bytes[j + 1] == 'c'
+            && is_num(bytes[j + 2])
+            && is_num(bytes[j + 3])
+        {
+            c = (bytes[j + 2] as u8 - b'0') as i32 * 10 + (bytes[j + 3] as u8 - b'0') as i32;
+            j += 4;
+        } else if j + 1 < bytes.len()
+            && bytes[j] == '&'
+            && (is_colour(bytes[j + 1]) != -1 || bytes[j + 1].to_ascii_lowercase() == 'l')
+        {
+            if bytes[j + 1].to_ascii_lowercase() == 'l' {
+                c = if colour != -1 { lastcol2 } else { rand(14) };
+            } else {
+                c = if colour != -1 {
+                    is_colour(bytes[j + 1])
+                } else {
+                    rand(14)
+                };
+            }
+            lastcol2 = lastcol;
+            lastcol = c;
+            j += 2;
+        } else {
+            out.push(bytes[j]);
+            j += 1;
+            continue;
+        }
+        let c = if c > MAX_COLORS + 1 { 0 } else { c };
+        let slot = c.clamp(0, COLOURLIST.len() as i32 - 1) as usize;
+        let expansion = COLOURLIST[slot];
+        // C: emit only when colour is on OR the expansion is empty (CNUL).
+        if colour != 0 || expansion.len() == 1 {
+            out.push_str(expansion);
+        }
+    }
+    out
+}
