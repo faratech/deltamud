@@ -1696,7 +1696,10 @@ pub fn do_blanket(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) 
     }
 
     // Success: hide the leader (and the rest of the group).
-    let mut befuddled = false;
+    // C act.offensive.c:992 initialises befuddled = 1 and tests !befuddled,
+    // so the "befuddled" room lines are dead code there; matching that by
+    // starting true keeps the port from emitting the extra line (#135).
+    let mut befuddled = true;
     if k_in_room || k == ch {
         let kname = g
             .get_char(k)
