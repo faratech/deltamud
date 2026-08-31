@@ -172,19 +172,58 @@ fn clan_file_path(lib_path: &str) -> String {
 /// CircleMUD boot_clans(): load (or create) the clan table from disk. The
 /// integrator calls this once at boot, before any command dispatch, with the
 /// configured lib path (e.g. `boot_clans(&config.lib_path)`).
+
+/// Map a C clan_info record onto the Rust ClanInfo (guest of #95 codecs).
+fn convert_c_clan(cc: crate::cformat::CClanInfo) -> ClanInfo {
+    ClanInfo {
+        number: cc.number,
+        members: cc.members,
+        ranks: cc.ranks,
+        privilege: cc.privilege,
+        clan_room: cc.clan_room,
+        gold: cc.gold,
+        rank_name: {
+            let mut arr: [String; MAX_RANKS - 1] = Default::default();
+            for (i, s) in cc.rank_name.into_iter().take(MAX_RANKS - 1).enumerate() {
+                arr[i] = s;
+            }
+            arr
+        },
+        leader: cc.leader,
+        name: cc.name,
+        who_name: cc.who_name,
+    }
+}
+
 pub fn boot_clans(lib_path: &str) {
     let path = clan_file_path(lib_path);
     let clans = match std::fs::read(&path) {
-        Ok(bytes) => match decode_clans(&bytes) {
-            Some(v) => v,
-            None => {
-                eprintln!(
-                    "SYSERR: clans.dat at '{}' is corrupt; starting empty.",
-                    path
-                );
-                Vec::new()
+        Ok(bytes) => {
+            // Issue #95: a C-written clans.dat is i32 count + 304-byte
+            // clan_info records. Try the C layout first (file size exactly
+            // 4 + count*304); fall back to the Rust self-describing format.
+            let c_format = bytes.len() >= 4
+                && bytes.len() == 4
+                    + i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize
+                        * crate::cformat::C_CLAN_INFO_SIZE;
+            if c_format {
+                crate::cformat::decode_clans_dat(&bytes)
+                    .into_iter()
+                    .map(|cc| convert_c_clan(cc))
+                    .collect()
+            } else {
+                match decode_clans(&bytes) {
+                    Some(v) => v,
+                    None => {
+                        eprintln!(
+                            "SYSERR: clans.dat at '{}' is corrupt; starting empty.",
+                            path
+                        );
+                        Vec::new()
+                    }
+                }
             }
-        },
+        }
         Err(_) => {
             // C logs "Clan file doesn't exist, a new one will be created."
             eprintln!("Clan file doesn't exist, a new one will be created.");
