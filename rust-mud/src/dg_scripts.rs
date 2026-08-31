@@ -550,15 +550,34 @@ fn resolve_random(g: &GameState, go: GoRef, field: &str) -> String {
             .map(|r| r.people.clone())
             .unwrap_or_default();
         // number(0,count) reservoir sampling, matching C exactly via rng.
-        // NOTE: requires &mut rng; we sample deterministically here by walking
-        // and using a thread-local fallback. Use the GameState rng via a cell.
+        // C dg_scripts.c:1228-1259 candidate filters (#147): the MOB path
+        // skips chars the scripter cannot see and PRF_NOHASSLE players; the
+        // OBJ/WLD paths skip wizinvis immortals and NOHASSLE players.
         let mut rndm: Option<CharId> = None;
         let mut count = 0;
+        let actor = match go {
+            GoRef::Mob(c) => Some(c),
+            _ => None,
+        };
         for c in people {
             if Some(c) == exclude {
                 continue;
             }
-            // (PRF_NOHASSLE / invis skipped: mobs & default players visible.)
+            if let Some(ch) = g.get_char(c) {
+                let nohassle = ch.prf_flags & crate::flags::PRF_NOHASSLE != 0;
+                let wizinvis = !ch.is_npc && ch.invis_level > 0;
+                if nohassle {
+                    continue;
+                }
+                if wizinvis {
+                    continue;
+                }
+                if let Some(actor) = actor {
+                    if !g.can_see(actor, c) {
+                        continue;
+                    }
+                }
+            }
             if rng_number(0, count) == 0 {
                 rndm = Some(c);
             }
