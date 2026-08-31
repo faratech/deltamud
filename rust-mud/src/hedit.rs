@@ -284,7 +284,7 @@ pub fn do_hedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let (buf1, _rest) = crate::interpreter::one_argument(arg);
 
     if buf1.is_empty() {
-        g.send_to_char(ch, "Specify a help entry to edit.\r\n");
+        send(g, ch, "Specify a help entry to edit.\r\n");
         return;
     }
 
@@ -294,7 +294,7 @@ pub fn do_hedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     {
         // Match strn_cmp("save", buf1, 4): a prefix of "save" of length up to 4.
         if "save".starts_with(&buf1.to_lowercase()) && !buf1.is_empty() {
-            g.send_to_char(ch, "Saving all help entries.\r\n");
+            send(g, ch, "Saving all help entries.\r\n");
             let name = g
                 .get_char(ch)
                 .map(|c| c.player.name.clone())
@@ -433,7 +433,7 @@ fn hedit_disp_menu(g: &mut GameState, conn: ConnId) {
 Enter choice : ",
         keywords, entry, min_level
     );
-    g.send_to_char(ch, &menu);
+    send(g, ch, &menu);
 }
 
 // ---------------------------------------------------------------------------
@@ -469,7 +469,7 @@ pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     with_state(conn, |st| st.help.keywords.clone()).unwrap_or_default(),
                 );
                 log::info!("OLC: {} edits help for {}.", name, kw);
-                g.send_to_char(ch, "Help entry saved to memory.\r\n");
+                send(g, ch, "Help entry saved to memory.\r\n");
                 cleanup(conn);
             }
             Some('n') | Some('N') => {
@@ -487,15 +487,15 @@ pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             Some('q') | Some('Q') => {
                 let changed = with_state(conn, |st| st.changed).unwrap_or(false);
                 if changed {
-                    g.send_to_char(ch, "Do you wish to save this help entry internally? : ");
+                    send(g, ch, "Do you wish to save this help entry internally? : ");
                     with_state(conn, |st| st.mode = HeditMode::ConfirmSave);
                 } else {
                     cleanup(conn);
                 }
-                g.send_to_char(ch, "\r\n");
+                send(g, ch, "\r\n");
             }
             Some('1') => {
-                g.send_to_char(ch, "Enter keywords:-\r\n] ");
+                send(g, ch, "Enter keywords:-\r\n] ");
                 with_state(conn, |st| st.mode = HeditMode::Keywords);
             }
             Some('2') => {
@@ -505,19 +505,19 @@ pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     st.text_buf = Some(st.help.entry.clone());
                     st.changed = true;
                 });
-                g.send_to_char(ch, "");
-                g.send_to_char(ch, "Enter help entry: (/s saves /h for help)\r\n\r\n");
+                send(g, ch, "");
+                send(g, ch, "Enter help entry: (/s saves /h for help)\r\n\r\n");
                 let cur = with_state(conn, |st| st.help.entry.clone()).unwrap_or_default();
                 if !cur.is_empty() {
-                    g.send_to_char(ch, &cur);
+                    send(g, ch, &cur);
                 }
             }
             Some('3') => {
-                g.send_to_char(ch, "Enter min level:-\r\n] ");
+                send(g, ch, "Enter min level:-\r\n] ");
                 with_state(conn, |st| st.mode = HeditMode::MinLevel);
             }
             _ => {
-                g.send_to_char(ch, "Invalid choice!\r\n");
+                send(g, ch, "Invalid choice!\r\n");
                 hedit_disp_menu(g, conn);
             }
         },
@@ -551,7 +551,7 @@ pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             // which passes the range check and resets min_level to 0 (#298).
             let number = atoi(arg);
             if number < 0 || number > LVL_IMPL as i32 {
-                g.send_to_char(ch, "That is not a valid choice!\r\nEnter min level:-\r\n] ");
+                send(g, ch, "That is not a valid choice!\r\nEnter min level:-\r\n] ");
             } else {
                 with_state(conn, |st| {
                     st.help.min_level = number;
@@ -700,6 +700,16 @@ fn delete_doubledollar(s: &str) -> String {
 fn cleanup(conn: ConnId) {
     take_state(conn);
     olc::clear_active(conn);
+}
+
+/// OLC output with C get_char_cols semantics: the &-codes in these menus are
+/// stripped for builders whose colour level is below C_NRM (#306).
+fn send(g: &mut GameState, ch: CharId, msg: &str) {
+    if crate::olc::olc_colour_on(g, ch) {
+        g.send_to_char(ch, msg);
+    } else {
+        g.send_to_char(ch, &crate::connection::strip_color(msg));
+    }
 }
 
 fn conn_char(g: &GameState, conn: ConnId) -> Option<CharId> {

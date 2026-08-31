@@ -145,9 +145,8 @@ pub fn abort(conn: ConnId) {
 // Output helper.
 // ---------------------------------------------------------------------------
 fn send(g: &mut GameState, conn: ConnId, msg: &str) {
-    if let Some(d) = g.descriptors.get_mut(&conn) {
-        d.outbuf.push_str(msg);
-    }
+    // C get_char_cols: colour gated on the builder's colour level (#306).
+    crate::olc::olc_send(g, conn, msg);
 }
 
 // ===========================================================================

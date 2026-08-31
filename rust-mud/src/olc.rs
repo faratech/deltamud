@@ -80,13 +80,53 @@ pub enum DgScriptEditMode {
 }
 
 // ---------------------------------------------------------------------------
-// OLC color cols. The C get_char_cols() set per-char color pointers; the
-// editors render with raw ANSI escapes that connection.rs forwards untouched.
+// OLC color cols. C's get_char_cols() (olc.c:482-488) fills its globals with
+// the screen.h KNRM/KGRN/KCYN/KYEL `&`-codes when the builder's colour level
+// >= C_NRM (PRF_COLOR_2), else KNUL (""). We keep the same `&`-codes as the
+// menu constants; the builder-facing send helpers strip them for builders
+// whose colour level is below C_NRM (#306).
 // ---------------------------------------------------------------------------
-pub const NRM: &str = "\x1b[0m";
-pub const GRN: &str = "\x1b[0;32m";
-pub const CYN: &str = "\x1b[0;36m";
-pub const YEL: &str = "\x1b[0;33m";
+pub const NRM: &str = "&n";
+pub const GRN: &str = "&G";
+pub const CYN: &str = "&C";
+pub const YEL: &str = "&Y";
+
+/// screen.h C_NRM: the colour level OLC menus require (PRF_COLOR_2 set).
+const C_NRM_LEVEL: i32 = 2;
+
+/// screen.h _clrlevel: 0-3 from PRF_COLOR_1/2.
+pub fn colour_level(g: &GameState, ch: CharId) -> i32 {
+    use crate::flags::{PRF_COLOR_1, PRF_COLOR_2};
+    let (p1, p2) = g
+        .get_char(ch)
+        .map(|c| {
+            (
+                c.prf_flags & PRF_COLOR_1 != 0,
+                c.prf_flags & PRF_COLOR_2 != 0,
+            )
+        })
+        .unwrap_or((false, false));
+    (p1 as i32) + ((p2 as i32) * 2)
+}
+
+/// True when the builder sees OLC menu colours (clr(ch, C_NRM)).
+pub fn olc_colour_on(g: &GameState, ch: CharId) -> bool {
+    colour_level(g, ch) >= C_NRM_LEVEL
+}
+
+/// Send OLC text to a connection, stripping the `&`-codes when the builder's
+/// colour level is below C_NRM (C get_char_cols handing back KNUL) (#306).
+pub fn olc_send(g: &mut GameState, conn: ConnId, msg: &str) {
+    let ch = g.descriptors.get(&conn).and_then(|d| d.character);
+    let keep = ch.map(|c| olc_colour_on(g, c)).unwrap_or(false);
+    if keep {
+        if let Some(d) = g.descriptors.get_mut(&conn) {
+            d.outbuf.push_str(msg);
+        }
+    } else if let Some(d) = g.descriptors.get_mut(&conn) {
+        d.outbuf.push_str(&crate::connection::strip_color(msg));
+    }
+}
 
 // ---------------------------------------------------------------------------
 // EditorKind — which OLC editor a connection is currently driving.
@@ -984,6 +1024,30 @@ mod tests {
         assert_eq!(mode, DgScriptEditMode::New);
         let out = &g.descriptors.get(&conn).unwrap().outbuf;
         assert!(out.contains("Invalid Trigger VNUM!"));
+    }
+
+    #[test]
+    fn menu_colours_follow_the_builder_colour_level() {
+        let _guard = olc_test_lock();
+        let mut g = GameState::new(Config::default());
+        let colour_on = player(&mut g, "Colour", LVL_IMPL);
+        let colour_off = player(&mut g, "Plain", LVL_IMPL);
+        g.get_char_mut(colour_off).unwrap().prf_flags = 0;
+        // Colour level from PRF_COLOR_1/2 (screen.h _clrlevel).
+        assert_eq!(colour_level(&g, colour_off), 0);
+        assert!(!olc_colour_on(&g, colour_off));
+        g.get_char_mut(colour_on).unwrap().prf_flags =
+            crate::flags::PRF_COLOR_1 | crate::flags::PRF_COLOR_2;
+        assert!(olc_colour_on(&g, colour_on));
+
+        // olc_send strips the &-codes for a colour-off builder (#306).
+        let conn = ConnId(105);
+        g.get_char_mut(colour_off).unwrap().desc = Some(conn);
+        let mut d = Descriptor::new(conn, "example.test".to_string());
+        d.character = Some(colour_off);
+        g.descriptors.insert(conn, d);
+        olc_send(&mut g, conn, "-- Menu [&C42&n]\r\n");
+        assert_eq!(g.descriptors.get(&conn).unwrap().outbuf, "-- Menu [42]\r\n");
     }
 
     #[test]

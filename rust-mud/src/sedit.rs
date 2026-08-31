@@ -640,7 +640,7 @@ pub fn do_sedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let (buf2, _) = crate::interpreter::one_argument(rest);
 
     if buf1.is_empty() {
-        g.send_to_char(ch, "Specify a shop VNUM to edit.\r\n");
+        send(g, ch, "Specify a shop VNUM to edit.\r\n");
         return;
     }
 
@@ -653,15 +653,15 @@ pub fn do_sedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     {
         if "save".starts_with(&buf1.to_lowercase()) {
             if buf2.is_empty() {
-                g.send_to_char(ch, "Save which zone?\r\n");
+                send(g, ch, "Save which zone?\r\n");
                 return;
             }
             let zone = buf2.parse::<i32>().unwrap_or(-1);
             if zone < 0 {
-                g.send_to_char(ch, "Save which zone?\r\n");
+                send(g, ch, "Save which zone?\r\n");
                 return;
             }
-            g.send_to_char(ch, &format!("Saving all shops in zone {}.\r\n", zone));
+            send(g, ch, &format!("Saving all shops in zone {}.\r\n", zone));
             let name = g
                 .get_char(ch)
                 .map(|c| c.player.name.clone())
@@ -671,13 +671,13 @@ pub fn do_sedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             sedit_save_to_disk(&lib_path, zone, &shops);
             return;
         }
-        g.send_to_char(ch, "Yikes!  Stop that, someone will get hurt!\r\n");
+        send(g, ch, "Yikes!  Stop that, someone will get hurt!\r\n");
         return;
     }
 
     let vnum = buf1.parse::<i32>().unwrap_or(-1);
     if vnum < 0 {
-        g.send_to_char(ch, "Yikes!  Stop that, someone will get hurt!\r\n");
+        send(g, ch, "Yikes!  Stop that, someone will get hurt!\r\n");
         return;
     }
 
@@ -847,7 +847,7 @@ Enter Choice : ",
         notrade,
         bitvec,
     );
-    g.send_to_char(ch, &menu);
+    send(g, ch, &menu);
 }
 
 fn sedit_products_menu(g: &mut GameState, conn: ConnId) {
@@ -874,7 +874,7 @@ fn sedit_products_menu(g: &mut GameState, conn: ConnId) {
     out.push_str(
         "\r\n&gA&n) Add a new product.\r\n&gD&n) Delete a product.\r\n&gQ&n) Quit\r\nEnter choice : ",
     );
-    g.send_to_char(ch, &out);
+    send(g, ch, &out);
 }
 
 fn sedit_rooms_menu(g: &mut GameState, conn: ConnId) {
@@ -902,7 +902,7 @@ fn sedit_rooms_menu(g: &mut GameState, conn: ConnId) {
         "\r\n&gA&n) Add a new room.\r\n&gD&n) Delete a room.\r\n&gC&n) Compact Display.\r\n\
 &gQ&n) Quit\r\nEnter choice : ",
     );
-    g.send_to_char(ch, &out);
+    send(g, ch, &out);
 }
 
 fn sedit_compact_rooms_menu(g: &mut GameState, conn: ConnId) {
@@ -928,7 +928,7 @@ fn sedit_compact_rooms_menu(g: &mut GameState, conn: ConnId) {
         "\r\n&gA&n) Add a new room.\r\n&gD&n) Delete a room.\r\n&gL&n) Long display.\r\n\
 &gQ&n) Quit\r\nEnter choice : ",
     );
-    g.send_to_char(ch, &out);
+    send(g, ch, &out);
 }
 
 fn sedit_namelist_menu(g: &mut GameState, conn: ConnId) {
@@ -956,7 +956,7 @@ fn sedit_namelist_menu(g: &mut GameState, conn: ConnId) {
     out.push_str(
         "\r\n&gA&n) Add a new entry.\r\n&gD&n) Delete an entry.\r\n&gQ&n) Quit\r\nEnter choice : ",
     );
-    g.send_to_char(ch, &out);
+    send(g, ch, &out);
 }
 
 fn sedit_types_menu(g: &mut GameState, conn: ConnId) {
@@ -975,7 +975,7 @@ fn sedit_types_menu(g: &mut GameState, conn: ConnId) {
         }
     }
     out.push_str("&nEnter choice : ");
-    g.send_to_char(ch, &out);
+    send(g, ch, &out);
 }
 
 fn sedit_shop_flags_menu(g: &mut GameState, conn: ConnId) {
@@ -1003,7 +1003,7 @@ fn sedit_shop_flags_menu(g: &mut GameState, conn: ConnId) {
         "\r\nCurrent Shop Flags : &c{}&n\r\nEnter choice : ",
         sprintbit(bits as i64, &SHOP_BITS)
     ));
-    g.send_to_char(ch, &out);
+    send(g, ch, &out);
 }
 
 fn sedit_no_trade_menu(g: &mut GameState, conn: ConnId) {
@@ -1031,7 +1031,7 @@ fn sedit_no_trade_menu(g: &mut GameState, conn: ConnId) {
         "\r\nCurrently won't trade with: &c{}&n\r\nEnter choice : ",
         sprintbit(bits as i64, &TRADE_LETTERS)
     ));
-    g.send_to_char(ch, &out);
+    send(g, ch, &out);
 }
 
 /// item_types[] name for a trade-type int (0..NUM_ITEM_TYPES); out-of-range
@@ -1080,7 +1080,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             _ => false,
         };
         if !is_num {
-            g.send_to_char(ch, "Field must be numerical, try again : ");
+            send(g, ch, "Field must be numerical, try again : ");
             return;
         }
     }
@@ -1089,7 +1089,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         SeditMode::ConfirmSave => {
             match trimmed.chars().next() {
                 Some('y') | Some('Y') => {
-                    g.send_to_char(ch, "Saving shop to memory.\r\n");
+                    send(g, ch, "Saving shop to memory.\r\n");
                     sedit_save_internally(g, conn);
                     let (name, vnum) = (
                         g.get_char(ch)
@@ -1101,7 +1101,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     cleanup(conn);
                 }
                 Some('n') | Some('N') => cleanup(conn),
-                _ => g.send_to_char(ch, "Invalid choice!\r\nDo you wish to save the shop? : "),
+                _ => send(g, ch, "Invalid choice!\r\nDo you wish to save the shop? : "),
             }
             return;
         }
@@ -1113,7 +1113,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 Some('q') | Some('Q') => {
                     let changed = with_state(conn, |st| st.changed).unwrap_or(false);
                     if changed {
-                        g.send_to_char(ch, "Do you wish to save the changes to the shop? (y/n) : ");
+                        send(g, ch, "Do you wish to save the changes to the shop? (y/n) : ");
                         with_state(conn, |st| st.mode = SeditMode::ConfirmSave);
                     } else {
                         cleanup(conn);
@@ -1122,72 +1122,72 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 }
                 Some('0') => {
                     with_state(conn, |st| st.mode = SeditMode::Keeper);
-                    g.send_to_char(ch, "Enter virtual number of shop keeper : ");
+                    send(g, ch, "Enter virtual number of shop keeper : ");
                     return;
                 }
                 Some('1') => {
                     with_state(conn, |st| st.mode = SeditMode::Open1);
-                    g.send_to_char(ch, "\r\nEnter new value : ");
+                    send(g, ch, "\r\nEnter new value : ");
                     return;
                 }
                 Some('2') => {
                     with_state(conn, |st| st.mode = SeditMode::Close1);
-                    g.send_to_char(ch, "\r\nEnter new value : ");
+                    send(g, ch, "\r\nEnter new value : ");
                     return;
                 }
                 Some('3') => {
                     with_state(conn, |st| st.mode = SeditMode::Open2);
-                    g.send_to_char(ch, "\r\nEnter new value : ");
+                    send(g, ch, "\r\nEnter new value : ");
                     return;
                 }
                 Some('4') => {
                     with_state(conn, |st| st.mode = SeditMode::Close2);
-                    g.send_to_char(ch, "\r\nEnter new value : ");
+                    send(g, ch, "\r\nEnter new value : ");
                     return;
                 }
                 Some('5') => {
                     with_state(conn, |st| st.mode = SeditMode::BuyProfit);
-                    g.send_to_char(ch, "\r\nEnter new value : ");
+                    send(g, ch, "\r\nEnter new value : ");
                     return;
                 }
                 Some('6') => {
                     with_state(conn, |st| st.mode = SeditMode::SellProfit);
-                    g.send_to_char(ch, "\r\nEnter new value : ");
+                    send(g, ch, "\r\nEnter new value : ");
                     return;
                 }
                 Some('7') => {
                     with_state(conn, |st| st.mode = SeditMode::NoItem1);
-                    g.send_to_char(ch, "\r\nEnter new text :\r\n] ");
+                    send(g, ch, "\r\nEnter new text :\r\n] ");
                     return;
                 }
                 Some('8') => {
                     with_state(conn, |st| st.mode = SeditMode::NoItem2);
-                    g.send_to_char(ch, "\r\nEnter new text :\r\n] ");
+                    send(g, ch, "\r\nEnter new text :\r\n] ");
                     return;
                 }
                 Some('9') => {
                     with_state(conn, |st| st.mode = SeditMode::NoCash1);
-                    g.send_to_char(ch, "\r\nEnter new text :\r\n] ");
+                    send(g, ch, "\r\nEnter new text :\r\n] ");
                     return;
                 }
                 Some('a') | Some('A') => {
                     with_state(conn, |st| st.mode = SeditMode::NoCash2);
-                    g.send_to_char(ch, "\r\nEnter new text :\r\n] ");
+                    send(g, ch, "\r\nEnter new text :\r\n] ");
                     return;
                 }
                 Some('b') | Some('B') => {
                     with_state(conn, |st| st.mode = SeditMode::NoBuy);
-                    g.send_to_char(ch, "\r\nEnter new text :\r\n] ");
+                    send(g, ch, "\r\nEnter new text :\r\n] ");
                     return;
                 }
                 Some('c') | Some('C') => {
                     with_state(conn, |st| st.mode = SeditMode::Buy);
-                    g.send_to_char(ch, "\r\nEnter new text :\r\n] ");
+                    send(g, ch, "\r\nEnter new text :\r\n] ");
                     return;
                 }
                 Some('d') | Some('D') => {
                     with_state(conn, |st| st.mode = SeditMode::Sell);
-                    g.send_to_char(ch, "\r\nEnter new text :\r\n] ");
+                    send(g, ch, "\r\nEnter new text :\r\n] ");
                     return;
                 }
                 Some('e') | Some('E') => {
@@ -1224,7 +1224,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     return;
                 }
                 Some('d') | Some('D') => {
-                    g.send_to_char(ch, "\r\nDelete which entry? : ");
+                    send(g, ch, "\r\nDelete which entry? : ");
                     with_state(conn, |st| st.mode = SeditMode::DeleteType);
                     return;
                 }
@@ -1235,12 +1235,12 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
 
         SeditMode::ProductsMenu => match trimmed.chars().next() {
             Some('a') | Some('A') => {
-                g.send_to_char(ch, "\r\nEnter new product virtual number : ");
+                send(g, ch, "\r\nEnter new product virtual number : ");
                 with_state(conn, |st| st.mode = SeditMode::NewProduct);
                 return;
             }
             Some('d') | Some('D') => {
-                g.send_to_char(ch, "\r\nDelete which product? : ");
+                send(g, ch, "\r\nDelete which product? : ");
                 with_state(conn, |st| st.mode = SeditMode::DeleteProduct);
                 return;
             }
@@ -1250,7 +1250,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
 
         SeditMode::RoomsMenu => match trimmed.chars().next() {
             Some('a') | Some('A') => {
-                g.send_to_char(ch, "\r\nEnter new room virtual number : ");
+                send(g, ch, "\r\nEnter new room virtual number : ");
                 with_state(conn, |st| st.mode = SeditMode::NewRoom);
                 return;
             }
@@ -1263,7 +1263,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 return;
             }
             Some('d') | Some('D') => {
-                g.send_to_char(ch, "\r\nDelete which room? : ");
+                send(g, ch, "\r\nDelete which room? : ");
                 with_state(conn, |st| st.mode = SeditMode::DeleteRoom);
                 return;
             }
@@ -1317,7 +1317,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             if i == -1 {
                 with_state(conn, |st| st.shop.keeper = NOBODY);
             } else if !mob_exists(g, i) {
-                g.send_to_char(ch, "That mobile does not exist, try again : ");
+                send(g, ch, "That mobile does not exist, try again : ");
                 return;
             } else {
                 // C sedit.c:1130-1134: the keeper mob must be in a zone the
@@ -1327,7 +1327,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     .map(|c| c.player.level)
                     .unwrap_or(LVL_IMPL);
                 if level < LVL_IMMORT && !crate::olc::can_edit_zone(g, ch, zone_rnum_of(g, i)) {
-                    g.send_to_char(ch, "You don't have permissions to that zone, try again : ");
+                    send(g, ch, "You don't have permissions to that zone, try again : ");
                     return;
                 }
                 with_state(conn, |st| st.shop.keeper = i);
@@ -1370,7 +1370,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 st.pending_type = v;
                 st.mode = SeditMode::Namelist;
             });
-            g.send_to_char(ch, "Enter namelist (return for none) :-\r\n] ");
+            send(g, ch, "Enter namelist (return for none) :-\r\n] ");
             return;
         }
         SeditMode::DeleteType => {
@@ -1390,7 +1390,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 return;
             }
             if !obj_exists(g, i) {
-                g.send_to_char(ch, "That object does not exist, try again : ");
+                send(g, ch, "That object does not exist, try again : ");
                 return;
             }
             // C sedit.c:1181-1188: a builder below LVL_GRGOD may only stock
@@ -1402,7 +1402,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             if level < LVL_GRGOD
                 && !crate::olc::obj_proto_in_owned_zone(g, ch, i)
             {
-                g.send_to_char(ch, "You don't have permissions to that zone, try again : ");
+                send(g, ch, "You don't have permissions to that zone, try again : ");
                 return;
             }
             with_state(conn, |st| st.shop.producing.push(i));
@@ -1426,7 +1426,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 return;
             }
             if g.real_room(i).is_none() {
-                g.send_to_char(ch, "That room does not exist, try again : ");
+                send(g, ch, "That room does not exist, try again : ");
                 return;
             }
             // C sedit.c:1199-1206: the shop room's zone must be owned
@@ -1442,7 +1442,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 .map(|zr| crate::olc::can_edit_zone(g, ch, zr))
                 .unwrap_or(false);
             if level < LVL_IMMORT && !owned {
-                g.send_to_char(ch, "You don't have permissions to that zone, try again : ");
+                send(g, ch, "You don't have permissions to that zone, try again : ");
                 return;
             }
             with_state(conn, |st| st.shop.in_room.push(i));
@@ -1534,6 +1534,16 @@ fn cleanup(conn: ConnId) {
 /// zone rnum for a mob vnum (C real_zone).
 fn zone_rnum_of(g: &GameState, mob_vnum: i32) -> usize {
     crate::olc::real_zone(g, mob_vnum).unwrap_or(usize::MAX)
+}
+
+/// OLC output with C get_char_cols semantics: the &-codes in these menus are
+/// stripped for builders whose colour level is below C_NRM (#306).
+fn send(g: &mut GameState, ch: CharId, msg: &str) {
+    if crate::olc::olc_colour_on(g, ch) {
+        g.send_to_char(ch, msg);
+    } else {
+        g.send_to_char(ch, &crate::connection::strip_color(msg));
+    }
 }
 
 fn conn_char(g: &GameState, conn: ConnId) -> Option<CharId> {

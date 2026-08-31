@@ -318,13 +318,13 @@ pub fn do_aedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
     let (buf1, _rest) = crate::interpreter::one_argument(arg);
     if buf1.is_empty() {
-        g.send_to_char(ch, "Specify an action to edit.\r\n");
+        send(g, ch, "Specify an action to edit.\r\n");
         return;
     }
 
     // "save" — flush all actions to disk (do_olc save path for AEDIT).
     if is_abbrev(&buf1, "save") {
-        g.send_to_char(ch, "Saving all actions.\r\n");
+        send(g, ch, "Saving all actions.\r\n");
         let name = g
             .get_char(ch)
             .map(|c| c.player.name.clone())
@@ -365,16 +365,16 @@ pub fn do_aedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 st.mode = AeditMode::ConfirmEdit;
             });
             let cmd = command_at(r).unwrap_or_default();
-            g.send_to_char(ch, &format!("Do you wish to edit the '{}' action? ", cmd));
+            send(g, ch, &format!("Do you wish to edit the '{}' action? ", cmd));
         }
         None => {
             if command_exists(&buf1) {
                 cleanup(conn);
-                g.send_to_char(ch, "That command already exists.\r\n");
+                send(g, ch, "That command already exists.\r\n");
                 return;
             }
             with_state(conn, |st| st.mode = AeditMode::ConfirmAdd);
-            g.send_to_char(ch, &format!("Do you wish to add the '{}' action? ", buf1));
+            send(g, ch, &format!("Do you wish to add the '{}' action? ", buf1));
         }
     }
 }
@@ -487,7 +487,7 @@ fn aedit_disp_menu(g: &mut GameState, conn: ConnId) {
         fld(&a.char_obj_found),
         fld(&a.others_obj_found),
     );
-    g.send_to_char(ch, &menu);
+    send(g, ch, &menu);
 }
 
 fn trunc(s: &str, n: usize) -> String {
@@ -532,7 +532,7 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                         .map(|c| c.player.name.clone())
                         .unwrap_or_default();
                     log::info!("OLC: {} edits action {}", name, cmd);
-                    g.send_to_char(ch, "Action saved to memory.\r\n");
+                    send(g, ch, "Action saved to memory.\r\n");
                     cleanup(conn);
                 }
                 Some('n') | Some('N') => cleanup(conn),
@@ -623,14 +623,14 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 Some('q') | Some('Q') => {
                     let changed = with_state(conn, |st| st.changed).unwrap_or(false);
                     if changed {
-                        g.send_to_char(ch, "Do you wish to save this action internally? ");
+                        send(g, ch, "Do you wish to save this action internally? ");
                         with_state(conn, |st| st.mode = AeditMode::ConfirmSave);
                     } else {
                         cleanup(conn);
                     }
                 }
                 Some('n') => {
-                    g.send_to_char(ch, "Enter action name: ");
+                    send(g, ch, "Enter action name: ");
                     with_state(conn, |st| st.mode = AeditMode::ActionName);
                 }
                 Some('1') => {
@@ -641,15 +641,15 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     with_state(conn, |st| st.mode = AeditMode::SortAs);
                 }
                 Some('2') => {
-                    g.send_to_char(ch, "Enter the minimum position the Character has to be in to activate social [0 - 8]: ");
+                    send(g, ch, "Enter the minimum position the Character has to be in to activate social [0 - 8]: ");
                     with_state(conn, |st| st.mode = AeditMode::MinCharPos);
                 }
                 Some('3') => {
-                    g.send_to_char(ch, "Enter the minimum position the Victim has to be in to activate social [0 - 8]: ");
+                    send(g, ch, "Enter the minimum position the Victim has to be in to activate social [0 - 8]: ");
                     with_state(conn, |st| st.mode = AeditMode::MinVictPos);
                 }
                 Some('4') => {
-                    g.send_to_char(ch, "Enter new minimum level for social: ");
+                    send(g, ch, "Enter new minimum level for social: ");
                     with_state(conn, |st| st.mode = AeditMode::MinCharLevel);
                 }
                 Some('5') => {
@@ -861,7 +861,7 @@ fn prompt_field(
             .unwrap_or_else(|| "NULL".to_string())
     })
     .unwrap_or_else(|| "NULL".to_string());
-    g.send_to_char(ch, &format!("{}\r\n[OLD]: {}\r\n[NEW]: ", label, old));
+    send(g, ch, &format!("{}\r\n[OLD]: {}\r\n[NEW]: ", label, old));
     with_state(conn, |st| st.mode = next);
 }
 
@@ -992,6 +992,16 @@ fn delete_doubledollar(s: &str) -> String {
 fn cleanup(conn: ConnId) {
     take_state(conn);
     olc::clear_active(conn);
+}
+
+/// OLC output with C get_char_cols semantics: the &-codes in these menus are
+/// stripped for builders whose colour level is below C_NRM (#306).
+fn send(g: &mut GameState, ch: CharId, msg: &str) {
+    if crate::olc::olc_colour_on(g, ch) {
+        g.send_to_char(ch, msg);
+    } else {
+        g.send_to_char(ch, &crate::connection::strip_color(msg));
+    }
 }
 
 fn conn_char(g: &GameState, conn: ConnId) -> Option<CharId> {

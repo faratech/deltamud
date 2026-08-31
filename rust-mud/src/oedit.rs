@@ -120,9 +120,8 @@ fn with_state<R>(conn: ConnId, f: impl FnOnce(&mut OeditState) -> R) -> Option<R
 }
 
 fn send(g: &mut GameState, conn: ConnId, msg: &str) {
-    if let Some(d) = g.descriptors.get_mut(&conn) {
-        d.outbuf.push_str(msg);
-    }
+    // C get_char_cols: colour gated on the builder's colour level (#306).
+    olc::olc_send(g, conn, msg);
 }
 
 fn conn_char(g: &GameState, conn: ConnId) -> Option<CharId> {

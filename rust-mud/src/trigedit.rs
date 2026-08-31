@@ -77,12 +77,9 @@ const WTRIG_TYPES: &[&str] = &[
 const NUM_TRIG_TYPE_FLAGS: usize = 15;
 const MAX_CMD_LENGTH: usize = 16384;
 
-// ANSI colours (olc.c get_char_cols: builders see colour). Kept as the raw
-// escape sequences C emits so the .trg menu is byte-faithful to DeltaMUD.
-const GRN: &str = "\x1b[0;32m";
-const NRM: &str = "\x1b[0m";
-const YEL: &str = "\x1b[0;33m";
-const CYN: &str = "\x1b[0;36m";
+// OLC colours: the &-codes C's get_char_cols fills in (screen.h KNRM/KGRN/
+// KYEL/KCYN), gated per builder by olc::olc_send (#306).
+use crate::olc::{CYN, GRN, NRM, YEL};
 
 // trigedit sub-modes (dg_olc.h TRIGEDIT_*).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
