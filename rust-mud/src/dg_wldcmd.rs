@@ -227,7 +227,7 @@ fn find_room_by_id(g: &GameState, id: i64) -> Option<RoomRnum> {
 /// coordinate. Coordinates are NOT wrapped here (the C rejects out-of-range),
 /// unlike map_coords_to_rnum — but the bounds check below guarantees the wrap
 /// loops in that helper are no-ops, so it resolves identically.
-fn cdsr(g: &GameState, string: &str) -> Option<RoomRnum> {
+pub(crate) fn cdsr(g: &GameState, string: &str) -> Option<RoomRnum> {
     let mut xf = false;
     let mut x: i32 = -1;
     let mut tmp = String::new();

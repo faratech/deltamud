@@ -221,6 +221,11 @@ fn find_target_room(g: &GameState, mob: CharId, raw: &str) -> Option<RoomRnum> {
     if roomstr.is_empty() {
         return None;
     }
+    // C act.wizard.c:206 / maputils.c:1030: cdsr() 'XxY' map coordinates are
+    // tried FIRST (the DG path shares find_target_room) (#148).
+    if let Some(rnum) = crate::dg_wldcmd::cdsr(g, &roomstr) {
+        return Some(rnum);
+    }
     let first_is_digit = roomstr
         .chars()
         .next()
@@ -228,7 +233,29 @@ fn find_target_room(g: &GameState, mob: CharId, raw: &str) -> Option<RoomRnum> {
         .unwrap_or(false);
     if first_is_digit && !roomstr.contains('.') {
         let vnum: RoomVnum = roomstr.parse().unwrap_or(NOWHERE);
-        return g.real_room(vnum);
+        // C act.wizard.c:238-261 find_target_room permission gates: a
+        // sub-immortal script cannot target GODROOM/IMPROOM, occupied
+        // PRIVATE rooms, or houses it may not enter (#148).
+        if let Some(dest) = g.real_room(vnum) {
+            let room = g.room(dest);
+            let flags = room.room_flags;
+            if flags.contains(crate::room::RoomFlags::GODROOM)
+                || flags.contains(crate::room::RoomFlags::IMPROOM)
+            {
+                return None;
+            }
+            if flags.contains(crate::room::RoomFlags::PRIVATE)
+                && room.people.len() > 1
+            {
+                return None;
+            }
+            if flags.contains(crate::room::RoomFlags::HOUSE) && !crate::house::house_can_enter(g, mob, room.number)
+            {
+                return None;
+            }
+            return Some(dest);
+        }
+        return None;
     }
     // UID or name → creature.
     if let Some(cid) = if roomstr.starts_with(UID_CHAR) {
@@ -1473,6 +1500,19 @@ fn do_mtransform(g: &mut GameState, ch: CharId, argument: &str) {
         c.points.defense = proto.points.defense;
         c.points.mdefense = proto.points.mdefense;
         c.points.technique = proto.points.technique;
+        // C's struct memcpy also carries the proto's AFF_ flags, skill list,
+        // talk tables, conditions, mana/move maxima, trust and spec-proc
+        // binding - the old field slice dropped them, so a shapechanger
+        // transforming into an invisible/sanctuary proto stayed plain (#149).
+        c.affect_flags = proto.affect_flags;
+        c.skills = proto.skills.clone();
+        c.talks = proto.talks;
+        c.conditions = proto.conditions;
+        c.points.mana = proto.points.mana;
+        c.points.max_mana = proto.points.max_mana;
+        c.points.move_points = proto.points.move_points;
+        c.points.max_move = proto.points.max_move;
+        c.trust = proto.trust;
     }
 
     // Discard the temporary loaded prototype mob.
