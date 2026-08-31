@@ -107,6 +107,15 @@ impl GameState {
         if let Some(o) = self.objs.get_mut(&oid) {
             o.loc = ObjLoc::Room(rnum);
         }
+        // C handler.c:884-887: dropping an object in a house flags the house
+        // for its next crashsave (ROOM_HOUSE_CRASH, C bit 12 - the RoomFlags
+        // name for that bit is NO_RECALL, hence the raw test) (#164).
+        if self.rooms[rnum].room_flags.contains(crate::room::RoomFlags::HOUSE)
+            && self.rooms[rnum].room_flags.bits() & (1 << 12) == 0
+        {
+            let bits = self.rooms[rnum].room_flags.bits() | (1 << 12);
+            self.rooms[rnum].room_flags = crate::room::RoomFlags::from_bits_retain(bits);
+        }
     }
 
     pub fn obj_to_char(&mut self, oid: ObjId, cid: CharId) {

@@ -408,6 +408,11 @@ pub fn boot_houses(lib_path: &str) {
 /// The real boot routine — needs the GameState to validate vnums and load
 /// objects, mirroring C's House_boot() called from boot_db. The integrator
 /// should call this once at startup after the world tables exist.
+/// C get_name_by_id(owner) != NULL: resolve through the player index.
+fn owner_exists(g: &GameState, idnum: i64) -> bool {
+    g.get_name_by_id(idnum).is_some()
+}
+
 pub fn house_boot(g: &mut GameState) {
     let path = hcontrol_path(&g.config.lib_path);
     let text = match std::fs::read_to_string(&path) {
@@ -435,24 +440,28 @@ pub fn house_boot(g: &mut GameState) {
         }
 
         let mut real_atrium: Option<RoomRnum> = None;
+        // Owner sanity (C house.c:295-322): a record whose owner no longer
+        // resolves through the player index is SKIPPED - the soft pass let
+        // houses of deleted players survive boot (#178).
+        if temp.owner >= 0 && !owner_exists(g, temp.owner) {
+            mudlog(g, "SYSERR: House owner does not exist - skipping house.", NRM_INVIS);
+            continue;
+        }
         if temp.owner != -1 {
-            // Owner sanity: C skips if get_name_by_id(owner)==NULL. We have no
-            // full player_table; treat a cached owner_name as "exists", and a
-            // missing cache as a soft pass (online players validated lazily).
-            if temp.atrium != 0 || temp.exit_num != 0 {
-                real_atrium = g.real_room(temp.atrium);
-                if real_atrium.is_none() {
-                    mudlog(g, "DEBUG: House atrium does not exist?!", NRM_INVIS);
-                    continue;
-                }
-                if temp.exit_num < 0 || temp.exit_num as usize >= NUM_OF_DIRS {
-                    mudlog(g, "DEBUG: House has invalid exit num?!", NRM_INVIS);
-                    continue;
-                }
-                if toroom(g, real_house, temp.exit_num as usize) != temp.atrium {
-                    mudlog(g, "DEBUG: House exit num mismatch?!", NRM_INVIS);
-                    continue;
-                }
+            // C validates atrium/exit ALWAYS for owner != -1, not only when
+            // both fields are non-zero (#178).
+            real_atrium = g.real_room(temp.atrium);
+            if real_atrium.is_none() {
+                mudlog(g, "DEBUG: House atrium does not exist?!", NRM_INVIS);
+                continue;
+            }
+            if temp.exit_num < 0 || temp.exit_num as usize >= NUM_OF_DIRS {
+                mudlog(g, "DEBUG: House has invalid exit num?!", NRM_INVIS);
+                continue;
+            }
+            if toroom(g, real_house, temp.exit_num as usize) != temp.atrium {
+                mudlog(g, "DEBUG: House exit num mismatch?!", NRM_INVIS);
+                continue;
             }
         }
 
@@ -1359,9 +1368,15 @@ pub fn do_bed(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
         c.prf2_flags &= !PRF2_LOCKOUT;
     }
 
-    // Crash_rentsave(ch, 0): the async player-save layer owns rent persistence;
-    // requesting the descriptor close (below) drives save_char + extract exactly
-    // like the do_quit port. Announce departure first.
+    // C act.other.c:506 do_bed: Crash_rentsave then House_crashsave for the
+    // house room before quitting (#164).
+    {
+        let lib = g.config.lib_path.clone();
+        crate::objsave::crash_rentsave(g, ch, 0);
+        house_crashsave(g, room_vnum);
+    }
+
+    // Announce departure first.
     act(
         g,
         "$n has quit the game. (bed)",
