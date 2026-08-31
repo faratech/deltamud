@@ -780,6 +780,14 @@ fn perform_get_from_room(g: &mut GameState, ch: CharId, obj: ObjId) -> bool {
             ActArg::None,
             To::Room,
         );
+        {
+            let (on, ovnum, rn, rvnum) = item_room_context(g, ch, obj);
+            watchdog_mudlog(
+                g,
+                ch,
+                format!("[WATCHDOG] {} gets {} ({}) in {} ({})", name_of(g, ch), on, ovnum, rn, rvnum),
+            );
+        }
         get_check_money(g, ch, obj);
         if obj_vnum(g, obj) == PANDORAS_BOX_VNUM {
             boxkill(g, ch, obj);
@@ -946,6 +954,17 @@ fn is_killer(g: &GameState, ch: CharId) -> bool {
         .unwrap_or(false)
 }
 
+
+/// Immortal item-flow audit trail (C act.item.c WATCHDOG mudlogs, #131):
+/// `mudlog(buf, CMP, LVL_IMPL, TRUE)` whenever an immortal manipulates
+/// items/gold.
+fn watchdog_mudlog(g: &mut GameState, ch: CharId, what: String) {
+    let lvl = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
+    if lvl >= LVL_IMMORT {
+        crate::syslog::mudlog(g, &what, crate::syslog::CMP, LVL_IMPL);
+    }
+}
+
 fn perform_drop_gold(g: &mut GameState, ch: CharId, amount: i32, mode: i32, rdr: Option<RoomRnum>) {
     if !PK_ALLOWED && is_killer(g, ch) && in_jail(g, ch) {
         g.send_to_char(ch, "Sorry. You can't do that when you're in jail.\r\n");
@@ -1010,6 +1029,24 @@ fn perform_drop_gold(g: &mut GameState, ch: CharId, amount: i32, mode: i32, rdr:
                 "You drop some gold which disappears in a puff of smoke!\r\n",
             );
         }
+        let (rn, rvnum) = match g.get_char(ch).and_then(|c| c.in_room) {
+            Some(r) => {
+                let room = g.room(r);
+                (room.name.clone(), room.number)
+            }
+            None => ("Nowhere".into(), -1),
+        };
+        watchdog_mudlog(
+            g,
+            ch,
+            format!(
+                "[WATCHDOG] {} drops {} gold coins in {} ({}).",
+                name_of(g, ch),
+                amount,
+                rn,
+                rvnum
+            ),
+        );
         if let Some(c) = g.get_char_mut(ch) {
             c.points.gold -= amount;
         }
@@ -1047,6 +1084,28 @@ fn perform_drop(
     let line = format!("$n {}s $p.{}", sname, vanish(mode));
     act(g, &line, true, ch, Some(obj), ActArg::None, To::Room);
     g.obj_from_anywhere(obj);
+    {
+        let (on, ovnum) = item_names(g, obj);
+        let (rn, rvnum) = match g.get_char(ch).and_then(|c| c.in_room) {
+            Some(r) => {
+                let room = g.room(r);
+                (room.name.clone(), room.number)
+            }
+            None => ("Nowhere".into(), -1),
+        };
+        watchdog_mudlog(
+            g,
+            ch,
+            format!(
+                "[WATCHDOG] {} drops {} ({}) in {} ({})",
+                name_of(g, ch),
+                on,
+                ovnum,
+                rn,
+                rvnum
+            ),
+        );
+    }
 
     if mode == SCMD_DONATE && obj_stat(g, obj, ITEM_NODONATE) {
         mode = SCMD_JUNK;
@@ -1318,6 +1377,41 @@ fn perform_give(g: &mut GameState, ch: CharId, vict: CharId, obj: ObjId) {
         ActArg::Char(vict),
         To::NotVict,
     );
+    let (on, ovnum) = item_names(g, obj);
+    watchdog_mudlog(
+        g,
+        ch,
+        format!(
+            "[WATCHDOG] {} gives {} ({}) to {}.",
+            name_of(g, ch),
+            on,
+            ovnum,
+            name_of(g, vict)
+        ),
+    );
+}
+
+fn item_names(g: &GameState, obj: ObjId) -> (String, i32) {
+    g.get_obj(obj)
+        .map(|o| (o.short_description.clone(), o.item_number))
+        .unwrap_or_default()
+}
+
+fn name_of(g: &GameState, cid: CharId) -> String {
+    g.get_char(cid)
+        .map(|c| c.get_name().to_string())
+        .unwrap_or_else(|| "someone".into())
+}
+
+fn item_room_context(g: &GameState, ch: CharId, obj: ObjId) -> (String, i32, String, i32) {
+    let (on, ovnum) = item_names(g, obj);
+    match g.get_char(ch).and_then(|c| c.in_room) {
+        Some(r) => {
+            let room = g.room(r);
+            (on, ovnum, room.name.clone(), room.number)
+        }
+        None => (on, ovnum, "Nowhere".into(), -1),
+    }
 }
 
 /// give_find_vict() (act.item.c).
@@ -1362,6 +1456,16 @@ fn perform_give_gold(g: &mut GameState, ch: CharId, vict: CharId, amount: i32) {
     act(g, &line, true, ch, None, ActArg::Char(vict), To::NotVict);
 
     if is_npc || level < LVL_GOD {
+        watchdog_mudlog(
+            g,
+            ch,
+            format!(
+                "[WATCHDOG] {} gives {} gold coins to {}.",
+                name_of(g, ch),
+                amount,
+                name_of(g, vict)
+            ),
+        );
         if let Some(c) = g.get_char_mut(ch) {
             c.points.gold -= amount;
         }
