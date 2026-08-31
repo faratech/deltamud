@@ -230,6 +230,14 @@ fn read_copyover_state(lib_path: &str) -> Vec<CopyoverEntry> {
         Err(_) => return Vec::new(),
     };
     let _ = std::fs::remove_file(&path); // C unlinks immediately.
+    parse_copyover_entries(&contents)
+}
+
+/// The parsing half of copyover recovery, split out so hostile/truncated
+/// `copyover.dat` content (written by the previous exec, but still untrusted)
+/// has unit coverage. Skips the leading listener-fd line, stops at `-1` or a
+/// blank line, and drops lines without a numeric fd + name.
+fn parse_copyover_entries(contents: &str) -> Vec<CopyoverEntry> {
     let mut out = Vec::new();
     for (i, line) in contents.lines().enumerate() {
         if i == 0 {
@@ -798,6 +806,71 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- copyover state parsing (W6 live-ops: the recovery file is untrusted
+    //    input written by the previous exec) -------------------------------
+
+    #[test]
+    fn copyover_parse_reads_fd_name_host_lines() {
+        let text = "7\n10 Mulder 10.0.0.1\n11 Belgarion host.example\n-1\n";
+        let entries = parse_copyover_entries(text);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].fd, 10);
+        assert_eq!(entries[0].name, "Mulder");
+        assert_eq!(entries[0].host, "10.0.0.1");
+        assert_eq!(entries[1].fd, 11);
+        assert_eq!(entries[1].host, "host.example");
+    }
+
+    #[test]
+    fn copyover_parse_stops_at_minus_one_and_blank() {
+        // Garbage after the -1 terminator must be ignored.
+        let text = "3\n8 A a.host\n-1\n999 Z z.h\n";
+        assert_eq!(parse_copyover_entries(text).len(), 1);
+        // A blank line terminates too.
+        let text2 = "3\n8 A a.host\n\n9 B b.h\n";
+        assert_eq!(parse_copyover_entries(text2).len(), 1);
+    }
+
+    #[test]
+    fn copyover_parse_drops_bad_lines_and_defaults_host() {
+        // Non-numeric fd: dropped. Missing host: empty. Extra fields: host
+        // keeps the third token only.
+        let text = "0\nnope A a.h\n12 Hostless\n13 Trunc a.h extra junk\n-1\n";
+        let entries = parse_copyover_entries(text);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].fd, 12);
+        assert_eq!(entries[0].host, "");
+        assert_eq!(entries[1].fd, 13);
+        assert_eq!(entries[1].host, "a.h");
+    }
+
+    #[test]
+    fn copyover_parse_survives_empty_and_listener_only_files() {
+        assert!(parse_copyover_entries("").is_empty());
+        assert!(parse_copyover_entries("5\n").is_empty());
+        assert!(parse_copyover_entries("5\n-1\n").is_empty());
+    }
+
+    #[test]
+    fn copyover_writer_reader_round_trip() {
+        // The exact lines do_copyover emits: listener fd, one `fd name host`
+        // per playing descriptor, then -1.
+        let listener_fd = 9;
+        let players = [
+            (10, "Mulder", "1.2.3.4"),
+            (11, "Skinner", "corp.example.test"),
+        ];
+        let mut text = format!("{listener_fd}\n");
+        for (fd, name, host) in players {
+            text.push_str(&format!("{fd} {name} {host}\n"));
+        }
+        text.push_str("-1\n");
+        let entries = parse_copyover_entries(&text);
+        assert_eq!(entries.len(), 2);
+        assert_eq!((entries[0].fd, entries[0].name.as_str()), (10, "Mulder"));
+        assert_eq!(entries[1].host, "corp.example.test");
+    }
 
     #[test]
     fn cli_no_specials_flag_matches_c_s_only() {
