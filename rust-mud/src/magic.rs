@@ -601,11 +601,72 @@ pub fn mag_affects(
     }
 }
 
-/// spell_affect_msg[] (the to-vict "wears on" messages). The C table is sparse;
-/// most spells have no to-vict here (they use to_room only), so an empty string
-/// is the faithful default.
-fn spell_affect_msg(_spellnum: i32) -> Option<&'static str> {
-    None
+/// spell_affect_msg[] (constants.c:889): the to-vict message a successful
+/// buff prints via magic.c:507/535-538 (suppressed for SPELL_SLEEP). The old
+/// stub returned None, so the recipient never learned armor/sanctuary/stone
+/// skin etc. took hold (#244). '!'-prefixed placeholders mean no message.
+fn spell_affect_msg(spellnum: i32) -> Option<&'static str> {
+    const TABLE: &[&str] = &[
+        "RESERVED DB.C",                            // 0
+        "You feel someone protecting you.",         // 1
+        "!Teleport!",                               // 2
+        "You feel righteous.",                      // 3
+        "You have been blinded!",                   // 4
+        "You feel very uncomfortable.",             // 5
+        "!Clone!",                                  // 6
+        "!Control Weather!",                        // 7
+        "!Create Food!",                            // 8
+        "!Create Water!",                           // 9
+        "!Cure Blind!",                             // 10
+        "!Cure Critic!",                            // 11
+        "!Cure Light!",                             // 12
+        "You feel very uncomfortable.",             // 13
+        "Your eyes tingle.",                        // 14
+        "Your eyes tingle.",                        // 15
+        "Your eyes tingle.",                        // 16
+        "Your eyes tingle.",                        // 17
+        "Your eyes tingle.",                        // 18
+        "!Earthquake!",                             // 19
+        "!Enchant Weapon!",                         // 20
+        "!Heal!",                                   // 21
+        "You vanish.",                              // 22
+        "!Locate object!",                          // 23
+        "You feel very sick.",                      // 24
+        "!Remove Curse!",                           // 25
+        "A white aura momentarily surrounds you.",  // 26
+        "You feel very sleepy...  Zzzz......",      // 27
+        "You feel stronger!",                       // 28
+        "!Summon!",                                 // 29
+        "!Word of Recall!",                         // 30
+        "!Remove Poison!",                          // 31
+        "Your feel your awareness improve.",        // 32
+        "!Animate Dead!",                           // 33
+        "!Group Armor!",                            // 34
+        "!Group Heal!",                             // 35
+        "!Group Recall!",                           // 36
+        "Your eyes glow red.",                      // 37
+        "Your feel webbing between your toes.",     // 38
+        "Your skin turns to stone!.",               // 39
+        "!Fear!",                                   // 40
+        "!Recharge!",                               // 41
+        "!Portal!",                                 // 42
+        "!Group Stone Skin!",                       // 43
+        "!Locate Target!",                          // 44
+        "A red aura momentarily surrounds you.",    // 45
+        "A green aura momentarily surrounds you.",  // 46
+        "You feel a protection from the heavens.",  // 47
+        "!Regen Mana!",                             // 48
+        "!Home!",                                   // 49
+        "!Word of Retreat!",                        // 50
+        "Your feet are suddenly chained together!", // 51
+        "You feel electrified and &Kglow&n!",       // 52
+    ];
+    let entry = TABLE.get(spellnum as usize).copied().unwrap_or("");
+    if entry.is_empty() || entry.starts_with('!') {
+        None
+    } else {
+        Some(entry)
+    }
 }
 
 // ===========================================================================
