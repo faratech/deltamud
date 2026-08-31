@@ -261,8 +261,10 @@ impl Game {
     }
 
     pub fn prime_zones(&mut self) {
-        let (mobs, objs) = self.state.prime_zones();
-        info!("Initial zone prime: +{} mobs, +{} objs", mobs, objs);
+        // The initial zone reset moved to main (before House_boot, per
+        // db.c boot order, #242); the Game task only primes live weather.
+        let _ = &self.state;
+        info!("Initial zone prime moved before house boot (db.c order)");
         // C boots the surface map (read_map) which calls init_weather, so the
         // world starts with MAX_WEATHER storms already on the map. Prime them
         // here so the weather map shows live storms from the first tick.

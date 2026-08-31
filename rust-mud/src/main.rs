@@ -464,6 +464,11 @@ async fn main() -> Result<()> {
     mail::boot_mail(&config.lib_path);
     quest::boot_quest(&config.lib_path);
     auction::boot_auction(&config.lib_path);
+    // C boot_db order (db.c:358-365 vs 369-373): the initial zone reset
+    // (world population) runs BEFORE House_boot, so stored house objects are
+    // not present during the first reset - otherwise an 'R' command could
+    // extract a stored house item (#242).
+    state.prime_zones();
     house::house_boot(&mut state);
 
     // DG Scripts: trigger prototypes were loaded above (before the world). Now
