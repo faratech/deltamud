@@ -715,11 +715,42 @@ pub fn do_gsay(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 // ---------------------------------------------------------------------------
 // perform_tell / is_tell_ok / do_tell / do_reply
 // ---------------------------------------------------------------------------
+/// get_char_vis (handler.c:1228-1249): a visible character found in the actor's
+/// room first, then `0.<name>` player lookup, then a numbered world-wide scan.
+/// The private copies in cmd_social/cmd_wizard/dg_mobcmd follow the same C
+/// body; do_tell/do_page need it here so cross-room immortal tells and
+/// numbered targets resolve the way C resolves them (#339).
+fn get_char_vis(g: &GameState, ch: CharId, arg: &str) -> Option<CharId> {
+    if let Some(found) = g.get_char_room_vis(ch, arg) {
+        return Some(found);
+    }
+    let (mut number, name) = crate::handler::get_number(arg);
+    if number == 0 {
+        return None;
+    }
+    for cid in g.char_ids() {
+        let target = match g.get_char(cid) {
+            Some(t) => t,
+            None => continue,
+        };
+        if crate::handler::isname(&name, &target.player.name) && g.can_see(ch, cid) {
+            number -= 1;
+            if number == 0 {
+                return Some(cid);
+            }
+        }
+    }
+    None
+}
+
 fn perform_tell(g: &mut GameState, ch: CharId, vict: CharId, arg: &str) {
     let vred = ccred(g, vict, C_NRM);
     g.send_to_char(vict, vred);
-    let arg = makedrunk(arg, g, ch);
+    // C (act.comm.c:388-391) builds the recipient's copy from the RAW argument
+    // first and only then slurps, so the sender's echo is slurred while the
+    // recipient reads the message as typed (#337).
     let to_vict = format!("$n tells you, '{}'", arg);
+    let arg = makedrunk(arg, g, ch);
     act_sleep(
         g,
         &to_vict,
@@ -826,9 +857,9 @@ pub fn do_tell(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "Who do you wish to tell what??\r\n");
         return;
     }
-    // get_char_vis: any visible player in the game by name.
-    let vict = g.find_player_by_name(&name).filter(|&v| g.can_see(ch, v));
-    let vict = match vict {
+    // get_char_vis: any visible character in the game by name (room first,
+    // then world), not just a PC name lookup (#339).
+    let vict = match get_char_vis(g, ch, &name) {
         Some(v) => v,
         None => {
             g.send_to_char(ch, NOPERSON);
@@ -902,7 +933,11 @@ pub fn do_spec_comm(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
         return;
     }
 
-    let message = makedrunk(&message, g, ch);
+    // C (act.comm.c:519-527) slurps into `argument` but then formats both
+    // messages from `buf2`, the raw half_chop result - the slur is a dead
+    // store. Keep the call (it burns the same RNG draws as C) and discard the
+    // result, so drunk whispers/asks stay as typed (#338).
+    let _slurred = makedrunk(&message, g, ch);
     let to_vict = format!("$n {} you, '{}'", action_plur, message);
     act(g, &to_vict, false, ch, None, ActArg::Char(vict), To::Vict);
 
@@ -985,14 +1020,14 @@ pub fn do_write(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             .get_obj(p)
             .map(|o| o.obj_type)
             .unwrap_or(ObjectType::Other);
-        // ITEM_PEN is DeltaMUD's pen item; the contract ObjectType has no Pen
-        // variant, so a "pen" is any non-note item the player names as paper.
-        if ptype == ObjectType::Note {
-            paper = Some(p);
-        } else {
-            // Treat the found object as the pen; paper will come from HOLD.
+        // C (act.comm.c:578-587): a pen named as the first argument is the pen;
+        // anything that is neither pen nor note is refused outright.
+        if ptype == ObjectType::Pen {
             pen = Some(p);
             paper = None;
+        } else if ptype != ObjectType::Note {
+            g.send_to_char(ch, "That thing has nothing to do with writing.\r\n");
+            return;
         }
 
         let held = g.get_char(ch).and_then(|c| c.equipment[WEAR_HOLD]);
@@ -1007,8 +1042,11 @@ pub fn do_write(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 return;
             }
         };
-        // CAN_SEE_OBJ on the held item — invisibility not yet modelled, so the
-        // item in hand is always visible here.
+        // C (act.comm.c:596-600): CAN_SEE_OBJ on the held item.
+        if !crate::cmd_informative::can_see_obj(g, ch, held) {
+            g.send_to_char(ch, "The stuff in your hand is invisible!  Yeech!!\r\n");
+            return;
+        }
         if pen.is_some() {
             paper = Some(held);
         } else {
@@ -1043,26 +1081,25 @@ pub fn do_write(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         })
         .unwrap_or(false);
 
-    if paper_type != ObjectType::Note {
-        // C: "$p is no good for writing with." iff pen isn't a pen; but with no
-        // ITEM_PEN type the pen check collapses — the note check is the gate.
-        act(
-            g,
-            "You can't write on $p.",
-            false,
-            ch,
-            Some(paper),
-            ActArg::None,
-            To::Char,
-        );
-    } else if pen_type == ObjectType::Note {
-        // The "pen" is actually a note — no good for writing.
+    // C (act.comm.c:609-612): the pen is checked FIRST — a non-pen "pen" is
+    // refused with "$p is no good for writing with." — and only then the paper.
+    if pen_type != ObjectType::Pen {
         act(
             g,
             "$p is no good for writing with.",
             false,
             ch,
             Some(pen),
+            ActArg::None,
+            To::Char,
+        );
+    } else if paper_type != ObjectType::Note {
+        act(
+            g,
+            "You can't write on $p.",
+            false,
+            ch,
+            Some(paper),
             ActArg::None,
             To::Char,
         );
@@ -1129,7 +1166,9 @@ pub fn do_page(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
 
-    match g.find_player_by_name(&name).filter(|&v| g.can_see(ch, v)) {
+    // C do_page (act.comm.c:672) resolves the target with get_char_vis, so an
+    // immortal can page a mob / numbered target elsewhere in the world (#339).
+    match get_char_vis(g, ch, &name) {
         Some(vict) => {
             act(g, &buf, false, ch, None, ActArg::Char(vict), To::Vict);
             if prf(g, ch, PRF_NOREPEAT) {
@@ -1458,4 +1497,237 @@ pub fn check_multiplaying(g: &GameState, hostname: &str) -> bool {
     }
     // C: `return 1; // While in development mode we wanna give our builders freedom...`
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::Descriptor;
+    use crate::object::{ObjectType, WearFlags};
+    use crate::room::Room;
+    use crate::world::ObjectProto;
+
+    fn player(g: &mut GameState, conn: ConnId, name: &str, level: u8) -> CharId {
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        ch.desc = Some(conn);
+        ch.player.level = level;
+        let id = g.create_char(ch);
+        g.players_by_name.insert(name.to_lowercase(), id);
+        id
+    }
+
+    fn out(g: &GameState, conn: ConnId) -> String {
+        g.descriptors.get(&conn).unwrap().outbuf.clone()
+    }
+
+    fn proto(vnum: ObjVnum, name: &str, obj_type: ObjectType) -> ObjectProto {
+        ObjectProto {
+            vnum,
+            name: name.to_string(),
+            short_desc: format!("a {}", name),
+            description: format!("A {} lies here.", name),
+            obj_type,
+            wear_flags: WearFlags::TAKE,
+            extra_flags: crate::object::ExtraFlags::empty(),
+            weight: 1,
+            cost: 1,
+            rent: 0,
+            values: [0; 4],
+            curr_slots: 0,
+            total_slots: 0,
+            obj_class: 0,
+            min_level: 0,
+            bitvector: 0,
+            action_description: String::new(),
+            affects: Vec::new(),
+            ex_descriptions: Vec::new(),
+        }
+    }
+
+    /// #337: perform_tell formats the recipient's copy from the RAW argument
+    /// and only then slurs, so the sender's echo is the only slurred copy.
+    #[test]
+    fn drunk_tell_keeps_the_recipients_copy_clean() {
+        let mut g = GameState::new(Config::default());
+        let r = g.add_room(Room::new(1001, 0, "R".to_string(), "R.".to_string()));
+        let a = player(&mut g, ConnId(1), "Drunkard", 10);
+        let b = player(&mut g, ConnId(2), "Bob", 10);
+        g.char_to_room(a, r);
+        g.char_to_room(b, r);
+        g.get_char_mut(a).unwrap().conditions[DRUNK] = 9;
+
+        do_tell(&mut g, a, "bob hello", 0);
+
+        let to_vict = out(&g, ConnId(2));
+        let to_self = out(&g, ConnId(1));
+        assert!(
+            to_vict.contains("tells you, 'hello'"),
+            "recipient should read the raw text: {}",
+            to_vict
+        );
+        assert!(
+            !to_self.contains("'hello'"),
+            "sender's echo should be slurred: {}",
+            to_self
+        );
+    }
+
+    /// #338: drunk whisper/ask are not slurred at all — C's slur result is a
+    /// dead store and both messages use the raw half_chop output.
+    #[test]
+    fn drunk_whisper_is_not_slurred() {
+        let mut g = GameState::new(Config::default());
+        let r = g.add_room(Room::new(1001, 0, "R".to_string(), "R.".to_string()));
+        let a = player(&mut g, ConnId(1), "Drunkard", 10);
+        let b = player(&mut g, ConnId(2), "Bob", 10);
+        g.char_to_room(a, r);
+        g.char_to_room(b, r);
+        g.get_char_mut(a).unwrap().conditions[DRUNK] = 9;
+
+        do_spec_comm(&mut g, a, "bob hello", SCMD_WHISPER);
+
+        let to_vict = out(&g, ConnId(2));
+        let to_self = out(&g, ConnId(1));
+        assert!(
+            to_vict.contains("you, 'hello'"),
+            "recipient should read the raw text: {}",
+            to_vict
+        );
+        assert!(
+            to_self.contains("'hello'"),
+            "the sender's echo is raw too: {}",
+            to_self
+        );
+    }
+
+    /// #331: an arbitrary first argument is refused with C's message.
+    #[test]
+    fn write_refuses_a_non_writing_item() {
+        let mut g = GameState::new(Config::default());
+        let r = g.add_room(Room::new(1001, 0, "R".to_string(), "R.".to_string()));
+        let a = player(&mut g, ConnId(1), "Scribbler", 10);
+        g.char_to_room(a, r);
+        g.obj_protos.insert(3001, proto(3001, "sword", ObjectType::Weapon));
+        let sword = g.load_object(3001).unwrap();
+        g.obj_to_char(sword, a);
+
+        do_write(&mut g, a, "sword", 0);
+
+        let buf = out(&g, ConnId(1));
+        assert!(
+            buf.contains("That thing has nothing to do with writing."),
+            "{}",
+            buf
+        );
+    }
+
+    /// #331: a named pen (ITEM_PEN) is the pen, the held note is the paper, and
+    /// the write goes ahead; the reverse ('write note pen' with a non-pen pen)
+    /// is refused with "$p is no good for writing with.".
+    #[test]
+    fn write_uses_the_pen_type_gate() {
+        let mut g = GameState::new(Config::default());
+        let r = g.add_room(Room::new(1001, 0, "R".to_string(), "R.".to_string()));
+        let a = player(&mut g, ConnId(1), "Scribbler", 10);
+        g.char_to_room(a, r);
+        g.obj_protos.insert(3002, proto(3002, "quill pen", ObjectType::Pen));
+        g.obj_protos.insert(3003, proto(3003, "parchment note", ObjectType::Note));
+        g.obj_protos.insert(3004, proto(3004, "sword", ObjectType::Weapon));
+
+        // Held note + named pen: C pairs them and starts the editor.
+        let note = g.load_object(3003).unwrap();
+        g.equip_char(a, note, WEAR_HOLD);
+        let pen = g.load_object(3002).unwrap();
+        g.obj_to_char(pen, a);
+
+        do_write(&mut g, a, "pen", 0);
+        let buf = out(&g, ConnId(1));
+        assert!(
+            buf.contains("Write your note.  (/s saves /h for help)"),
+            "a pen plus a held note should start the editor: {}",
+            buf
+        );
+
+        // Two arguments: the named pen is a sword, so C refuses on the pen.
+        let note2 = g.load_object(3003).unwrap();
+        g.obj_to_char(note2, a);
+        let sword = g.load_object(3004).unwrap();
+        g.obj_to_char(sword, a);
+        g.descriptors.get_mut(&ConnId(1)).unwrap().outbuf.clear();
+
+        do_write(&mut g, a, "note sword", 0);
+        let buf = out(&g, ConnId(1));
+        assert!(
+            buf.contains("is no good for writing with."),
+            "{}",
+            buf
+        );
+        assert!(!buf.contains("Write your note."), "{}", buf);
+    }
+
+    /// #339: do_tell / do_page / do_status resolve their target with
+    /// get_char_vis, so an immortal reaches a PC in another room (and a
+    /// numbered '2.<name>' target) instead of "Who is that?".
+    #[test]
+    fn tell_page_status_use_get_char_vis() {
+        let mut g = GameState::new(Config::default());
+        let ra = g.add_room(Room::new(1001, 0, "A".to_string(), "A.".to_string()));
+        let rb = g.add_room(Room::new(1002, 0, "B".to_string(), "B.".to_string()));
+        let god = player(&mut g, ConnId(1), "Zapata", LVL_GOD);
+        let victim = player(&mut g, ConnId(2), "Victim", 10);
+        let other = player(&mut g, ConnId(3), "Victimess", 10);
+        g.char_to_room(god, ra);
+        g.char_to_room(victim, rb);
+        g.char_to_room(other, rb);
+
+        do_tell(&mut g, god, "victim hi", 0);
+        assert!(
+            out(&g, ConnId(2)).contains("tells you, 'hi'"),
+            "an immortal tell should cross rooms: {}",
+            out(&g, ConnId(2))
+        );
+        g.descriptors.get_mut(&ConnId(1)).unwrap().outbuf.clear();
+
+        do_page(&mut g, god, "victim wake up", 0);
+        assert!(
+            out(&g, ConnId(2)).contains("*Zapata* wake up"),
+            "an immortal page should cross rooms: {}",
+            out(&g, ConnId(2))
+        );
+        g.descriptors.get_mut(&ConnId(1)).unwrap().outbuf.clear();
+
+        crate::cmd_informative::do_status(&mut g, god, "victim", 0);
+        assert!(
+            out(&g, ConnId(1)).contains("***** Score for Victim *****"),
+            "score <player> should find an out-of-room PC: {}",
+            out(&g, ConnId(1))
+        );
+
+        // '2.victim' is a numbered world target: isname("victim") is a prefix
+        // match, so it resolves to the second matching PC in the other room.
+        // A PC-name lookup would answer NOPERSON here.
+        for conn in 1..=3 {
+            g.descriptors
+                .get_mut(&ConnId(conn))
+                .map(|d| d.outbuf.clear());
+        }
+        do_tell(&mut g, god, "2.victim hi", 0);
+        assert!(
+            !out(&g, ConnId(1)).contains("No-one by that name here."),
+            "a numbered target must still resolve: {}",
+            out(&g, ConnId(1))
+        );
+        let first = out(&g, ConnId(2)).contains("tells you, 'hi'");
+        let second = out(&g, ConnId(3)).contains("tells you, 'hi'");
+        assert!(
+            first ^ second,
+            "exactly one of the two matches receives it: {} / {}",
+            out(&g, ConnId(2)),
+            out(&g, ConnId(3))
+        );
+    }
 }

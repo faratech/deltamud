@@ -1751,6 +1751,33 @@ pub fn do_worth(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     }
 }
 
+/// get_char_vis (handler.c:1228-1249): room first, then `0.<name>` player
+/// lookup, then a numbered world-wide scan. Private copies live in
+/// cmd_social/cmd_wizard/cmd_comm/dg_mobcmd; do_status needs one here so an
+/// immortal `score <player>` finds a target in another room (#339).
+fn get_char_vis(g: &GameState, ch: CharId, arg: &str) -> Option<CharId> {
+    if let Some(found) = g.get_char_room_vis(ch, arg) {
+        return Some(found);
+    }
+    let (mut number, name) = get_number(arg);
+    if number == 0 {
+        return None;
+    }
+    for cid in g.char_ids() {
+        let target = match g.get_char(cid) {
+            Some(t) => t,
+            None => continue,
+        };
+        if isname(&name, &target.player.name) && g.can_see(ch, cid) {
+            number -= 1;
+            if number == 0 {
+                return Some(cid);
+            }
+        }
+    }
+    None
+}
+
 /// do_status — 'status'/'score' (CircleMUD/DeltaMUD long score sheet).
 pub fn do_status(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     let (target_name, _) = half_chop(argument);
@@ -1761,7 +1788,7 @@ pub fn do_status(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     } else if ch_level < LVL_IMMORT {
         (ch, "You are".to_string())
     } else {
-        match g.get_char_room_vis(ch, &target_name) {
+        match get_char_vis(g, ch, &target_name) {
             Some(v) if !g.get_char(v).map(|c| c.is_npc).unwrap_or(true) => {
                 if ch_level < g.get_char(v).map(|c| c.player.level).unwrap_or(1) {
                     g.send_to_char(
