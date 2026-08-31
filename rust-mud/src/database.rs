@@ -231,6 +231,34 @@ impl Database {
             .collect())
     }
 
+    /// C clan.c:242-255 clan_destroy SQL: clear the destroyed clan's members
+    /// and shift higher clans down one (offline rows included) (#165).
+    pub async fn clan_destroy_fixup(&self, destroyed: i32) -> Result<()> {
+        let mut conn = self.pool.get_conn().await?;
+        conn.exec_drop(
+            "UPDATE player_main SET clan=-1, clan_rank=-1 WHERE clan=?",
+            (destroyed,),
+        )
+        .await?;
+        conn.exec_drop(
+            "UPDATE player_main SET clan=clan-1 WHERE clan>?",
+            (destroyed,),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// C clan.c:388-405 lower_entire_clan SQL (#165).
+    pub async fn clan_lower_ranks(&self, clan: i32) -> Result<()> {
+        let mut conn = self.pool.get_conn().await?;
+        conn.exec_drop(
+            "UPDATE player_main SET clan_rank=1 WHERE clan=? AND clan_rank!=-1",
+            (clan,),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn save_player(&self, ch: &Character) -> Result<()> {
         self.save_player_with_host(ch, "").await
     }

@@ -318,6 +318,7 @@ impl Game {
             // awaits, where &mut self.state is free for the sync replay — we load
             // the player, replay the command, save, and extract.
             self.drain_offline_ops().await;
+        self.drain_deferred_db_ops().await;
             self.drain_player_save_requests().await;
             self.drain_pfileclean().await;
             self.flush_all().await;
@@ -1311,6 +1312,25 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
     /// usual output — then persist the (possibly edited) record and extract the
     /// char so it doesn't linger in the world. Runs between awaits in the run
     /// loop, so &mut self.state is free for the sync command_interpreter call.
+    /// Drain clan-related deferred SQL (queued from sync command paths, #165).
+    async fn drain_deferred_db_ops(&mut self) {
+        let ops: Vec<crate::state::DeferredDbOp> =
+            std::mem::take(&mut self.state.deferred_db_ops);
+        for op in ops {
+            let r = match op {
+                crate::state::DeferredDbOp::ClanDestroyFixup(n) => {
+                    self.db.clan_destroy_fixup(n).await
+                }
+                crate::state::DeferredDbOp::ClanLowerRanks(n) => {
+                    self.db.clan_lower_ranks(n).await
+                }
+            };
+            if let Err(e) = r {
+                log::warn!("deferred clan DB op failed: {}", e);
+            }
+        }
+    }
+
     async fn drain_offline_ops(&mut self) {
         // Take the queue so a replayed command that itself queued (it won't,
         // since the target is now present) wouldn't be processed re-entrantly.

@@ -632,6 +632,10 @@ fn clan_destroy(g: &mut GameState, ch: CharId, arg: &str) {
         return;
     }
 
+    // C clan.c:242-255 runs two SQL UPDATEs covering OFFLINE players' rows.
+    // Queue the async DB fixup (drained by the Game loop) as well (#165).
+    g.deferred_db_ops
+        .push(crate::state::DeferredDbOp::ClanDestroyFixup(i));
     // Fix up every ONLINE player's clan membership (the C SQL UPDATEs cover the
     // offline pfile, which we cannot reach synchronously — see header).
     let players: Vec<CharId> = connected_players(g);
@@ -870,6 +874,9 @@ fn handle_rank(g: &mut GameState, ch: CharId, arg: &str) {
 /// rank -1 applicants) drops to rank 1. Only ONLINE members are reachable.
 fn lower_entire_clan(g: &mut GameState, clan_idx: i32) {
     let number = with_clan(clan_idx, |c| c.number).unwrap_or(clan_idx);
+    // C clan.c:388-405: the SQL UPDATE also covers OFFLINE members (#165).
+    g.deferred_db_ops
+        .push(crate::state::DeferredDbOp::ClanLowerRanks(number));
     let players = connected_players(g);
     for v in players {
         if get_clan(g, v) == number && get_clan_rank(g, v) != -1 {

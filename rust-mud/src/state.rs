@@ -71,6 +71,14 @@ pub struct OfflineOp {
     pub command: String,
 }
 
+/// Deferred async DB work queued from synchronous command handlers.
+#[derive(Debug, Clone)]
+pub enum DeferredDbOp {
+    /// clan.c:242-255: shift clans past the destroyed one.
+    ClanDestroyFixup(i32),
+    /// clan.c:388-405: lower every member of the clan to rank 1.
+    ClanLowerRanks(i32),
+}
 pub struct GameState {
     // Static world (loaded at boot; mutated by resets / OLC).
     pub rooms: Vec<Room>,
@@ -110,6 +118,11 @@ pub struct GameState {
     // drains this each heartbeat — loads the player into the world, replays the
     // command, then saves + extracts. Empty in steady state.
     pub offline_ops: Vec<OfflineOp>,
+
+    /// Deferred async DB operations queued from sync command paths - e.g.
+    /// clan destroy/rank-lower SQL that must also cover OFFLINE players'
+    /// rows (C runs the UPDATEs synchronously; #165).
+    pub deferred_db_ops: Vec<DeferredDbOp>,
     pub pfileclean_requested: bool,
     pub player_save_requests: Vec<CharId>,
 
@@ -162,6 +175,7 @@ impl GameState {
             players_by_name: HashMap::new(),
             player_table: Vec::new(),
             offline_ops: Vec::new(),
+            deferred_db_ops: Vec::new(),
             pfileclean_requested: false,
             player_save_requests: Vec::new(),
             next_char_id: 1,

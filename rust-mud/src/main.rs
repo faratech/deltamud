@@ -325,6 +325,13 @@ pub trait DatabaseInterface: Send + Sync {
     async fn verify_password(&self, name: &str, password: &str) -> Result<bool>;
     async fn delete_deleted_players(&self) -> Result<u64>;
     async fn clan_member_counts(&self) -> Result<Vec<(i32, i32)>>;
+    /// C clan.c:242-255 clan_destroy: shift every player row's clan past the
+    /// destroyed one and clear the destroyed clan's members (offline rows
+    /// included) (#165).
+    async fn clan_destroy_fixup(&self, destroyed: i32) -> Result<()>;
+    /// C clan.c:388-405 lower_entire_clan: set clan_rank = 1 for every
+    /// member of `clan` whose rank != -1 (#165).
+    async fn clan_lower_ranks(&self, clan: i32) -> Result<()>;
     /// Every player's index row {idnum,name,level,last_logon,host} for the
     /// boot-time player_table build (C build_player_index, db.c).
     async fn list_players(&self) -> Result<Vec<crate::state::PlayerIndex>>;
@@ -358,6 +365,12 @@ impl DatabaseInterface for database::Database {
     }
     async fn clan_member_counts(&self) -> Result<Vec<(i32, i32)>> {
         self.clan_member_counts().await
+    }
+    async fn clan_destroy_fixup(&self, destroyed: i32) -> Result<()> {
+        self.clan_destroy_fixup(destroyed).await
+    }
+    async fn clan_lower_ranks(&self, clan: i32) -> Result<()> {
+        self.clan_lower_ranks(clan).await
     }
     async fn list_players(&self) -> Result<Vec<crate::state::PlayerIndex>> {
         self.list_players().await

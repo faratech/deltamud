@@ -94,6 +94,31 @@ impl crate::DatabaseInterface for MockDatabase {
         Ok((before - players.len()) as u64)
     }
 
+    async fn clan_destroy_fixup(&self, destroyed: i32) -> Result<()> {
+        let mut players = self.players.lock().unwrap();
+        for stored in players.values_mut() {
+            let c = &mut stored.character;
+            if c.clan == destroyed {
+                c.clan = -1;
+                c.clan_rank = -1;
+            } else if c.clan > destroyed {
+                c.clan -= 1;
+            }
+        }
+        Ok(())
+    }
+
+    async fn clan_lower_ranks(&self, clan: i32) -> Result<()> {
+        let mut players = self.players.lock().unwrap();
+        for stored in players.values_mut() {
+            let c = &mut stored.character;
+            if c.clan == clan && c.clan_rank != -1 {
+                c.clan_rank = 1;
+            }
+        }
+        Ok(())
+    }
+
     async fn clan_member_counts(&self) -> Result<Vec<(i32, i32)>> {
         let players = self.players.lock().unwrap();
         let mut counts: HashMap<i32, i32> = HashMap::new();
