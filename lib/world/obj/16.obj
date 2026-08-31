@@ -31,7 +31,7 @@ A stick.~
    It is a stick.  This stick is arms length and strong.    
 ~
 5 4 8193
-0 2 8 2 0 0
+0 2 8 2 45 60
 1 50 2
 L 17
 #1603
@@ -42,7 +42,7 @@ A flaming stick.~
 weakened by the fire though...    
 ~
 5 4 8193
-0 2 7 2 0 0
+0 2 7 2 45 60
 1 35 0
 L 15
 E

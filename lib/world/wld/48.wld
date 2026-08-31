@@ -1,0 +1,45 @@
+#4800
+Thargor Arena Entrance~
+   Banners hang from the rafters of this long entry hall.~
+48 8 0
+D0
+~
+~
+0 0 4899
+S
+#4899
+The Arena Pit~
+   Sands stretch in every direction, ringed by standing stones.~
+48 0 0
+D1
+~
+~
+0 0 4800
+D0
+~
+~
+0 0 4801
+D2
+~
+~
+0 0 4802
+S
+#4801
+The Arena Temple of Life~
+   White-cloaked healers keep this shrine.~
+48 8 0
+D3
+~
+~
+0 0 4899
+S
+#4802
+The Arena Temple of Mana~
+   Blue lamps burn without oil in this shrine.~
+48 8 0
+D2
+~
+~
+0 0 4899
+S
+$~

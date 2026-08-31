@@ -567,6 +567,24 @@ pub fn gain_exp(g: &mut GameState, ch: CharId, gain: i64) {
             } else {
                 g.send_to_char(ch, &format!("You rise {} levels!\r\n", num_levels));
             }
+            // C limits.c:355-359 (finish-the-game restoration): reaching
+            // LVL_GETSTUFF (3) pays two gold bricks (obj 3014) from
+            // do_oldbie. C's own call site was commented out, so mortals
+            // never received it; the only live call is the immortal
+            // promotion path (registered divergence/completion).
+            let new_level = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
+            if new_level == 3 {
+                // LVL_GETSTUFF (structs.h:544).
+                for _ in 0..2 {
+                    if let Some(oid) = g.load_object(3014) {
+                        g.obj_to_char(oid, ch);
+                    }
+                }
+                g.send_to_char(
+                    ch,
+                    "&YThe gods have rewarded you for getting to level 3!&n\r\nTwo gold bricks fall from the sky into your hands.&n\r\n",
+                );
+            }
             // check_autowiz(ch): C regenerates the wiz/imm lists here. The native
             // autowiz (autowiz.rs) replaces the C system() call; its internal level
             // gate means real work only happens the moment the player reaches HERO.

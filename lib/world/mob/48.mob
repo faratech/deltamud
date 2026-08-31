@@ -1,0 +1,40 @@
+#4800
+thargor arenaentrancemaster master arena~
+Thargor the Arena Master~
+Thargor the Arena Master stands here, calling the matches.
+~
+    A slab of scarred muscle gone grey at the temples, Thargor has
+refereed every match since the arena opened.  ARENA JOIN to sign the
+roster; OBSERVE <player> to watch.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+800 1d30
+0 30000
+9 9 0
+E
+#4801
+healer arena temple~
+the Arena Healer~
+An Arena Healer watches the sands, ready for the fallen.
+~
+    White-cloaked and impatient, the healer patches champions between
+matches.
+~
+48 0 0 E
+X30 100 100 100 100 100 1d1+700 1d20
+0 20000
+9 9 0
+E
+#4802
+regenerator mana arena~
+the Arena Mana Regenerator~
+An Arena Magician murmurs over a basin of blue fire.
+~
+    The magician restores the spent mana of arena combatants.
+~
+48 0 0 E
+X30 100 100 100 100 100 1d1+700 1d20
+0 20000
+9 9 0
+E
+$

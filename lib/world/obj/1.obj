@@ -210,7 +210,7 @@ a small knife~
 A small knife is lying here.~
 ~
 5 0 8193
-1 1 1 14 0 0
+1 1 1 14 45 60
 5 320 0
 c 0
 #119
@@ -258,4 +258,18 @@ The general mortal's bulletin board hangs on the wall here.~
 0 0 0 0 0 0
 0 0 0
 c 0
+#180
+box pandora pandoras~
+Pandora's Box~
+An ornate black-lacquered box banded in dull silver sits here.~
+~
+15 68 1
+100 0 -1 0 0 0
+30 0 0
+c 1
+E
+pandoras box ornate~
+    The silver bands are engraved in a script no scholar has ever
+    matched.  One line repeats, in trade-tongue: OPEN ME.
+~
 $~

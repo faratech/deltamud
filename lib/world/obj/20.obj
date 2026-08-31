@@ -344,7 +344,7 @@ a bone crudgel~
 A large bone is lying here.~
 ~
 5 0 8193
-0 1 7 5 0 0
+0 1 7 5 45 60
 4 0 0
 L 3
 E
@@ -453,7 +453,7 @@ a grey staff~
 A grey staff has been left here.~
 ~
 5 0 8193
-0 3 3 5 0 0
+0 3 3 5 45 60
 6 2 0
 E
 staff~

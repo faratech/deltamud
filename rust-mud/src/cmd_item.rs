@@ -143,7 +143,9 @@ const PRF2_MBUILDING: i64 = 1 << 6;
 // Room flag (structs.h ROOM_HOUSE_CRASH).
 const ROOM_HOUSE_CRASH: u32 = 1 << 12;
 
-const PANDORAS_BOX_VNUM: ObjVnum = -100;
+// C ships -100 so the box can never exist; the finish-the-game program
+// authored obj 180 in zone 1 and points the define at it (#358).
+const PANDORAS_BOX_VNUM: ObjVnum = 180;
 
 // ---------------------------------------------------------------------------
 // Tiny ports of helpers act.item.c reaches into utils.c / handler.c for.
