@@ -210,37 +210,6 @@ X1 6 5 5 5 5 1d1+20 1d1
 9 9 1
 BareHandAttack: 13
 E
-#134
-dragon~
-&Rthe massively large red dragon~
-&RA massively huge red dragon towers above you.&n
-~
-
-It is a massive dragon with razor-sharp scales and huge wings.
-You are sure it would annihalate you.
-If you attack this monster, you will die.
-
-~
-253978 1024 0 E
-X100 600 525 525 525 525 1d1+1703 1d298
-0 33100
-9 9 1
-BareHandAttack: 6
-E
-#199
-postmaster postman mailman~
-the postmaster~
-The medieval postmaster is here processing deliveries.
-~
-   He is wearing a royal uniform furbished by the Kingdom of Anacreon.  He is
-working quickly taking letters and packages and bringing them to the back of
-the building for the other postmen to organize.    
-~
-253979 0 0 E
-X5 30 26 26 26 26 1d1+88 1d13
-50 1830
-9 9 0
-E
 #115
 guildmaster mage magic master~~
 the Mage Guildmaster~
@@ -321,66 +290,6 @@ X30 100 100 100 100 100 1d1+700 1d30
 500 20000
 9 9 0
 E
-#126
-guild guard mage doorway~~
-the Mage Guild Guard~
-The Mage Guild Guard stands watch at the guild door.
-~
-    Only students of the arcane may pass the Mage Guild Guard.
-~
-2 0 0 E
-X30 100 100 100 100 100 1d1+600 1d25
-100 5000
-9 9 0
-E
-#127
-guild guard cleric doorway~~
-the Cleric Guild Guard~
-The Cleric Guild Guard stands watch at the guild door.
-~
-    Only the devout may pass the Cleric Guild Guard.
-~
-2 0 0 E
-X30 100 100 100 100 100 1d1+600 1d25
-100 5000
-9 9 0
-E
-#128
-guild guard thief doorway~~
-the Thief Guild Guard~
-The Thief Guild Guard lounges by the guild door, watching.
-~
-    Only members of the guild may pass the Thief Guild Guard.
-~
-2 0 0 E
-X30 100 100 100 100 100 1d1+600 1d25
-100 5000
-9 9 0
-E
-#129
-guild guard warrior doorway~~
-the Warrior Guild Guard~
-The Warrior Guild Guard stands watch at the guild door.
-~
-    Only sworn warriors may pass the Warrior Guild Guard.
-~
-2 0 0 E
-X30 100 100 100 100 100 1d1+600 1d25
-100 5000
-9 9 0
-E
-#130
-guild guard artisan doorway~~
-the Artisan Guild Guard~
-The Artisan Guild Guard stands watch at the guild door.
-~
-    Only members of the craft may pass the Artisan Guild Guard.
-~
-2 0 0 E
-X30 100 100 100 100 100 1d1+600 1d25
-100 5000
-9 9 0
-E
 #121
 city guard watch temple~
 the City Watch Guard
@@ -449,6 +358,97 @@ kill a citizen, and they will come for you.
 2 0 0 E
 X30 100 100 100 100 100 1d1+650 1d30
 200 15000
+9 9 0
+E
+#126
+guild guard mage doorway~~
+the Mage Guild Guard~
+The Mage Guild Guard stands watch at the guild door.
+~
+    Only students of the arcane may pass the Mage Guild Guard.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+600 1d25
+100 5000
+9 9 0
+E
+#127
+guild guard cleric doorway~~
+the Cleric Guild Guard~
+The Cleric Guild Guard stands watch at the guild door.
+~
+    Only the devout may pass the Cleric Guild Guard.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+600 1d25
+100 5000
+9 9 0
+E
+#128
+guild guard thief doorway~~
+the Thief Guild Guard~
+The Thief Guild Guard lounges by the guild door, watching.
+~
+    Only members of the guild may pass the Thief Guild Guard.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+600 1d25
+100 5000
+9 9 0
+E
+#129
+guild guard warrior doorway~~
+the Warrior Guild Guard~
+The Warrior Guild Guard stands watch at the guild door.
+~
+    Only sworn warriors may pass the Warrior Guild Guard.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+600 1d25
+100 5000
+9 9 0
+E
+#130
+guild guard artisan doorway~~
+the Artisan Guild Guard~
+The Artisan Guild Guard stands watch at the guild door.
+~
+    Only members of the craft may pass the Artisan Guild Guard.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+600 1d25
+100 5000
+9 9 0
+E
+#134
+dragon~
+&Rthe massively large red dragon~
+&RA massively huge red dragon towers above you.&n
+~
+
+It is a massive dragon with razor-sharp scales and huge wings.
+You are sure it would annihalate you.
+If you attack this monster, you will die.
+
+~
+253978 1024 0 E
+X100 600 525 525 525 525 1d1+1703 1d298
+0 33100
+9 9 1
+BareHandAttack: 6
+E
+#199
+postmaster postman mailman~
+the postmaster~
+The medieval postmaster is here processing deliveries.
+~
+   He is wearing a royal uniform furbished by the Kingdom of Anacreon.  He is
+working quickly taking letters and packages and bringing them to the back of
+the building for the other postmen to organize.    
+~
+253979 0 0 E
+X5 30 26 26 26 26 1d1+88 1d13
+50 1830
 9 9 0
 E
 $
