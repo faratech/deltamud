@@ -196,6 +196,10 @@ pub struct Game {
     /// Unix timestamp the Game task started, for the MSSP UPTIME datum (which
     /// reports the server boot time per the MSSP spec).
     started_at: i64,
+    /// C db.c zone_update state: the 60-second accumulator (a static counter
+    /// in C) and the reset queue of zones past their lifespan.
+    zone_minute_timer: u64,
+    zone_reset_queue: Vec<i32>,
 }
 
 impl Game {
@@ -208,6 +212,8 @@ impl Game {
             lib_path: "./lib".to_string(),
             metrics: Arc::new(Metrics::new()),
             started_at: chrono::Utc::now().timestamp(),
+            zone_minute_timer: 0,
+            zone_reset_queue: Vec::new(),
         }
     }
 
@@ -1540,20 +1546,82 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
     }
 
     fn zone_update(&mut self) {
-        // Age zones; reset those past their lifespan (CircleMUD zone_update).
-        let due: Vec<i32> = {
-            let mut v = Vec::new();
+        // C db.c:1877-1952 zone_update (#231). A 60-second accumulator ages
+        // the zones (NOT one age tick per 10-second PULSE_ZONE call); zones
+        // reaching their lifespan are queued (age = ZO_DEAD) and at most ONE
+        // queued zone is reset per tick, gated on room emptiness unless
+        // reset_mode == 2.
+        const ZO_DEAD: i32 = crate::world::ZONE_DEAD;
+        self.zone_minute_timer += 1;
+        if (self.zone_minute_timer * PULSE_ZONE) / PASSES_PER_SEC >= 60 {
+            self.zone_minute_timer = 0;
+            let mut enqueue: Vec<i32> = Vec::new();
             for z in self.state.zones.iter_mut() {
-                z.age += 1;
-                if z.lifespan > 0 && z.age >= z.lifespan && z.reset_mode != 0 {
-                    v.push(z.number);
+                if z.age < z.lifespan && z.reset_mode != 0 {
+                    z.age += 1;
+                }
+                if z.age >= z.lifespan && z.age < ZO_DEAD && z.reset_mode != 0 {
+                    enqueue.push(z.number);
+                    z.age = ZO_DEAD;
                 }
             }
-            v
-        };
-        for zn in due {
-            self.state.reset_zone(zn);
+            self.zone_reset_queue.extend(enqueue);
         }
+        if self.zone_reset_queue.is_empty() {
+            return;
+        }
+        let mut idx = 0;
+        while idx < self.zone_reset_queue.len() {
+            let zn = self.zone_reset_queue[idx];
+            let reset_mode = self
+                .state
+                .zones
+                .iter()
+                .find(|z| z.number == zn)
+                .map(|z| z.reset_mode)
+                .unwrap_or(0);
+            if reset_mode == 2 || self.zone_is_empty(zn) {
+                self.zone_reset_queue.remove(idx);
+                self.state.reset_zone(zn);
+                let name = self
+                    .state
+                    .zones
+                    .iter()
+                    .find(|z| z.number == zn)
+                    .map(|z| z.name.clone())
+                    .unwrap_or_default();
+                crate::syslog::mudlog(
+                    &mut self.state,
+                    &format!("Auto zone reset: {}", name),
+                    crate::syslog::CMP,
+                    LVL_GOD,
+                );
+                break;
+            }
+            idx += 1;
+        }
+    }
+
+    /// C db.c:2150 is_empty(zone_nr): true when no playing descriptor's
+    /// character stands in the zone.
+    fn zone_is_empty(&self, zone_number: i32) -> bool {
+        for d in self.state.descriptors.values() {
+            if d.state != ConState::Playing {
+                continue;
+            }
+            if let Some(cid) = d.character {
+                if let Some(c) = self.state.get_char(cid) {
+                    if let Some(rnum) = c.in_room {
+                        if let Some(room) = self.state.room_opt(rnum) {
+                            if room.zone == zone_number {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        true
     }
 
     // ---- Output flushing ------------------------------------------------
@@ -1920,6 +1988,68 @@ mod tests {
     fn ban_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn zone_update_ages_once_per_minute_and_queues_resets() {
+        // C db.c:1877-1952 (#231): six PULSE_ZONE ticks make one minute;
+        // a zone reaching its lifespan is queued (age = ZO_DEAD). An OCCUPIED
+        // zone (reset_mode 1) is not reset until a tick finds it empty.
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        game.state.zones.push(crate::world::Zone {
+            number: 30,
+            name: "Test Zone".into(),
+            builders: String::new(),
+            lifespan: 1,
+            age: 0,
+            top: 3099,
+            reset_mode: 1,
+            min_level: 0,
+            max_level: 0,
+            status_mode: 0,
+            map_x: None,
+            map_y: None,
+            reset_commands: Vec::new(),
+        });
+        let rnum = game
+            .state
+            .add_room(crate::room::Room::new(3001, 30, "z".into(), "".into()));
+
+        // An idle player inside the zone keeps zone_is_empty() false.
+        let conn = ConnId(55);
+        game.state
+            .descriptors
+            .insert(conn, Descriptor::new(conn, "example.test".to_string()));
+        let mut occupant = crate::character::Character::new_player(
+            "Zoner".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        occupant.desc = Some(conn);
+        let oid = game.state.create_char(occupant);
+        game.state.descriptors.get_mut(&conn).unwrap().character = Some(oid);
+        game.state.descriptors.get_mut(&conn).unwrap().state = ConState::Playing;
+        game.state.char_to_room(oid, rnum);
+
+        for _ in 0..5 {
+            game.zone_update();
+        }
+        assert_eq!(game.state.zones[0].age, 0, "no minute has fully passed");
+
+        game.zone_update(); // 6th tick = 60 s
+        assert_eq!(game.state.zones[0].age, crate::world::ZONE_DEAD);
+        assert_eq!(game.zone_reset_queue, vec![30]);
+
+        // Occupied: the queued reset must NOT fire.
+        game.zone_update();
+        assert_eq!(game.zone_reset_queue, vec![30], "occupied zone waits");
+
+        // The occupant leaves: the next tick resets the zone.
+        game.state.char_from_room(oid);
+        game.zone_update();
+        assert!(game.zone_reset_queue.is_empty(), "empty zone resets");
+        assert_eq!(game.state.zones[0].age, 0);
     }
 
     #[test]

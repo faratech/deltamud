@@ -61,6 +61,9 @@ pub enum ResetCmd {
     },
 }
 
+/// C db.c:1873 `#define ZO_DEAD 999` - a queued zone's age marker.
+pub const ZONE_DEAD: i32 = 999;
+
 #[derive(Debug, Clone)]
 pub struct Zone {
     pub number: i32,
