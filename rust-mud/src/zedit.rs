@@ -250,9 +250,10 @@ pub fn do_zedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     // fidelity incl. if_flag/arg4), falling back to the in-memory simplified
     // ResetCmd list if the file is unreadable.
     let all = read_disk_cmds(&path).unwrap_or_else(|| cmds_from_memory(g, zone_index));
+    let all_copy = all.clone();
     let cmds: Vec<RawCmd> = all
         .into_iter()
-        .filter(|c| cmd_room(c) == Some(room_vnum))
+        .filter(|c| belongs_to_room(&all_copy, room_vnum, c))
         .collect();
 
     let st = ZeditState {
@@ -320,8 +321,40 @@ fn cmd_room(c: &RawCmd) -> Option<RoomVnum> {
     match c.command {
         'M' | 'O' => Some(c.arg3),
         'D' | 'R' => Some(c.arg1),
+        // C zedit.c: G/E/P hit `default: break` in the room-assignment loop
+        // and INHERIT the previous command's room (cmd_room is declared
+        // outside the fold). Returning None here dropped every G/E/P from
+        // the isolation filters, orphaning equipment/containers on every
+        // save (#261).
+        'G' | 'E' | 'P' => None,
         _ => None,
     }
+}
+
+/// True if `c` belongs to `room` under C's carried-cmd_room semantics: the
+/// room-relevant commands M/O set it from arg3, D/R from arg1, and G/E/P
+/// inherit the room of the command before them.
+fn belongs_to_room(cmds: &[RawCmd], room_vnum: RoomVnum, c: &RawCmd) -> bool {
+    let mut cur: Option<RoomVnum> = None;
+    for cmd in cmds {
+        match cmd.command {
+            'M' | 'O' => cur = Some(cmd.arg3),
+            'D' | 'R' => cur = Some(cmd.arg1),
+            'G' | 'E' | 'P' => {}
+            _ => {}
+        }
+        if std::ptr::eq(cmd, c) {
+            return cur == Some(room_vnum);
+        }
+    }
+    false
+}
+
+fn filter_room_cmds(cmds: &[RawCmd], room_vnum: RoomVnum, keep: bool) -> Vec<RawCmd> {
+    cmds.iter()
+        .filter(|c| belongs_to_room(cmds, room_vnum, c) == keep)
+        .cloned()
+        .collect()
 }
 
 // ===========================================================================
@@ -1347,7 +1380,8 @@ fn save_internally(g: &mut GameState, conn: ConnId) {
     let path = zon_file_path(g, st.zone_number);
     let survivors = {
         let mut all = read_disk_cmds(&path).unwrap_or_else(|| cmds_from_memory(g, st.zone_index));
-        all.retain(|c| cmd_room(c) != Some(st.room_vnum));
+        let all_copy = all.clone();
+        all.retain(|c| !belongs_to_room(&all_copy, st.room_vnum, c));
         all
     };
     let all = splice_room_cmds(&st.cmds, survivors);
@@ -1380,7 +1414,8 @@ fn save_to_disk(g: &mut GameState, conn: ConnId) {
     // the file matches memory.
     let survivors = {
         let mut all = read_disk_cmds(&path).unwrap_or_else(|| cmds_from_memory(g, st.zone_index));
-        all.retain(|c| cmd_room(c) != Some(st.room_vnum));
+        let all_copy = all.clone();
+        all.retain(|c| !belongs_to_room(&all_copy, st.room_vnum, c));
         all
     };
     let all = splice_room_cmds(&st.cmds, survivors);
