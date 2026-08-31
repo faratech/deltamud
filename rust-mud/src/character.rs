@@ -431,13 +431,9 @@ impl Character {
     }
 
     pub fn class_abbrev(&self) -> &'static str {
-        match self.player.class {
-            Class::MagicUser => "Mag",
-            Class::Cleric => "Cle",
-            Class::Thief => "Thi",
-            Class::Warrior => "War",
-            Class::Artisan => "Art",
-        }
+        // Delegate to the authoritative class.c table ("Mu/Cl/Th/Wa/Ar");
+        // this was a fourth divergent copy (issue #251).
+        crate::class::class_abbrev(self.player.class)
     }
 
     /// Third-person reference (CircleMUD PERS/GET_NAME): NPC short_desc

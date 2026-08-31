@@ -4035,8 +4035,11 @@ mod tests {
             vec!["Initiate".to_string(), "Captain".to_string()],
         )]);
         let mut g = GameState::new(Config::default());
-        let viewer = connected_player(&mut g, ConnId(1), "Viewer", 1);
-        let target = connected_player(&mut g, ConnId(2), "Member", 1);
+        // Unique ids: do_who pages through the process-global pager table,
+        // which is keyed by ConnId — concurrent tests sharing an id would
+        // swap each other's pages.
+        let viewer = connected_player(&mut g, ConnId(71), "Viewer", 1);
+        let target = connected_player(&mut g, ConnId(72), "Member", 1);
         {
             let c = g.get_char_mut(target).unwrap();
             c.clan = 0;
@@ -4045,7 +4048,7 @@ mod tests {
 
         do_who(&mut g, viewer, "", 0);
 
-        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        let out = &g.descriptors.get(&ConnId(71)).unwrap().outbuf;
         assert!(out.contains("Captain of Rustaceans"));
         assert!(!out.contains("rank 2 of clan 0"));
     }
@@ -4140,11 +4143,12 @@ mod tests {
     #[test]
     fn do_who_ends_with_the_boot_high_line() {
         let mut g = GameState::new(Config::default());
-        let viewer = connected_player(&mut g, ConnId(1), "Loner", 1);
-        let _buddy = connected_player(&mut g, ConnId(2), "Pal", 1);
+        let viewer = connected_player(&mut g, ConnId(73), "Loner", 1);
+        let _buddy = connected_player(&mut g, ConnId(74), "Pal", 1);
+        // (reads below use ConnId(73))
 
         do_who(&mut g, viewer, "", 0);
-        let out = out_of(&mut g, ConnId(1));
+        let out = out_of(&mut g, ConnId(73));
         assert!(
             out.contains("There are 2 visible mortals.\r\nThere is a boot time high of 2 players.\r\n"),
             "{}",
@@ -4153,9 +4157,9 @@ mod tests {
 
         // Nobody visible ('who -i' with two mortals online): the zero case
         // still gets the counts line and the boot-time high.
-        g.descriptors.get_mut(&ConnId(1)).unwrap().outbuf.clear();
+        g.descriptors.get_mut(&ConnId(73)).unwrap().outbuf.clear();
         do_who(&mut g, viewer, "-i", 0);
-        let out = out_of(&mut g, ConnId(1));
+        let out = out_of(&mut g, ConnId(73));
         assert!(
             out.contains(
                 "No wizards or mortals are currently visible to you.\r\nThere is a boot time high of 2 players.\r\n"

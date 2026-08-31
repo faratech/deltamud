@@ -3226,7 +3226,7 @@ mod tests {
             nr: 0,
             vnum: 9999,
             attach_type: OBJ_TRIGGER,
-            name: "wear test".to_string(),
+            name: "veto armor".to_string(),
             trigger_type: OTRIG_WEAR,
             narg: 100,
             arglist: String::new(),
@@ -3243,6 +3243,9 @@ mod tests {
 
     #[test]
     fn perform_wear_rejects_anti_alignment_items() {
+        // Serialize with the wear-trigger veto test: obj ids and the DG script
+        // store are process-global across tests.
+        let _dg = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (mut g, ch, obj, conn) = wearable_game(ExtraFlags::ANTI_GOOD, 0);
         g.get_char_mut(ch).unwrap().alignment = 500;
 
@@ -3251,6 +3254,9 @@ mod tests {
 
     #[test]
     fn perform_wear_rejects_anti_class_items() {
+        // Serialize with the wear-trigger veto test: obj ids and the DG script
+        // store are process-global across tests.
+        let _dg = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (g, ch, obj, conn) = wearable_game(ExtraFlags::ANTI_WARRIOR, 0);
 
         assert_zapped(g, ch, obj, conn);
@@ -3258,6 +3264,9 @@ mod tests {
 
     #[test]
     fn perform_wear_rejects_min_level_items() {
+        // Serialize with the wear-trigger veto test: obj ids and the DG script
+        // store are process-global across tests.
+        let _dg = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (g, ch, obj, conn) = wearable_game(ExtraFlags::empty(), 20);
 
         assert_zapped(g, ch, obj, conn);
@@ -3285,5 +3294,10 @@ mod tests {
             .unwrap()
             .outbuf
             .contains("You wear a test armor on your body.\r\n"));
+
+        // Remove the veto: the script store is process-global and obj ids are
+        // per-GameState, so a leftover veto would zap another test's armor.
+        // isname matches the whole query against ONE name token, so search "veto".
+        assert!(dg_handler::remove_trigger(ScriptKey::Obj(obj), "veto"));
     }
 }
