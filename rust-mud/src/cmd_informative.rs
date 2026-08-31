@@ -261,33 +261,19 @@ fn sex_name(sex: Gender) -> &'static str {
     }
 }
 
+/// CLASS_ABBR(ch) (utils.h:492 -> class.c `class_abbrevs[]`): "Mu/Cl/Th/Wa/Ar".
+/// Delegates to the authoritative `class.rs` table — a local copy here had
+/// drifted to "Mag/Cle/Thi/War/Art" (#251).
 fn class_abbr(class: Class) -> &'static str {
-    match class {
-        Class::MagicUser => "Mag",
-        Class::Cleric => "Cle",
-        Class::Thief => "Thi",
-        Class::Warrior => "War",
-        Class::Artisan => "Art",
-    }
+    crate::class::class_abbrev(class)
 }
 
+/// RACE_ABBR(ch) (utils.h:493 -> races.c `race_abbrevs[]`): the three-letter
+/// race tag for the C race index. Delegates to the authoritative `races.rs`
+/// table so Goblin/Drow get "Gob"/"Dro" from the same nine C rows everyone
+/// else reads (#335); the caller is always a PC, so `is_npc` is false.
 fn race_abbr(race: Race) -> &'static str {
-    match race {
-        Race::Human => "Hum",
-        Race::Elf => "Elf",
-        Race::Gnome => "Gno",
-        Race::Dwarf => "Dwa",
-        Race::Troll => "Tro",
-        Race::Goblin => "Gob",
-        Race::Drow => "Dro",
-        Race::Orc => "Orc",
-        Race::Minotaur => "Min",
-        Race::HalfElf => "Hel",
-        Race::Kender => "Ken",
-        Race::Vampire => "Vam",
-        Race::Ogre => "Ogr",
-        Race::HalfOrc => "Hor",
-    }
+    crate::races::race_abbrev(race as i32, false)
 }
 
 /// sprintbit(): render a bit-flag long against a name table (CircleMUD).
@@ -2235,15 +2221,12 @@ _.,-'^'-,._\r\n\
   -o = only show outlaws\r\n\
 \r\n";
 
-/// find_class_bitvector(arg): single-letter class -> class bitmask.
+/// find_class_bitvector(arg) (class.c:133-159): a single menu *letter* -> the
+/// class bit. The letters are the creation-menu letters, not the class initials:
+/// d=Mage, a=Cleric, c=Warrior, b=Thief, e=Artisan. Delegates to the
+/// authoritative `class.rs` implementation (#252).
 fn find_class_bitvector(c: char) -> i64 {
-    match c.to_ascii_lowercase() {
-        'm' => 1 << (Class::MagicUser as i64),
-        'c' => 1 << (Class::Cleric as i64),
-        't' => 1 << (Class::Thief as i64),
-        'w' => 1 << (Class::Warrior as i64),
-        _ => 0,
-    }
+    crate::class::find_class_bitvector(c)
 }
 
 pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
@@ -3861,5 +3844,90 @@ mod tests {
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
         assert!(out.contains("Captain of Rustaceans"));
         assert!(!out.contains("rank 2 of clan 0"));
+    }
+
+    /// #251/#335: the who tag is C's "[ level Race Class ]" with the real
+    /// class.c/races.c abbreviations — "Mu" (not "Mag") and "Gob"/"Dro". The
+    /// race tag comes from races.c's nine-row table (via `races::race_abbrev`),
+    /// so a race outside C's 0..=8 range degrades to "--" instead of an
+    /// invented row.
+    #[test]
+    fn do_who_uses_the_c_race_and_class_abbrevs() {
+        let mut g = GameState::new(Config::default());
+        let viewer = connected_player(&mut g, ConnId(1), "Watcher", 1);
+        let gob = connected_player(&mut g, ConnId(2), "Snarl", 5);
+        let mage = connected_player(&mut g, ConnId(3), "Spark", 6);
+        let kender = connected_player(&mut g, ConnId(4), "Tassel", 7);
+        g.get_char_mut(gob).unwrap().player.race = Race::Goblin;
+        g.get_char_mut(mage).unwrap().player.class = Class::MagicUser;
+        g.get_char_mut(kender).unwrap().player.race = Race::Kender;
+
+        do_who(&mut g, viewer, "", 0);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("Gob"), "goblin race tag missing: {}", out);
+        assert!(!out.contains("Dro"), "no drow in the room: {}", out);
+        assert!(
+            out.contains(" -- "),
+            "out-of-range race should degrade to --: {}",
+            out
+        );
+        assert!(
+            !out.contains("Ken"),
+            "no invented Kender row in the C table: {}",
+            out
+        );
+        assert!(out.contains("Hum Mu"), "class tag should be Mu: {}", out);
+        assert!(!out.contains("Mag"), "class tag should not be Mag: {}", out);
+    }
+
+    /// #252: `who -c <letters>` filters on class.c's menu-letter bits.
+    ///
+    /// C's find_class_bitvector keeps stock CircleMUD's bit positions
+    /// (d=1<<0, a=1<<1, c=1<<2, b=1<<3, e=1<<4) while DeltaMUD's class
+    /// ordinals are Mu=0/Cl=1/Th=2/Wa=3/Ar=4, so combined with who's
+    /// `showclass & (1 << GET_CLASS(wch))` the 'c' letter selects *Thieves*
+    /// and 'b' *Warriors*. That asymmetry is C's observable behaviour and is
+    /// reproduced here by delegating to the same table.
+    #[test]
+    fn do_who_class_filter_uses_c_menu_letters() {
+        let mut g = GameState::new(Config::default());
+        let viewer = connected_player(&mut g, ConnId(1), "Seer", 1);
+        let mage = connected_player(&mut g, ConnId(2), "Zap", 4);
+        let warrior = connected_player(&mut g, ConnId(3), "Bash", 5);
+        let thief = connected_player(&mut g, ConnId(4), "Sneak", 6);
+        let cleric = connected_player(&mut g, ConnId(5), "Pray", 7);
+        let artisan = connected_player(&mut g, ConnId(6), "Craft", 8);
+        g.get_char_mut(mage).unwrap().player.class = Class::MagicUser;
+        g.get_char_mut(warrior).unwrap().player.class = Class::Warrior;
+        g.get_char_mut(thief).unwrap().player.class = Class::Thief;
+        g.get_char_mut(cleric).unwrap().player.class = Class::Cleric;
+        g.get_char_mut(artisan).unwrap().player.class = Class::Artisan;
+
+        // (letter, the name that must appear, a name that must not).
+        let cases = [
+            ("d", "Zap", "Bash"),    // Magic User
+            ("a", "Pray", "Zap"),    // Cleric
+            ("b", "Bash", "Sneak"),  // Warrior (bit 3)
+            ("c", "Sneak", "Bash"),  // Thief (bit 2)
+            ("e", "Craft", "Pray"),  // Artisan
+        ];
+        for (letter, hit, miss) in cases {
+            for conn in 1..=6 {
+                g.descriptors
+                    .get_mut(&ConnId(conn))
+                    .map(|d| d.outbuf.clear());
+            }
+            do_who(&mut g, viewer, &format!("-c {}", letter), 0);
+            let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+            assert!(out.contains(hit), "who -c {} should match {}: {}", letter, hit, out);
+            assert!(
+                !out.contains(miss),
+                "who -c {} should not match {}: {}",
+                letter,
+                miss,
+                out
+            );
+        }
     }
 }

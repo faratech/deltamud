@@ -102,20 +102,27 @@ pub static PC_CLASS_TYPES: [&str; NUM_CLASSES] = [
 
 /// `class_menu` — the class-selection menu (interpreter.c CON_QCLASS). Color is
 /// emitted as literal `&`-codes; preserved byte-for-byte incl. trailing `\r\n`.
-pub static CLASS_MENU: &str = "\r\n\
-&YSelect a class&n&R:&n\r\n\
-  &c[&na&c]&n Cleric   - religious and holy people who use defensive magic.\r\n\
-  &c[&nb&c]&n Thief    - stealthy and dexterous rogues, considered cunning.\r\n\
-  &c[&nc&c]&n Warrior  - strong and powerful fighters, weapon masters.\r\n\
-  &c[&nd&c]&n Mage     - wise and intelligent, and use offensive spells.\r\n\
-  &c[&ne&c]&n Artisan  - well adjusted, excellent item makers and traders.\r\n";
+/// Built with `concat!` rather than `\` continuations so each C source line's
+/// leading two spaces survive (Rust strips continuation-line whitespace,
+/// which left every menu row flush-left) (#253).
+pub static CLASS_MENU: &str = concat!(
+    "\r\n",
+    "&YSelect a class&n&R:&n\r\n",
+    "  &c[&na&c]&n Cleric   - religious and holy people who use defensive magic.\r\n",
+    "  &c[&nb&c]&n Thief    - stealthy and dexterous rogues, considered cunning.\r\n",
+    "  &c[&nc&c]&n Warrior  - strong and powerful fighters, weapon masters.\r\n",
+    "  &c[&nd&c]&n Mage     - wise and intelligent, and use offensive spells.\r\n",
+    "  &c[&ne&c]&n Artisan  - well adjusted, excellent item makers and traders.\r\n",
+);
 
 /// `town_menu` — home-town selection menu (interpreter.c CON_QTOWN).
-pub static TOWN_MENU: &str = "\r\n\
-&YSelect your home&n&R:&n\r\n\
-  &c[&na&c]&n Bah      - capitol of the Kingdom of Anacreon\r\n\
-  &c[&nb&c]&n Bah      - an Elven town of magic &r(&Rexpert&r)&n\r\n\
-  &c[&nc&c]&n Bah      - a human town of mystery &r(&Rexpert&r)&n\r\n";
+pub static TOWN_MENU: &str = concat!(
+    "\r\n",
+    "&YSelect your home&n&R:&n\r\n",
+    "  &c[&na&c]&n Bah      - capitol of the Kingdom of Anacreon\r\n",
+    "  &c[&nb&c]&n Bah      - an Elven town of magic &r(&Rexpert&r)&n\r\n",
+    "  &c[&nc&c]&n Bah      - a human town of mystery &r(&Rexpert&r)&n\r\n",
+);
 
 /// `class_name(class)` — full class name (`pc_class_types`).
 pub fn class_name(class: Class) -> &'static str {
@@ -185,6 +192,49 @@ pub fn find_class_bitvector(arg: char) -> i64 {
         'b' => 1 << 3,
         'e' => 1 << 4,
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #251: class_abbrevs[] is the C table "Mu/Cl/Th/Wa/Ar", not the
+    /// three-letter initials some call sites used to invent.
+    #[test]
+    fn class_abbrevs_match_class_c() {
+        assert_eq!(CLASS_ABBREVS, ["Mu", "Cl", "Th", "Wa", "Ar"]);
+        assert_eq!(class_abbrev(Class::MagicUser), "Mu");
+        assert_eq!(class_abbrev(Class::Cleric), "Cl");
+        assert_eq!(class_abbrev(Class::Thief), "Th");
+        assert_eq!(class_abbrev(Class::Warrior), "Wa");
+        assert_eq!(class_abbrev(Class::Artisan), "Ar");
+    }
+
+    /// #252: the who/users `-c` letters are the *menu* letters, so 'd' is the
+    /// Mage bit and 'c' the Warrior bit (not 'm'/'c').
+    #[test]
+    fn class_bitvector_uses_the_menu_letters() {
+        assert_eq!(find_class_bitvector('d'), 1 << 0); // Magic User
+        assert_eq!(find_class_bitvector('a'), 1 << 1); // Cleric
+        assert_eq!(find_class_bitvector('c'), 1 << 2); // Warrior
+        assert_eq!(find_class_bitvector('b'), 1 << 3); // Thief
+        assert_eq!(find_class_bitvector('e'), 1 << 4); // Artisan
+        assert_eq!(find_class_bitvector('m'), 0);
+        assert_eq!(find_class_bitvector('t'), 0);
+        assert_eq!(find_class_bitvector('w'), 0);
+    }
+
+    /// #253: every class/town menu row keeps the C source's two-space indent.
+    #[test]
+    fn menus_keep_their_two_space_row_indent() {
+        for menu in [CLASS_MENU, TOWN_MENU] {
+            for line in menu.split("\r\n").filter(|l| l.contains("&c[&n")) {
+                assert!(line.starts_with("  "), "row lost its indent: {:?}", line);
+            }
+        }
+        assert!(CLASS_MENU.contains("\r\n  &c[&na&c]&n Cleric"));
+        assert!(TOWN_MENU.contains("\r\n  &c[&na&c]&n Bah"));
     }
 }
 
