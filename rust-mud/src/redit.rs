@@ -601,6 +601,29 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 send(g, conn, "That room does not exist, try again : ");
                 return;
             }
+            // C redit.c:1075-1086 REDIT_EXIT_NUMBER: a sub-immortal builder
+            // may only link to rooms in zones they can edit (#269).
+            {
+                let level = conn_char(g, conn)
+                    .and_then(|c| g.get_char(c))
+                    .map(|c| c.player.level)
+                    .unwrap_or(LVL_IMPL);
+                if number != -1 && level < LVL_IMMORT {
+                    // the exit destination's zone NUMBER must be under the
+                    // builder's ownership (can_edit_zone takes the zone rnum).
+                    let target_zone_rnum = g
+                        .real_room(number)
+                        .and_then(|r| g.room_opt(r))
+                        .and_then(|room| crate::olc::real_zone(g, room.number));
+                    let owned = target_zone_rnum
+                        .map(|zr| crate::olc::can_edit_zone(g, conn_char(g, conn).unwrap(), zr))
+                        .unwrap_or(false);
+                    if !owned {
+                        send(g, conn, "You don't have permissions to that zone, try again (-1 for none) : ");
+                        return;
+                    }
+                }
+            }
             with_state(conn, |s| {
                 if let Some(e) = s.room.exits[s.cur_exit].as_mut() {
                     e.to_room = number;
