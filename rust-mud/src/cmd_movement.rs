@@ -2162,6 +2162,11 @@ pub(crate) fn stop_follower(g: &mut GameState, ch: CharId) {
         // C: REMOVE_BIT(AFF_FLAGS(ch), AFF_CHARM | AFF_GROUP)
         c.affect_flags &= !(AFF_CHARM | AFF_GROUP);
     }
+    // C utils.c:536-537 stop_follower: 'if (affected_by_spell(ch, SPELL_CHARM))
+    // affect_from_char(ch, SPELL_CHARM)'. Without removing the AFFECT ENTRY,
+    // affect_total ORs the charm bitvector back and a released mob snaps
+    // right back to permanently charmed (#125).
+    g.affect_remove_spell(ch, crate::spell_parser::SPELL_CHARM);
 }
 
 // ---------------------------------------------------------------------------

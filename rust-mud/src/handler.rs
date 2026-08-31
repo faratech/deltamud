@@ -83,6 +83,21 @@ impl GameState {
         crate::combat::stop_fighting(self, cid);
     }
 
+    /// C handler.c affect_modify(..., FALSE) + affect_remove: strip every
+    /// affect of a spell, CLEAR its affect bits from the flag word (the
+    /// old retain()s left bits stuck), then recompute (#98).
+    pub fn affect_remove_spell(&mut self, cid: CharId, spell: i32) {
+        let mut cleared = 0i64;
+        if let Some(ch) = self.chars.get_mut(&cid) {
+            for a in ch.affected.iter().filter(|a| a.spell_type == spell) {
+                cleared |= a.bitvector;
+            }
+            ch.affected.retain(|a| a.spell_type != spell);
+            ch.affect_flags &= !cleared;
+        }
+        self.affect_total(cid);
+    }
+
     // ---- Object placement ----------------------------------------------
     pub fn obj_to_room(&mut self, oid: ObjId, rnum: RoomRnum) {
         if rnum >= self.rooms.len() {
@@ -157,8 +172,13 @@ impl GameState {
         if pos >= NUM_WEARS {
             return;
         }
+        // C handler.c:699-707 equip: affect_modify(..., obj bitvector, TRUE)
+        // grants the item's affect bits while worn ("wearing this grants
+        // infravision/sanctuary/..." items; #98).
+        let bv = self.objs.get(&oid).map(|o| o.bitvector).unwrap_or(0);
         if let Some(ch) = self.chars.get_mut(&cid) {
             ch.equipment[pos] = Some(oid);
+            ch.affect_flags |= bv;
         }
         if let Some(o) = self.objs.get_mut(&oid) {
             o.loc = ObjLoc::Worn(cid, pos);
@@ -177,6 +197,11 @@ impl GameState {
             .chars
             .get_mut(&cid)
             .and_then(|ch| ch.equipment[pos].take())?;
+        // C handler.c:743-757 unequip: the item's affect bits are removed.
+        let bv = self.objs.get(&oid).map(|o| o.bitvector).unwrap_or(0);
+        if let Some(ch) = self.chars.get_mut(&cid) {
+            ch.affect_flags &= !bv;
+        }
         if let Some(o) = self.objs.get_mut(&oid) {
             o.loc = ObjLoc::Nowhere;
         }
@@ -483,13 +508,19 @@ impl GameState {
     pub fn affect_total(&mut self, cid: CharId) {
         // Collect equipment object affects + active spell affects.
         let mut mods: Vec<(i32, i32)> = Vec::new();
-        let mut flagbits: i64 = 0;
+        // Start from the current flag word: direct-set bits (camouflage's
+        // AFF_HIDE, AFF_GROUP, ...) persist across recomputes, and equipped
+        // items contribute their bitvector (C affect_total strips and
+        // re-applies each equipped obj_flags.bitvector, handler.c:237-270;
+        // #98).
+        let mut flagbits: i64 = self.chars.get(&cid).map(|c| c.affect_flags).unwrap_or(0);
         if let Some(ch) = self.chars.get(&cid) {
             for (pos, slot) in ch.equipment.iter().enumerate() {
                 if let Some(oid) = *slot {
                     let Some(obj) = self.objs.get(&oid) else {
                         continue;
                     };
+                    flagbits |= obj.bitvector;
                     if obj.obj_type == ObjectType::Armor {
                         mods.push((APPLY_DEFENSE, armor_ac_modifier(pos, obj.values[0])));
                     }

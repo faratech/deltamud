@@ -108,10 +108,7 @@ pub fn set_fighting(g: &mut GameState, ch: CharId, victim: CharId) {
 }
 
 fn affect_from_char(g: &mut GameState, ch: CharId, spell: i32) {
-    if let Some(c) = g.get_char_mut(ch) {
-        c.affected.retain(|a| a.spell_type != spell);
-    }
-    g.affect_total(ch);
+    g.affect_remove_spell(ch, spell);
 }
 
 pub(crate) fn stop_fighting(g: &mut GameState, ch: CharId) {

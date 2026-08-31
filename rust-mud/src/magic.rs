@@ -137,10 +137,7 @@ fn affect_to_char(g: &mut GameState, victim: CharId, af: Affect) {
 
 /// affect_from_char (handler.c): strip every affect of a given spell.
 fn affect_from_char(g: &mut GameState, victim: CharId, spell: i32) {
-    if let Some(c) = g.get_char_mut(victim) {
-        c.affected.retain(|a| a.spell_type != spell);
-    }
-    g.affect_total(victim);
+    g.affect_remove_spell(victim, spell);
 }
 
 /// update_pos (fight.c): recompute a character's position from HP.
@@ -1260,10 +1257,14 @@ fn affect_update_char(g: &mut GameState, cid: CharId) {
             action = AfUpdate::Remove;
         }
         if matches!(action, AfUpdate::Remove) {
-            // The discharge above may have extracted the character.
-            if let Some(c) = g.get_char_mut(cid) {
+            // The discharge above may have extracted the character. The
+            // expired affect's bits are cleared with it (affect_remove).
+            if let Some(c) = g.get_char(cid) {
                 if i < c.affected.len() {
-                    c.affected.remove(i);
+                    let bv = c.affected[i].bitvector;
+                    let c2 = g.get_char_mut(cid).unwrap();
+                    c2.affected.remove(i);
+                    c2.affect_flags &= !bv;
                 }
             }
         } else {

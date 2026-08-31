@@ -265,10 +265,7 @@ fn affected_by_spell(g: &GameState, cid: CharId, spell_type: i32) -> bool {
 
 /// affect_from_char: remove every affect of `spell_type`, then recompute.
 fn affect_from_char(g: &mut GameState, cid: CharId, spell_type: i32) {
-    if let Some(c) = g.get_char_mut(cid) {
-        c.affected.retain(|a| a.spell_type != spell_type);
-    }
-    g.affect_total(cid);
+    g.affect_remove_spell(cid, spell_type);
     // affect_total only re-derives ability mods; the AFF_ bitvector is rebuilt
     // from the surviving affects so the flag actually clears.
     rebuild_aff_flags(g, cid);
