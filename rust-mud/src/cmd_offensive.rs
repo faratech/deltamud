@@ -1222,10 +1222,12 @@ pub fn do_berserk(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     let mut prob = get_skill(g, ch, SKILL_BERSERK);
     let v_level = get_level(g, vict) as i32;
     let ch_level = get_level(g, ch) as i32;
+    // C rolls the main number(...) first, drawing the divisors after it
+    // (act.offensive.c:726-728) - keep the stream order identical (#136).
+    let percent_roll = g.rng.number((prob as f32 * 0.4) as i32, 101);
     let r1 = g.rng.number(6, 12);
     let r2 = g.rng.number(4, 10);
-    let mut percent =
-        g.rng.number((prob as f32 * 0.4) as i32, 101) + (v_level / r1) - (ch_level / r2);
+    let mut percent = percent_roll + (v_level / r1) - (ch_level / r2);
 
     // prob scales with hp/maxhp (floor 0.6).
     let mut factor = get_hit(g, ch) as f32 / get_max_hit(g, ch) as f32;
@@ -1552,8 +1554,18 @@ pub fn do_camouflage(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i3
         [crate::constants::app_index(dex, crate::constants::DEX_APP_SKILL.len())]
     .hide;
     let mut prob = get_skill(g, ch, SKILL_CAMOUFLAGE) + hide_bonus;
+    // C act.offensive.c:950/1036 rolls number(prob*0.6, 101) BEFORE the
+    // level divisor number(10, 15); matching the draw order keeps seeded
+    // golden replays aligned with the C stream (#136).
+    let mut percent = g.rng.number((prob as f32 * 0.6) as i32, 101);
     let r = g.rng.number(10, 15);
-    let mut percent = g.rng.number((prob as f32 * 0.6) as i32, 101) - (get_level(g, ch) as i32 / r);
+    percent -= get_level(g, ch) as i32 / r;
+    // C stores the roll in a `byte` (unsigned char): a negative int narrows
+    // to ~255, so the skill FAILS. The i32 clamp to 0 turned that rare
+    // failure into a success (#134).
+    if percent < 0 {
+        percent &= 0xFF; // two's-complement (byte) narrowing
+    }
     if percent <= 0 {
         percent = 0;
     }
@@ -1657,8 +1669,18 @@ pub fn do_blanket(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) 
         [crate::constants::app_index(dex, crate::constants::DEX_APP_SKILL.len())]
     .hide;
     let mut prob = get_skill(g, ch, SKILL_CAMOUFLAGE) + hide_bonus - grpsize;
+    // C act.offensive.c:950/1036 rolls number(prob*0.6, 101) BEFORE the
+    // level divisor number(10, 15); matching the draw order keeps seeded
+    // golden replays aligned with the C stream (#136).
+    let mut percent = g.rng.number((prob as f32 * 0.6) as i32, 101);
     let r = g.rng.number(10, 15);
-    let mut percent = g.rng.number((prob as f32 * 0.6) as i32, 101) - (get_level(g, ch) as i32 / r);
+    percent -= get_level(g, ch) as i32 / r;
+    // C stores the roll in a `byte` (unsigned char): a negative int narrows
+    // to ~255, so the skill FAILS. The i32 clamp to 0 turned that rare
+    // failure into a success (#134).
+    if percent < 0 {
+        percent &= 0xFF; // two's-complement (byte) narrowing
+    }
     if percent <= 0 {
         percent = 0;
     }
