@@ -863,14 +863,34 @@ pub fn do_save(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     {
         return;
     }
-    // C tests `if (cmd)` — true whenever a player actually types "save" (cmd is
-    // the command index, nonzero). The dispatcher only routes a typed command
-    // here, so we always acknowledge. The async Game loop performs the real
-    // save_char + Crash_crashsave + House_crashsave (documented persistence gap).
-    let name = g
-        .get_char(ch)
-        .map(|c| c.player.name.clone())
-        .unwrap_or_default();
+    // C act.other.c:490-507 do_save: write_aliases, save_char(NOWHERE),
+    // Crash_crashsave, and House_crashsave when the room is flagged
+    // ROOM_HOUSE_CRASH. Before #308 this only printed the acknowledgment and
+    // persisted nothing (#308).
+    let (name, in_room) = match g.get_char(ch) {
+        Some(c) => (c.player.name.clone(), c.in_room),
+        None => return,
+    };
+    // save_char(ch, NOWHERE): SQL row via the async bridge.
+    g.request_player_save(ch);
+    // Crash_crashsave: rent/crash object file.
+    let lib = g.config.lib_path.clone();
+    crate::objsave::crash_save(g, ch, &lib);
+    // write_aliases(ch).
+    let idnum = g.get_char(ch).map(|c| c.idnum).unwrap_or(0);
+    let _ = crate::alias::write_aliases(&lib, &name, idnum);
+    // House_crashsave when the room is flagged ROOM_HOUSE_CRASH.
+    if let Some(rnum) = in_room {
+        // C ROOM_HOUSE_CRASH is bit 12; RoomFlags names that bit NO_RECALL
+        // (see the room.rs 12-15 naming note), so test the raw bit.
+        let (vnum, is_house_crash) = match g.room_opt(rnum) {
+            Some(r) => (r.number, r.room_flags.bits() & (1 << 12) != 0),
+            None => (0, false),
+        };
+        if is_house_crash {
+            crate::house::house_crashsave(g, vnum);
+        }
+    }
     g.send_to_char(ch, &format!("Saving {}.\r\n", name));
 }
 
