@@ -652,9 +652,33 @@ fn boxkill(g: &mut GameState, ch: CharId, obj: ObjId) {
         c.affected.clear();
     }
     g.affect_total(ch);
+    // C act.item.c:207-214: death cry, corpse, and the immortal mudlog
+    // accompany the box death; the port skipped all three (#132). Dead code
+    // in practice (Pandora's Box never loads) - ported for fidelity.
+    crate::combat::death_cry(g, ch);
     g.obj_from_anywhere(obj);
     g.extract_obj(obj);
+    let (rname, is_npc) = match g.get_char(ch) {
+        Some(c) => (
+            c.in_room.map(|r| g.room(r).name.clone()).unwrap_or_default(),
+            c.is_npc,
+        ),
+        None => (String::new(), false),
+    };
+    crate::combat::make_corpse_for_victim(g, ch);
+    let name = g
+        .get_char(ch)
+        .map(|c| c.get_name().to_string())
+        .unwrap_or_else(|| "someone".into());
     g.extract_char(ch);
+    if !is_npc {
+        crate::syslog::mudlog(
+            g,
+            &format!("{} killed by Pandora's Box ({}) at {}", name, -100, rname),
+            crate::syslog::BRF,
+            LVL_IMMORT,
+        );
+    }
 }
 
 fn perform_get_from_container(g: &mut GameState, ch: CharId, obj: ObjId, cont: ObjId, mode: i32) {

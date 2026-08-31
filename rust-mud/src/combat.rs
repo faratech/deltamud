@@ -1717,7 +1717,7 @@ pub(crate) fn die(g: &mut GameState, killer: Option<CharId>, victim: CharId) {
     }
 }
 
-fn make_corpse_for_victim(g: &mut GameState, victim: CharId) {
+pub(crate) fn make_corpse_for_victim(g: &mut GameState, victim: CharId) {
     let rnum = match g.get_char(victim).and_then(|c| c.in_room) {
         Some(r) => r,
         None => return,
