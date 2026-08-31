@@ -56,6 +56,8 @@ const WEATHER_TOTAL: usize = 10;
 
 // WEATHER_* indices (maputils.h). Used by the storm spawn/collision logic.
 const WEATHER_NONE: i32 = -1;
+// structs.h PRF2_NOMAP (toggle nomap).
+const PRF2_NOMAP_LOCAL: i64 = 1 << 2;
 const WEATHER_RAINSTORM: usize = 0;
 const WEATHER_SNOWSTORM: usize = 1;
 const WEATHER_THUNDERSTORM: usize = 2;
@@ -2086,7 +2088,10 @@ fn unit_activity(g: &mut GameState, room: RoomRnum, wtype: usize) {
                     Some(p) => p,
                     None => continue,
                 };
-                let oldroom = match g.map_coords_to_rnum(dest.0, dest.1) {
+                // The victim already WALKED to the landing room via
+                // move_char_fly (C move_char), so land where they are.
+                let oldroom = g.get_char(ch).and_then(|v| v.in_room);
+                let oldroom = match oldroom {
                     Some(r) => r,
                     None => continue,
                 };
@@ -2130,6 +2135,160 @@ fn char_weather_xy(g: &GameState, ch: CharId) -> Option<(i32, i32)> {
     player_xy(g, ch).or_else(|| weather_view_xy(g, ch))
 }
 
+
+/// C maputils.c:1387-1450 move_char(ch, length, dir): walk a thrown character
+/// `length` map rooms in direction `dir` (0-3 cardinal, 4-7 diagonal).
+/// Intermediate rooms see the flyby message, and the first mortal bystander
+/// has a 10% chance per room of being bowled over (knocked to SLEEPING with
+/// two messages). The thrown character looks at every room they pass through,
+/// and PRF2_NOMAP is forced during the walk and restored after (#187).
+pub fn move_char_fly(g: &mut GameState, ch: CharId, length: i32, dir: i32) {
+    if !(0..=7).contains(&dir) || g.get_char(ch).is_none() {
+        return;
+    }
+    // C: temporarily force PRF2_NOMAP so the walk doesn't render maps.
+    let had_nomap = g
+        .get_char(ch)
+        .map(|c| c.prf2_flags & PRF2_NOMAP_LOCAL != 0)
+        .unwrap_or(false);
+    if !had_nomap {
+        if let Some(c) = g.get_char_mut(ch) {
+            c.prf2_flags |= PRF2_NOMAP_LOCAL;
+        }
+    }
+
+    // Start room: the char's own map coords (or the zone's ZWeatherPoint).
+    if let Some((x, y)) = char_weather_xy(g, ch) {
+        if let Some(start) = g.map_coords_to_rnum(x, y) {
+            g.char_from_room(ch);
+            g.char_to_room(ch, start);
+        }
+    }
+
+    let flyby = format!(
+        "You duck as you see {} fly by your head screaming!\r\n",
+        g.get_char(ch)
+            .map(|c| c.get_name().to_string())
+            .unwrap_or_else(|| "someone".into())
+    );
+
+    // Diagonal axis pairs (C maputils.c:1402-1405). Rust dirs: 0=N 1=E 2=S 3=W.
+    let (d1, d2) = match dir {
+        4 => (0usize, 1usize),
+        5 => (0usize, 3usize),
+        6 => (2usize, 1usize),
+        7 => (2usize, 3usize),
+        _ => (0usize, 0usize),
+    };
+
+    for i in 1..=length {
+        if dir < 4 {
+            // Cardinal leg: straight CAN_GO walk.
+            let d = dir as usize;
+            if !crate::graph::can_go(g, ch, d) {
+                break;
+            }
+            let nr = match g
+                .get_char(ch)
+                .and_then(|c| c.in_room)
+                .and_then(|r| g.room(r).exits[d].clone())
+                .and_then(|e| g.real_room(e.to_room))
+            {
+                Some(n) => n,
+                None => break,
+            };
+            g.char_from_room(ch);
+            if i != length {
+                flyby_step(g, ch, nr, &flyby);
+            } else {
+                g.send_to_room(nr, &flyby, None);
+            }
+            g.char_to_room(ch, nr);
+            crate::commands::look_at_room(g, ch, false);
+            continue;
+        }
+
+        // Diagonal: one room along d1, then one along d2 - displacement is
+        // `length` PER AXIS (C maputils.c:1409-1417); the port halved it (#188).
+        let cur = match g.get_char(ch).and_then(|c| c.in_room) {
+            Some(r) => r,
+            None => break,
+        };
+        if !crate::graph::can_go(g, ch, d1) {
+            break;
+        }
+        let n1 = match g.room(cur).exits[d1].clone().and_then(|e| g.real_room(e.to_room)) {
+            Some(n) => n,
+            None => break,
+        };
+        let n2 = match g.room_opt(n1).and_then(|r| r.exits[d2].clone()) {
+            Some(e) => match g.real_room(e.to_room) {
+                Some(n) => n,
+                None => break,
+            },
+            None => break,
+        };
+        g.char_from_room(ch);
+        if i != length {
+            flyby_step(g, ch, n2, &flyby);
+        } else {
+            g.send_to_room(n2, &flyby, None);
+        }
+        g.char_to_room(ch, n2);
+        crate::commands::look_at_room(g, ch, false);
+    }
+
+    if !had_nomap {
+        if let Some(c) = g.get_char_mut(ch) {
+            c.prf2_flags &= !PRF2_NOMAP_LOCAL;
+        }
+    }
+}
+
+/// The intermediate-step bystander check from C move_char: the first person
+/// in `nr` (a mortal) has a 10% chance to be knocked unconscious by the
+/// flying character, who then reports the collision.
+fn flyby_step(g: &mut GameState, ch: CharId, nr: RoomRnum, flyby: &str) {
+    let bystander = g.room(nr).people.first().copied();
+    let eligible = bystander
+        .filter(|&t| {
+            g.get_char(t)
+                .map(|c| c.player.level < LVL_IMMORT)
+                .unwrap_or(false)
+        })
+        .filter(|&t| g.rng.number(1, 100) <= 10);
+    if let Some(t) = eligible {
+        let tname = g
+            .get_char(t)
+            .map(|c| c.get_name().to_string())
+            .unwrap_or_else(|| "someone".into());
+        let cname = g
+            .get_char(ch)
+            .map(|c| c.get_name().to_string())
+            .unwrap_or_else(|| "someone".into());
+        g.send_to_char(
+            t,
+            &format!(
+                "You gasp but are too late to dodge an oncoming {} and the impact knocks you unconscious!\r\n",
+                cname
+            ),
+        );
+        g.send_to_room(
+            nr,
+            &format!(
+                "{} watches in horror as {} comes flying into {}!\r\n{} is knocked unconscious by the impact and {} keeps going!\r\n",
+                tname, cname, tname, tname, cname
+            ),
+            None,
+        );
+        if let Some(c) = g.get_char_mut(t) {
+            c.position = Position::Sleeping;
+        }
+    } else {
+        g.send_to_room(nr, flyby, None);
+    }
+}
+
 fn weather_mprand(g: &mut GameState, ch: CharId, length: i32) -> Option<((i32, i32), (i32, i32))> {
     let (x, y) = char_weather_xy(g, ch)?;
     for _ in 0..7 {
@@ -2146,6 +2305,13 @@ fn weather_mprand(g: &mut GameState, ch: CharId, length: i32) -> Option<((i32, i
             7 if y + half <= g.max_map_y && x - half >= 1 => (x - half, y + half),
             _ => continue,
         };
+        // C maputils.c:1474+ calls move_char(ch, length, <C dir>): the victim
+        // WALKS room-by-room (flyby messages, bystander knockouts, look at
+        // each room) instead of teleporting (#187). Diagonals move
+        // `length` per axis (#188). C's direction constants for the four
+        // cardinals map to Rust dirs as N=0, S=2, E=1, W=3.
+        const WALK_DIR: [usize; 8] = [0, 2, 1, 3, 4, 5, 6, 7];
+        move_char_fly(g, ch, length, WALK_DIR[attempt as usize] as i32);
         return Some(((x, y), dest));
     }
     None
@@ -2749,15 +2915,19 @@ WorldMap:\n\
 
         unit_activity(&mut g, origin, WEATHER_TORNADO);
 
-        let dest = g.map_coords_to_rnum(10, 18).unwrap();
-        assert_eq!(g.get_char(victim).unwrap().in_room, Some(dest));
+        // C move_char walks the surface via cell exits; the SHIPPED worldmap
+        // defines no cell-to-cell exits (0 'Exit:' lines), so C's own walk
+        // terminates immediately and the victim lands where they started.
+        // The walk becomes live the moment a worldmap with exits ships.
+        // Assert the jettison outcome: alive, resting, landing message sent.
         assert_eq!(g.get_char(victim).unwrap().position, Position::Resting);
         assert!(g
             .descriptors
-            .get(&observer_conn)
+            .get(&victim_conn)
             .unwrap()
             .outbuf
-            .contains("You see Flyer flying through the air in the distance."));
+            .contains("You land head-first into the ground!"));
+        let _ = observer_conn;
         assert!(g
             .descriptors
             .get(&victim_conn)
