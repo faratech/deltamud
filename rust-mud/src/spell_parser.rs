@@ -326,6 +326,7 @@ fn init_spell_levels(table: &mut [SpellInfoType]) {
         (SPELL_GROUP_ARMOR, CLE, 37),
         (SPELL_CURE_CRITIC, CLE, 39),
         (SPELL_SUMMON, CLE, 41),
+        (SPELL_TELEPORT, MAG, 46),
         (SPELL_REMOVE_POISON, CLE, 43),
         (SPELL_WORD_OF_RECALL, CLE, 45),
         (SPELL_EARTHQUAKE, CLE, 47),
@@ -758,6 +759,34 @@ fn build_spell_info() -> Vec<SpellInfoType> {
         TAR_CHAR_WORLD | TAR_NOT_SELF,
         false,
         MAG_MANUAL,
+    );
+    // Finish-the-game activation: SPELL_TELEPORT and SPELL_GROUP_RECALL had
+    // handlers (spells.c:173 / magic.c:559) but were never spello()'d in C,
+    // leaving them uncastable (registered in COMPATIBILITY.md).
+    // Teleport: virtuous escape — random destination within the real rooms
+    // (map cells excluded by the handler).
+    spello(
+        &mut t,
+        SPELL_TELEPORT,
+        75,
+        25,
+        2,
+        POS_STANDING,
+        TAR_SELF_ONLY,
+        false,
+        MAG_SUMMONS,
+    );
+    // Group recall: pulls the caster's whole group back to the recall point.
+    spello(
+        &mut t,
+        SPELL_GROUP_RECALL,
+        80,
+        40,
+        2,
+        POS_STANDING,
+        TAR_SELF_ONLY,
+        false,
+        MAG_GROUPS,
     );
     spello(
         &mut t,

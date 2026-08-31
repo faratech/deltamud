@@ -245,6 +245,8 @@ pub struct Game {
     zone_reset_queue: Vec<i32>,
     /// C comm.c mins_since_crashsave: minutes since the last autosave sweep.
     mins_since_crashsave: u32,
+    /// Auto-reboot warning latch (one warning per armed schedule).
+    reboot_warned: bool,
 }
 
 impl Game {
@@ -262,6 +264,7 @@ impl Game {
             zone_minute_timer: 0,
             zone_reset_queue: Vec::new(),
             mins_since_crashsave: 0,
+            reboot_warned: false,
         }
     }
 
@@ -2453,6 +2456,39 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
     }
 
     // ---- Output flushing ------------------------------------------------
+    /// C comm.c:762 auto-reboot clock (finish-the-game activation): once a
+    /// minute, compare wall-clock time to the setreboot schedule; warn at the
+    /// warn time and save-all + graceful shutdown at the reboot time.
+    fn autoreboot_check(&mut self) {
+        if !self.state.config.autoreboot {
+            return;
+        }
+        let (rh, rm, wh, wm) = crate::cmd_wizard::reboot_schedule();
+        if rh < 0 {
+            return;
+        }
+        use chrono::Timelike;
+        let now = chrono::Utc::now();
+        let (hr, min) = (now.hour() as i32, now.minute() as i32);
+        if hr == wh && min == wm && !self.reboot_warned {
+            self.reboot_warned = true;
+            let msg = format!(
+                "&m[&YINFO&m]&n The game will reboot in {} minutes. Please rent.\r\n",
+                if rm >= wm { rm - wm } else { 60 - (wm - rm) }
+            );
+            self.state.send_to_all_players(&msg);
+            crate::syslog::mudlog(&mut self.state, "Automatic reboot imminent.", crate::syslog::NRM, 0);
+        }
+        if hr == rh && min == rm {
+            info!("Auto-reboot triggered; saving and restarting.");
+            crate::syslog::mudlog(&mut self.state, "Automatic reboot triggered.", crate::syslog::NRM, 0);
+            crate::objsave::crash_save_all(&mut self.state);
+            crate::house::house_save_all(&mut self.state);
+            crate::olc::flush_save_list_to_disk(&mut self.state);
+            self.state.shutdown_requested = true;
+        }
+    }
+
     async fn flush_all(&mut self) {
         let conns: Vec<ConnId> = self.state.descriptors.keys().copied().collect();
         let mut to_close = Vec::new();

@@ -333,13 +333,16 @@ pub fn spell_teleport(
         Some(v) => v,
         None => return,
     };
-    let top = g.rooms.len();
-    if top == 0 {
+    // The destination roll excludes the synthetic surface-map cells
+    // (registered completion): teleporting onto the ~9,801-cell worldmap
+    // grid would strand a caster in the wilderness. C had no map here.
+    let real_top = g.map_start_rnum.unwrap_or(g.rooms.len());
+    if real_top == 0 {
         return;
     }
     let mut to_room;
     loop {
-        to_room = g.rng.number(0, (top - 1) as i32) as usize;
+        to_room = g.rng.number(0, (real_top - 1) as i32) as usize;
         let flags = g.room(to_room).room_flags;
         if !flags.intersects(RoomFlags::PRIVATE | RoomFlags::DEATH) {
             break;

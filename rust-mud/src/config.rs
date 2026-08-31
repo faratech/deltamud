@@ -45,6 +45,15 @@ pub struct Config {
     pub port: u16,
     pub use_compat_mode: bool,
     pub use_mock_db: bool,
+    /// C config.c www_who (shipped NO): generate the web who-list page.
+    /// Toggled with MUD_WWW_WHO=1; output dir via MUD_WWW_WHO_DIR.
+    pub www_who: bool,
+    pub www_who_dir: String,
+    /// C config.c autoreboot (shipped 0): the scheduled reboot clock.
+    pub autoreboot: bool,
+    /// C config.c pt_markable (shipped NO, act.other.c:726): a successful
+    /// player-thief is branded PLR_THIEF. Default off to match the oracle.
+    pub pt_markable: bool,
     /// Pinned PRNG seed (MUD_RNG_SEED) for deterministic golden tests.
     pub rng_seed: Option<u64>,
     /// Suppress assignment of special routines (comm.c `no_specials`, set by the
@@ -63,6 +72,10 @@ impl Config {
                 .unwrap_or_else(|_| "mysql://root:password@localhost/deltamud".to_string()),
             jail_num: 400,
             newbie_room: 200,
+            www_who: env::var("MUD_WWW_WHO").map(|v| v == "1").unwrap_or(false),
+            www_who_dir: env::var("MUD_WWW_WHO_DIR").unwrap_or_else(|_| "./www".to_string()),
+            autoreboot: env::var("MUD_AUTOREBOOT").map(|v| v == "1").unwrap_or(false),
+            pt_markable: env::var("MUD_PT_MARKABLE").map(|v| v == "1").unwrap_or(false),
             lib_path: env::var("MUD_LIB_PATH").unwrap_or_else(|_| "./lib".to_string()),
             port: env::var("MUD_PORT")
                 .unwrap_or_else(|_| "4000".to_string())
@@ -88,6 +101,10 @@ impl Default for Config {
             database_url: String::new(),
             jail_num: 400,
             newbie_room: 200,
+            www_who: env::var("MUD_WWW_WHO").map(|v| v == "1").unwrap_or(false),
+            www_who_dir: env::var("MUD_WWW_WHO_DIR").unwrap_or_else(|_| "./www".to_string()),
+            autoreboot: env::var("MUD_AUTOREBOOT").map(|v| v == "1").unwrap_or(false),
+            pt_markable: env::var("MUD_PT_MARKABLE").map(|v| v == "1").unwrap_or(false),
             lib_path: "./lib".to_string(),
             port: 4000,
             use_compat_mode: false,

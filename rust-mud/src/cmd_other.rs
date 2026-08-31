@@ -2540,7 +2540,15 @@ pub fn do_steal(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
                     ActArg::Char(vict),
                     To::NotVict,
                 );
-                // pt_markable jurisdiction marking is off by default (no global).
+                // C act.other.c:726: with pt_markable a successful theft
+                // from a player brands the thief PLR_THIEF (the City Watch
+                // and bounty system react to the flag). Default off to match
+                // the oracle; MUD_PT_MARKABLE=1 enables it.
+                if g.config.pt_markable {
+                    if let Some(c) = g.get_char_mut(ch) {
+                        c.act_flags |= PLR_THIEF;
+                    }
+                }
             } else {
                 // Carry-capacity checks (CAN_CARRY_N / CAN_CARRY_W approximated
                 // by item count + weight; the full str_app table lives in

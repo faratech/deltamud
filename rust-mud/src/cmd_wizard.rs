@@ -5552,10 +5552,21 @@ pub fn do_olist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 // do_whoupd / do_isay / do_mcasters
 // ===========================================================================
 pub fn do_whoupd(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    // config.c: www_who = NO (0). C: `if (!(www_who) > 0) { "...deactivated..."
-    // return; }` — with www_who 0 this is the only reachable branch, so the
-    // make_who2html()/HTML-file path is never taken in the stock build. Faithful.
-    g.send_to_char(ch, "The WWW who is currently deactivated in the code.\r\n");
+    // C act.wizard.c:4238 + comm.c:2566. C's guard (`if (!(www_who) > 0)`)
+    // was buggy and www_who shipped NO; the finish-the-game port repairs the
+    // guard and makes the generator live behind the www_who config flag
+    // (registered divergence).
+    if !g.config.www_who {
+        g.send_to_char(ch, "The WWW who is currently deactivated in the code.\r\n");
+        return;
+    }
+    match crate::whohtml::make_who2html(g) {
+        Ok(()) => g.send_to_char(ch, "Updating the web who list...\r\n"),
+        Err(e) => {
+            crate::syslog::mudlog(g, &format!("ERROR: who2html: {}", e), crate::syslog::NRM, LVL_GOD);
+            g.send_to_char(ch, "The WWW who update failed; see syslog.\r\n");
+        }
+    }
 }
 
 pub fn do_isay(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
@@ -5618,6 +5629,17 @@ pub fn do_mcasters(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
 // reboot_hr/min + warn_hr/min are boot-loop globals. Mirror locally so the
 // report path is faithful within a run (documented gap: not consulted yet).
 static REBOOT_HR: AtomicI32 = AtomicI32::new(-1);
+
+/// The (reboot_hr, reboot_min, warn_hr, warn_min) schedule for the
+/// heartbeat's auto-reboot clock (-1 = disabled).
+pub fn reboot_schedule() -> (i32, i32, i32, i32) {
+    (
+        REBOOT_HR.load(Ordering::Relaxed),
+        REBOOT_MIN.load(Ordering::Relaxed),
+        WARN_HR.load(Ordering::Relaxed),
+        WARN_MIN.load(Ordering::Relaxed),
+    )
+}
 static REBOOT_MIN: AtomicI32 = AtomicI32::new(0);
 static WARN_HR: AtomicI32 = AtomicI32::new(0);
 static WARN_MIN: AtomicI32 = AtomicI32::new(0);

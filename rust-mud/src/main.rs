@@ -84,6 +84,7 @@ mod spell_parser;
 mod spells;
 mod state;
 mod syslog;
+mod whohtml;
 mod trigedit;
 mod types;
 mod weather;
