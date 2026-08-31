@@ -216,6 +216,28 @@ impl GameState {
     pub fn room_mut(&mut self, rnum: RoomRnum) -> &mut Room {
         &mut self.rooms[rnum]
     }
+    /// C utils.h:223-228 IS_DARK(room): a room is dark when unlit AND
+    /// (flagged DARK, OR outdoors-but-not-city at sunset/night). The Rust
+    /// Room::is_dark only knew the flag, so nights never darkened outdoor
+    /// rooms (#99).
+    pub fn is_dark(&self, rnum: RoomRnum) -> bool {
+        let Some(room) = self.room_opt(rnum) else {
+            return false;
+        };
+        if room.light != 0 {
+            return false;
+        }
+        if room.room_flags.contains(crate::room::RoomFlags::DARK) {
+            return true;
+        }
+        let sun = crate::weather::sunlight();
+        let outdoors = !matches!(
+            room.sector_type,
+            crate::room::SectorType::Inside | crate::room::SectorType::City
+        );
+        outdoors && (sun == crate::weather::SUN_SET || sun == crate::weather::SUN_DARK)
+    }
+
     pub fn room_opt(&self, rnum: RoomRnum) -> Option<&Room> {
         self.rooms.get(rnum)
     }

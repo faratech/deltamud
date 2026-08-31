@@ -397,7 +397,7 @@ impl GameState {
         }
         let light_ok = match v.in_room {
             Some(rnum) => {
-                !self.room_opt(rnum).map(|r| r.is_dark()).unwrap_or(false)
+                !self.is_dark(rnum)
                     || v.affect_flags & AFF_INFRAVISION != 0
             }
             None => true,

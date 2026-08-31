@@ -328,7 +328,7 @@ fn can_see_in_dark(g: &GameState, ch: CharId) -> bool {
 }
 
 fn room_is_dark(g: &GameState, rnum: RoomRnum) -> bool {
-    g.room_opt(rnum).map(|r| r.is_dark()).unwrap_or(false)
+    g.is_dark(rnum)
 }
 
 fn is_blind(g: &GameState, ch: CharId) -> bool {
