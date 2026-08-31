@@ -2347,10 +2347,16 @@ pub fn do_steal(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         percent = -1; // always success
     }
 
-    // pt_allowed off by default => stealing from PCs always fails.
+    // C act.other.c:672-678: with config.c:86 pt_allowed = YES, pcsteal
+    // stays 0 and PC-thieving runs on the normal skill roll; immortals AND
+    // shopkeeper mobs always auto-fail the roll (#309, #316). The old code
+    // hard-inverted pt_allowed, making PC theft unconditionally fatal.
     let vict_npc = g.get_char(vict).map(|c| c.is_npc).unwrap_or(false);
-    let pcsteal = !vict_npc;
-    if vict_level >= LVL_IMMORT || pcsteal {
+    const PT_ALLOWED: bool = true; // config.c:86
+    let pcsteal = !PT_ALLOWED && !vict_npc;
+    let vict_vnum = g.get_char(vict).and_then(|c| if c.is_npc { Some(c.nr) } else { None });
+    let is_keeper = vict_vnum.map(crate::shop::is_shop_keeper_vnum).unwrap_or(false);
+    if vict_level >= LVL_IMMORT || pcsteal || is_keeper {
         percent = 101;
     }
 
