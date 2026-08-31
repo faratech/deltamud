@@ -61,7 +61,7 @@ const WEATHER_SNOWSTORM: usize = 1;
 const WEATHER_THUNDERSTORM: usize = 2;
 const WEATHER_FIRESTORM: usize = 3;
 const WEATHER_FOG: usize = 4;
-const WEATHER_MAGICFOG: usize = 5;
+pub const WEATHER_MAGICFOG: usize = 5;
 const WEATHER_HURRICANE: usize = 6;
 const WEATHER_TORNADO: usize = 7;
 const WEATHER_BLIZZARD: usize = 8;
@@ -954,6 +954,16 @@ fn parse_worldmap(lib_path: &str) -> MapData {
 }
 
 /// Run `f` against the (lazily parsed, per-lib_path cached) map data.
+/// Per-room weather type via the room's map coordinates (C reads
+/// world[room].weather, set by swc's zone fan-out; #121/#120). Rooms off the
+/// map return -1 (no weather).
+pub fn room_weather_type(g: &GameState, room: &crate::room::Room) -> i32 {
+    let (Some(x), Some(y)) = (room.map_x, room.map_y) else {
+        return -1;
+    };
+    with_map(g, |m| m.cell_weather(x, y))
+}
+
 fn with_map<R>(g: &GameState, f: impl FnOnce(&MapData) -> R) -> R {
     let lib = g.config.lib_path.clone();
     let mut tbl = map_table().lock().unwrap();

@@ -115,6 +115,30 @@ fn has_boat(g: &GameState, ch: CharId) -> bool {
     false
 }
 
+
+/// C act.movement.c:470-485 pick_rdir_fog: pick a random exit whose
+/// destination cell is magic fog (biased toward deeper fog); no fogged
+/// neighbours -> a fully random direction (#120).
+fn pick_rdir_fog(g: &mut GameState, rnum: RoomRnum) -> usize {
+    let fogged: Vec<usize> = (0..NUM_OF_DIRS)
+        .filter(|&i| {
+            g.room(rnum).exits[i]
+                .as_ref()
+                .and_then(|e| g.real_room(e.to_room))
+                .map(|dest| {
+                    let d = g.room(dest);
+                    crate::maputils::room_weather_type(g, d) == crate::maputils::WEATHER_MAGICFOG as i32
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+    if fogged.is_empty() {
+        return g.rng.number(0, NUM_OF_DIRS as i32 - 1) as usize;
+    }
+    let nth = g.rng.number(1, fogged.len() as i32) as usize;
+    fogged[nth - 1]
+}
+
 pub fn do_move(g: &mut GameState, ch: CharId, _arg: &str, subcmd: i32) {
     // cmd numbers 1..6 (SCMD_NORTH..SCMD_DOWN) map to direction indices 0..5.
     perform_move(g, ch, (subcmd - 1) as i32, false);
@@ -132,6 +156,24 @@ pub fn perform_move(g: &mut GameState, ch: CharId, dir: i32, need_specials_check
         Some(r) => r,
         None => return false,
     };
+
+    // C act.movement.c:492-497: a mortal standing in magic fog has no idea
+    // where they are going - the direction is re-rolled fog-biased (#120).
+    let ch_lvl = g.get_char(ch).map(|c| c.player.level).unwrap_or(LVL_IMPL);
+    let standing_fog = g
+        .get_char(ch)
+        .and_then(|c| c.in_room)
+        .and_then(|r| g.room_opt(r))
+        .map(|room| crate::maputils::room_weather_type(g, room) == crate::maputils::WEATHER_MAGICFOG as i32)
+        .unwrap_or(false);
+    let mut dir = dir;
+    if !g.get_char(ch).map(|c| c.is_npc).unwrap_or(true)
+        && ch_lvl < LVL_IMMORT
+        && standing_fog
+    {
+        g.send_to_char(ch, "You have no idea where you're going!\r\n");
+        dir = pick_rdir_fog(g, rnum); // &mut g in scope
+    }
 
     let exit = g.room(rnum).exits[dir].clone();
     let exit = match exit {
@@ -319,6 +361,34 @@ pub(crate) fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_spe
     let mut need_movement = (src_cost + dst_cost) / 2;
     if g.room(to_rnum).snow > 0 {
         need_movement *= 2;
+    }
+    // C maputils.c:2250-2270 weather_movement_increase(): storm cells on the
+    // surface map add a surcharge for the source and destination leg each
+    // (#121; storms previously cost nothing extra).
+    for room in [src_room, dst_room] {
+        if room.map_x.is_none() || room.map_y.is_none() {
+            continue;
+        }
+        let w = crate::maputils::room_weather_type(g, room);
+        if w < 0 {
+            continue;
+        }
+        let w = w as usize;
+        const RAINSTORM: usize = 0;
+        const SNOWSTORM: usize = 1;
+        const THUNDERSTORM: usize = 2;
+        const HURRICANE: usize = 6;
+        const TORNADO: usize = 7;
+        const BLIZZARD: usize = 8;
+        need_movement += match w {
+            RAINSTORM => need_movement / 12,
+            SNOWSTORM => need_movement / 10,
+            THUNDERSTORM => need_movement / 12,
+            HURRICANE => need_movement / 9,
+            TORNADO => need_movement / 9,
+            BLIZZARD => need_movement / 4,
+            _ => 0,
+        };
     }
 
     // Riding skill check: a failed SKILL_RIDING roll rears the mount and throws
