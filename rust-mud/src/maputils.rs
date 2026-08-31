@@ -1411,41 +1411,75 @@ fn noroom_glyph(m: &MapData, x: i32, y: i32, weather_active: bool, advancedmap: 
 // ---------------------------------------------------------------------------
 
 pub fn pweather(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    // C: thick (magic) fog blocks reading the weather for mortals; indoors is
-    // impossible; otherwise draw the weather map.
-    let level = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
-    let mortal = level < LVL_IMMORT;
-    let (cx, cy) = match weather_view_xy(g, ch) {
-        Some(p) => p,
-        None => {
-            g.send_to_char(
-                ch,
-                "Notify immortals that this zone's ZWeatherPoint is unset please.\r\n",
-            );
-            return;
-        }
-    };
-    let standing_weather = with_map(g, |m| m.cell_weather(cx, cy));
-    if mortal
-        && (standing_weather == WEATHER_FOG as i32 || standing_weather == WEATHER_MAGICFOG as i32)
-    {
+    // C maputils.c:2031-2044 gate ORDER: fog (mortals AND NPCs) -> indoors
+    // -> ismap -> ZWeatherPoint coords set -> 'unset' notice. The port
+    // resolved coords first, so the 'unset' notice preempted the fog and
+    // indoors replies (#191).
+    let (level, is_npc) = g
+        .get_char(ch)
+        .map(|c| (c.player.level, c.is_npc))
+        .unwrap_or((0, true));
+    let indoor = g
+        .get_char(ch)
+        .and_then(|c| c.in_room)
+        .and_then(|r| g.rooms.get(r))
+        .map(|room| room.room_flags.contains(crate::room::RoomFlags::INDOORS))
+        .unwrap_or(false);
+
+    // 1. fog gate (level < LVL_IMMORT || IS_NPC).
+    let standing_fog = g
+        .get_char(ch)
+        .and_then(|c| c.in_room)
+        .and_then(|r| g.rooms.get(r))
+        .map(|room| {
+            let w = room_weather_type(g, room);
+            w == WEATHER_FOG as i32 || w == WEATHER_MAGICFOG as i32
+        })
+        .unwrap_or(false);
+    if standing_fog && (level < LVL_IMMORT || is_npc) {
         g.send_to_char(
             ch,
             "The thick fog prevents you from determining the weather.\r\n",
         );
         return;
     }
-    let indoors = g
-        .get_char(ch)
-        .and_then(|c| c.in_room)
-        .and_then(|r| g.rooms.get(r))
-        .map(|room| room.room_flags.contains(crate::room::RoomFlags::INDOORS))
-        .unwrap_or(false);
-    if indoors {
+    // 2. indoors.
+    if indoor {
         g.send_to_char(ch, "Determine the weather indoors!? Impossible!\r\n");
         return;
     }
-    printweather(g, ch);
+    // 3. on the map -> print.
+    let on_map = g
+        .get_char(ch)
+        .and_then(|c| c.in_room)
+        .and_then(|r| g.rooms.get(r))
+        .map(|room| room.map_x.is_some())
+        .unwrap_or(false);
+    if on_map {
+        printweather(g, ch);
+        return;
+    }
+    // 4. zone ZWeatherPoint with NON-ZERO coords -> print; else the notice.
+    let zw = g
+        .get_char(ch)
+        .and_then(|c| c.in_room)
+        .and_then(|r| g.rooms.get(r))
+        .map(|r| r.zone)
+        .and_then(|zone_number| {
+            with_map(g, |m| {
+                m.z_weather_points
+                    .iter()
+                    .find(|p| p.zone_number == zone_number)
+                    .map(|p| (p.x, p.y))
+            })
+        });
+    match zw {
+        Some((x, y)) if x != 0 && y != 0 => printweather(g, ch),
+        _ => g.send_to_char(
+            ch,
+            "Notify immortals that this zone's ZWeatherPoint is unset please.\r\n",
+        ),
+    }
 }
 
 fn weather_view_xy(g: &GameState, ch: CharId) -> Option<(i32, i32)> {
