@@ -723,18 +723,47 @@ fn resolve_char_field(
 }
 
 fn find_eq_pos(arg: &str) -> Option<usize> {
-    // Accept a numeric wear slot or a keyword from EQUIPMENT_TYPES order.
-    if let Ok(n) = arg.trim().parse::<usize>() {
+    // C dg_scripts.c:1370-1379 calls find_eq_pos (act.item.c:1474-1523):
+    // a positional keyword table with !RESERVED! holes, matched by
+    // search_block-style PREFIX match, THEN a numeric fallback (#154).
+    const KEYWORDS: [[&str; 2]; 22] = [
+        ["!RESERVED!", ""],   // 0  light
+        ["finger", ""],       // 1
+        ["!RESERVED!", ""],   // 2
+        ["neck", ""],         // 3
+        ["!RESERVED!", ""],   // 4
+        ["body", ""],         // 5
+        ["head", ""],         // 6
+        ["legs", ""],         // 7
+        ["feet", ""],         // 8
+        ["hands", ""],        // 9
+        ["arms", ""],         // 10
+        ["shield", ""],       // 11
+        ["about", ""],        // 12
+        ["waist", ""],        // 13
+        ["wrist", ""],        // 14
+        ["!RESERVED!", ""],   // 15
+        ["!RESERVED!", ""],   // 16
+        ["!RESERVED!", ""],   // 17
+        ["shoulders", ""],    // 18
+        ["ankle", ""],        // 19
+        ["face", ""],         // 20
+        ["!RESERVED!", ""],   // 21
+    ];
+    let a = arg.trim().to_lowercase();
+    for (i, kw) in KEYWORDS.iter().enumerate() {
+        // search_block(..., FALSE): `arg` is an abbreviation OF the keyword.
+        if kw[0] != "!RESERVED!" && kw[0].starts_with(&a) {
+            return Some(i);
+        }
+    }
+    // numeric fallback (C: `if (pos == -1 && isdigit(*arg)) pos = atoi(arg)`).
+    if let Ok(n) = a.parse::<usize>() {
         if n < NUM_WEARS {
             return Some(n);
         }
     }
-    let names = [
-        "light", "rfinger", "lfinger", "neck1", "neck2", "body", "head", "legs", "feet", "hands",
-        "arms", "shield", "about", "waist", "rwrist", "lwrist", "wield", "hold",
-    ];
-    let a = arg.to_lowercase();
-    names.iter().position(|n| *n == a)
+    None
 }
 
 fn resolve_obj_field(
