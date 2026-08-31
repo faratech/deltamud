@@ -1016,14 +1016,21 @@ fn parse_arg1(g: &mut GameState, conn: ConnId, line: &str) {
     let ch = char_for_conn(g, conn);
     match cmd {
         'M' => {
-            if g.mob_protos.contains_key(&vnum) {
-                if !ch
+            // C zedit.c:1406-1412: the permission check runs FIRST, exempts
+            // level >= LVL_GRGOD (104), and uses the retry prompt (#271).
+            let level = ch
+                .and_then(|id| g.get_char(id))
+                .map(|c| c.player.level as i32)
+                .unwrap_or(LVL_IMPL as i32);
+            if level < LVL_GRGOD as i32
+                && !ch
                     .map(|id| can_edit_vnum_zone(g, id, vnum))
                     .unwrap_or(false)
-                {
-                    send(g, conn, "You do not have permission to edit this zone.\r\n");
-                    return;
-                }
+            {
+                send(g, conn, "You don't have permissions to that zone, try again : ");
+                return;
+            }
+            if g.mob_protos.contains_key(&vnum) {
                 with_cur(conn, |c| c.arg1 = vnum);
                 disp_arg2(g, conn);
             } else {
