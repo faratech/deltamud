@@ -817,12 +817,14 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         Mode::SizeHpDice => num_set(g, conn, line, 0, 127, |m, v| m.mana = v),
         Mode::AddHp => num_set(g, conn, line, 0, 30000, |m, v| m.movep = v),
         Mode::Exp => {
-            let n = (atoi64(line)).max(0);
+            // C medit.c:1330: GET_EXP = MAX(0, atoi(arg)) into an int — values
+            // beyond i32::MAX overflow the .mob loader's %d sscanf (#303).
+            let n = (atoi64(line)).max(0).min(i32::MAX as i64);
             with_mob(conn, |m| m.exp = n);
             after_edit(g, conn);
         }
         Mode::Gold => {
-            let n = (atoi64(line)).max(0);
+            let n = (atoi64(line)).max(0).min(i32::MAX as i64);
             with_mob(conn, |m| m.gold = n);
             after_edit(g, conn);
         }
@@ -1713,4 +1715,49 @@ fn atoi64(s: &str) -> i64 {
         end += 1;
     }
     t[..end].parse().unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::Descriptor;
+    use crate::world::Zone;
+
+    #[test]
+    fn exp_entry_clamps_to_i32_max() {
+        let mut g = GameState::new(Config::default());
+        g.zones.push(Zone {
+            number: 1,
+            name: "Zone 1".into(),
+            builders: "Root".into(),
+            lifespan: 30,
+            age: 0,
+            top: 199,
+            reset_mode: 2,
+            min_level: 0,
+            max_level: 60,
+            status_mode: 0,
+            map_x: None,
+            map_y: None,
+            reset_commands: Vec::new(),
+        });
+        let mut ch = Character::new_player("Root".into(), Class::Cleric, Race::Human);
+        ch.player.level = LVL_IMPL;
+        let ch = g.create_char(ch);
+        let conn = ConnId(95);
+        g.get_char_mut(ch).unwrap().desc = Some(conn);
+        let mut d = Descriptor::new(conn, "example.test".to_string());
+        d.character = Some(ch);
+        g.descriptors.insert(conn, d);
+
+        do_medit(&mut g, ch, "150", 0);
+        medit_parse(&mut g, conn, "d"); // exp prompt
+        medit_parse(&mut g, conn, "99999999999");
+        let exp = std::cell::Cell::new(0i64);
+        with_mob(conn, |m| exp.set(m.exp));
+        // C stores into an int; a wider value would overflow the .mob loader (#303).
+        assert_eq!(exp.get(), i32::MAX as i64);
+    }
 }

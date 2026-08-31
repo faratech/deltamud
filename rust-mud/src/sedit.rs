@@ -1350,12 +1350,16 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             with_state(conn, |st| st.shop.close2 = v);
         }
         SeditMode::BuyProfit => {
-            let v = trimmed.parse::<f32>().unwrap_or(0.0);
-            with_state(conn, |st| st.shop.profit_buy = v);
+            // C sscanf("%f") leaves the field untouched on parse failure — a
+            // bad rate must NOT become 0.00 ("everything free") (#295).
+            if let Ok(v) = trimmed.parse::<f32>() {
+                with_state(conn, |st| st.shop.profit_buy = v);
+            }
         }
         SeditMode::SellProfit => {
-            let v = trimmed.parse::<f32>().unwrap_or(0.0);
-            with_state(conn, |st| st.shop.profit_sell = v);
+            if let Ok(v) = trimmed.parse::<f32>() {
+                with_state(conn, |st| st.shop.profit_sell = v);
+            }
         }
         SeditMode::TypeMenu => {
             let v = trimmed
@@ -1534,4 +1538,57 @@ fn zone_rnum_of(g: &GameState, mob_vnum: i32) -> usize {
 
 fn conn_char(g: &GameState, conn: ConnId) -> Option<CharId> {
     g.descriptors.get(&conn).and_then(|d| d.character)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::Descriptor;
+    use crate::world::Zone;
+
+    #[test]
+    fn profit_parse_keeps_previous_value_on_garbage() {
+        let mut g = GameState::new(Config::default());
+        g.zones.push(Zone {
+            number: 1,
+            name: "Zone 1".to_string(),
+            builders: "Root".to_string(),
+            lifespan: 30,
+            age: 0,
+            top: 199,
+            reset_mode: 2,
+            min_level: 0,
+            max_level: 60,
+            status_mode: 0,
+            map_x: None,
+            map_y: None,
+            reset_commands: Vec::new(),
+        });
+        let mut ch = Character::new_player("Root".into(), Class::Cleric, Race::Human);
+        ch.player.level = LVL_IMPL;
+        let ch = g.create_char(ch);
+        let conn = ConnId(81);
+        g.get_char_mut(ch).unwrap().desc = Some(conn);
+        let mut d = Descriptor::new(conn, "example.test".to_string());
+        d.character = Some(ch);
+        g.descriptors.insert(conn, d);
+
+        do_sedit(&mut g, ch, "150", 0);
+        sedit_parse(&mut g, conn, "6"); // sell rate
+        sedit_parse(&mut g, conn, "1.25");
+        assert_eq!(
+            with_state(conn, |st| st.shop.profit_sell).unwrap(),
+            1.25,
+            "a valid rate is stored"
+        );
+        // C sscanf("%f") leaves the field untouched on failure (#295).
+        sedit_parse(&mut g, conn, "garbage");
+        assert_eq!(
+            with_state(conn, |st| st.shop.profit_sell).unwrap(),
+            1.25,
+            "garbage must not zero the rate"
+        );
+    }
 }

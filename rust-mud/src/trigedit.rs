@@ -527,7 +527,8 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             return;
         }
         Mode::Name => {
-            let arg = line.trim();
+            // C dg_olc.c:340 stores the raw line (str_dup); no trim (#300).
+            let arg = line;
             if let Some(st) = states().lock().unwrap().get_mut(&conn) {
                 st.name = if arg.is_empty() {
                     "undefined".to_string()
@@ -541,8 +542,9 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             let v = atoi(line);
             if let Some(st) = states().lock().unwrap().get_mut(&conn) {
                 // C: ((atoi>=MOB_TRIGGER) || (atoi<=WLD_TRIGGER)) — that guard is
-                // always true in C, so any value is accepted as the attach_type.
-                st.attach_type = v;
+                // always true in C, so any value is accepted, stored as
+                // (byte)atoi (wraps 0-255, dg_olc.c:353) (#300).
+                st.attach_type = (v as u8) as i32;
                 st.val += 1;
             }
         }
@@ -554,7 +556,8 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             }
         }
         Mode::Argument => {
-            let arg = line.trim();
+            // C dg_olc.c:356 stores the raw line; no trim (#300).
+            let arg = line;
             if let Some(st) = states().lock().unwrap().get_mut(&conn) {
                 st.arglist = arg.to_string();
                 st.val += 1;
@@ -706,192 +709,6 @@ fn commands_input(g: &mut GameState, conn: ConnId, line: &str) {
     }
 }
 
-fn buffer_nonempty(conn: ConnId) -> bool {
-    states()
-        .lock()
-        .unwrap()
-        .get(&conn)
-        .map(|s| !s.storage.is_empty())
-        .unwrap_or(false)
-}
-
-// Split the flat storage into logical lines (the cmdlist_element chain). Lines
-// are CRLF-separated; a trailing empty segment is dropped.
-fn buffer_lines(conn: ConnId) -> Vec<String> {
-    let buf = states()
-        .lock()
-        .unwrap()
-        .get(&conn)
-        .map(|s| s.storage.clone())
-        .unwrap_or_default();
-    let mut v: Vec<String> = buf.split("\r\n").map(|l| l.to_string()).collect();
-    // A buffer that ends in CRLF leaves a trailing empty element; drop it.
-    if v.last().map(|l| l.is_empty()).unwrap_or(false) {
-        v.pop();
-    }
-    v
-}
-
-fn set_buffer_lines(conn: ConnId, lines: &[String]) {
-    let mut s = String::new();
-    for l in lines {
-        s.push_str(l);
-        s.push_str("\r\n");
-    }
-    if let Some(st) = states().lock().unwrap().get_mut(&conn) {
-        st.storage = s;
-    }
-}
-
-// ---- modify.c parse_action subset for the inline editor --------------------
-
-fn parse_action_help(g: &mut GameState, conn: ConnId) {
-    let help = "Editor command formats: /<letter>\r\n\r\n\
-        /a         -  aborts editor\r\n\
-        /c         -  clears buffer\r\n\
-        /d#        -  deletes a line #\r\n\
-        /e# <text> -  changes the line at # with <text>\r\n\
-        /f         -  formats text\r\n\
-        /i# <text> -  inserts <text> at line #\r\n\
-        /l         -  lists buffer\r\n\
-        /n         -  lists buffer with line numbers\r\n\
-        /r 'a' 'b' -  replace 1st occurrence of text <a> in buffer with text <b>\r\n\
-        /s         -  saves text\r\n";
-    send(g, conn, help);
-}
-
-fn parse_action_list(g: &mut GameState, conn: ConnId, args: &str, numbered: bool) {
-    let lines = buffer_lines(conn);
-    let parts: Vec<i32> = args
-        .split_whitespace()
-        .filter_map(|s| s.parse().ok())
-        .collect();
-    let (mut start, end): (usize, usize) = match parts.len() {
-        0 => (1, lines.len()),
-        1 => (parts[0].max(1) as usize, parts[0].max(1) as usize),
-        _ => (parts[0].max(1) as usize, parts[1].max(1) as usize),
-    };
-    if start < 1 {
-        start = 1;
-    }
-    let mut out = String::new();
-    let mut i = start;
-    while i <= end && i <= lines.len() {
-        if numbered {
-            out.push_str(&format!("{:4}: ", i));
-        }
-        out.push_str(&lines[i - 1]);
-        out.push_str("\r\n");
-        i += 1;
-    }
-    if out.is_empty() {
-        out.push_str("No lines in that range.\r\n");
-    }
-    send(g, conn, &out);
-}
-
-fn parse_action_delete(g: &mut GameState, conn: ConnId, args: &str) {
-    let mut lines = buffer_lines(conn);
-    let n: i32 = atoi(args);
-    if n < 1 || (n as usize) > lines.len() {
-        send(g, conn, "Line number out of range; aborting.\r\n");
-        return;
-    }
-    lines.remove((n - 1) as usize);
-    set_buffer_lines(conn, &lines);
-    send(g, conn, &format!("Line {} deleted.\r\n", n));
-}
-
-fn parse_action_edit(g: &mut GameState, conn: ConnId, args: &str) {
-    // /e# <text>
-    let trimmed = args.trim_start();
-    let mut it = trimmed.splitn(2, char::is_whitespace);
-    let num_str = it.next().unwrap_or("");
-    let text = it.next().unwrap_or("");
-    let n: i32 = atoi(num_str);
-    let mut lines = buffer_lines(conn);
-    if n < 1 || (n as usize) > lines.len() {
-        send(g, conn, "Line number out of range; aborting.\r\n");
-        return;
-    }
-    lines[(n - 1) as usize] = text.to_string();
-    set_buffer_lines(conn, &lines);
-    send(g, conn, &format!("Line {} changed.\r\n", n));
-}
-
-fn parse_action_insert(g: &mut GameState, conn: ConnId, args: &str) {
-    // /i# <text>
-    let trimmed = args.trim_start();
-    let mut it = trimmed.splitn(2, char::is_whitespace);
-    let num_str = it.next().unwrap_or("");
-    let text = it.next().unwrap_or("");
-    let n: i32 = atoi(num_str);
-    let mut lines = buffer_lines(conn);
-    if n < 1 || (n as usize) > lines.len() + 1 {
-        send(g, conn, "Line number out of range; aborting.\r\n");
-        return;
-    }
-    lines.insert((n - 1) as usize, text.to_string());
-    set_buffer_lines(conn, &lines);
-    send(g, conn, &format!("Line inserted at {}.\r\n", n));
-}
-
-fn parse_action_replace(g: &mut GameState, conn: ConnId, args: &str) {
-    // /r 'a' 'b' — replace first occurrence of a with b.
-    let (a, b) = match parse_two_quoted(args) {
-        Some(p) => p,
-        None => {
-            send(
-                g,
-                conn,
-                "Invalid format.  Use: /r 'pattern' 'replacement'\r\n",
-            );
-            return;
-        }
-    };
-    let mut buf = states()
-        .lock()
-        .unwrap()
-        .get(&conn)
-        .map(|s| s.storage.clone())
-        .unwrap_or_default();
-    if let Some(pos) = buf.find(&a) {
-        buf.replace_range(pos..pos + a.len(), &b);
-        if let Some(st) = states().lock().unwrap().get_mut(&conn) {
-            st.storage = buf;
-        }
-        send(g, conn, "Replacement made.\r\n");
-    } else {
-        send(g, conn, "Search string not found.\r\n");
-    }
-}
-
-fn parse_action_format(g: &mut GameState, conn: ConnId, _args: &str) {
-    // Trigger command lists are not prose; "format" simply normalises trailing
-    // whitespace on each line (C's format_text would re-wrap, which would break
-    // script lines). We preserve line structure.
-    let lines: Vec<String> = buffer_lines(conn)
-        .into_iter()
-        .map(|l| l.trim_end().to_string())
-        .collect();
-    set_buffer_lines(conn, &lines);
-    send(g, conn, "Text formatted.\r\n");
-}
-
-/// Parse two single-quoted strings: 'a' 'b'.
-fn parse_two_quoted(s: &str) -> Option<(String, String)> {
-    let s = s.trim();
-    let start_a = s.find('\'')? + 1;
-    let rest = &s[start_a..];
-    let end_a = rest.find('\'')?;
-    let a = rest[..end_a].to_string();
-    let after_a = &rest[end_a + 1..];
-    let start_b = after_a.find('\'')? + 1;
-    let rest_b = &after_a[start_b..];
-    let end_b = rest_b.find('\'')?;
-    let b = rest_b[..end_b].to_string();
-    Some((a, b))
-}
 
 // ---------------------------------------------------------------------------
 // trigedit_save (dg_olc.c): rewrite the whole zone's .trg file byte-faithfully

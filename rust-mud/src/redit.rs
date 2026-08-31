@@ -25,6 +25,9 @@ use std::sync::OnceLock;
 const EX_HIDDEN: i32 = 1 << 4;
 const MAX_ROOM_DESC: usize = 1024;
 const MAX_MESSAGE_LENGTH: usize = 4096;
+// olc.h:338/342.
+const MAX_ROOM_NAME: usize = 75;
+const MAX_EXIT_DESC: usize = 256;
 
 // NUM_ROOM_FLAGS / NUM_ROOM_SECTORS — count of real entries (excluding the
 // trailing "\n" sentinel) in the constants tables.
@@ -194,7 +197,7 @@ fn disp_menu(g: &mut GameState, conn: ConnId) {
     let s = match states().lock().unwrap().get(&conn).map(|s| {
         (
             s.vnum,
-            g_zone_number(s),
+            s.znum,
             s.room.name.clone(),
             s.room.description.clone(),
             olc::sprintbit(s.room.room_flags.bits() as i64, ROOM_BITS),
@@ -210,7 +213,14 @@ fn disp_menu(g: &mut GameState, conn: ConnId) {
         Some(v) => v,
         None => return,
     };
-    let (vnum, zonenum, name, desc, flags, sector, n, e, so, w, u, d) = s;
+    let (vnum, znum, name, desc, flags, sector, n, e, so, w, u, d) = s;
+    // C redit.c:801: zone_table[OLC_ZNUM(d)].number — the owning zone's
+    // builder number, not vnum/100 (wrong for map rooms >= 2,000,100) (#294).
+    let zonenum = g
+        .zones
+        .get(znum)
+        .map(|z| z.number)
+        .unwrap_or(vnum / 100);
 
     let body = format!(
         "-- Room number : [{cyn}{vnum}{nrm}]\tRoom zone: [{cyn}{zone}{nrm}]\r\n\
@@ -254,12 +264,6 @@ fn disp_menu(g: &mut GameState, conn: ConnId) {
     );
     send(g, conn, &body);
     let _ = with_state(conn, |s| s.mode = ReditMode::MainMenu);
-}
-
-fn g_zone_number(s: &ReditState) -> i32 {
-    // We only stored the zone rnum; map back to the builder number lazily by
-    // dividing the room vnum (matches DeltaMUD zone_number convention).
-    s.vnum / 100
 }
 
 fn exit_to_vnum(room: &RoomEdit, dir: usize) -> i32 {
@@ -454,7 +458,13 @@ fn text_bufs() -> &'static Mutex<HashMap<ConnId, String>> {
 fn begin_text(g: &mut GameState, conn: ConnId, seed: &str, mode: ReditMode) {
     text_bufs().lock().unwrap().insert(conn, seed.to_string());
     let _ = with_state(conn, |s| s.mode = mode);
-    send(g, conn, "Enter text: (/s saves /h for help)\r\n\r\n");
+    // C redit.c:900/1030/1321 use a distinct banner per sub-editor (#291).
+    let prompt = match mode {
+        ReditMode::Desc => "Enter room description: (/s saves /h for help)\r\n\r\n",
+        ReditMode::ExitDescription => "Enter exit description: (/s saves /h for help)\r\n\r\n",
+        _ => "Enter extra description: (/s saves /h for help)\r\n\r\n",
+    };
+    send(g, conn, prompt);
     if !seed.is_empty() {
         send(g, conn, seed);
         if !seed.ends_with('\n') {
@@ -483,7 +493,9 @@ fn text_input(
     }
     let max = match mode {
         ReditMode::Desc => MAX_ROOM_DESC,
-        ReditMode::ExitDescription | ReditMode::ExtradescDescription => MAX_MESSAGE_LENGTH,
+        // C redit.c:1037/1165 use MAX_EXIT_DESC (256) for exit descriptions,
+        // not MAX_MESSAGE_LENGTH (#290).
+        ReditMode::ExitDescription => MAX_EXIT_DESC,
         _ => MAX_MESSAGE_LENGTH,
     };
     let mut buf = text_bufs()
@@ -533,11 +545,17 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         ReditMode::MainMenu => parse_main_menu(g, conn, arg),
 
         ReditMode::Name => {
-            let name = if arg.is_empty() {
+            // C redit.c:970-973: cap the room name at MAX_ROOM_NAME (75).
+            let mut name = if arg.is_empty() {
                 "undefined".to_string()
             } else {
                 arg.to_string()
             };
+            // C writes arg[MAX_ROOM_NAME - 1] = '\0' when strlen > MAX_ROOM_NAME,
+            // so an over-long name keeps 74 chars (C's own off-by-one).
+            if name.len() > MAX_ROOM_NAME {
+                name.truncate(MAX_ROOM_NAME - 1);
+            }
             with_state(conn, |s| {
                 s.room.name = name;
                 s.modified = true;
@@ -848,7 +866,25 @@ fn set_exit(conn: ConnId, dir: usize) {
 fn parse_exit_menu(g: &mut GameState, conn: ConnId, arg: &str) {
     match arg.chars().next() {
         Some('0') => {
-            // Backing out: if the exit has no destination, drop the empty slot.
+            // C redit.c:1015-1023: a fresh exit with no destination is not
+            // silently discarded; refuse and redisplay the exit menu (#292).
+            let dangling = with_state(conn, |s| {
+                s.room.exits[s.cur_exit]
+                    .as_ref()
+                    .map(|e| e.to_room == NOWHERE)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+            if dangling {
+                send(
+                    g,
+                    conn,
+                    "\r\nPlease specify an exit number or purge the exit.\r\n\r\n",
+                );
+                disp_exit_menu(g, conn);
+                return;
+            }
+            // Backing out.
             with_state(conn, |s| {
                 let dir = s.cur_exit;
                 if let Some(e) = &s.room.exits[dir] {
@@ -1175,5 +1211,74 @@ fn write_world_file(path: &std::path::Path, contents: &str) {
     let _ = std::fs::remove_file(path);
     if std::fs::rename(&tmp, path).is_err() {
         log::warn!("OLC: cannot rename {:?} -> {:?}", tmp, path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::Descriptor;
+    use crate::world::Zone;
+
+    fn zone(number: i32) -> Zone {
+        Zone {
+            number,
+            name: format!("Zone {}", number),
+            builders: "Root".to_string(),
+            lifespan: 30,
+            age: 0,
+            top: number * 100 + 99,
+            reset_mode: 2,
+            min_level: 0,
+            max_level: 60,
+            status_mode: 0,
+            map_x: None,
+            map_y: None,
+            reset_commands: Vec::new(),
+        }
+    }
+
+    /// redit with a descriptor attached; returns (g, ch, conn).
+    fn setup(vnum: RoomVnum, conn: ConnId) -> (GameState, CharId, ConnId) {
+        let mut g = GameState::new(Config::default());
+        g.zones.push(zone(1));
+        let mut ch = Character::new_player("Root".into(), Class::Cleric, Race::Human);
+        ch.player.level = LVL_IMPL;
+        let ch = g.create_char(ch);
+        g.get_char_mut(ch).unwrap().desc = Some(conn);
+        let mut d = Descriptor::new(conn, "example.test".to_string());
+        d.character = Some(ch);
+        g.descriptors.insert(conn, d);
+        do_redit(&mut g, ch, &vnum.to_string(), 0);
+        (g, ch, conn)
+    }
+
+    #[test]
+    fn exit_menu_zero_refuses_a_fresh_exit() {
+        let (mut g, _ch, conn) = setup(101, ConnId(71));
+        redit_parse(&mut g, conn, "5"); // north: creates the fresh exit slot
+        redit_parse(&mut g, conn, "0"); // back out with no destination
+        let out = &g.descriptors.get(&conn).unwrap().outbuf;
+        // C redit.c:1015-1023: refusal, not a silent purge (#292).
+        assert!(out.contains("Please specify an exit number or purge the exit."));
+        let kept = states().lock().unwrap()[&conn]
+            .room
+            .exits[NORTH]
+            .as_ref()
+            .map(|e| e.to_room)
+            .unwrap();
+        assert_eq!(kept, NOWHERE);
+    }
+
+    #[test]
+    fn room_name_is_capped_at_max_room_name() {
+        let (mut g, _ch, conn) = setup(102, ConnId(72));
+        redit_parse(&mut g, conn, "1");
+        redit_parse(&mut g, conn, &"x".repeat(200));
+        let name = states().lock().unwrap()[&conn].room.name.clone();
+        // C writes arg[MAX_ROOM_NAME - 1] = '\0' (74 kept chars).
+        assert_eq!(name.len(), MAX_ROOM_NAME - 1);
     }
 }

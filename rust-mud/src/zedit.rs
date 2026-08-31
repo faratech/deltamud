@@ -1693,7 +1693,8 @@ fn cmds_from_memory(g: &GameState, zone_index: usize) -> Vec<RawCmd> {
                 arg1: *obj_vnum,
                 arg2: *max_count,
                 arg3: *load_chance,
-                arg4: 0,
+                // C zedit.c:550 writes -1 in the unused arg4 column.
+                arg4: -1,
             },
             ResetCmd::EquipMob {
                 if_flag,
@@ -1732,8 +1733,9 @@ fn cmds_from_memory(g: &GameState, zone_index: usize) -> Vec<RawCmd> {
                 if_flag: *if_flag as i32,
                 arg1: *room_vnum,
                 arg2: *obj_vnum,
+                // C zedit.c:577-578: both unused columns are -1.
                 arg3: -1,
-                arg4: 0,
+                arg4: -1,
             },
             ResetCmd::Door {
                 if_flag,
@@ -1746,7 +1748,8 @@ fn cmds_from_memory(g: &GameState, zone_index: usize) -> Vec<RawCmd> {
                 arg1: *room_vnum,
                 arg2: *direction as i32,
                 arg3: *state,
-                arg4: 0,
+                // C zedit.c:571 writes -1 in the unused arg4 column.
+                arg4: -1,
             },
         })
         .collect()
@@ -1782,38 +1785,23 @@ fn read_disk_header(path: &std::path::Path) -> Option<DiskHeader> {
     }
     i += 1; // skip #num
 
-    // name~ (may span lines).
+    // C db.c:1561-1567 reads exactly ONE line for name and one for builders,
+    // truncating at the first '~'. A multi-line scan would shift every
+    // subsequent header field up a line on save (#286).
     let mut name = String::new();
-    while i < lines.len() {
-        if let Some(p) = lines[i].find('~') {
-            if !name.is_empty() {
-                name.push('\n');
-            }
-            name.push_str(&lines[i][..p]);
-            i += 1;
-            break;
+    if let Some(l) = lines.get(i) {
+        match l.find('~') {
+            Some(p) => name.push_str(&l[..p]),
+            None => name.push_str(l),
         }
-        if !name.is_empty() {
-            name.push('\n');
-        }
-        name.push_str(lines[i]);
         i += 1;
     }
-    // builders~ (may span lines).
     let mut builders = String::new();
-    while i < lines.len() {
-        if let Some(p) = lines[i].find('~') {
-            if !builders.is_empty() {
-                builders.push('\n');
-            }
-            builders.push_str(&lines[i][..p]);
-            i += 1;
-            break;
+    if let Some(l) = lines.get(i) {
+        match l.find('~') {
+            Some(p) => builders.push_str(&l[..p]),
+            None => builders.push_str(l),
         }
-        if !builders.is_empty() {
-            builders.push('\n');
-        }
-        builders.push_str(lines[i]);
         i += 1;
     }
     if builders == "<NONE!>" {
@@ -1999,6 +1987,51 @@ mod tests {
         assert!(can_edit_vnum_zone(&g, builder, 150));
         assert!(!can_edit_vnum_zone(&g, builder, 250));
         assert!(can_edit_vnum_zone(&g, imp, 250));
+    }
+
+    #[test]
+    fn unused_reset_columns_write_minus_one() {
+        let mut g = GameState::new(Config::default());
+        g.zones.push(zone(1, "R"));
+        g.zones[0].reset_commands = vec![
+            ResetCmd::GiveObjToMob {
+                if_flag: false,
+                obj_vnum: 101,
+                max_count: 1,
+                load_chance: 100,
+            },
+            ResetCmd::RemoveObj {
+                if_flag: false,
+                room_vnum: 100,
+                obj_vnum: 101,
+            },
+            ResetCmd::Door {
+                if_flag: false,
+                room_vnum: 100,
+                direction: 0,
+                state: 1,
+            },
+        ];
+        // The in-memory fallback must reproduce the on-disk convention of -1 in
+        // unused columns (C zedit.c:550/571/577-578) (#282).
+        let raws = cmds_from_memory(&g, 0);
+        assert_eq!(raws[0].arg4, -1, "G arg4");
+        assert_eq!((raws[1].arg3, raws[1].arg4), (-1, -1), "R arg3/arg4");
+        assert_eq!(raws[2].arg4, -1, "D arg4");
+    }
+
+    #[test]
+    fn header_scan_reads_exactly_one_line_per_field() {
+        let dir = std::env::temp_dir().join(format!("zedit-hdr-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("99.zon");
+        std::fs::write(&path, "#99\nNameWithoutTilde\nBuilders~\n0 30 2\n$\n").unwrap();
+        let hdr = read_disk_header(&path).unwrap();
+        // C db.c:1561-1567 truncates at the first '~' of a single line — a
+        // tilde-less line is NOT merged with the following ones (#286).
+        assert_eq!(hdr.name, "NameWithoutTilde");
+        assert_eq!(hdr.builders, "Builders");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

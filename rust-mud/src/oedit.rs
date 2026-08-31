@@ -266,7 +266,12 @@ fn text_bufs() -> &'static Mutex<HashMap<ConnId, String>> {
 fn begin_text(g: &mut GameState, conn: ConnId, seed: &str, mode: OeditMode) {
     text_bufs().lock().unwrap().insert(conn, seed.to_string());
     let _ = with_state(conn, |s| s.mode = mode);
-    send(g, conn, "Enter text: (/s saves /h for help)\r\n\r\n");
+    // C oedit.c:1032/1428: distinct banner per sub-editor (#291).
+    let prompt = match mode {
+        OeditMode::ActDesc => "Enter action description: (/s saves /h for help)\r\n\r\n",
+        _ => "Enter the extra description: (/s saves /h for help)\r\n\r\n",
+    };
+    send(g, conn, prompt);
     if !seed.is_empty() {
         send(g, conn, seed);
         if !seed.ends_with('\n') {
@@ -626,7 +631,12 @@ fn disp_val1_menu(g: &mut GameState, conn: ConnId) {
         ObjectType::LiqContainer | ObjectType::Fountain => send(g, conn, "Max drink units : "),
         ObjectType::Food => send(g, conn, "Hours to fill stomach : "),
         ObjectType::Money => send(g, conn, "Number of gold coins : "),
-        ObjectType::Note => {} // language, unused; falls to "modified" -> menu
+        ObjectType::Note => {
+            // Language, unused. C leaves the builder hanging here with no
+            // prompt and the next line eaten as value[0] (oedit.c:654-657);
+            // redraw the menu instead (#293).
+            commit_and_menu(g, conn);
+        }
         _ => disp_menu(g, conn),
     }
 }

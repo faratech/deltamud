@@ -305,20 +305,26 @@ pub fn do_hedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
     }
 
-    // Guard: is this entry already being edited by someone?
+    // Guard: is this entry already being edited by someone? (C olc.c:201-202
+    // names the other editor in the message; #299).
     let rnum = find_help_rnum(&buf1);
-    let editing_keyword = rnum
-        .and_then(|r| {
-            help_table()
-                .lock()
-                .ok()
-                .and_then(|t| t.get(r).map(|e| e.keywords.clone()))
-        })
-        .unwrap_or_else(|| buf1.clone());
-    if hedit_keyword_busy(&editing_keyword, conn) {
+    if hedit_keyword_busy(rnum, conn) {
+        let other = states()
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(&c, st)| c != conn && st.rnum == rnum)
+            .and_then(|(&c, _)| {
+                g.descriptors
+                    .get(&c)
+                    .and_then(|d| d.character)
+                    .and_then(|cid| g.get_char(cid))
+                    .map(|c| c.player.name.clone())
+            })
+            .unwrap_or_else(|| "someone".to_string());
         g.send_to_char(
             ch,
-            "Help files are already being editted by someone else.\r\n",
+            &format!("Help files are already being editted by {}.\r\n", other),
         );
         return;
     }
@@ -366,16 +372,35 @@ pub fn do_hedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     hedit_disp_menu(g, conn);
 }
 
-/// True if another connection is currently in hedit editing an entry whose
-/// keyword line matches (mirrors C's OLC_NUM collision check, keyed on keyword).
-fn hedit_keyword_busy(keyword: &str, exclude: ConnId) -> bool {
+/// True if another connection is currently editing the same help entry.
+/// C's OLC_NUM(d) == number check degrades to 0 == 0 for hedit (every session
+/// collides with every other); keying on the help rnum is the sane reading of
+/// that intent (#299).
+fn hedit_keyword_busy(rnum: Option<usize>, exclude: ConnId) -> bool {
     let guard = match states().lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
-    guard
-        .iter()
-        .any(|(&c, st)| c != exclude && st.help.keywords.eq_ignore_ascii_case(keyword))
+    match rnum {
+        Some(r) => guard
+            .iter()
+            .any(|(&c, st)| c != exclude && st.rnum == Some(r)),
+        None => false,
+    }
+}
+
+/// C stdlib atoi(): parse the leading numeric prefix, 0 on no digits.
+fn atoi(s: &str) -> i32 {
+    let t = s.trim();
+    let mut end = 0;
+    let bytes = t.as_bytes();
+    if !bytes.is_empty() && (bytes[0] == b'-' || bytes[0] == b'+') {
+        end = 1;
+    }
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    t[..end].parse().unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -522,7 +547,9 @@ pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
 
         HeditMode::MinLevel => {
-            let number = arg.parse::<i32>().unwrap_or(-1);
+            // C hedit.c:317: atoi() semantics — a non-numeric line becomes 0,
+            // which passes the range check and resets min_level to 0 (#298).
+            let number = atoi(arg);
             if number < 0 || number > LVL_IMPL as i32 {
                 g.send_to_char(ch, "That is not a valid choice!\r\nEnter min level:-\r\n] ");
             } else {
@@ -677,4 +704,35 @@ fn cleanup(conn: ConnId) {
 
 fn conn_char(g: &GameState, conn: ConnId) -> Option<CharId> {
     g.descriptors.get(&conn).and_then(|d| d.character)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::Descriptor;
+
+    #[test]
+    fn min_level_uses_c_atoi_semantics() {
+        let mut g = GameState::new(Config::default());
+        let mut ch = Character::new_player("Root".into(), Class::Cleric, Race::Human);
+        ch.player.level = LVL_IMPL;
+        let ch = g.create_char(ch);
+        let conn = ConnId(91);
+        g.get_char_mut(ch).unwrap().desc = Some(conn);
+        let mut d = Descriptor::new(conn, "example.test".to_string());
+        d.character = Some(ch);
+        g.descriptors.insert(conn, d);
+
+        do_hedit(&mut g, ch, "testkeyword", 0);
+        hedit_parse(&mut g, conn, "3"); // min level prompt
+        // C hedit.c:317: atoi("abc") == 0 -> passes the range check (#298).
+        hedit_parse(&mut g, conn, "abc");
+        assert_eq!(with_state(conn, |st| st.help.min_level), Some(0));
+        // A genuine out-of-range number is still rejected.
+        hedit_parse(&mut g, conn, "-4");
+        assert_eq!(with_state(conn, |st| st.help.min_level), Some(0));
+        cleanup(conn);
+    }
 }

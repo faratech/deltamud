@@ -235,9 +235,22 @@ pub fn olc_saveinfo(g: &mut GameState, ch: CharId) {
         g.send_to_char(ch, "The database is up to date.\r\n");
         return;
     }
+    // C olc.c:393-408: Help/Actions lines need >= LVL_IMMORT; zone lines
+    // need can_edit_zone on the listed zone (#278).
+    let level = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
     let mut out = String::from("The following OLC components need saving:\r\n");
     let mut any = false;
     for (zone, kind) in entries {
+        if kind != OLC_SAVE_HELP && kind != OLC_SAVE_ACTION {
+            let owned = real_zone(g, zone * 100)
+                .map(|zr| can_edit_zone(g, ch, zr))
+                .unwrap_or(false);
+            if !owned && level < LVL_IMMORT {
+                continue;
+            }
+        } else if level < LVL_IMMORT {
+            continue;
+        }
         let line = match kind {
             OLC_SAVE_HELP => " - Help Entries.\r\n".to_string(),
             OLC_SAVE_ACTION => " - Actions.\r\n".to_string(),
@@ -373,8 +386,13 @@ pub fn dg_script_edit_parse(
         }
         DgScriptEditMode::New => {
             let Some((pos, trig_vnum)) = parse_script_position_vnum(line) else {
-                dg_script_menu(g, conn, kind, entity_vnum);
-                *mode = DgScriptEditMode::Main;
+                // C dg_olc.c:766-783: an unparseable line leaves vnum at -1 →
+                // real_trigger() < 0 → "Invalid Trigger VNUM!" re-prompt (#304).
+                send_to_conn(
+                    g,
+                    conn,
+                    "Invalid Trigger VNUM!\r\nPlease enter position, vnum   (ex: 1, 200):",
+                );
                 return true;
             };
             if pos == 0 || trig_vnum == 0 {
@@ -938,6 +956,58 @@ mod tests {
         assert!(out.contains("Rooms for zone 42"));
         olc_remove_from_save_list(42, OLC_SAVE_ROOM);
         crate::dg_db_scripts::clear_proto_triggers(crate::dg_handler::WLD_TRIGGER, 4201);
+    }
+
+    #[test]
+    fn dg_script_editor_reprompts_on_unparseable_line() {
+        let _guard = olc_test_lock();
+        let mut g = GameState::new(Config::default());
+        g.zones.push(zone(44, "Root"));
+        let conn = ConnId(103);
+        let ch = player(&mut g, "Root", LVL_IMPL);
+        g.get_char_mut(ch).unwrap().desc = Some(conn);
+        let mut d = Descriptor::new(conn, "example.test".to_string());
+        d.character = Some(ch);
+        g.descriptors.insert(conn, d);
+
+        let mut mode = DgScriptEditMode::New;
+        // C dg_olc.c:766-783: garbage stays in the sub-editor with the
+        // "Invalid Trigger VNUM!" re-prompt (#304).
+        assert!(dg_script_edit_parse(
+            &mut g,
+            conn,
+            crate::dg_handler::MOB_TRIGGER,
+            4401,
+            &mut mode,
+            "not a vnum",
+        ));
+        assert_eq!(mode, DgScriptEditMode::New);
+        let out = &g.descriptors.get(&conn).unwrap().outbuf;
+        assert!(out.contains("Invalid Trigger VNUM!"));
+    }
+
+    #[test]
+    fn saveinfo_hides_zones_the_builder_cannot_edit() {
+        let _guard = olc_test_lock();
+        let mut g = GameState::new(Config::default());
+        g.zones.push(zone(45, "Alice"));
+        g.zones.push(zone(46, "Bob"));
+        olc_add_to_save_list(45, OLC_SAVE_ROOM);
+        olc_add_to_save_list(46, OLC_SAVE_ROOM);
+
+        let conn = ConnId(104);
+        let alice = player(&mut g, "Alice", LVL_BUILDER_LEVEL as Level);
+        g.get_char_mut(alice).unwrap().desc = Some(conn);
+        let mut d = Descriptor::new(conn, "example.test".to_string());
+        d.character = Some(alice);
+        g.descriptors.insert(conn, d);
+
+        olc_saveinfo(&mut g, alice);
+        let out = &g.descriptors.get(&conn).unwrap().outbuf.clone();
+        assert!(out.contains("zone 45"));
+        assert!(!out.contains("zone 46"), "Bob's zone must be hidden (#278)");
+        olc_remove_from_save_list(45, OLC_SAVE_ROOM);
+        olc_remove_from_save_list(46, OLC_SAVE_ROOM);
     }
 
     #[test]
