@@ -749,6 +749,8 @@ pub fn do_echo(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
         .get_char(ch)
         .map(|c| c.prf_flags & PRF_NOREPEAT != 0)
         .unwrap_or(false);
+    // Snapshot the sender's PRF2 bits for the intangible filter below.
+    let ch_prf2 = g.get_char(ch).map(|c| c.prf2_flags).unwrap_or(0);
     for vict in people {
         if vict == ch {
             if ch_norepeat {
@@ -772,6 +774,20 @@ pub fn do_echo(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
             continue;
         }
         if subcmd == SCMD_EMOTE {
+            // C act.wizard.c:149: an intangible sender who is not building
+            // hides the emote from mortal recipients who are not themselves
+            // intangible.
+            let (vict_prf2, vict_level) = g
+                .get_char(vict)
+                .map(|c| (c.prf2_flags, c.player.level))
+                .unwrap_or((0, 0));
+            if (ch_prf2 & PRF2_INTANGIBLE) != 0
+                && (ch_prf2 & PRF2_MBUILDING) == 0
+                && (vict_prf2 & PRF2_INTANGIBLE) == 0
+                && vict_level < LVL_IMMORT
+            {
+                continue;
+            }
             // PERS(ch, vict): visible name else "someone".
             let pers = if g.can_see(vict, ch) {
                 name.clone()
@@ -2356,9 +2372,18 @@ pub fn do_return(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         None => return,
     };
     g.send_to_char(ch, "You return to your original body.\r\n");
-    // If someone switched into the original body, C close_socket()s them; that
-    // descriptor handoff is owned by the connection layer — here we simply
-    // restore the descriptor to the original character.
+    // C act.wizard.c:1346-1347: "if someone switched into your original body,
+    // disconnect them". Their descriptor is marked Close, which the game loop
+    // treats exactly like do_quit.
+    let occupant = g.get_char(original).and_then(|c| c.desc);
+    if let Some(occ) = occupant {
+        if let Some(d) = g.descriptors.get_mut(&occ) {
+            d.state = ConState::Close;
+        }
+        if let Some(o) = g.get_char_mut(original) {
+            o.desc = None;
+        }
+    }
     if let Some(d) = g.descriptors.get_mut(&conn) {
         d.character = Some(original);
         d.original = None;
@@ -7498,5 +7523,105 @@ WorldMap:\n",
         assert!(!g.pk_allowed, "a sub-GRGOD immortal cannot open the gate");
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
         assert!(!out.contains("Legal PKs are now"), "out: {}", out);
+    }
+
+    // ---- #208: emote's PRF2_INTANGIBLE recipient filter --------------------
+
+    #[test]
+    fn intangible_non_builder_emote_is_hidden_from_mortals() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let ghost = connected_player(&mut g, ConnId(1), "Ghost", LVL_IMMORT);
+        let mort = connected_player(&mut g, ConnId(2), "Mort", 10);
+        g.char_to_room(ghost, room);
+        g.char_to_room(mort, room);
+        g.get_char_mut(ghost).unwrap().prf2_flags |= PRF2_INTANGIBLE;
+
+        do_echo(&mut g, ghost, "drifts through the wall.", SCMD_EMOTE);
+
+        // The sender still sees it; the mortal does not.
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("drifts through the wall."));
+        assert!(!g
+            .descriptors
+            .get(&ConnId(2))
+            .unwrap()
+            .outbuf
+            .contains("drifts through the wall."));
+
+        // A builder ghost (PRF2_MBUILDING) is delivered to mortals again.
+        g.get_char_mut(ghost).unwrap().prf2_flags |= PRF2_MBUILDING;
+        g.descriptors.get_mut(&ConnId(2)).unwrap().outbuf.clear();
+        do_echo(&mut g, ghost, "drifts through the wall.", SCMD_EMOTE);
+        assert!(g
+            .descriptors
+            .get(&ConnId(2))
+            .unwrap()
+            .outbuf
+            .contains("drifts through the wall."));
+
+        // So is an emote seen by a mortal who is themselves intangible.
+        g.get_char_mut(ghost).unwrap().prf2_flags &= !PRF2_MBUILDING;
+        g.get_char_mut(mort).unwrap().prf2_flags |= PRF2_INTANGIBLE;
+        g.descriptors.get_mut(&ConnId(2)).unwrap().outbuf.clear();
+        do_echo(&mut g, ghost, "drifts through the wall.", SCMD_EMOTE);
+        assert!(g
+            .descriptors
+            .get(&ConnId(2))
+            .unwrap()
+            .outbuf
+            .contains("drifts through the wall."));
+    }
+
+    // ---- #212: return disconnects an occupant of the original body ---------
+
+    #[test]
+    fn return_disconnects_a_body_snatcher() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let owner = connected_player(&mut g, ConnId(1), "Owner", LVL_IMPL);
+        let body = connected_player(&mut g, ConnId(2), "Snatcher", LVL_IMPL);
+        g.char_to_room(owner, room);
+        g.char_to_room(body, room);
+
+        // `owner` is currently possessing `host`; `body` has meanwhile switched
+        // into `host` (the immortal's original body) with ConnId(2).
+        let host = g.create_char(Character::new_npc(1234));
+        g.char_to_room(host, room);
+        g.get_char_mut(host).unwrap().desc = Some(ConnId(2));
+        {
+            let d = g.descriptors.get_mut(&ConnId(1)).unwrap();
+            d.state = ConState::Playing;
+            d.character = Some(owner);
+            d.original = Some(host);
+        }
+        {
+            let d = g.descriptors.get_mut(&ConnId(2)).unwrap();
+            d.state = ConState::Playing;
+            d.character = Some(host);
+            d.original = Some(body);
+        }
+        g.get_char_mut(owner).unwrap().desc = Some(ConnId(1));
+        g.get_char_mut(body).unwrap().desc = Some(ConnId(2));
+
+        do_return(&mut g, owner, "", 0);
+
+        assert_eq!(
+            g.descriptors.get(&ConnId(2)).unwrap().state,
+            ConState::Close,
+            "the occupant's connection must be dropped"
+        );
+        // The original body is re-attached to the returning player's connection.
+        assert_eq!(g.get_char(host).unwrap().desc, Some(ConnId(1)));
+        assert_eq!(g.get_char(owner).unwrap().desc, None);
+        assert_eq!(
+            g.descriptors.get(&ConnId(1)).unwrap().character,
+            Some(host)
+        );
+        assert_eq!(g.descriptors.get(&ConnId(1)).unwrap().original, None);
     }
 }
