@@ -51,7 +51,7 @@ const MOB_QUEST: i64 = 1 << 19;
 
 // Object vnums for the quest reward shop (quest.c QUEST_ITEM*).
 const QUEST_ITEM1: ObjVnum = 9002; // Sword of the Gods         500,000qp
-const QUEST_ITEM2: ObjVnum = 9003; // Midgaard Hero Vest         30,000qp
+const QUEST_ITEM2: ObjVnum = 9003; // Itrius Hero Vest         30,000qp
 const QUEST_ITEM3: ObjVnum = 3082; // Divine Bag of Holding      25,000qp
 const QUEST_ITEM4: ObjVnum = 3163; // Necklace of Recall         20,000qp
 const QUEST_ITEM5: ObjVnum = 8620; // Pendant of Age             17,000qp
@@ -175,7 +175,7 @@ fn two_arguments(argument: &str) -> (String, String) {
 }
 
 /// Look up a live questmaster mob in the actor's room (MOB_FLAGGED QUESTMASTER).
-fn find_questmaster(g: &GameState, ch: CharId) -> Option<CharId> {
+pub fn find_questmaster(g: &GameState, ch: CharId) -> Option<CharId> {
     let rnum = g.get_char(ch)?.in_room?;
     for &cid in &g.rooms.get(rnum)?.people {
         let m = match g.get_char(cid) {
@@ -342,7 +342,7 @@ fn do_quest_list(g: &mut GameState, ch: CharId, questman: CharId) {
     );
     let list = "Current Quest Items available for Purchase:\r\n\r\n\
          #1 - 500,000..........Sword of the Gods\r\n\
-         #2 - 30,000qp.........Midgaard Hero Vest\r\n\
+         #2 - 30,000qp.........Itrius Hero Vest\r\n\
          #3 - 25,000qp.........Divine Bag of Holding\r\n\
          #4 - 20,000qp.........Necklace of Recall     \r\n\
          #5 - 17,000qp.........Pendant of Age \r\n\
@@ -1019,7 +1019,7 @@ fn deny_quest(g: &mut GameState, ch: CharId, questman: CharId) {
 /// reads through to the live default of 0 for every prototype; it activates
 /// automatically once act_flags are loaded. We probe a live instance's flags
 /// if one exists (load path), else fall back to false.
-fn mob_proto_has_flag(g: &GameState, vnum: MobVnum, flag: i64) -> bool {
+pub fn mob_proto_has_flag(g: &GameState, vnum: MobVnum, flag: i64) -> bool {
     // Any currently-loaded instance of this prototype reflects act_flags.
     for cid in g.char_ids() {
         if let Some(c) = g.get_char(cid) {
@@ -1069,14 +1069,12 @@ pub fn quest_on_kill(g: &mut GameState, killer: CharId, victim: CharId) -> bool 
         "Return to the questmaster before your time runs out!\n\r",
     );
 
-    // questdiff = estimate_difficulty(killer, quest target); clamp; /5; negate.
-    // The C re-reads the prototype as a throwaway mob; we estimate against the
-    // just-killed victim (still resident at call time) for an identical number.
-    let mut questdiff = estimate_difficulty(g, killer, victim);
-    if questdiff <= 0 {
-        questdiff = 1;
-    }
-    questdiff /= 5;
+    // questdiff = estimate_difficulty(killer, quest target); /5; floor at 1;
+    // negate. The C clamps BEFORE the division (estimate/5 == 0 for a
+    // same-level target), so the negation writes -0 == 0 and the quest marker
+    // is wiped — the player then cannot complete. The clamp-after-divide is
+    // the registered repair (COMPATIBILITY.md, finish-the-game register).
+    let questdiff = (estimate_difficulty(g, killer, victim) / 5).max(1);
     if let Some(c) = g.get_char_mut(killer) {
         c.quest_mob = -questdiff;
     }
@@ -1139,5 +1137,62 @@ pub fn quest_update(g: &mut GameState) {
                 return;
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Finish-the-game tests (registered divergences + activations).
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::room::Room;
+
+    fn game_with_pair(same_level: bool) -> (GameState, CharId, CharId) {
+        let mut g = GameState::new(Config::default());
+        let a = g.add_room(Room::new(100, 1, "A".into(), String::new()));
+        let b = g.add_room(Room::new(101, 1, "B".into(), String::new()));
+        let mut killer = Character::new_player("Slayer".into(), Class::Warrior, Race::Human);
+        killer.player.level = 10;
+        killer.act_flags |= PLR_QUESTOR;
+        let mut victim = Character::new_npc(1600);
+        victim.player.level = if same_level { 10 } else { 5 };
+        let killer = g.create_char(killer);
+        let victim = g.create_char(victim);
+        g.char_to_room(killer, a);
+        g.char_to_room(victim, b);
+        (g, killer, victim)
+    }
+
+    /// The registered repair: a same-level target (difficulty estimate <= 4)
+    /// must still produce a valid negative marker, not -0 == 0.
+    #[test]
+    fn quest_on_kill_keeps_marker_for_same_level_targets() {
+        let (mut g, killer, victim) = game_with_pair(true);
+        if let Some(c) = g.get_char_mut(killer) {
+            c.quest_mob = 1600;
+        }
+        assert!(quest_on_kill(&mut g, killer, victim));
+        let marker = g.get_char(killer).unwrap().quest_mob;
+        assert!(marker < 0, "marker must go negative, got {}", marker);
+    }
+
+    /// A stronger-than-player target keeps the C-sized reward multiplier.
+    #[test]
+    fn quest_on_kill_scales_marker_with_difficulty() {
+        let (mut g, killer, victim) = game_with_pair(false);
+        // Make the victim far stronger: estimate >> 5.
+        if let Some(v) = g.get_char_mut(victim) {
+            v.player.level = 20;
+        }
+        if let Some(c) = g.get_char_mut(killer) {
+            c.quest_mob = 1600;
+        }
+        assert!(quest_on_kill(&mut g, killer, victim));
+        let marker = g.get_char(killer).unwrap().quest_mob;
+        assert!(marker <= -1);
     }
 }

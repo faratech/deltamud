@@ -1,0 +1,120 @@
+#9002
+sword gods~
+the Sword of the Gods~
+A blade of white fire lies here, humming with divine wrath.~
+~
+5 67 8193
+0 5 20 0 0 0
+15 500000 20000
+c 1
+L 40
+A
+13 8
+A
+22 8
+A
+17 5
+E
+sword gods~
+Forged before the founding of Itrius, this blade has ended wars and started them.~
+#9003
+vest hero itrius~
+the Itrius Hero Vest~
+A battle-scarred vest of a hero of Itrius rests here.~
+~
+9 64 9
+30 0 0 0 0 0
+10 80000 8000
+c 1
+L 35
+A
+17 10
+A
+13 3
+E
+vest hero~
+Worn at the defense of Itrius, patched with the names of the fallen and the saved.~
+#9000
+ringstone black-eyed~
+a Black-eyed Ringstone~
+A small black stone with a single staring eye rests here.~
+~
+8 64 16385
+0 0 0 0 0 0
+1 20000 2000
+c 1
+L 20
+A
+13 2
+A
+22 2
+#9001
+loop infinite black-eyed~
+a Black-eyed Infinite Loop~
+A shimmering black loop floats here, chasing its own tail.~
+~
+8 64 16385
+0 0 0 0 0 0
+1 18000 1800
+c 1
+L 20
+A
+2 2
+A
+13 1
+#9010
+brick gold~
+a gold brick~
+A heavy brick of solid gold sits here.~
+~
+8 64 1
+0 0 0 0 0 0
+20 50000 5000
+c 1
+L 0
+#9005
+token quest shield~
+the Token of the Shield~
+A wooden token shaped like a shield lies here.~
+~
+13 16388 1
+0 0 0 0 0 0
+1 0 0
+c 1
+#9006
+token quest sceptre~
+the Token of the Sceptre~
+A wooden token shaped like a sceptre lies here.~
+~
+13 16388 1
+0 0 0 0 0 0
+1 0 0
+c 1
+#9007
+token quest crown~
+the Token of the Crown~
+A wooden token shaped like a crown lies here.~
+~
+13 16388 1
+0 0 0 0 0 0
+1 0 0
+c 1
+#9008
+token quest chalice~
+the Token of the Chalice~
+A wooden token shaped like a chalice lies here.~
+~
+13 16388 1
+0 0 0 0 0 0
+1 0 0
+c 1
+#9009
+token quest blade~
+the Token of the Blade~
+A wooden token shaped like a blade lies here.~
+~
+13 16388 1
+0 0 0 0 0 0
+1 0 0
+c 1
+$~

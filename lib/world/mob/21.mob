@@ -5,9 +5,22 @@ MOBOS MAXIMUS STANDS HERE.
 ~
 ITS MOBOS MAXIMUS.
 ~
-10 0 0 E
+524298 0 0 E
 X100 0 0 0 0 0 1d1+1703 1d298
 1000 33100
+9 9 0
+E
+#2150
+questmaster quest~
+the Questmaster of the Outpost~
+A grizzled Questmaster watches the road from beside his post.
+~
+    He has seen every raid the goblins ever attempted, and pays well
+for brave hands.
+~
+786434 0 0 E
+X30 100 100 100 100 100 1d1+700 1d30
+500 20000
 9 9 0
 E
 $

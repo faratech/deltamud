@@ -7,7 +7,7 @@ A kobold child is playing here.
 He appears to be a cross between a halfling and a small, ugly dog.  He
 has two small horns, and glowing red eyes.
 ~
-12 1024 0 E
+524300 1024 0 E
 X1 0 0 0 0 0 1d1+20 1d1
 10 250
 9 9 1
@@ -24,7 +24,7 @@ A childish female kobold plays nearby.
 Two curly greenish locks of hair mottled with dirt and mud rest on her
 shoulders.  She looks like a cross between an ugly halfling and a dog.
 ~
-12 1024 0 E
+524300 1024 0 E
 X1 0 0 0 0 0 1d1+20 1d1
 10 250
 9 9 2
@@ -103,7 +103,7 @@ A male wyvern is relaxing here.
 ~
    The male wyverns description will be done later
 ~
-9441320 1024 0 E
+9965608 1024 0 E
 X3 0 0 0 0 0 1d1+54 1d7
 30 750
 9 9 1
@@ -117,7 +117,7 @@ A fairly large female wyvern stands here.
 ~
    Descriptions will be added later
 ~
-9441320 1024 0 E
+9965608 1024 0 E
 X3 0 0 0 0 0 1d1+54 1d7
 30 750
 9 9 2

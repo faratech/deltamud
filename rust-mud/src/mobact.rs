@@ -297,6 +297,20 @@ pub fn mobile_activity(g: &mut GameState) {
             continue;
         }
 
+        // ---- 1b. Mob hunting (stock CircleMUD mobact.c) -----------------
+        // DeltaMUD's mobact.c dropped the stock `if (HUNTING(ch))
+        // hunt_victim(ch);` driver, so DG `mhunt` set HUNTING and nothing ever
+        // consumed it. Restored per the finish-the-game activation
+        // (COMPATIBILITY.md register); stock places it right after the
+        // awake/fighting gates, before scavenge/wander.
+        if g.get_char(ch).map(|c| c.hunting.is_some()).unwrap_or(false) {
+            crate::graph::hunt_victim(g, ch);
+            // Stock C ends the mob's turn after hunting (the call site is
+            // `if (HUNTING(ch)) { hunt_victim(ch); continue; }`): no wander,
+            // scavenge or aggression on the same pulse.
+            continue;
+        }
+
         // ---- 2. Scavenger pickup ---------------------------------------
         if mob_flagged(g, ch, MOB_SCAVENGER) {
             scavenge(g, ch);
@@ -978,5 +992,85 @@ mod tests {
         mobile_activity(&mut g);
 
         assert_ne!(g.get_char(mob).unwrap().act_flags & MOB_SPEC, 0);
+    }
+
+    /// Finish-the-game activation: a mob with HUNTING set closes distance to
+    /// its prey over pulses (stock CircleMUD's mobile_activity driver that
+    /// DeltaMUD dropped).
+    #[test]
+    fn hunting_mob_closes_distance_over_pulses() {
+        use crate::character::Character;
+        use crate::config::Config;
+        use crate::room::Room;
+
+        let mut g = GameState::new(Config::default());
+        // Linear corridor: 300(north)<- 301 <- 302 <- 303 <- 304.
+        let rooms: Vec<usize> = (0..5)
+            .map(|i| {
+                g.add_room(Room::new(300 + i as i32, 3, format!("R{}", i), String::new()))
+            })
+            .collect();
+        for w in rooms.windows(2) {
+            let (s, n) = (w[0], w[1]);
+            g.room_mut(s).exits[NORTH] = Some(crate::room::Exit {
+                description: None,
+                keyword: None,
+                exit_info: 0,
+                key: -1,
+                to_room: g.rooms[n].number,
+            });
+            g.room_mut(n).exits[SOUTH] = Some(crate::room::Exit {
+                description: None,
+                keyword: None,
+                exit_info: 0,
+                key: -1,
+                to_room: g.rooms[s].number,
+            });
+        }
+
+        let mut mob = Character::new_npc(1600);
+        mob.player.level = 10;
+        mob.points.max_hit = 100;
+        mob.points.hit = 100; // freshly-loaded mob: full health
+        mob.points.max_move = 100;
+        mob.points.move_points = 100; // freshly-loaded mob: full movement
+        let mob_id = g.create_char(mob);
+        g.char_to_room(mob_id, rooms[0]);
+
+        let mut prey = Character::new_player("Prey".into(), Class::Warrior, Race::Human);
+        prey.player.level = 10;
+        prey.points.max_hit = 10000;
+        prey.points.hit = 10000; // survives the strikes; we only assert pursuit
+        let prey_id = g.create_char(prey);
+        g.char_to_room(prey_id, rooms[4]);
+
+        g.get_char_mut(mob_id).unwrap().hunting = Some(prey_id);
+        println!(
+            "pre-loop: pos={:?} hp={} mv={}",
+            g.get_char(mob_id).unwrap().position,
+            g.get_char(mob_id).unwrap().points.hit,
+            g.get_char(mob_id).unwrap().points.move_points
+        );
+
+        // The hunter must pursue: track that its room advances toward the
+        // prey across pulses (the pursuit itself is the restored behavior).
+        let start = g.get_char(mob_id).and_then(|c| c.in_room);
+        let mut best = start;
+        for _ in 0..12 {
+            mobile_activity(&mut g);
+            let m = g.get_char(mob_id).and_then(|c| c.in_room);
+            if m > best {
+                best = m;
+            }
+        }
+        let prey_room = g.get_char(prey_id).and_then(|c| c.in_room);
+        assert_ne!(best, start, "hunter never moved");
+        assert!(
+            best >= prey_room || g.get_char(prey_id).is_none(),
+            "hunter must close distance: start {:?}, best {:?}, prey {:?}",
+            start,
+            best,
+            prey_room
+        );
     }
 }

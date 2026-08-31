@@ -114,6 +114,15 @@ Each activation is a registered, intentional divergence from the shipped C binar
 | `togglemap off` | Early return + "NO! YOU'LL HURT SOMEONE!" before unload_map | Kept as shipped — the author's guard is a deliberate choice, not a bug |
 | `show_on_who_list` (builders visible in `who`) | Function written ("future expansion capabilities") but its call site commented out; builders hidden | No change needed: the port's who walks in-world players, so builders are visible — the author's intent already holds |
 
+### Finish-the-game Wave 2 (practices + quests)
+
+| Feature | C oracle state | Port state |
+|---|---|---|
+| `SPECIAL(guild)` / `guild_guard` | Declared, never ASSIGNMOB'd; `guild_info[]` points at stock Midgaard rooms that never shipped — players could never spend a practice | Assigned to authored Itrius guildmasters (mobs 115–119) and entrance guards (126–130); `GUILD_INFO` retargeted to the real guild entrances (Mage←123s, Cleric←103s, Thief←115n, Warrior←119n, Artisan←106n; the Artisan row is an addition, C had none) |
+| Quest reward marker | Clamps `estimate_difficulty` to ≥1 BEFORE /5, so a same-level target yields -0 == 0 and the marker is wiped (quest uncompletable) | Clamp applied after the division: `(difficulty/5).max(1)` |
+| Questmaster + targets + rewards | No mob carries MOB_QUESTMASTER/MOB_QUEST; the 12 reward objects and 5 tokens (9002…9010, 3082, 3160, 3161, 3163, 6814, 8620, 18702) were never authored | Authored at the C-hardcoded vnums with stub vault zones; 21 quest targets flagged across zones 11/14/16/20/21; questmaster mobs 120 (Itrius) and 2150 (zone 21). Reward display name "Midgaard Hero Vest" re-skinned to "Itrius Hero Vest" (vnums, order and QP prices preserved); authored mobs are SENTINEL-flagged |
+| Mob hunting | DeltaMUD dropped stock CircleMUD's `if (HUNTING(ch)) hunt_victim(ch);` driver — DG `mhunt` set HUNTING and nothing consumed it | Stock driver restored in mobile_activity after the awake/fighting gates, ending the mob's turn |
+
 ## Runtime Fidelity Gaps
 
 The 2026-08 parity program (GitHub issues #96-#347, epic #348) audited all 12

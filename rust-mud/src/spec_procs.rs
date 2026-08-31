@@ -2015,6 +2015,21 @@ pub fn register_mob_specs(mut assign: impl FnMut(MobVnum, crate::spec_assign::Sp
     assign(3105, mayor as crate::spec_assign::SpecFn);
     // --- Scavenger fido (stock Midgaard vnum). ---
     assign(3062, fido as crate::spec_assign::SpecFn);
+    // --- Finish-the-game activations (Itrius): the authored guildmasters,
+    //     guild entrance guards and city guards. C's spec_assign.c never
+    //     assigned guild/guild_guard anywhere, and its cityguard vnums
+    //     (3060/3067) are not in the shipped world; the MOTD explicitly
+    //     promises law enforcement. These registrations activate the ported
+    //     procs for the authored zone-1 mobs (COMPATIBILITY.md register).
+    for &v in &[115, 116, 117, 118, 119] {
+        assign(v, guild as crate::spec_assign::SpecFn); // Itrius guildmasters
+    }
+    for &v in &[126, 127, 128, 129, 130] {
+        assign(v, guild_guard as crate::spec_assign::SpecFn); // guild entrance guards
+    }
+    for &v in &[121, 122, 123, 124, 125] {
+        assign(v, cityguard as crate::spec_assign::SpecFn); // Itrius city watch
+    }
     // --- Generic combat specs. The canonical Midgaard thief is 3061; snake and
     //     magic_user are bound to their stock vnums so the ported procs are
     //     reachable (inert until a world ships these mobs). ---

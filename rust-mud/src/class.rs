@@ -279,13 +279,14 @@ pub fn prac_type_is_spell(class: Class) -> bool {
 const GUILD_ALL: i32 = -999;
 
 pub static GUILD_INFO: &[(i32, i32, i32)] = &[
-    // Midgaard
-    (CLASS_MAGIC_USER, 3017, SCMD_SOUTH),
-    (CLASS_CLERIC, 3004, SCMD_NORTH),
-    (CLASS_THIEF, 3027, SCMD_EAST),
-    (CLASS_WARRIOR, 3021, SCMD_EAST),
-    // Brass Dragon — open to all
-    (GUILD_ALL, 5065, SCMD_WEST),
+    // Itrius guild entrances (finish-the-game retarget: the C table pointed
+    // at stock Midgaard rooms that never shipped). Each row: {class, the
+    // street room the guard stands in, the direction leading into the guild}.
+    (CLASS_MAGIC_USER, 123, SCMD_SOUTH), // Hathgar Drive -> Mage Guild (156)
+    (CLASS_CLERIC, 103, SCMD_SOUTH),     // Main Street  -> Cleric Guild (153)
+    (CLASS_THIEF, 115, SCMD_NORTH),      // Otus Avenue  -> Thief Guild (162)
+    (CLASS_WARRIOR, 119, SCMD_NORTH),    // Otus Avenue  -> Warrior Guild (165)
+    (CLASS_ARTISAN, 106, SCMD_NORTH),    // Main Street  -> Artisan Guild (148)
 ];
 
 /// `guild_ok(class, room_vnum, scmd)` — the guild-guard decision (spec_procs.c

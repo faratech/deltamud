@@ -8,7 +8,7 @@ turn as you look into its red, hungry eyes.  This rat is two feet in length.
 Slobber drips from its large fangs, signifying that it is hungry...  He seems
 to want you as his main course.    
 ~
-74 0 -18 E
+524362 0 -18 E
 X15 0 0 0 0 0 1d1+258 1d43
 150 3750
 9 9 1
@@ -24,7 +24,7 @@ weary body.  His eyes are timid and sad.  You think you can hear his stomach
 rumbling with hunger.  He grins at you with rotten teeth in hopes of a
 donation...    
 ~
-74 0 0 E
+524362 0 0 E
 X16 0 0 0 0 0 1d1+275 1d46
 160 4000
 9 9 1
@@ -40,7 +40,7 @@ warts and dirt.  Her hair hangs in tangles from her scalp, looking much like a
 ruined mop.  She grins nastily at you with yellow, rotting teeth...  Her eyes
 bloodshot red.  She pokes the fire with a long, thin stick.    
 ~
-74 0 -400 E
+524362 0 -400 E
 X18 0 0 0 0 0 1d1+309 1d52
 180 4500
 9 9 2
@@ -57,7 +57,7 @@ are quite menacing.  His brows bend inward into a scowl.  Large canine teeth
 jut from his upper jaw and drip with drool.  His nose is large and warty...  
 His eyes burn red as he stares into you.  It seems he doesn't like you.    
 ~
-72 0 -341 E
+524360 0 -341 E
 X14 0 0 0 0 0 1d1+241 1d40
 140 3500
 9 9 1
@@ -73,7 +73,7 @@ bulg from beneath his clothing.  Fire burns in his eyes and it seems that it
 also burns in his heart.  He doesn't like you...  You don't like him...  His
 teeth clench ready for battle.    
 ~
-4194392 0 -540 E
+4718680 0 -540 E
 X20 0 0 0 0 0 1d1+343 1d58
 200 5000
 9 9 1
@@ -90,7 +90,7 @@ himself, almost inaudibly to your ears.  He looks ugly...  Yet innocent at the
 same time...  You rethink your thoughts when he promptly raises his middle
 finger at you and mouths a swear.  That's a Troll for you.    
 ~
-74 0 -340 E
+524362 0 -340 E
 X15 0 0 0 0 0 1d1+258 1d43
 150 3750
 9 9 1
@@ -103,7 +103,7 @@ A pile of bones.
    This pile of bones seems to rattle as you gaze at it...  Makes you somewhat
 uneasy.    
 ~
-4194394 0 -900 E
+4718682 0 -900 E
 X19 0 0 0 0 0 1d1+326 1d55
 190 4750
 9 9 0
@@ -120,7 +120,7 @@ Dwarven origin...  Perhaps the former inhabitants of this land.  Crusted blood
 coats the edges of its mouth as well as its along the forearms and hands.  
 Pale, dirty rags hang shredded over the dead being's body.
 ~
-32874 0 -890 E
+557162 0 -890 E
 X16 0 0 0 0 0 1d1+275 1d46
 160 4000
 9 9 0
@@ -136,7 +136,7 @@ with gray hair and scratches.  The head stares at you hungrily with eigth deep
 black eyes that seem to continue forever.  It's fangs snap together as it
 thinks of its next meal...    
 ~
-74 0 0 E
+524362 0 0 E
 X0 0 0 0 0 0 1d1+0 1d1
 0 0
 9 9 0

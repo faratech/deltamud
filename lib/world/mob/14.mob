@@ -7,7 +7,7 @@ A cute little kitten stands here.
 defenseless, but it would be best not to touch it because it's mother would
 probably find you later.    
 ~
-204 0 0 E
+524492 0 0 E
 X1 0 0 0 0 0 1d1+5 1d1
 0 5
 9 9 0
@@ -23,7 +23,7 @@ walking, and it's eyes can't focus very well.  The cat is so skinny, that you
 can see the bones through its skin!  The cat's fur is very uneven, as you see a
 trail of cat hair behind it.    
 ~
-204 0 0 E
+524492 0 0 E
 X2 0 0 0 0 0 1d1+37 1d4
 1 100
 9 9 0
@@ -38,7 +38,7 @@ A big fat cat stands here.
 The cat's fur is very shiny and rarely sheds.  You reach down to pet the cat
 and it purrs loudly.  You can tell that this is a very friendly cat.    
 ~
-204 0 25 E
+524492 0 25 E
 X2 0 0 0 0 0 1d1+37 1d4
 1 500
 9 9 0
@@ -53,7 +53,7 @@ A Parthan is standing here.
 and some features of a human.  He has reddish-orange fur and red eyes.  He is
 looking around waiting for something to happen.    
 ~
-6156 0 15 E
+530444 0 15 E
 X10 0 0 0 0 0 1d20+173 1d28
 100 2500
 9 9 1
@@ -68,7 +68,7 @@ A Parthan is standing here.
 feet tall, has white fur and black eyes.  He is looking around waiting for
 something to happen.    
 ~
-6156 0 0 E
+530444 0 0 E
 X10 0 0 0 0 0 1d25+173 1d28
 100 2500
 9 9 1
@@ -83,7 +83,7 @@ A Parthan is standing here.
 about five feet tall, has grey fur and blazing red eyes.  He's looking around
 waiting for something to pounce on!    
 ~
-6216 0 0 E
+530504 0 0 E
 X17 0 0 0 0 0 1d1+292 1d49
 170 4250
 9 9 1
@@ -98,7 +98,7 @@ A parthan is standing here.
 about six feet tall, has spotted fur and black eyes.  He's standing around
 waiting for something to happen.    
 ~
-6220 0 0 E
+530508 0 0 E
 X11 0 0 0 0 0 1d1+190 1d31
 110 2750
 9 9 1
@@ -112,7 +112,7 @@ A Parthan is standing here.
 feet tall, very muscular build, has black fur with grey spots and ruby red
 eyes.  He is just waiting for trouble!    
 ~
-6250 0 0 E
+530538 0 0 E
 X13 0 0 0 0 0 1d1+224 1d37
 130 3250
 9 9 1
@@ -128,7 +128,7 @@ man, half cat with black fur and bright yellow eyes!  He's crossing your path,
 and you better be ready for what he's up to!  Instead of looking for trouble,
 he's going to bring it!
 ~
-6250 0 -75 E
+530538 0 -75 E
 X14 0 0 0 0 0 1d1+241 1d40
 140 3500
 9 9 1
@@ -144,7 +144,7 @@ has arms and legs the size of tree trunks.  He has black fur, and you notice
 the blood all over his body and by the king's insignia that he is no other
 than..  TERREL!    
 ~
-6266 0 -100 E
+530554 0 -100 E
 X15 0 0 0 0 0 1d1+258 1d43
 150 3750
 9 9 1
@@ -158,7 +158,7 @@ A skeleton stands here.
    Nothing special about this skeleton.  Just your average pile of bones that
 wants to cause trouble.    
 ~
-8 0 0 E
+524296 0 0 E
 X10 60 52 52 52 52 1d1+173 1d28
 100 4473
 9 9 0
@@ -171,7 +171,7 @@ A zombie stands here.
    Just your average moaning, slow walking, unintelligent stack of rotting
 flesh.  Kill it and make the moaning stop!    
 ~
-8 0 0 E
+524296 0 0 E
 X10 60 52 52 52 52 1d1+173 1d28
 100 4473
 9 9 0
@@ -185,7 +185,7 @@ A mummy stands in your way.
 white cloth that now is brown and reeky!  You hear a muffled moan coming from
 this mummy.  To kill it would make it stink even more.    
 ~
-8 0 0 E
+524296 0 0 E
 X13 78 68 68 68 68 1d1+224 1d37
 130 5871
 9 9 0
@@ -198,7 +198,7 @@ A ghost flies in front of you!
    Just your average white ghost.  A spirit of the dead, which comes back to
 haunt this crypt, or worse, take your soul.    
 ~
-8 32 0 E
+524296 32 0 E
 X14 84 73 73 73 73 1d1+241 1d40
 140 6309
 9 9 0
@@ -213,7 +213,7 @@ cloak and wields a big scythe.  The main difference between the two is that the
 grim reaper attacks silently, and the spectre makes a loud shrieking noise.  
 Keep yourself from going deaf and kill this thing...  If you dare!    
 ~
-8 0 0 E
+524296 0 0 E
 X15 90 78 78 78 78 1d1+258 1d43
 150 6732
 9 9 0

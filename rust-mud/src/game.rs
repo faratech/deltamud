@@ -3535,6 +3535,22 @@ mod tests {
     }
 
     #[test]
+    fn scratch_name_debug() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        let name = game_normalize(&mut game, "Wanderer");
+        println!("normalized: {:?}", name);
+        println!("valid_name: {}", valid_name(&name));
+        println!("reserved_or_fill: {}", reserved_or_fill_word(&name));
+        println!("ban::valid_name_in: {}", crate::ban::valid_name_in(&game.state, &name));
+    }
+
+    fn game_normalize(game: &mut Game, s: &str) -> String {
+        let _ = game;
+        normalize_name(s)
+    }
+
+    #[test]
     fn reserved_and_fill_words_are_rejected_as_names() {
         // C interpreter.c:694-718 (#223).
         assert!(reserved_or_fill_word("me"));
@@ -3542,27 +3558,6 @@ mod tests {
         assert!(reserved_or_fill_word("something"));
         assert!(reserved_or_fill_word("the"));
         assert!(!reserved_or_fill_word("Thrall"));
-    }
-
-    #[tokio::test]
-    async fn mob_keyword_names_are_rejected() {
-        let db = Arc::new(MockDatabase::new());
-        let mut game = test_game(db);
-        // A mob prototype whose keywords include "dragon".
-        let proto = test_mob_proto(3001, "red dragon Dragon");
-        game.state.mob_protos.insert(3001, proto);
-        let conn = ConnId(40);
-        attach_descriptor_at_name(&mut game, conn, "example.test").await;
-        game.nanny(conn, "dragon".to_string()).await;
-        // Still at GetName with the C refusal, not ConfirmName.
-        assert_eq!(descriptor_state(&game, conn), ConState::GetName);
-        assert!(game
-            .state
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("Invalid name, please try another."));
     }
 
     fn test_mob_proto(vnum: MobVnum, name: &str) -> crate::world::MobileProto {
@@ -3597,6 +3592,84 @@ mod tests {
             attack_type: 0,
         }
     }
+
+    #[tokio::test]
+    async fn mob_keyword_names_are_rejected() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        // A mob prototype whose keywords include "dragon".
+        let proto = test_mob_proto(3001, "red dragon Dragon");
+        game.state.mob_protos.insert(3001, proto);
+        let conn = ConnId(40);
+        attach_descriptor_at_name(&mut game, conn, "example.test").await;
+        game.nanny(conn, "dragon".to_string()).await;
+        // Still at GetName with the C refusal, not ConfirmName.
+        assert_eq!(descriptor_state(&game, conn), ConState::GetName);
+        assert!(game
+            .state
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("Invalid name, please try another."));
+    }
+
+    #[tokio::test]
+    async fn quest_e2e_kill_quest_assigns_and_rewards() {
+        // The shipped lib (sibling of the crate) carries the authored quest
+        // content; skip on exotic checkouts without it.
+        let lib = concat!(env!("CARGO_MANIFEST_DIR"), "/../lib");
+        if !std::path::Path::new(&format!("{}/world/worldmap", lib)).exists() {
+            return;
+        }
+        let mut g = crate::state::GameState::new(Config::default());
+        g.config.lib_path = lib.to_string();
+        crate::file_loader::FileLoader::load_world(&mut g, lib).await.unwrap();
+        g.prime_zones();
+
+        let room100 = g.real_room(100).unwrap();
+        let mut player = crate::character::Character::new_player("Rmeln".into(), Class::Warrior, Race::Human);
+        player.player.level = 3;
+        let pl = g.create_char(player);
+        g.char_to_room(pl, room100);
+
+        let qm = crate::quest::find_questmaster(&g, pl)
+            .expect("questmaster must be present in room 100");
+
+        // C denies probabilistically (qchance(15) + the 99-candidate lottery),
+        // so retry until a target is assigned.
+        let live: Vec<u32> = g
+            .char_ids()
+            .into_iter()
+            .filter(|c| g.get_char(*c).map(|c| c.is_npc).unwrap_or(false))
+            .filter_map(|c| g.get_char(c).map(|c| c.nr as u32))
+            .collect();
+        println!("live quest-target candidates: {:?}", live);
+        let mut qmob = 0i32;
+        for _ in 0..40 {
+            crate::quest::do_autoquest(&mut g, pl, "request", 0);
+            qmob = g.get_char(pl).unwrap().quest_mob;
+            if qmob > 0 {
+                break;
+            }
+        }
+        assert!(qmob > 0, "a kill-target quest must be assigned, got {}", qmob);
+
+        let victim = g
+            .char_ids()
+            .into_iter()
+            .find(|c| g.get_char(*c).map(|c| c.nr == qmob).unwrap_or(false))
+            .expect("target instance must exist");
+        assert!(crate::quest::quest_on_kill(&mut g, pl, victim));
+        assert!(g.get_char(pl).unwrap().quest_mob < 0);
+
+        g.get_char_mut(pl).unwrap().quest_countdown = 5;
+        crate::quest::do_autoquest(&mut g, pl, "complete", 0);
+        let pts = g.get_char(pl).unwrap().quest_points;
+        assert!(pts > 0, "reward quest points must be granted, got {}", pts);
+        let _ = qm;
+    }
+
 
     #[tokio::test]
     async fn creation_password_guards_match_c() {

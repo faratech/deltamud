@@ -241,4 +241,144 @@ X5 30 26 26 26 26 1d1+88 1d13
 50 1830
 9 9 0
 E
+#115
+guildmaster mage magic master~~
+the Mage Guildmaster~
+The Mage Guildmaster is here, surrounded by floating tomes.
+~
+    A tall figure in star-covered robes, the Mage Guildmaster has spent
+decades mastering the arcane arts.  He offers to teach worthy students
+the ways of magic.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+700 1d30
+500 20000
+9 9 0
+E
+#116
+guildmaster cleric priest master~~
+the Cleric Guildmaster~
+The Cleric Guildmaster is here, praying before the altar.
+~
+    Armored in quiet faith, the Cleric Guildmaster trains the devout in
+the healing and smiting arts.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+700 1d30
+500 20000
+9 9 0
+E
+#117
+guildmaster thief rogue master~~
+the Thief Guildmaster~
+The Thief Guildmaster is here, eyeing your purse.
+~
+    Dressed in shadow-grey leathers, the Thief Guildmaster knows every
+lock, pocket and rooftop in Itrius.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+700 1d30
+500 20000
+9 9 0
+E
+#118
+guildmaster warrior fighter master~~
+the Warrior Guildmaster~
+The Warrior Guildmaster is here, sharpening a enormous blade.
+~
+    Scarred and grinning, the Warrior Guildmaster teaches the craft of
+steel to any with the stomach for it.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+700 1d30
+500 20000
+9 9 0
+E
+#119
+guildmaster artisan smith master~~
+the Artisan Guildmaster~
+The Artisan Guildmaster is here, hammering out fine works.
+~
+    Burn-scarred aprons and a patient eye mark the Artisan Guildmaster,
+maker of Itrius' finest wares and teacher of its crafters.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+700 1d30
+500 20000
+9 9 0
+E
+#120
+questmaster quest mistress~~
+the Questmaster~
+The Questmaster is here, handing out tales of adventure.
+~
+    The Questmaster of Itrius keeps a ledger of every deed done in the
+kingdom, and is always looking for someone brave (or foolish) enough
+to take on a quest.  Type 'autoquest request' to hear one.
+~
+262146 0 0 E
+X30 100 100 100 100 100 1d1+700 1d30
+500 20000
+9 9 0
+E
+#126
+guild guard mage doorway~~
+the Mage Guild Guard~
+The Mage Guild Guard stands watch at the guild door.
+~
+    Only students of the arcane may pass the Mage Guild Guard.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+600 1d25
+100 5000
+9 9 0
+E
+#127
+guild guard cleric doorway~~
+the Cleric Guild Guard~
+The Cleric Guild Guard stands watch at the guild door.
+~
+    Only the devout may pass the Cleric Guild Guard.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+600 1d25
+100 5000
+9 9 0
+E
+#128
+guild guard thief doorway~~
+the Thief Guild Guard~
+The Thief Guild Guard lounges by the guild door, watching.
+~
+    Only members of the guild may pass the Thief Guild Guard.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+600 1d25
+100 5000
+9 9 0
+E
+#129
+guild guard warrior doorway~~
+the Warrior Guild Guard~
+The Warrior Guild Guard stands watch at the guild door.
+~
+    Only sworn warriors may pass the Warrior Guild Guard.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+600 1d25
+100 5000
+9 9 0
+E
+#130
+guild guard artisan doorway~~
+the Artisan Guild Guard~
+The Artisan Guild Guard stands watch at the guild door.
+~
+    Only members of the craft may pass the Artisan Guild Guard.
+~
+2 0 0 E
+X30 100 100 100 100 100 1d1+600 1d25
+100 5000
+9 9 0
+E
 $

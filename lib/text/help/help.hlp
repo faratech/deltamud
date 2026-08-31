@@ -73829,3 +73829,21 @@ UNDEFINED
 Empty
 #0
 $~
+quest autoquest
+The quest system: type AUTOQUEST REQUEST while standing before a
+questmaster to hear a tale of a monster that needs slaying.  Slay the
+beast and return to the questmaster before your time runs out, then
+type AUTOQUEST COMPLETE to claim your reward.
+
+Quest rewards are bought with quest points: AUTOQUEST LIST shows the
+kingdom's treasure larder, AUTOQUEST BUY <number> purchases from it,
+and AUTOQUEST POINTS shows your total.
+#0
+practice
+Syntax: PRACTICE <skill or spell>
+
+While standing before a guildmaster of your class, PRACTICE spends one
+of your practices to improve your knowledge of a skill or spell.
+PRACTICE with no argument lists what you know.  Practices are earned
+as you gain levels - and they are scarce, so spend them wisely.
+#0
