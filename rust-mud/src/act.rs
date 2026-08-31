@@ -37,7 +37,7 @@ fn hssh(g: &GameState, cid: CharId) -> &'static str {
         Gender::Neutral => "it",
     }
 }
-fn hshr(g: &GameState, cid: CharId) -> &'static str {
+pub(crate) fn hshr(g: &GameState, cid: CharId) -> &'static str {
     match sex_of(g, cid) {
         Gender::Male => "his",
         Gender::Female => "her",

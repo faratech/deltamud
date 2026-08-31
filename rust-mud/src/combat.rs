@@ -29,6 +29,7 @@ use crate::types::*;
 pub const TYPE_HIT: i32 = 1100;
 pub const TYPE_STAB: i32 = 1114;
 const SELF_DAMAGE: i32 = 1197; // spells.h
+const PRF2_MERCY: i64 = 1 << 7; // structs.h PRF2_FLAGS
 const NUM_ATTACK_TYPES: i32 = 15; // olc.h
 const SKILL_BACKSTAB: u16 = 501;
 const SKILL_SECOND_ATTACK: u16 = 524;
@@ -885,6 +886,29 @@ fn do_actual_damage(
         return;
     }
 
+    // PRF2_MERCY pre-damage abort (fight.c:813-817, #97): a merciful PC
+    // stays their hand once the victim is below 0 hp.
+    {
+        let mercy = g
+            .get_char(ch)
+            .map(|c| !c.is_npc && c.prf2_flags & PRF2_MERCY != 0)
+            .unwrap_or(false);
+        let v_below = g.get_char(victim).map(|c| c.points.hit < 0).unwrap_or(false);
+        if mercy && v_below && !deathblow && attacktype < SELF_DAMAGE {
+            act(
+                g,
+                "$N is almost dead, and you decide to have mercy on them.",
+                false,
+                ch,
+                None,
+                ActArg::Char(victim),
+                To::Char,
+            );
+            stop_fighting(g, ch);
+            return;
+        }
+    }
+
     if let Some(msg) = newbie_pvp_block_message(g, ch, victim) {
         g.send_to_char(ch, msg);
         return;
@@ -1046,7 +1070,6 @@ fn do_actual_damage(
     // exists. Invalid (TYPE_UNDEFINED), out-of-range (>= SELF_DAMAGE) and
     // SKILL_RIPOSTE attack types print nothing here — except TYPE_UNDEFINED,
     // which keeps the port's generic-hit fallback for environment / dg damage.
-    const PRF2_MERCY: i64 = 1 << 7; // structs.h
     if attacktype != TYPE_UNDEFINED
         && attacktype < SELF_DAMAGE
         && attacktype != SKILL_RIPOSTE as i32
@@ -1077,6 +1100,50 @@ fn do_actual_damage(
         // Generic strike with no weapon flavour (environment / dg damage):
         // fall back to the plain TYPE_HIT verb so onlookers still see a hit.
         dam_message(g, dmg, ch, victim, TYPE_HIT);
+    }
+
+    // PRF2_MERCY spare (fight.c:1026-1039, #97): the killing blow stops, both
+    // fighters disengage, the victim is stood up at -1 hp.
+    {
+        let mercy = g
+            .get_char(ch)
+            .map(|c| !c.is_npc && c.prf2_flags & PRF2_MERCY != 0)
+            .unwrap_or(false);
+        let v_below = g.get_char(victim).map(|c| c.points.hit < 0).unwrap_or(false);
+        if mercy && v_below && !deathblow && attacktype < SELF_DAMAGE {
+            stop_fighting(g, ch);
+            stop_fighting(g, victim);
+            let hr = crate::act::hshr(g, victim);
+            let mut buf = format!(
+                "You have mercy on $N, and spare {} life... for now.",
+                hr
+            );
+            act(g, &buf, true, ch, None, ActArg::Char(victim), To::Char);
+            buf.clear();
+            act(
+                g,
+                "$n spares your life, thank the gods!",
+                false,
+                ch,
+                None,
+                ActArg::Char(victim),
+                To::Vict,
+            );
+            act(
+                g,
+                "$N is about to deliver the death blow, but suddenly spares $n's life!",
+                false,
+                victim,
+                None,
+                ActArg::Char(ch),
+                To::NotVict,
+            );
+            let _ = &mut buf;
+            if let Some(v) = g.get_char_mut(victim) {
+                v.points.hit = -1;
+            }
+            update_position(g, victim);
+        }
     }
 
     send_position_feedback(g, ch, victim, dmg);
