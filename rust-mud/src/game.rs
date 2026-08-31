@@ -937,7 +937,7 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
 
     /// Load (or, for fresh chars, re-load) the player, place them in the
     /// world, and start play.
-    async fn enter_game(&mut self, conn_id: ConnId, _is_new: bool) {
+    async fn enter_game(&mut self, conn_id: ConnId, is_new: bool) {
         let name = self.descriptor_name(conn_id);
         let mut ch = match self.db.load_player(&name).await {
             Ok(c) => c,
@@ -1139,6 +1139,17 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
         }
         // Restore the player's rented/crash-saved objects (objsave.c).
         crate::objsave::crash_load(&mut self.state, id, &self.lib_path);
+
+        // C interpreter.c:2267-2269 (menu '1'): a brand-new character gets
+        // do_start(), START_MESSG, then do_newbie() — the starter item (obj 190,
+        // "an unfinished player's guide"), GET_RECALL_LEV = 0 and GET_WIMP_LEV =
+        // 1. This port runs do_start_init in create_and_enter (before the DB
+        // write), so the newbie step belongs here: the char is in the world, past
+        // crash_load, which is where C's enter_player_game has left them. Without
+        // it a new PC has no player's guide and never auto-flees at 1 hp.
+        if is_new {
+            crate::class::do_newbie(&mut self.state, id);
+        }
 
         let motd = self.state.motd.clone();
         self.state.send_to_char(id, &motd);
