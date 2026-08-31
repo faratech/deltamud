@@ -1,64 +1,83 @@
 #2100
 Outside a Dark Cave~
-   You are standing in an unfinished room.    
+   A shelf of grey rock breaks the treeline here, and out of it
+yawns the black mouth of a cave.  Cold air breathes steadily from
+the darkness, smelling of wet stone and old smoke, and the ground
+before the opening is stamped bare by many careless feet.
 ~
 21 4 0
 D0
-   To the north you see the myrky GloomWood trees.
+   The GloomWood closes in to the north.
 ~
 ~
 0 0 2139
 D1
-   To the east you see the myrky GloomWood trees.
+   Dark trees stand thick to the east.
 ~
 ~
 0 0 2142
 D2
+   The cave mouth gapes southward.
 ~
 ~
 0 0 2170
 D3
-   To the west you see myrky Gloomwood trees.
+   The forest darkens away to the west.
 ~
 ~
 0 0 2141
 S
 #2101
 On a Gravel Path~
-You are in an unfinished room.
+   Here a broad drive of weed-grown gravel ends against a wall of
+trunks.  Ruts in the mud show that carts once ran down from the
+manor this way, but the forest has long since taken back its own.
+Paths part into the trees to the east, south and west, each as
+dark as the next.
 ~
-21 0 0
+21 0 3
 D1
+   The old drive runs eastward into the trees.
 ~
 ~
 0 0 2102
 D2
+   Weeds choke the gravel to the south.
 ~
 ~
 0 0 2102
 D3
+   A path of sorts leads west into the gloom.
 ~
 ~
 0 0 2102
 S
 #2102
 Within a Dark Forest~
-You are in an unfinished room.
+   The trees here stand so close that their boles seem to lean
+together and whisper.  Paths run away to the north, east, south
+and west, yet as you watch, the shadows between the trunks appear
+to rearrange themselves.  A small pile of rocks, neatly stacked,
+marks the crossing like a waystone.
 ~
-21 0 0
+21 0 3
 D0
+   Paths run north between the trunks.
 ~
 ~
 0 0 2139
 D1
+   The gravel drive lies east.
 ~
 ~
 0 0 2101
 D2
+   The trees crowd closer to the south.
 ~
 ~
 0 0 2141
 D3
+   Dark paths lead away to the west.
 ~
 ~
 0 0 2142
@@ -66,22 +85,30 @@ S
 T 2195
 #2103
 Within a Dark Forest~
-You are in an unfinished room.
+   The trees stand wider here, and a tumbled line of mossy stone
+runs among them -- the old boundary of the manor grounds.  Through
+gaps to the north, east and south you glimpse a weed-grown yard and
+a deep stone well.  Westward the trunks draw back about a long, low
+building, its doors hanging crooked.
 ~
-21 0 0
+21 0 3
 D0
+   A weed-grown yard shows through the trees to the north.
 ~
 ~
 0 0 2114
 D1
+   The overgrown yard lies east.
 ~
 ~
 0 0 2114
 D2
+   The yard and its well lie south.
 ~
 ~
 0 0 2114
 D3
+   A long, low building stands west among the trees.
 ~
 ~
 0 0 2112
@@ -89,530 +116,737 @@ S
 T 2194
 #2104
 On a Gravel Path~
-You are in an unfinished room.
+   A path of raked gravel, green now with weeds, runs between
+rows of vines gone wild.  To the north it widens before a large
+manor house, its windows shuttered and its porch sagging.  The
+rows of vines stretch away east and west, heavy with sour
+fruit.
 ~
-21 0 0
+21 0 2
 D0
+   The gravel path approaches the manor.
 ~
 ~
 0 0 2111
 D1
+   Rows of vines run off eastward.
 ~
 ~
 0 0 2108
 D3
+   More vine rows stand to the west.
 ~
 ~
 0 0 2105
 S
 #2105
 In a Vineyard~
-You are in an unfinished room.
+   Trellised vines crowd in on every side, their rows unkempt
+and heavy with fruit that no one has gathered.  Wasp-haunted
+clusters hang split and fermenting, and the air is thick with the
+smell of sour must.  The rows run north and south, and a gravel
+path lies east.
 ~
-21 0 0
+21 0 2
 D0
+   The vines stand thicker to the north.
 ~
 ~
 0 0 2107
 D1
+   A gravel path lies east of the rows.
 ~
 ~
 0 0 2104
 D2
+   The rows continue southward.
 ~
 ~
 0 0 2106
 S
 #2106
 In a Vineyard~
-You are in an unfinished room.
+   The rows end here against a drift of bramble.  A trellis has
+gone down under its own weight and dragged its vines with it, so
+that the grapes rot in purple heaps beneath.  Someone has driven a
+crooked stake into the earth and hung a strip of red cloth from
+it.
 ~
-21 0 0
+21 0 2
 D0
+   The rows run back northward.
 ~
 ~
 0 0 2105
 S
 #2107
 Near some Plump Grapes~
-You are in an unfinished room.
+   These vines have fared better than their fellows, bearing
+clusters of plump grapes in dusty green and deep violet.  Many have
+been torn down recently, and the ground is littered with stripped
+stalks and small splay-footed tracks.
 ~
-21 0 0
+21 0 2
 D2
+   The vines stand thick to the south.
 ~
 ~
 0 0 2105
 S
 #2108
 In a Vineyard~
-You are in an unfinished room.
+   Rows of vines march away to the north and south here, their
+leaves spotted with black rot.  Weeds have claimed the spaces
+between them, and the gravel path lies west, running back toward
+the manor.
 ~
-21 0 0
+21 0 2
 D0
+   The rows continue northward.
 ~
 ~
 0 0 2109
 D2
+   Blighted vines stand to the south.
 ~
 ~
 0 0 2110
 D3
+   The gravel path lies west.
 ~
 ~
 0 0 2104
 S
 #2109
 In a Vineyard~
-You are in an unfinished room.
+   Here the vineyard ends in a corner of tumbled wall.  The
+vines have scrambled over the fallen stones and made a thicket of
+them, and within the tangle sits a shrine of sorts: a bowl of green
+glass half-buried in the nettles, ringed about with small teeth.
 ~
-21 0 0
+21 0 2
 D2
+   The rows run back southward.
 ~
 ~
 0 0 2108
 S
 #2110
 Near some Rotting GrapeVines~
-You are in an unfinished room.
+   A blight has passed through this corner of the vineyard.  The
+vines stand black and brittle, their fruit shrivelled to husks
+that crumble at a touch.  Flies swarm thick over the fallen
+clusters, and the sweetness of their spoiling hangs heavy in the
+air.
 ~
-21 0 0
+21 0 2
 D0
+   Sounder vines stand to the north.
 ~
 ~
 0 0 2108
 S
 #2111
 Before a Large Manor~
-You are in an unfinished room.
+   A weed-grown forecourt lies before a large manor house of
+grey stone.  Its shutters hang askew, its door stands ajar, and the
+stones about the door have been daubed with crude signs in
+something brown and dried.  A stable block rises east, a stone well
+stands west, and the vineyard path runs south.
 ~
-21 0 0
+21 0 2
 D0
+   The manor's door stands open to the north.
 ~
 ~
 0 0 2115
 D1
+   The stable block stands east.
 ~
 ~
 0 0 2112
 D2
+   The vineyard path leads south.
 ~
 ~
 0 0 2104
 D3
+   An old stone well stands west.
 ~
 ~
 0 0 2114
 S
 #2112
 Inside some Stables~
-You are in an unfinished room.
+   Rotten straw and stale dung scent the air of the stable
+block.  Most of the stalls have been broken up for firewood, and
+both the north and east walls have been smashed through, opening
+the stable into the trees beyond as if its builders cared little
+what wandered in by night.  A leaning rail leads south.
 ~
 21 0 0
 D0
+   Daylight and dark trees show through a broken wall.
 ~
 ~
 0 0 2102
 D1
+   A jagged gap opens into the forest.
 ~
 ~
 0 0 2103
 D2
+   A muddy pen lies south, beyond a leaning rail.
 ~
 ~
 0 0 2113
 D3
+   The forecourt of the manor lies west.
 ~
 ~
 0 0 2111
 S
 #2113
 A Horse Pen~
-You are in an unfinished room.
+   A muddy paddock, fenced with rails long since kicked to
+splinters by whatever was once kept here.  No horses remain; only
+a rain-pool churned by hooves, a heap of harness gone stiff with
+rot, and bones in the grass that are too large for a dog's.
 ~
-21 0 0
+21 0 2
 D0
+   The stable stands north of the pen.
 ~
 ~
 0 0 2112
 S
 #2114
 Beside a Deep Well~
-You are in an unfinished room.
+   An old stone well stands in a confusion of paths here, its
+windlass rotted and its bucket long since gone.  A look down the
+shaft finds only darkness and a smell of cold rot; someone has
+thrown bones down it, and they lie white on the wet stones below.
+Paths part to the north, south and west, and the manor waits
+east.
 ~
-21 0 0
+21 0 2
 D0
+   Paths run north beneath the trees.
 ~
 ~
 0 0 2103
 D1
+   The manor's forecourt lies east.
 ~
 ~
 0 0 2111
 D2
+   Paths run south beneath the trees.
 ~
 ~
 0 0 2103
 D3
+   Paths run west beneath the trees.
 ~
 ~
 0 0 2103
 S
 #2115
 Entrance Hall to the Manor~
-You are in an unfinished room.
+   A wide hall of worn flags beneath a smoke-stained ceiling.
+The furniture has been hacked apart for burning, and the shields
+that once hung here are gone, leaving pale shapes on the panelling.
+Goblin filth fouls the corners, and a litter of gnawed bones lies
+where the hearth once burned.
 ~
 21 0 0
 D0
+   The hall continues north to a long table.
 ~
 ~
 0 0 2119
 D1
+   A low doorway leads east into a servants' room.
 ~
 ~
 0 0 2117
 D2
+   The manor door stands open to the south.
 ~
 ~
 0 0 2111
 D3
+   A small, clean room lies west.
 ~
 ~
 0 0 2116
 S
 #2116
 A Clean Office~
-You are in an unfinished room.
+   Strange as it seems amid the ruin of the house, this little
+room is clean.  A clerk's desk stands against the wall, its
+ledgers squared and its inkwell stoppered, and the floor has been
+freshly swept.  Notched tally-sticks lie bundled on the blotter --
+counts of grain, of hides, of heads.
 ~
 21 0 0
 D0
+   A comfortable room lies north.
 ~
 ~
 0 0 2120
 D1
+   The entrance hall lies east.
 ~
 ~
 0 0 2115
 S
 #2117
 Servants Quarters~
-You are in an unfinished room.
+   A low room of narrow cots, most of them stripped to the
+frame.  Blankets lie mouldered where they were dropped, and a cold
+hearth is heaped with the ash of a mean fire.  Someone has
+scratched a game of nine men's morris into the floorboards beside
+the nearest cot.
 ~
 21 0 0
 D0
+   A kitchen lies north.
 ~
 ~
 0 0 2118
 D3
+   The entrance hall lies west.
 ~
 ~
 0 0 2115
 S
 #2118
 A Kitchen~
-You are in an unfinished room.
+   The kitchen's great hearth still stands, black with old
+fires, and copper pots gone green hang from the rack above it.
+The butcher's block has seen recent use: grease and hair foul the
+chopping hollow, and a cleaver stands upright in the wood.  A spit
+of green hazel leans above cold ashes.
 ~
 21 0 0
 D2
+   The servants' quarters lie south.
 ~
 ~
 0 0 2117
 D3
+   A long dining hall lies west.
 ~
 ~
 0 0 2119
 S
 #2119
 A Large Dinning Hall~
-You are in an unfinished room.
+   A long table of black oak runs the length of the hall, its
+polish spoiled by rings and deep knife-scoring.  Benches stand
+askew and the flagstones beneath are strewn with bones, shells and
+the husks of stolen fruit.  The master's high seat at the head of
+the table has been sawn down to the height of a goblin.
 ~
 21 0 0
 D1
+   The kitchen lies east.
 ~
 ~
 0 0 2118
 D2
+   The entrance hall lies south.
 ~
 ~
 0 0 2115
 D3
+   A comfortable room lies west.
 ~
 ~
 0 0 2120
 S
 #2120
 A Comfortable Lounge~
-You are in an unfinished room.
+   Worn chairs and a sagging settle group about a cold
+fireplace whose mantel still carries a pair of silver
+candlesticks.  A table for cards stands in the window, its dealing
+box empty.  Stairs rise in the corner, and a trap in the floor by
+the hearth stands open on a flight of steps going down.
 ~
 21 0 0
 D1
+   The dining hall lies east.
 ~
 ~
 0 0 2119
 D2
+   The clean office lies south.
 ~
 ~
 0 0 2116
 D4
+   Stairs rise to the upper floor.
 ~
 ~
 0 0 2121
 D5
+   A trap in the floor leads down to the cellar.
 ~
 ~
 0 0 2127
 S
 #2121
 At the Top of the Stairs~
-You are in an unfinished room.
+   The stair comes up into a gallery beneath the peaked roof.
+The wall here is hung with the portraits of the manor's family,
+and someone has carefully cut the face out of every canvas.  A
+hallway runs east into the dark, past the doorways of the
+bedchambers.
 ~
 21 0 0
 D1
+   A panelled hallway runs east.
 ~
 ~
 0 0 2122
 D5
+   The stair goes down to the lounge.
 ~
 ~
 0 0 2120
 S
 #2122
 A Hallway~
-You are in an unfinished room.
+   A narrow hallway panelled in dark wood, its floor carpeted
+in a pattern worn to threads.  Doors stand at either end and on
+either side, most of them hanging open on empty rooms.  The air is
+close and smells of dust, mice and old smoke.
 ~
 21 0 0
 D0
+   A bedchamber door stands north.
 ~
 ~
 0 0 2123
 D1
+   The hallway continues east.
 ~
 ~
 0 0 2125
 D2
+   Another bedchamber door stands south.
 ~
 ~
 0 0 2124
 D3
+   The gallery and stair lie west.
 ~
 ~
 0 0 2121
 S
 #2123
 A Bedroom~
-You are in an unfinished room.
+   This was a child's room.  A cot stands beneath a shuttered
+window, and a carved wooden horse lies on its side in the middle
+of the floor where it was dropped.  Small clothes still hang on
+the wall, and a game of jackstones sits half-played on the
+sill.
 ~
 21 0 0
 D2
+   The hallway lies south.
 ~
 ~
 0 0 2122
 S
 #2124
 A Bedroom~
-You are in an unfinished room.
+   A spare bedchamber, its bed stripped to the ticking and its
+wardrobe standing open and empty.  A looking-glass hangs on the
+wall, and the goblins who come here have used it for a target, to
+judge by the cracks that star the glass.
 ~
 21 0 0
 D0
+   The hallway lies north.
 ~
 ~
 0 0 2122
 S
 #2125
 A Hallway~
-You are in an unfinished room.
+   The hallway ends here before a single tall door, its paint
+blistered and its handle bright with handling.  The carpet under
+foot has been worn bare in a path toward it, as though many feet
+had come and gone this way long before the goblins came.
 ~
 21 0 0
 D1
+   The master's door stands east.
 ~
 ~
 0 0 2126
 D3
+   The hallway runs back west.
 ~
 ~
 0 0 2122
 S
 #2126
 The Master Bedroom~
-You are in an unfinished room.
+   The lord's own room.  A great bed stands against the wall,
+heaped with furs in place of its lost hangings, and the wardrobe
+has been burst open and ransacked.  The shutters are drawn to, and
+on the wall where a mirror hung there now dangles a bunch of
+cocks' feathers and small dried hands on a thong.
 ~
 21 0 0
 D3
+   The hallway lies west.
 ~
 ~
 0 0 2125
 S
 #2127
 The Cellar~
-You are in an unfinished room.
+   Cold air settles in the cellar, and the dark smells of
+earth, cask-wood and spilled wine.  Racks line one wall, most of
+them emptied and their bottles smashed.  A barrel has been
+broached and left tipped in its stand, and the runnels of old wine
+stain the floor black.
 ~
 21 0 0
 D1
+   A hidden door stands east behind the racks.
 ~
 ~
 0 0 2128
 D4
+   Steps rise to the lounge above.
 ~
 ~
 0 0 2120
 S
 #2128
 A Secret StoreRoom~
-You are in an unfinished room.
+   Behind the racks a false wall swings open on a hidden
+storeroom, walled and shelved with care.  Here the master kept
+what mattered: salted meat in waxed cloth, casks of good brandy, a
+chest of plate wrapped in flannel -- and, forgotten in a corner, a
+bundle of letters tied in ribbon.
 ~
 21 0 0
 D3
+   The cellar lies west.
 ~
 ~
 0 0 2127
 S
 #2129
 Near a Small Cave~
-You are in an unfinished room.
+   The forest thins about a shelf of mossy rock, and in the
+face of the shelf a small cave opens into the dark.  The ground
+before it is tracked and fouled, and a little hoard of stolen
+goods -- a torch, two candlesticks, a doll with a painted face --
+has been tucked beneath a flat stone by the entrance.
 ~
-21 0 0
+21 0 3
 D0
+   The forest closes in to the north.
 ~
 ~
 0 0 2142
 D1
+   A low cave mouth opens east.
 ~
 ~
 0 0 2130
 D2
+   The forest closes in to the south.
 ~
 ~
 0 0 2141
 D3
+   The forest closes in to the west.
 ~
 ~
 0 0 2140
 S
 #2130
 A Small Cave~
-You are in an unfinished room.
+   The cave is narrow and low, its walls sweating with damp.
+Roots of the trees above have pushed through the roof and hang
+like whips.  Bones of rabbits and crows lie scattered about,
+cracked open for the marrow.
 ~
 21 0 0
 D1
+   The passage continues eastward.
 ~
 ~
 0 0 2131
 D3
+   Daylight shows at the cave mouth west.
 ~
 ~
 0 0 2129
 S
 #2131
 A Small Cave~
-You are in an unfinished room.
+   Here the passage forks, one way running deeper northward and
+another descending south into a colder dark.  Water drips
+somewhere out of sight with a slow, patient sound, and the walls
+show the scrapes of many small claws.
 ~
 21 0 0
 D0
+   The passage runs north.
 ~
 ~
 0 0 2133
 D2
+   A colder dark lies south.
 ~
 ~
 0 0 2132
 D3
+   The passage runs back west.
 ~
 ~
 0 0 2130
 S
 #2132
 A Small Cave~
-You are in an unfinished room.
+   The passage ends in a round chamber floored with soft, dry
+sand.  A cache has been made here: stolen goods stacked against
+the wall under a skin, among them silver spoons, a lady's slipper
+and a bolt of manor linen gone grey with damp.
 ~
 21 0 0
 D0
+   The fork of the passage lies north.
 ~
 ~
 0 0 2131
 S
 #2133
 A Small Cave~
-You are in an unfinished room.
+   A pocket in the rock where the ceiling dips nearly to the
+floor.  Bats cling to the roof in a shivering cluster and their
+droppings mound beneath.  Their bright eyes wake as your light
+touches them, and the cluster stirs with a dry whisper of
+leather.
 ~
 21 0 0
 D2
+   The fork of the passage lies south.
 ~
 ~
 0 0 2131
 S
 #2134
 Beside a Steep Rocky Slope~
-You are in an unfinished room.
+   Here the forest breaks against an outcrop of grey stone that
+rises steeply out of the trees.  Lichen stains the rock in rings
+of green and gold, and a faint path climbs northward toward its
+foot.  On every other side the dark trees close in again.
 ~
-21 0 0
+21 0 3
 D0
+   The foot of the slope lies north.
 ~
 ~
 0 0 2135
 D1
+   The GloomWood stretches away east.
 ~
 ~
 0 0 2139
 D2
+   Dark paths run off to the south.
 ~
 ~
 0 0 2140
 D3
+   The GloomWood stretches away west.
 ~
 ~
 0 0 2141
 S
 #2135
 The Foot of a Rocky Slope~
-You are in an unfinished room.
+   The slope rises above you in a tumble of broken slabs,
+seamed with scrub and the roots of pines clinging in the cracks.
+Loose stone clatters away underfoot at every step, and above, the
+crag juts against a sky the colour of pewter.
 ~
-21 0 0
+21 0 4
 D2
+   The forest floor lies south.
 ~
 ~
 0 0 2134
 D4
+   The slope climbs steeply upward.
 ~
 ~
 0 0 2136
 S
 #2136
 Ascending a Rocky Slope~
-You are in an unfinished room.
+   You climb a rough stair of shelving rock, leaning on your
+hands as often as your feet.  Wind combs through the stunted pines
+below, and the whole black sea of the GloomWood spreads out
+beneath you, bound at its edges by the glint of a river.
 ~
-21 0 0
+21 0 4
 D4
+   The slope climbs higher still.
 ~
 ~
 0 0 2137
 D5
+   The slope falls away downward.
 ~
 ~
 0 0 2135
 S
 #2137
 The Top of a Rocky Slope~
-You are in an unfinished room.
+   The crag's crown is bare stone worn smooth by weather.  From
+here you can see the forest rolling away on every side, the
+manor's chimneys a grey finger to the south, and the river winding
+bright between the trees.  The wind up here never quite stops.
 ~
-21 0 0
+21 0 4
 D1
+   The slope falls away eastward.
 ~
 ~
 0 0 2134
 D3
+   A ledge runs west along the crag.
 ~
 ~
 0 0 2138
 D5
+   The slope drops away beneath you.
 ~
 ~
 0 0 2136
 S
 #2138
 A Crude Nest~
-You are in an unfinished room.
+   A great nest of sticks and twisted boughs sits on a ledge at
+the crag's western edge, wide enough for a sheep.  Moulted
+feathers -- brown, banded, and longer than a man's forearm --
+litter the stone, along with the bones of hares and a fawn's skull
+picked clean.
 ~
-21 0 0
+21 0 4
 D1
+   The crag's crown lies east.
 ~
 ~
 0 0 2137
@@ -717,39 +951,129 @@ D3
 S
 #2143
 Diving in the River~
-You are in an unfinished room.
+   You are under the river, where the current has dug a deep
+pool below the bank.  The water is cold and green-dark, shot with
+shifting bars of light from above, and the silt swirls up at every
+stroke.  A channel of sorts runs away eastward along the bottom.
 ~
-21 0 0
+21 0 6
+D1
+   The drowned channel runs east.
+~
+
+~
+0 0 2144
+D4
+   The surface of the pool glimmers overhead.
+~
+
+~
+0 0 2155
 S
 #2144
 Diving in the River~
-You are in an unfinished room.
+   The bed of the river slopes away here into deeper, colder
+water.  Fine silt clouds about your limbs, and a sunken branch,
+silvered and waterlogged, lies half-buried across the way.  The
+channel bends southward.
 ~
-21 0 0
+21 0 6
+D2
+   The channel runs on to the south.
+~
+
+~
+0 0 2145
+D3
+   The pool lies back west.
+~
+
+~
+0 0 2143
 S
 #2145
 Diving in the River~
-You are in an unfinished room.
+   The floor of the pool shelves downward here into a
+green-black gloom.  Your ears fill with the pressure of the water
+and the chatter of the current overhead.  Below, something pale
+and round gleams faintly among the stones.
 ~
-21 0 0
+21 0 6
+D0
+   The channel runs back north.
+~
+
+~
+0 0 2144
+D5
+   The water darkens and deepens below.
+~
+
+~
+0 0 2146
 S
 #2146
 Diving in the River~
-You are in an unfinished room.
+   You are deep under the river now, where the light from above
+is only a dim shimmer and the cold presses in.  Weeds wave from
+the bottom, long and brown, catching at wrists and ankles as you
+pass.  The channel runs on eastward.
 ~
-21 0 0
+21 0 6
+D1
+   The channel runs on eastward.
+~
+
+~
+0 0 2147
+D4
+   The shelf of the pool rises above.
+~
+
+~
+0 0 2145
 S
 #2147
 Diving in the River~
-You are in an unfinished room.
+   Here the bed of the river is strewn with the wreckage of a
+small boat: a rusted band of iron, a rowlock, and ribs of blackened
+timber standing out of the silt like the carcass of a fish.  The
+bottom rises toward the south.
 ~
-21 0 0
+21 0 6
+D2
+   The bed rises toward the south.
+~
+
+~
+0 0 2148
+D3
+   The deep channel lies back west.
+~
+
+~
+0 0 2146
 S
 #2148
 Diving in the River~
-You are in an unfinished room.
+   The channel comes up under the far bank, where the water
+runs shallow and quick over gravel.  Minnows scatter from your
+hand, and above you the surface trembles in a bright, broken
+ceiling that promises air.
 ~
-21 0 0
+21 0 6
+D0
+   The drowned channel lies back north.
+~
+
+~
+0 0 2147
+D4
+   Bright air shivers overhead.
+~
+
+~
+0 0 2164
 S
 #2149
 GloomWood Forest~
@@ -796,24 +1120,31 @@ D2
 S
 #2151
 GloomWood Forest~
-You are in an unfinished room.
+   Large, dark trees grow in this area, their claw-like branches
+reaching across the sky, shredding sunlight as it falls fleecily to
+earth.  A deep resounding hoot emits from a nested hollow high
+overhead.  A large tree, possibly centuries old, is growing nearby.
+The creepy forest goes on to the north, east and south of you.
 ~
 21 0 0
 D0
+   Dark trees stand thick to the north.
 ~
 ~
 0 0 2140
 D1
+   Dark trees stand thick to the east.
 ~
 ~
 0 0 2149
 D2
+   Dark trees stand thick to the south.
 ~
 ~
 0 0 2168
 S
 #2152
-An unfinished room~
+GloomWood Forest X~
    Large, dark trees grow in this area, their claw-like branches reaching
 across the sky, shredding sunlight as it falls fleecily to earth.  A cacaphony
 of crowing bursts into existence as you enter this area.  The birds screach
@@ -874,40 +1205,60 @@ D3
 S
 #2155
 On a Gently Flowing River~
-You are in an unfinished room.
+   The river spreads into a wide, slow pool here, dark and deep
+enough to hide its own bottom.  The banks are steep and hung with
+roots, and the forest leans over the water so closely that its
+branches trail in the current.  The water deepens toward the
+middle of the pool.
 ~
-21 0 0
+21 0 6
 D1
+   A wooded bank rises to the east.
 ~
 ~
 0 0 2159
 D2
+   The river runs on to the south.
 ~
 ~
 0 0 2166
 D3
+   The river runs on to the west.
 ~
 ~
 0 0 2154
+D5
+   The pool's green depths fall away beneath you.
+~
+
+~
+0 0 2143
 S
 #2156
 On a Gently Flowing River~
-You are in an unfinished room.
+   The river runs quick and cold between the trees here,
+chattering over a bed of pale gravel.  Steep banks of black mud
+rise on either side, scored by the slides of otters, and fallen
+trunks bridge the water at unlikely angles.
 ~
-21 0 0
+21 0 6
 D0
+   The river runs on northward.
 ~
 ~
 0 0 2149
 D1
+   The river runs on eastward.
 ~
 ~
 0 0 2157
 D2
+   The river runs on southward.
 ~
 ~
 0 0 2160
 D3
+   The river runs on westward.
 ~
 ~
 0 0 2168
@@ -941,22 +1292,29 @@ D3
 S
 #2158
 On a Gently Flowing River~
-You are in an unfinished room.
+   The current quickens here, drawing the river between sunken
+stones in a long hissing riffle.  Spray hangs in the air, and every
+stone below the surface wears a coat of slick green weed.  The
+water is waist-deep at best, and shockingly cold.
 ~
-21 0 0
+21 0 6
 D0
+   The river runs on northward.
 ~
 ~
 0 0 2154
 D1
+   White water marks the river to the east.
 ~
 ~
 0 0 2166
 D2
+   The river runs on southward.
 ~
 ~
 0 0 2162
 D3
+   The river runs on westward.
 ~
 ~
 0 0 2157
@@ -1009,22 +1367,30 @@ D3
 S
 #2161
 On a Gently Flowing River~
-You are in an unfinished room.
+   The river winds slowly here through a drowned corner of the
+forest, its water stained the colour of strong tea.  Fallen leaves
+ride the current in quiet fleets, gathering in the eddies beneath
+the banks.  Something big rolls out in the middle distance, and the
+rings spread wide before they fade.
 ~
-21 0 0
+21 0 6
 D0
+   The river runs on northward.
 ~
 ~
 0 0 2157
 D1
+   The river runs on eastward.
 ~
 ~
 0 0 2162
 D2
+   The river runs on southward.
 ~
 ~
 0 0 2169
 D3
+   The river runs on westward.
 ~
 ~
 0 0 2160
@@ -1079,21 +1445,34 @@ D3
 S
 #2164
 On a Gently Flowing River L~
-You are in an unfinished room.
+   The river bends at this place, running shallow and broad
+over gravel beds.  Willows crowd both banks, their withies
+hanging in the water, and the light comes down in coins through
+the leaves.  A kingfisher's blue flash passes downstream and is
+gone.
 ~
-21 0 0
+21 0 6
 D0
+   The river runs on northward.
 ~
 ~
 0 0 2162
 D1
+   A wooded bank rises to the east.
 ~
 ~
 0 0 2142
 D3
+   The river runs on westward.
 ~
 ~
 0 0 2169
+D5
+   Gravel glimmers in the shallows below.
+~
+
+~
+0 0 2148
 S
 #2165
 GloomWood Forest~
@@ -1207,88 +1586,120 @@ S
 T 2190
 #2170
 A Dank Cave~
-You are in an unfinished room.
+   The cave mouth opens behind you to the grey light of the
+forest, and the floor slopes down into a wet dark.  Water stands
+in the hollows of the rock, and the drip of it echoes somewhere
+ahead.  The smell is of cold stone and standing water.
 ~
 21 0 0
 D0
+   Grey daylight shows at the cave mouth.
 ~
 ~
 0 0 2100
 D2
+   The cave descends into darkness.
 ~
 ~
 0 0 2171
 S
 #2171
 A Dark Cave~
-You are in an unfinished room.
+   The passage widens into a rough chamber where three ways
+part.  The rock here is slick with seepage, and a film of white
+mineral scum marks the waterline of some older flood.  Your light
+reaches only a little way into any of them.
 ~
 21 0 0
 D0
+   The cave mouth lies north.
 ~
 ~
 0 0 2170
 D1
+   A narrow passage runs east.
 ~
 ~
 0 0 2173
 D2
+   A low passage runs south.
 ~
 ~
 0 0 2172
 S
 #2172
 A Dark Cave~
-You are in an unfinished room.
+   The passage ends at a wall of stone furred with white mould.
+Something has denned here: the floor is heaped with dry leaves and
+the wall bears long parallel scratches at the height of a good
+shoulder.  The smell of the animal is still strong.
 ~
 21 0 0
 D0
+   The chamber lies back north.
 ~
 ~
 0 0 2171
 S
 #2173
 A Dark Cave~
-You are in an unfinished room.
+   The rock narrows here into a taller, thinner passage, its
+walls close enough to touch at once.  Water runs down one face in
+a thin cold thread, and the sound of it fills the passage with a
+thin whispering.
 ~
 21 0 0
 D2
+   The passage descends southward.
 ~
 ~
 0 0 2174
 D3
+   The chamber lies back west.
 ~
 ~
 0 0 2171
 S
 #2174
 A Dark Cave~
-You are in an unfinished room.
+   The passage ends in a low chamber where a pool has gathered
+in a bowl of rock, black and utterly still.  Cave crickets tick
+somewhere in the dark, and every sound you make comes back to you
+twice off the wet stone.
 ~
 21 0 0
 D0
+   The narrow passage lies back north.
 ~
 ~
 0 0 2173
 S
 #2175
 The Edge of a Dark Forest~
-You are in an unfinished room.
+   The trees thin here, and the air carries the smell of
+woodsmoke and offal from somewhere close by.  The ground is
+trampled and dunged, and red ribbons hang from the branches, some
+of them fresh, some rotted to rags.  Paths run off in several
+directions, none of them looking safe.
 ~
-21 0 0
+21 0 3
 D0
+   Paths run off northward.
 ~
 ~
 0 0 2180
 D1
+   Paths run off eastward.
 ~
 ~
 0 0 2184
 D2
+   Paths run off southward.
 ~
 ~
 0 0 2190
 D3
+   Paths run off westward.
 ~
 ~
 0 0 2185
@@ -1296,22 +1707,30 @@ S
 T 2196
 #2176
 Near a Dark Forest~
-You are in an unfinished room.
+   A grey light falls between the trunks, and beneath it the
+ground is cut with goblin tracks going every way at once.  Somewhere
+not far off a drum taps and stops, taps and stops, as though
+someone were practising.  Thorn thickets bar the way in more than
+one direction.
 ~
-21 0 0
+21 0 3
 D0
+   Paths run off northward.
 ~
 ~
 0 0 2181
 D1
+   Paths run off eastward.
 ~
 ~
 0 0 2187
 D2
+   Paths run off southward.
 ~
 ~
 0 0 2189
 D3
+   Paths run off westward.
 ~
 ~
 0 0 2182
@@ -1319,14 +1738,26 @@ S
 T 2197
 #2177
 Near a Dark Glade~
-You are in an unfinished room.
+   The forest opens into a small glade where no underbrush
+grows, only a circle of stamped earth ringed by leaning stones.
+Feathers, eggshell and small bones lie scattered about, and the
+bark of every trunk has been notched with the same crude sign, cut
+deep and often.
 ~
-21 0 0
+21 0 3
+D0
+   A hide flap hangs closed in the side of a low hut.
+~
+flap curtain
+~
+1 -1 2191
 D1
+   A path leads east out of the glade.
 ~
 ~
 0 0 2179
 D3
+   A path leads west out of the glade.
 ~
 ~
 0 0 2188
@@ -1334,22 +1765,29 @@ S
 T 2198
 #2178
 The Edge of a Dark Forest~
-You are in an unfinished room.
+   Deadfalls and bramble choke the spaces between the trees
+here, and a narrow thread of a path winds among them.  Red ribbons
+are tied at intervals along the way, and each has a knot in it --
+some many knots, some only one.
 ~
-21 0 0
+21 0 3
 D0
+   Paths run off northward.
 ~
 ~
 0 0 2179
 D1
+   Paths run off eastward.
 ~
 ~
 0 0 2190
 D2
+   Paths run off southward.
 ~
 ~
 0 0 2188
 D3
+   Paths run off westward.
 ~
 ~
 0 0 2180
@@ -1357,315 +1795,463 @@ S
 T 2199
 #2179
 Near a Dark Forest~
-You are in an unfinished room.
+   The path here runs between the huts of the camp and the darker
+trees beyond.  A hide has been strung between two trunks as a
+windbreak, and behind it lie the leavings of a meal: cracked
+bones, a split wooden bowl and a pool of grease gone white.
 ~
-21 0 0
+21 0 2
 D0
+   A hut stands north of the path.
 ~
 ~
 0 0 2184
 D1
+   The path runs east.
 ~
 ~
 0 0 2181
 D2
+   Paths run off southward.
 ~
 ~
 0 0 2178
 D3
+   A dark glade lies west.
 ~
 ~
 0 0 2177
 S
 #2180
 A Faint Dirt Path~
-You are in an unfinished room.
+   A path of beaten earth, pale with use, winds between the
+trunks.  The trees here have been trimmed of their lower branches,
+and the stumps show the work of crude axes.  Red ribbons flutter at
+the height of a man's eye, marking the way.
 ~
-21 0 0
+21 0 2
 D0
+   The path runs north.
 ~
 ~
 0 0 2182
 D1
+   The path runs east.
 ~
 ~
 0 0 2178
 D2
+   The path runs south.
 ~
 ~
 0 0 2175
 D3
+   The path runs west.
 ~
 ~
 0 0 2181
 S
 #2181
 A Dirt Path~
-You are in an unfinished room.
+   The path is worn knee-deep in places, and the banks on
+either side are heaped with camp refuse: broken spear-shafts,
+cracked pots, and a scatter of small bones picked very clean.
 ~
-21 0 0
+21 0 2
 D0
+   The path runs north.
 ~
 ~
 0 0 2183
 D1
+   The path runs east.
 ~
 ~
 0 0 2180
 D2
+   The path runs south.
 ~
 ~
 0 0 2176
 D3
+   The path runs west.
 ~
 ~
 0 0 2179
 S
 #2182
 Outside a Hut~
-You are in an unfinished room.
+   A war hut of bent poles and hide stands here, its covering
+stained with old smoke and sewn with clumsy patches.  A rack of
+spears leans against the doorpost, and the ground before it has
+been patted hard and swept by someone's diligent hand.
 ~
-21 0 0
+21 0 2
 D0
+   The path runs north.
 ~
 ~
 0 0 2185
 D1
+   Paths run off eastward.
 ~
 ~
 0 0 2176
 D2
+   The path runs south.
 ~
 ~
 0 0 2180
 D3
+   The path runs west.
 ~
 ~
 0 0 2183
 S
 #2183
 A Dirt Path~
-You are in an unfinished room.
+   Paths cross here in a trampled open space.  A pole has been
+set in the ground, hung about with the skulls of forest creatures
+and one that is harder to name, and the turf for a pace about its
+base is worn to mud.
 ~
-21 0 0
+21 0 2
 D0
+   The path runs north toward the great fire.
 ~
 ~
 0 0 2186
 D1
+   A hut stands east of the crossing.
 ~
 ~
 0 0 2182
 D2
+   The path runs south.
 ~
 ~
 0 0 2181
 D3
+   A hut stands west of the crossing.
 ~
 ~
 0 0 2184
 S
 #2184
 Outside a Hut~
-You are in an unfinished room.
+   This hut has been thrown together from bark and wattle, and
+its roof sags under a weight of moss.  Hooks of bone stand out
+from the doorframe, hung with strips of meat that have been left
+far too long.  The flies here are thick enough to hum.
 ~
-21 0 0
+21 0 2
 D0
+   The path runs north.
 ~
 ~
 0 0 2187
 D1
+   The path runs east.
 ~
 ~
 0 0 2183
 D2
+   Paths run off southward.
 ~
 ~
 0 0 2179
 D3
+   Paths run off westward.
 ~
 ~
 0 0 2175
 S
 #2185
 Outside a Hut~
-You are in an unfinished room.
+   A low hut squats among the trees here, half sunk into the
+earth and roofed with turf gone green.  A tethering post stands
+nearby, about which the ground has been churned to mud by whatever
+is kept close, and the splintered rail has been gnawed.
 ~
-21 0 0
+21 0 2
 D0
+   The path runs north.
 ~
 ~
 0 0 2188
 D1
+   Paths run off eastward.
 ~
 ~
 0 0 2175
 D2
+   The path runs south.
 ~
 ~
 0 0 2182
 D3
+   The great fire glows west.
 ~
 ~
 0 0 2186
 S
 #2186
 A Large CampFire~
-You are in an unfinished room.
+   A great fire has burned here many times over: the earth is
+scorched to a wide black ring, heaped about with stones cracked by
+the heat.  Iron spits and a battered helm turned kettle lie among
+the ash, and a totem of stacked skulls watches from a post nearby.
+The stumps of the trees stand in a ring, felled to clear the
+ground.
 ~
-21 0 0
+21 0 2
 D0
+   The chieftain's hall stands north.
 ~
 ~
 0 0 2189
 D1
+   A turf-roofed hut stands east.
 ~
 ~
 0 0 2185
 D2
+   The path runs south.
 ~
 ~
 0 0 2183
 D3
+   A hut stands west.
 ~
 ~
 0 0 2187
 S
 #2187
 Outside a Hut~
-You are in an unfinished room.
+   This hut has been built against the bole of a great oak, its
+roof thatched with green boughs.  Someone has tried to carve faces
+into the bark above the doorway, all of them lopsided, and a
+wind-chime of bones clicks dully in the branches.
 ~
-21 0 0
+21 0 2
 D0
+   The path runs north.
 ~
 ~
 0 0 2190
 D1
+   The great fire burns east.
 ~
 ~
 0 0 2186
 D2
+   The path runs south.
 ~
 ~
 0 0 2184
 D3
+   Paths run off westward.
 ~
 ~
 0 0 2176
 S
 #2188
 Outside a Hut~
-You are in an unfinished room.
+   A round hide hut stands here, larger than its neighbours and
+surrounded by a fence of sharpened stakes driven close together.
+The gate of the little fence is tied shut with a strip of rawhide
+in a knot that has been undone and tied again many times.
 ~
-21 0 0
+21 0 2
 D0
+   Paths run off northward.
 ~
 ~
 0 0 2178
 D1
+   The dark glade lies east.
 ~
 ~
 0 0 2177
 D2
+   The path runs south.
 ~
 ~
 0 0 2185
 D3
+   The chieftain's hall stands west.
 ~
 ~
 0 0 2189
 S
 #2189
 Outside a Large Hut~
-You are in an unfinished room.
+   The chieftain's hall dwarfs the other huts of the camp: a
+long ridge of heavy poles roofed with hides and turves, its gable
+posts crowned with antlers.  Wolf pelts flank the door flap, and
+stools set about the entrance show that guards sit here of a
+night.  The campfire burns close by to the south.
 ~
-21 0 0
+21 0 2
 D0
+   Paths run off northward.
 ~
 ~
 0 0 2176
 D1
+   A fenced hide hut stands east.
 ~
 ~
 0 0 2188
 D2
+   The great fire burns south.
 ~
 ~
 0 0 2186
 D3
+   A burnt-over hut stands west.
 ~
 ~
 0 0 2190
 S
 #2190
 Outside a Hut~
-You are in an unfinished room.
+   This hut has burned at some time and been rebuilt with
+whatever came to hand, so that its walls are a patchwork of bark,
+shields and a couple of doors stolen from somewhere finer.  Ash
+seeps from the joints of the roof, and the smell of old char
+hangs about it.
 ~
-21 0 0
+21 0 2
 D0
+   Paths run off northward.
 ~
 ~
 0 0 2175
 D1
+   The chieftain's hall stands east.
 ~
 ~
 0 0 2189
 D2
+   The path runs south.
 ~
 ~
 0 0 2187
 D3
+   Paths run off westward.
 ~
 ~
 0 0 2178
 S
 #2191
 Within a Hut~
-You are in an unfinished room.
+   The inside of the hut is dim and thick with smoke that seeps
+through the hide roof and settles in the folds of the walls.
+Sleeping mats of woven reed lie about a small firepit, and a rack
+of crude charms -- knucklebones, knots of hair, a crow's foot set
+in wax -- hangs above the door.
 ~
 21 0 0
+D2
+   The hide flap of the door leads out to the glade.
+~
+flap curtain
+~
+1 -1 2177
 S
 T 2188
 #2193
 Within a Hut~
-You are in an unfinished room.
+   This hut reeks.  A frame of green poles stands in the middle
+of the floor with hides stretched upon it, some of them still
+showing hair, and beneath it a trough holds whatever is left of
+the tanning bath.  The flies here have ideas about property of
+their own.
 ~
 21 0 0
 S
 #2194
 Within a Hut~
-You are in an unfinished room.
+   Haunches of venison and sides of wild pig hang from the roof
+poles on bark hooks, and baskets of stolen grain stand about the
+walls.  A domed clay oven occupies one corner, its floor black
+with use, and a crock of sour beer sits bunged in another.
 ~
 21 0 0
 S
 #2195
 Within a Hut~
-You are in an unfinished room.
+   A hearth of puddled clay glows faintly at the back of this
+hut, with a hide bellows and a little anvil of iron set on a stump
+beside it.  Lumps of bad iron, a coil of twisted arrowheads and a
+half-finished spearhead litter the workbench.
 ~
 21 0 0
 S
 #2196
 Within a Hut~
-You are in an unfinished room.
+   Dried herbs and bundles of feathers hang in every corner of
+this hut, and the air is sharp with them.  A bowl of some dark
+residue sits in the middle of the floor, ringed about with small
+stones, and the walls have been painted with spirals in red
+ochre.
 ~
 21 0 0
 S
 #2197
 Within a Large Hut~
-You are in an unfinished room.
+   The chieftain's hall is wide enough for a dozen fires, though
+only the central pit burns now.  Benches of split logs flank a
+long hearthstone, wolf pelts cover the floor, and the roof poles
+are hung with shields, drums and the horns of beasts no one in
+this forest has a right to have killed.
 ~
 21 0 0
+D0
+   A hide curtain hangs across the north end of the hall.
+~
+curtain hide
+~
+1 -1 2198
+D1
+   A mound of faced earth rises at the east end.
+~
+
+~
+0 0 2199
 S
 #2198
 Near a Large Bed~
-You are in an unfinished room.
+   A great bed stands at the back of the chamber, heaped with
+furs and blankets stolen from a hundred better houses.  The manor's
+silver candlesticks burn on a shield turned side-table, and a
+strong bound chest sits at the foot of the bed, its lock scratched
+and gouged by many patient hands.
 ~
 21 0 0
+D2
+   A hide curtain hangs across the south end of the chamber.
+~
+curtain hide
+~
+1 -1 2197
 S
 #2199
 A Mediocre Throne Room~
-You are in an unfinished room.
+   A mound of packed earth has been raised at the end of the
+chamber and faced with slabs of stolen flagstone.  Upon it stands
+the chieftain's seat: a manor chair lashed to a second chair, its
+legs bound in wolf hide and its back set with a crown of boar
+tusks.  The effect is less than majestic, but the tusks are
+real.
 ~
 21 0 0
+D3
+   The long hall of the great hut lies west.
+~
+
+~
+0 0 2197
 S
 $~
