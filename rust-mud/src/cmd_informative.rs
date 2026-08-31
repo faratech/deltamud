@@ -557,6 +557,37 @@ fn look_at_char(g: &mut GameState, i: CharId, ch: CharId) {
 
     diag_char_to_char(g, i, ch);
 
+    // C act.informative.c:285-299: mounted-ness readout on look (#330).
+    {
+        let (riding, ridden_by, i_room) = g
+            .get_char(i)
+            .map(|c| (c.riding, c.ridden_by, c.in_room))
+            .unwrap_or((None, None, None));
+        let same = |other: Option<CharId>| -> bool {
+            match (other, i_room) {
+                (Some(o), Some(r)) => g.get_char(o).and_then(|c| c.in_room) == Some(r),
+                _ => false,
+            }
+        };
+        if same(riding) {
+            if riding == Some(ch) {
+                act(g, "$e is mounted on you.", false, i, None, ActArg::Char(ch), To::Vict);
+            } else if let Some(r) = riding {
+                let name = crate::act::pers(g, ch, r);
+                let line = format!("$e is mounted upon {}.", name);
+                act(g, &line, false, i, None, ActArg::Char(ch), To::Vict);
+            }
+        } else if same(ridden_by) {
+            if ridden_by == Some(ch) {
+                act(g, "You are mounted upon $m.", false, i, None, ActArg::Char(ch), To::Vict);
+            } else if let Some(r) = ridden_by {
+                let name = crate::act::pers(g, ch, r);
+                let line = format!("$e is mounted by {}.", name);
+                act(g, &line, false, i, None, ActArg::Char(ch), To::Vict);
+            }
+        }
+    }
+
     // Citizen/level title line (PCs only).
     let (is_npc, level, sex, race, class, home) = match g.get_char(i) {
         Some(c) => (
@@ -687,6 +718,13 @@ fn list_all_char(g: &GameState, i: CharId, ch: CharId) -> String {
                 if c.affect_flags & AFF_INVISIBLE != 0 {
                     buf.push('*');
                 }
+                // C act.informative.c:397-398: the player's active quest
+                // target is marked '(TARGET) ' in the room list (#330).
+                if g.get_char(ch).map(|v| v.quest_mob).unwrap_or(0) != 0
+                    && g.get_char(ch).map(|v| v.quest_mob).unwrap_or(0) == c.nr
+                {
+                    buf.push_str("(TARGET) ");
+                }
                 if g.get_char(ch)
                     .map(|v| v.affect_flags & AFF_DETECT_ALIGN != 0)
                     .unwrap_or(false)
@@ -697,9 +735,13 @@ fn list_all_char(g: &GameState, i: CharId, ch: CharId) -> String {
                         buf.push_str("(Blue Aura) ");
                     }
                 }
+                // C act.informative.c:383: NPC long descriptions render in
+                // yellow (CCYEL) (#330).
+                buf.push_str("&Y");
                 buf.push_str(long);
                 // sanctuary / convergence / autus / blind suffixes
                 push_aff_glows(&mut buf, c, hssh(c.player.sex));
+                buf.push_str("&n");
                 return buf;
             }
         }
@@ -747,8 +789,20 @@ fn list_all_char(g: &GameState, i: CharId, ch: CharId) -> String {
     }
 
     // Position / fighting.
+    // C act.informative.c:424/454-460: a ridden NPC skips the normal
+    // position phrase and reports " is here, mounted upon <rider>." (#330)
+    let ridden_override = c
+        .ridden_by
+        .map(|r| g.get_char(r).and_then(|x| x.in_room) == c.in_room)
+        .unwrap_or(false);
     if c.position != Position::Fighting {
-        buf.push_str(POSITIONS[c.position as usize]);
+        if ridden_override {
+            let r = c.ridden_by.unwrap();
+            let name = pers(g, ch, r);
+            buf.push_str(&format!(" is here, mounted upon {}.", name));
+        } else {
+            buf.push_str(POSITIONS[c.position as usize]);
+        }
     } else if let Some(opp) = c.fighting {
         buf.push_str(" is here, fighting ");
         if opp == ch {

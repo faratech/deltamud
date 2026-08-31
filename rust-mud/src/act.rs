@@ -53,7 +53,7 @@ fn hmhr(g: &GameState, cid: CharId) -> &'static str {
 }
 
 /// PERS(ch, vict): visible name, else "A Mystical Being"/"someone".
-fn pers(g: &GameState, viewer: CharId, cid: CharId) -> String {
+pub(crate) fn pers(g: &GameState, viewer: CharId, cid: CharId) -> String {
     if g.can_see(viewer, cid) {
         if let Some(ch) = g.get_char(cid) {
             return if ch.is_npc {
