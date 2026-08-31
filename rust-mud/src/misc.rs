@@ -775,7 +775,15 @@ pub fn do_tlist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     if found == 0 {
         out.push_str("No triggers found in that range.\r\n");
     }
-    g.send_to_char(ch, &out);
+    // C dg_scripts.c:2407 do_tlist ends with page_string(ch->desc, ...).
+    match ch_desc(g, ch) {
+        Some(conn) => crate::modify::page_string(g, conn, &out),
+        None => g.send_to_char(ch, &out),
+    }
+}
+
+fn ch_desc(g: &GameState, ch: CharId) -> Option<crate::types::ConnId> {
+    g.get_char(ch).and_then(|c| c.desc)
 }
 
 pub fn do_tstat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
