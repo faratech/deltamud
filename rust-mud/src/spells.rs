@@ -451,6 +451,13 @@ pub fn spell_summon(
             ch,
             &format!("You failed because {} has summon protection on.\r\n", vname),
         );
+        // C spells.c:250-252: immortal audit trail for blocked summons (#249).
+        crate::syslog::mudlog(
+            g,
+            &format!("{} failed summoning {} to {}.", caster_name, vname, room_name),
+            crate::syslog::BRF,
+            LVL_IMMORT,
+        );
         return;
     }
 
@@ -748,7 +755,12 @@ pub fn spell_identify(
         );
         g.send_to_char(
             ch,
-            &format!("Weight: {}, Value: {}, Rent: {}\r\n", weight, cost, rent),
+            &format!(
+                "Weight: {}, Value: {}, Rent: {}\r\n",
+                crate::combat::numdisplay(weight as i64),
+                crate::combat::numdisplay(cost as i64),
+                crate::combat::numdisplay(rent as i64)
+            ),
         );
         let viewer_level = g.get_char(ch).map(|c| c.player.level).unwrap_or(1);
         g.send_to_char(
@@ -907,16 +919,18 @@ fn identify_quality_line(curr_slots: i32, total_slots: i32, viewer_level: Level)
             curr_slots, total_slots, condition
         )
     } else {
+        // C spells.c:434-482 uses a <=10 ladder; the old 0..=19 ranges
+        // shifted every bucket by ~9 points (#246).
         let label = match condition {
-            0..=19 => "Extremley Poor",
-            20..=29 => "Poor",
-            30..=39 => "Fair",
-            40..=49 => "Moderate",
-            50..=59 => "Good",
-            60..=69 => "Very Good",
-            70..=79 => "Excellent",
-            80..=89 => "Superior",
-            90..=99 => "Extremely Superior",
+            0..=10 => "Extremley Poor",
+            11..=20 => "Poor",
+            21..=30 => "Fair",
+            31..=40 => "Moderate",
+            41..=50 => "Good",
+            51..=60 => "Very Good",
+            61..=70 => "Excellent",
+            71..=80 => "Superior",
+            81..=90 => "Extremely Superior",
             _ => "Brand New",
         };
         format!("Quality: {}\r\n", label)
@@ -1370,9 +1384,18 @@ pub fn spell_portal(
             o.values[0] = 1;
             o.values[1] = v_room as i32; // value[1] = destination rnum
             o.timer = timer;
-            o.action_description = Some(format!(
-                "Through the mists of the portal, you can faintly see {}",
-                v_room_name
+            // C spells.c:873-879: the destination hint is an extra
+            // description (keyword = portal name), which is what 'look
+            // portal' resolves; action_description is invisible to look
+            // (#247).
+            // keyword = the portal object's own name (spells.c:875).
+            let kw = o.name.clone();
+            o.ex_descriptions.push((
+                kw,
+                format!(
+                    "Through the mists of the portal, you can faintly see {}",
+                    v_room_name
+                ),
             ));
         }
         g.obj_to_room(p1, ch_room);
@@ -1406,9 +1429,13 @@ pub fn spell_portal(
             o.values[0] = 1;
             o.values[1] = ch_room as i32;
             o.timer = timer;
-            o.action_description = Some(format!(
-                "Through the mists of the portal, you can faintly see {}",
-                ch_room_name
+            let kw = o.name.clone();
+            o.ex_descriptions.push((
+                kw,
+                format!(
+                    "Through the mists of the portal, you can faintly see {}",
+                    ch_room_name
+                ),
             ));
         }
         g.obj_to_room(p2, v_room);

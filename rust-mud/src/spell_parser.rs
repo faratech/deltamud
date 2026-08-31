@@ -1141,10 +1141,11 @@ fn raw_spell_name(spellnum: i32) -> &'static str {
 /// find_skill_num(name) (spell_parser.c): abbreviation / multi-word match of
 /// `name` against spells[]. Returns the spell/skill index, or -1.
 pub fn find_skill_num(name: &str) -> i32 {
+    // C spell_parser.c:956: 'cast \'\'' reaches find_skill_num with an empty
+    // name whose is_abbrev("", entry) matches the FIRST entry (armor), then
+    // fails the GET_SKILL check with 'You are unfamiliar with that spell.'
+    // The early bail made Rust print 'Cast what?!?' instead (#256).
     let name = name.trim();
-    if name.is_empty() {
-        return -1;
-    }
     let mut index = 1;
     while index <= TOP_SPELL_INDEX {
         let entry = raw_spell_name(index);

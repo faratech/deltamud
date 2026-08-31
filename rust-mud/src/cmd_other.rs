@@ -3299,7 +3299,11 @@ pub fn do_gen_atm(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
                 );
             }
         }
-        _ => {}
+        _ => {
+            // C spell_parser.c:844-846: unknown magic-item type logs a
+            // SYSERR for the operator (#254).
+            log::error!("SYSERR: Unknown object_type in mag_objectmagic");
+        }
     }
 }
 

@@ -3594,7 +3594,7 @@ pub fn do_wizutil(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
     match subcmd {
         SCMD_REROLL => {
             g.send_to_char(ch, "Rerolled...\r\n");
-            roll_real_abils(g, vict);
+            crate::class::roll_real_abils(g, vict);
             log_line(g, &format!("(GC) {} has rerolled {}.", cname, vname));
             let a = g.get_char(vict).map(|c| c.real_abils).unwrap_or_default();
             g.send_to_char(
@@ -3788,34 +3788,7 @@ fn plr_tog_chk(g: &mut GameState, id: CharId, flag: i64) -> bool {
 /// roll_real_abils (class.c): re-roll a PC's six stats. The exact class-weighted
 /// distribution lives in class.c (not surfaced); use the same 3d6-style spread
 /// CircleMUD's default roll_real_abils produces so the values are sane.
-fn roll_real_abils(g: &mut GameState, id: CharId) {
-    let rolls = |g: &mut GameState| {
-        // 4d6-drop-lowest, like CircleMUD's roll_real_abils.
-        let mut dice = [0i32; 4];
-        for d in dice.iter_mut() {
-            *d = g.rng.number(1, 6);
-        }
-        dice.sort_unstable();
-        (dice[1] + dice[2] + dice[3]) as i8
-    };
-    let s = rolls(g);
-    let i = rolls(g);
-    let w = rolls(g);
-    let d = rolls(g);
-    let c = rolls(g);
-    let ch_ = rolls(g);
-    if let Some(v) = g.get_char_mut(id) {
-        v.real_abils.str = s;
-        v.real_abils.str_add = 0;
-        v.real_abils.intel = i;
-        v.real_abils.wis = w;
-        v.real_abils.dex = d;
-        v.real_abils.con = c;
-        v.real_abils.cha = ch_;
-        v.aff_abils = v.real_abils;
-    }
-    g.affect_total(id);
-}
+
 
 // ===========================================================================
 // do_show
