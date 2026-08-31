@@ -1628,7 +1628,6 @@ fn stop_follower(g: &mut GameState, ch: CharId) {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

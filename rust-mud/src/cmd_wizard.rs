@@ -211,22 +211,22 @@ fn sprintbit(bits: i64, table: &[&str]) -> String {
 /// structs.h order (CON_PLAYING 0 … CON_QDEITY 31).
 fn conn_state_index(state: ConState) -> i32 {
     match state {
-        ConState::Playing => 0,          // CON_PLAYING
-        ConState::Close => 1,            // CON_CLOSE
-        ConState::GetName => 2,          // CON_GET_NAME
-        ConState::ConfirmName => 3,      // CON_NAME_CNFRM
-        ConState::GetOldPassword => 4,   // CON_PASSWORD
-        ConState::GetNewPassword => 5,   // CON_NEWPASSWD
-        ConState::ConfirmPassword => 6,  // CON_CNFPASSWD
-        ConState::GetSex => 7,           // CON_QSEX
-        ConState::GetClass => 8,         // CON_QCLASS
-        ConState::ReadMotd => 9,         // CON_RMOTD
-        ConState::Menu => 10,            // CON_MENU
-        ConState::GetRace => 23,         // CON_QRACE
-        ConState::RollStats => 24,       // CON_QROLLSTATS
-        ConState::GetHometown => 25,     // CON_QHOMETOWN
-        ConState::GetNewbie => 27,       // CON_NEWBIE
-        ConState::GetDeity => 31,        // CON_QDEITY
+        ConState::Playing => 0,         // CON_PLAYING
+        ConState::Close => 1,           // CON_CLOSE
+        ConState::GetName => 2,         // CON_GET_NAME
+        ConState::ConfirmName => 3,     // CON_NAME_CNFRM
+        ConState::GetOldPassword => 4,  // CON_PASSWORD
+        ConState::GetNewPassword => 5,  // CON_NEWPASSWD
+        ConState::ConfirmPassword => 6, // CON_CNFPASSWD
+        ConState::GetSex => 7,          // CON_QSEX
+        ConState::GetClass => 8,        // CON_QCLASS
+        ConState::ReadMotd => 9,        // CON_RMOTD
+        ConState::Menu => 10,           // CON_MENU
+        ConState::GetRace => 23,        // CON_QRACE
+        ConState::RollStats => 24,      // CON_QROLLSTATS
+        ConState::GetHometown => 25,    // CON_QHOMETOWN
+        ConState::GetNewbie => 27,      // CON_NEWBIE
+        ConState::GetDeity => 31,       // CON_QDEITY
     }
 }
 
@@ -1678,7 +1678,11 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
     // C act.wizard.c:1000-1002: mob_index[GET_MOB_RNUM(k)].func ? "Exists" : "None".
     let mob_spec = crate::spec_assign::get_mob_spec(mob_vnum).is_some();
     // C act.wizard.c:908: attack_hit_text[k->mob_specials.attack_type].singular.
-    let attack_type = g.mob_protos.get(&mob_vnum).map(|m| m.attack_type).unwrap_or(0);
+    let attack_type = g
+        .mob_protos
+        .get(&mob_vnum)
+        .map(|m| m.attack_type)
+        .unwrap_or(0);
     let attack_word = constants::ATTACK_HIT_TEXT
         .get(attack_type.clamp(0, constants::ATTACK_HIT_TEXT.len() as i32 - 1) as usize)
         .map(|(s, _)| (*s).to_string())
@@ -1805,8 +1809,14 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
             ch,
             &format!(
                 "Hometown: [{}], Speaks: [{}/{}/{}], (STL[{}]/per[{}]/NSTL[{}]) Clan: [{}]\r\n",
-                hometown, talks[0] as i32, talks[1] as i32, talks[2] as i32, practices, learn_per,
-                nstl, clan
+                hometown,
+                talks[0] as i32,
+                talks[1] as i32,
+                talks[2] as i32,
+                practices,
+                learn_per,
+                nstl,
+                clan
             ),
         );
     }
@@ -7372,7 +7382,11 @@ WorldMap:\n",
             .contains("SpecProc: Exists"));
 
         // Object vnum 20 is the generic portal (ASSIGNOBJ 20 portal).
-        let obj = g.create_obj(Object::new(20, "portal".to_string(), "a shimmering portal".to_string()));
+        let obj = g.create_obj(Object::new(
+            20,
+            "portal".to_string(),
+            "a shimmering portal".to_string(),
+        ));
         g.descriptors.get_mut(&ConnId(1)).unwrap().outbuf.clear();
         g.char_to_room(imm, plain);
         do_stat_object(&mut g, imm, obj);
@@ -7466,7 +7480,8 @@ WorldMap:\n",
         g.zones.push(test_zone(0, 99, "Bob"));
         let builder = connected_player(&mut g, ConnId(1), "Sally", 1);
         g.char_to_room(builder, room);
-        g.mob_protos.insert(1200, mobile_proto(1200, "receptionist", 0));
+        g.mob_protos
+            .insert(1200, mobile_proto(1200, "receptionist", 0));
 
         do_vstat(&mut g, builder, "mob 1200", 0);
 
@@ -7665,10 +7680,7 @@ WorldMap:\n",
         // The original body is re-attached to the returning player's connection.
         assert_eq!(g.get_char(host).unwrap().desc, Some(ConnId(1)));
         assert_eq!(g.get_char(owner).unwrap().desc, None);
-        assert_eq!(
-            g.descriptors.get(&ConnId(1)).unwrap().character,
-            Some(host)
-        );
+        assert_eq!(g.descriptors.get(&ConnId(1)).unwrap().character, Some(host));
         assert_eq!(g.descriptors.get(&ConnId(1)).unwrap().original, None);
     }
 }

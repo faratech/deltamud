@@ -850,12 +850,11 @@ pub fn do_newbie(g: &mut GameState, ch: CharId) {
     }
 }
 
-
 #[cfg(test)]
 mod newbie_tests {
     use super::*;
-    use crate::config::Config;
     use crate::character::Character;
+    use crate::config::Config;
     use crate::object::{ExtraFlags, WearFlags};
     use crate::room::Room;
     use crate::world::ObjectProto;
@@ -888,7 +887,8 @@ mod newbie_tests {
     fn do_newbie_gives_the_guide_and_sets_wimpy_and_recall() {
         let mut g = GameState::new(Config::default());
         let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
-        g.obj_protos.insert(190, object_proto(190, "a players guide"));
+        g.obj_protos
+            .insert(190, object_proto(190, "a players guide"));
         let ch = g.create_char(Character::new_player(
             "Newbie".to_string(),
             Class::Warrior,
@@ -909,7 +909,8 @@ mod newbie_tests {
     #[test]
     fn do_newbie_is_a_no_op_for_an_npc() {
         let mut g = GameState::new(Config::default());
-        g.obj_protos.insert(190, object_proto(190, "a players guide"));
+        g.obj_protos
+            .insert(190, object_proto(190, "a players guide"));
         let mob = g.create_char(Character::new_npc(1));
 
         do_newbie(&mut g, mob);
