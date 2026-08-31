@@ -3,4 +3,413 @@ The Quest Vault~
 Rows of shelves hold the kingdom's greatest treasures.~
 31 1024 0
 S
+#3101
+The Bell Tower Stair~
+   The drowned stair comes up out of the flood into the ground floor of
+a bell tower, and the water runs back down the steps behind you.  The
+walls here are wept green with slime, and the tower's great bell hangs
+below, half-sunk in the flooded nave.~
+31 8 0
+D2
+   The stair descends back out into the open water of the valley.
+~
+~
+0 0 3044
+D5
+   Steps lead down into the flooded narthex of the cloister.
+~
+~
+0 0 3102
+S
+#3102
+The Flooded Narthex~
+   Water stands waist-deep between the pillars here, and the painted
+saints on the walls have been worn to bare plaster at the waterline.
+Doors of rotted oak hang off their hinges at either end of the room.~
+31 8 0
+D4
+   The bell tower stair rises up out of the water to the south.
+~
+~
+0 0 3101
+D0
+   The narthex opens north into the drowned nave.
+~
+~
+0 0 3103
+S
+#3103
+The Drowned Nave~
+   The nave is a great hall of pillars, its floor lost under green
+water and its clerestory windows dark with weed.  The benches have
+floated apart and lie scattered across the flooded aisle.  Somewhere
+out in the dark, water drips from a great height.~
+31 6 0
+D2
+   The flooded narthex lies back south.
+~
+~
+0 0 3102
+D0
+   The water deepens toward the crossing of the church.
+~
+~
+0 0 3104
+D1
+   A side chapel stands east beyond the pillars.
+~
+~
+0 0 3106
+D3
+   The sacristy doors stand open to the west.
+~
+~
+0 0 3105
+S
+#3104
+The Chapel of the Sunken Choir~
+   The choir stalls have rotted to a lattice of black wood, and the
+hymn boards on the wall still carry their lines of notes, legible
+under a skin of green slime.  The water here is shallower, and
+something has been singing, very recently, in the dark above it.~
+31 6 0
+D2
+   The drowned nave lies south beyond the choir stalls.
+~
+~
+0 0 3103
+D0
+   North, the cloister garth lies open beneath the sky.
+~
+~
+0 0 3107
+S
+#3105
+The Sacristy of Rusted Relics~
+   Vestments hang in rotted rows along the wall, and the reliquary
+cases have been pried open and left standing.  Whatever the relics
+were, the water has had them; only the silver mountings remain, black
+with weed.~
+31 8 0
+D1
+   The drowned nave lies east through the sacristy doors.
+~
+~
+0 0 3103
+D0
+   North, an archway opens onto the crossing.
+~
+~
+0 0 3106
+S
+#3106
+The Crossing of Green Water~
+   The nave, transept and cloister meet here under a crossing tower
+whose ceiling is lost in darkness.  The water moves in a slow circle,
+turning the flood-weed on the flagstones with it.  Arches lead off in
+every direction, and a garth of drowned garden lies north.~
+31 6 0
+D3
+   The drowned nave stretches away to the west.
+~
+~
+0 0 3103
+D2
+   The sacristy lies south beyond the archway.
+~
+~
+0 0 3105
+D0
+   The refectory of the brothers stands north.
+~
+~
+0 0 3108
+D1
+   East, a colonnade of saints runs out along the transept.
+~
+~
+0 0 3109
+S
+#3107
+The Cloister Garth~
+   The garth is open to the sky at last, and rain falls softly into a
+shallow lake where the cloister garden used to be.  Cress and reeds
+have taken the beds, and a stone fountain pours water that is no
+cleaner than the flood it stands in.~
+31 0 2
+D2
+   The chapel of the sunken choir lies south across the garth.
+~
+~
+0 0 3104
+D1
+   The refectory building stands east beyond the flooded beds.
+~
+~
+0 0 3108
+S
+#3108
+The Refectory of the Brothers~
+   Long tables run the length of the hall under a ceiling of black
+beams, and the benches are still drawn up to them.  The Prioress's
+seat at the head has been kept clear of weed by hands that come here
+regularly.  A stair down to the cellars stands open at the west end.~
+31 8 0
+D3
+   The cloister garth lies west through the flooded doorway.
+~
+~
+0 0 3107
+D2
+   The crossing of green water lies south.
+~
+~
+0 0 3106
+D5
+   A stone stair descends into the flooded library.
+~
+stair steps~
+1 0 3111
+S
+#3109
+The Colonnade of Drowned Saints~
+   A colonnade of carved saints runs along the transept wall, each
+figure taller than a man and each worn featureless below the chin by
+the water that has stood here for years.  Beyond the last of them the
+floor gives way to the black water of a cistern.~
+31 6 0
+D3
+   The crossing of green water lies back west.
+~
+~
+0 0 3106
+D5
+   The colonnade descends into the black water of the cistern.
+~
+~
+0 0 3110
+S
+#3110
+The Cistern of the Cloister~
+   The cloister's great cistern is a vault of pillars filled to the
+springing line with cold green water.  Things have been hung in the
+water here on lines of wire, weighted with stones, and left to cure.~
+31 6 0
+D4
+   The colonnade rises up out of the water to the south.
+~
+~
+0 0 3109
+D0
+   The sunken chapter house stands north across the cistern.
+~
+~
+0 0 3112
+S
+#3111
+The Drowned Library~
+   The library is flooded to the knee, and the shelves have been
+salvaged in order:  the highest shelves are dry and orderly, the
+lowest are a pulp of black paper.  Reading desks stand in rows in the
+water, their books weighted open at pages no one has read in years.~
+31 8 0
+D4
+   The stair climbs back up to the refectory.
+~
+stair steps~
+1 0 3108
+D0
+   The scriptorium lies north beyond the reading desks.
+~
+~
+0 0 3113
+S
+#3112
+The Sunken Chapter House~
+   The chapter house is an octagon of slender pillars, its benches
+arranged in a ring beneath a vault that still carries a fragment of
+painted star.  The abbot's chair faces the door, and the water in the
+room is perfectly still.~
+31 8 0
+D2
+   The cistern lies south through the low arch.
+~
+~
+0 0 3110
+D1
+   The scriptorium lies east beyond the chapter house benches.
+~
+~
+0 0 3113
+D0
+   The undercroft of bells lies north through a door of iron.
+~
+door undercroft~
+1 0 3114
+S
+#3113
+The Scriptorium~
+   Forty writing carrels stand in the scriptorium, each with its stool,
+its lamp bracket and its abacus.  Ink has dried in the wells for the
+last time, and the vellum on the desks is ruled but empty.  The water
+has come in under the door and gone out again many times.~
+31 8 0
+D2
+   The drowned library lies south through the reading desks.
+~
+~
+0 0 3111
+D3
+   The sunken chapter house lies west.
+~
+~
+0 0 3112
+S
+#3114
+The Undercroft of Bells~
+   The undercroft is a low brick vault stacked with the cloister's
+bells, great and small, sunk into the floor on their crowns like
+planted bulbs.  A stair climbs to the belfry above, and a grating in
+the floor opens into blacker water below.~
+31 8 0
+D2
+   The sunken chapter house lies south through the iron door.
+~
+door~
+1 0 3112
+D4
+   A narrow stair climbs up into the belfry.
+~
+stair~
+1 0 3115
+D5
+   The floor grating drops into the flooded cellblock.
+~
+grating~
+1 0 3116
+S
+#3115
+The Belfry of the Drowned Bell~
+   The belfry is open to the weather on all four sides, and its bell
+swings very slightly in the wind with a sound too low to be called
+ringing.  From here the drowned cloister can be seen entire:  the
+garth, the roofs, and the ash-coloured tower far off across the
+flood.~
+31 8 0
+D5
+   The narrow stair drops back down to the undercroft.
+~
+stair~
+1 0 3114
+S
+#3116
+The Cellblock of the Drowned~
+   Two ranks of cells face each other across a flooded corridor, and
+the doors have been taken off every one of them and stacked neatly at
+the north end.  Water runs along a channel cut in the floor, and the
+channel has been kept clear.~
+31 9 0
+D4
+   The floor grating climbs back up to the undercroft of bells.
+~
+grating~
+1 0 3114
+D1
+   The crypt of the first abbots lies east through the cellblock.
+~
+~
+0 0 3117
+D0
+   The corridor continues north to the hall of green prayer.
+~
+~
+0 0 3118
+S
+#3117
+The Crypt of the First Abbots~
+   Stone effigies of the cloister's founders lie in ranks here, each
+with its hands folded on a broken crozier.  The effigies have been
+fitted with new eyes of green glass, and every one of them faces the
+door you came in by.~
+31 9 0
+D3
+   The cellblock lies back west.
+~
+~
+0 0 3116
+S
+#3118
+The Hall of Green Prayer~
+   The brothers of the flood worship here, in a hall whose floor is
+three inches under water and whose altar is a slab of black stone
+raised just clear of it.  The water around the altar has been raked
+into slow, careful patterns.~
+31 8 0
+D2
+   The cellblock of the drowned lies south along the corridor.
+~
+~
+0 0 3116
+D1
+   The tomb of Abbot Mael stands east beyond the altar.
+~
+door tomb~
+1 0 3119
+S
+#3119
+The Tomb of Abbot Mael~
+   The tomb is a round chamber under the east end of the hall, its
+dome painted with a sea that has no shore.  A sarcophagus of green
+stone stands at the centre, and the water about it is black and
+unmoving.  A stair at the chamber's north side goes down into the
+darkness beneath the cloister.~
+31 8 0
+D3
+   The hall of green prayer lies west through the tomb door.
+~
+door~
+1 0 3118
+D5
+   A stair descends into the dark below the cloister.
+~
+stair~
+1 0 3120
+S
+#3120
+The Drowned Stair Below~
+   The stair ends in water again, colder here and utterly still.  The
+walls are of ash-coloured stone, and the blocks are fitted with a
+precision no mason of the cloister possessed.  Something has been
+carried up and down these steps often, and recently.~
+31 9 0
+D4
+   The stair climbs back up to the tomb of Abbot Mael.
+~
+stair~
+1 0 3119
+D0
+   North, a drowned gate stands open in the ash-coloured wall.
+~
+~
+0 0 3121
+S
+#3121
+The Gate Beneath the Water~
+   Two pillars of black basalt rise out of the flood here, and between
+them a road of fitted stone runs north into a cutting in the rock.
+The water runs off it in a thin ribbon and does not pool.  Above and
+behind, the green water of the valley lies still;  ahead, a red
+light moves somewhere under the ash-coloured stone.~
+31 8 0
+D2
+   The drowned stair below lies back south.
+~
+~
+0 0 3120
+D0
+   North, the basalt road rises into the roots of the Ashen Spire.
+~
+~
+0 0 3200
+S
 $~

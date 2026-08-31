@@ -3,4 +3,482 @@ The Quest Vault~
 Rows of shelves hold the kingdom's greatest treasures.~
 30 1024 0
 S
+#3020
+The Broken Highway~
+   The old causeway ends here in a field of broken paving.  South, the
+road runs back toward the settled lands; north it sinks into a grey
+plain where nothing green has lived since the war.  A leaning milepost
+still stands at the roadside, its lettering half-erased by salt wind.~
+30 0 2
+D0
+   The highway resumes through the ash toward a ruined tollhouse.
+~
+~
+0 0 3021
+E
+milepost post~
+Cracked letters spell out what the weather has left:  ...DERED MAR...
+Below them, in a newer hand, someone has scratched:  DO NOT PASS AFTER
+DARK.~
+S
+#3021
+Ruins of the March Tollhouse~
+   The tollhouse is a shell of blackened stone, its roof burned away
+and its tollgate lying in splinters across the road.  Ash has drifted
+in through the empty windows and lies in soft grey drifts against the
+hearth.  The highway passes through here, north and south.~
+30 8 0
+D2
+   The broken highway runs back south out of the Marches.
+~
+~
+0 0 3020
+D0
+   North, the road crosses the open ash fields.
+~
+~
+0 0 3022
+D1
+   A rutted track leaves the road east toward a roadside shrine.
+~
+~
+0 0 3026
+S
+#3022
+The Ashen Fields~
+   Grey ash lies knee-deep in every furrow, and the stubble of the last
+crop stands bleached and brittle in it.  Here and there a rusted
+ploughshare or a helmet rests where its owner dropped it.  The war road
+runs north through the fields, and a fence line can be seen west.~
+30 0 2
+D2
+   The ruins of the tollhouse stand back south on the highway.
+~
+~
+0 0 3021
+D0
+   The ash fields continue north toward a cratered orchard.
+~
+~
+0 0 3024
+D1
+   East, a square of raised earth bristles with rusted iron.
+~
+~
+0 0 3025
+D3
+   A buckled fence line runs west along the edge of the fields.
+~
+~
+0 0 3023
+S
+#3023
+The Buckled Fence Line~
+   A fence of pointed stakes, meant to stop cavalry, has been flattened
+in three places and stands bent and twisted in the others.  Torn
+banner-silk still hangs from one leaning post.  The ash fields lie east;
+north a squat stone tower leans against the sky.~
+30 0 2
+D1
+   East, the fence gives way to the open ash fields.
+~
+~
+0 0 3022
+D0
+   The leaning watchtower stands close by to the north.
+~
+~
+0 0 3027
+S
+#3024
+A Cratered Orchard~
+   Shell-holes pockmark the ground between rows of dead apple trees.
+The trees still stand, black and bare, and a few still hold shrivelled
+fruit that no bird has touched.  The ash fields stretch back south.~
+30 0 3
+D2
+   The ashen fields lie south, beyond the last row of trees.
+~
+~
+0 0 3022
+D0
+   More blighted rows of trees continue north.
+~
+~
+0 0 3029
+S
+#3025
+The Cannon Square~
+   A square battery platform of rammed earth and timber dominates this
+field, ringed by the rusted barrels of guns spiked long ago.  Ash
+drifts about the wheels of the gun carriages.  The deserters of the
+Marches have hung their washing between two barrels.~
+30 0 2
+D3
+   West, the ash fields run back to the war road.
+~
+~
+0 0 3022
+D0
+   A well and a scattered camp lie north of the battery.
+~
+~
+0 0 3028
+S
+#3026
+The Roadside Shrine~
+   A shrine of the old road-god stands here under a dead elm, its niche
+empty and its offering bowl filled with ash.  Candles have been set
+about the base, and someone has tried, recently, to light them.  The
+trees of the old orchard close in around the clearing.~
+30 0 3
+D3
+   West, the rutted track rejoins the highway at the tollhouse.
+~
+~
+0 0 3021
+D0
+   A camp of hide tents stands among the trees to the north.
+~
+~
+0 0 3030
+S
+#3027
+The Leaning Watchtower~
+   The tower has settled a full yard out of true, and its spiral stair
+climbs the inside of the curve.  Arrow slits give a grey light, and the
+dust of the Marches lies thick on every step.  The garrison's straw is
+still heaped along the west wall.~
+30 8 0
+D2
+   The buckled fence line runs back south toward the fields.
+~
+~
+0 0 3023
+D0
+   A broken doorway opens into the tower's magazine.
+~
+~
+0 0 3031
+D4
+   The spiral stair climbs into the darkness of the belfry.
+~
+stair steps~
+1 0 3032
+S
+#3028
+The Rusted Well~
+   A well head of green stone stands at the centre of a churned yard,
+its winch long since seized with rust.  The bucket has been hauled up
+and left to swing.  Beyond it the Marches open out east toward a
+sunken breastwork of earth and stakes.~
+30 0 2
+D2
+   The cannon square lies south across the churned ground.
+~
+~
+0 0 3025
+D1
+   East, a sunken breastwork cuts across the plain.
+~
+~
+0 0 3033
+S
+#3029
+The Blighted Rows~
+   The orchard's northern rows have fared worst:  the trees here are
+not merely dead but split, as if lightning had walked the lines
+between them.  The ground is thick with fallen black fruit.~
+30 0 3
+D2
+   The cratered orchard continues south, among the shell-holes.
+~
+~
+0 0 3024
+D0
+   North, the trees thin toward a field of standing banners.
+~
+~
+0 0 3034
+S
+#3030
+The Free Company's Camp~
+   A dozen hide tents and lean-tos are pitched among the dead trees,
+and the ground between them has been swept clean and marked with
+cook-fires.  A banner of no kingdom you know hangs from a spear.  The
+company has made itself at home in the ruined Marches.~
+30 0 3
+D2
+   The roadside shrine stands south under the dead elm.
+~
+~
+0 0 3026
+D1
+   East, a trench line cuts across the orchard.
+~
+~
+0 0 3035
+S
+#3031
+The Tower Magazine~
+   Powder barrels line this low cellar in tilted rows, most of them
+staved in and long since spoiled by the wet.  Rust has eaten the
+strap-iron, and the air is thick with the smell of saltpetre and
+standing water.~
+30 9 0
+D2
+   The stair climbs back up into the tower to the south.
+~
+~
+0 0 3027
+S
+#3032
+The Broken Belfry~
+   The belfry is open to the sky on three sides, its bell gone to feed
+some army's cannon.  From here the whole Sundered Marches lie below:
+the ash fields, the trenches, and far to the north a line of dull
+green water where the land gives way.~
+30 0 0
+D5
+   The spiral stair drops away down the leaning shaft of the tower.
+~
+stair steps~
+1 0 3027
+S
+#3033
+The Sunken Breastwork~
+   The earthwork here has been cut down to a shallow trench by years of
+rain, but the sharpened stakes in front of it still stand in a double
+line.  Rusted caltrops lie in the ash between them.  A well and yard
+lie west; the breastwork runs on north.~
+30 0 2
+D3
+   The rusted well and its yard lie west.
+~
+~
+0 0 3028
+D0
+   The breastwork continues north toward the crossroads.
+~
+~
+0 0 3037
+S
+#3034
+The Field of Banners~
+   A hundred standards stand planted in the ash here, the banners of
+regiments that ceased to exist years ago.  Rain and salt have rotted
+the cloth to ribbons, but the poles have never been pulled up.  The
+blighted orchard lies south.~
+30 0 2
+D2
+   The blighted rows of the orchard lie south.
+~
+~
+0 0 3029
+D1
+   East, the trench line opens onto a meeting of tracks.
+~
+~
+0 0 3037
+S
+#3035
+The Trench Line~
+   The trench is six feet deep and runs east to west through the ash,
+its lip revetted with rotten planking.  Fire steps, loopholes and a
+dugout have all been cut into the near wall, and the floor is littered
+with the small debris of a long winter in the line.~
+30 0 2
+D3
+   The Free Company's camp lies west among the dead trees.
+~
+~
+0 0 3030
+D0
+   The trench turns north along the foot of the old rampart.
+~
+~
+0 0 3038
+S
+#3036
+The Collapsed Bastion~
+   A corner bastion of Fort Sunder has fallen bodily down the hillside,
+dragging its wall with it, and the stones have come to rest in a wild
+slope of rubble.  Between the fallen blocks there are tunnels of a
+kind, and more than one is big enough to hold something.~
+30 4 4
+D3
+   West, the rubble climbs back up to the old rampart.
+~
+~
+0 0 3038
+D1
+   The rubble slope runs down east toward the ridge path.
+~
+~
+0 0 3039
+S
+#3037
+Crossroads of the Marches~
+   Four tracks meet here in a puddle of grey mud:  the old war road
+running north and south, a breastwork track from the west, and a
+cart road east toward the fort.  A fingerpost stands in the middle,
+its arms pointing four ways and its plate long since pried off.~
+30 0 2
+D2
+   The sunken breastwork runs back south.
+~
+~
+0 0 3033
+D3
+   West, the track leads out to the field of banners.
+~
+~
+0 0 3034
+D0
+   North, the cart road runs up to the gates of Fort Sunder.
+~
+~
+0 0 3040
+S
+#3038
+The Old Rampart~
+   An ancient rampart of earth and stone, older by far than the war,
+runs along the crest here.  Its ditch is choked with ash, and sheep
+crops nothing on its flank, for nothing eats what grows in the
+Marches.  The trench line drops away south.~
+30 0 4
+D2
+   The trench line runs back down south into the plain.
+~
+~
+0 0 3035
+D1
+   East, a slope of fallen masonry slides down to the bastion.
+~
+~
+0 0 3036
+D0
+   The rampart climbs north toward the ridge.
+~
+~
+0 0 3039
+S
+#3039
+The Ridge Path~
+   The path follows the spine of the ridge, and the wind here carries
+salt and the smell of stagnant water.  Below to the north the land
+falls away into a drowned valley, and across it, half-hidden in
+cloud, a dark tower of ash-coloured stone rises out of the flood.~
+30 0 4
+D2
+   The old rampart runs back south along the crest.
+~
+~
+0 0 3038
+D3
+   West, a slope of fallen masonry climbs up to the bastion.
+~
+~
+0 0 3036
+D0
+   North, the path descends toward the drowned valley.
+~
+~
+0 0 3044
+S
+#3040
+The Gate of Fort Sunder~
+   The fort's gate is a tunnel of blackened timber and iron plate, and
+its doors were burned in place.  The guard niches on either side are
+swept and kept, for the fort is not altogether empty.  The cart road
+runs back south toward the crossroads.~
+30 8 0
+D2
+   South, the cart road runs down to the crossroads.
+~
+~
+0 0 3037
+D0
+   The fort's courtyard opens north beyond the gate tunnel.
+~
+gate doors~
+0 0 3041
+S
+#3041
+The Courtyard of Fort Sunder~
+   Parade ground gravel has drifted into weeds that never quite die,
+and the well head in the middle has been fitted with a new winch.
+Stairways run up the inner faces of the walls, and the keep's door
+faces north across the yard.~
+30 8 0
+D2
+   The gate tunnel leads back south out of the fort.
+~
+~
+0 0 3040
+D0
+   The keep's great door stands north across the courtyard.
+~
+door keep~
+1 0 3042
+S
+#3042
+The Great Hall of Fort Sunder~
+   The hall is a long vault of black stone, its roof beams charred and
+its floor scarred by fire.  Trestle tables have been pushed against
+the walls, and above the cold hearth hangs a banner that has been
+taken down and put up again so often that the silk is worn through.~
+30 9 0
+D2
+   The courtyard lies south beyond the keep's door.
+~
+door~
+1 0 3041
+D0
+   A broken stair at the hall's north end climbs to the wall.
+~
+~
+0 0 3043
+S
+#3043
+The Keep's Collapsed Wall~
+   The north face of the keep has come down into the bailey, and the
+rubble makes a rough stair to the top of the wall.  From the breach
+there is a clear view north over the last of the Marches to the
+drowned valley and the far green water.~
+30 8 0
+D2
+   The broken stair leads down into the great hall.
+~
+~
+0 0 3042
+D1
+   The wall top runs east toward the north ridge.
+~
+~
+0 0 3044
+S
+#3044
+The Drowned Stair~
+   Here the ridge ends, and a stair of wet stone descends into the
+green water that has swallowed the old cloister road.  The water is
+thigh-deep and rising, and far out in the flood the roofs of a great
+building stand just clear of the surface.~
+30 0 4
+D3
+   West, the wall top of Fort Sunder climbs back to the keep.
+~
+~
+0 0 3043
+D2
+   South, the ridge path climbs away toward the rampart.
+~
+~
+0 0 3039
+D0
+   The drowned stair goes down into the flood, toward the sunken gate.
+~
+~
+0 0 3101
+S
 $~

@@ -1,0 +1,157 @@
+#3100
+brother drowned~
+a drowned brother~
+A drowned brother of the cloister stands swaying in the water.
+~
+    The flood took the cloister's brothers where they stood at their
+prayers, and some of them are still at them.  This one's robes have
+gone to black weed about the waist and its face to nothing below the
+chin, but the hands are still folded, and it opens them only to
+correct an intruder's posture.
+~
+64 0 0 E
+X46 230 230 230 230 230 1d1+1050 1d70
+300 42000
+9 9 0
+E
+#3101
+choirist salt~
+a salt-crusted choirist~
+A salt-crusted choirist stands with its mouth open.
+~
+    The choir drowned in their stalls, and the water has pickled them
+where they sat.  This one's mouth is open at the note it died on,
+and it has been singing it, without pause, ever since.  The note is
+not a note any more.
+~
+64 0 0 E
+X52 260 260 260 260 260 1d1+1200 1d78
+600 48000
+9 9 0
+E
+#3102
+ghoul reclamation bloated~
+a bloated reclamation ghoul~
+A bloated reclamation ghoul rises out of the green water.
+~
+    The cloister reclaimed its dead twice over:  once in consecrated
+ground, and once when the flood moved them.  What comes up out of the
+cistern now is vast and soft and patient, and it goes about the
+cloister putting things back where they were, which is why the
+chapters are still arranged in order.
+~
+524384 0 0 E
+X48 240 240 240 240 240 1d1+1100 1d72
+200 44000
+9 9 0
+E
+#3103
+swarm leech cistern~
+a cistern leech swarm~
+A black swarm of cistern leeches turns in the water.
+~
+    Not one animal but ten thousand, moving as a single slow ring in
+the flooded cistern.  The swarm keeps to the deep water, mostly, and
+it feeds on whatever the flood brings down to it.  It has learned the
+sound of boots on flagstones.
+~
+96 0 0 E
+X47 235 235 235 235 235 1d1+1050 1d71
+50 43000
+9 9 0
+E
+#3104
+librarian drowned stacks~
+the Librarian of the Drowned Stacks~
+The Librarian of the Drowned Stacks stands among her drying lines.
+~
+    The Librarian drowned at her desk and has never left it.  She wears
+what is left of a grey habit and a chain of office, and she has spent
+every year since separating what can be saved from what cannot.  Her
+opinions about readers who handle vellum with wet hands are strongly
+held and no longer silent.
+~
+524290 0 0 E
+X55 290 290 290 290 290 1d1+1600 2d42
+3000 60000
+9 9 2
+E
+#3105
+templar drowned~
+a drowned templar~
+A drowned templar of the cloister guards the flooded corridor.
+~
+    The cloister's soldiers were few and they held the cellblock to the
+last, which is where the flood found them.  This one still carries
+the long sword and the round shield of the order, and the green glass
+eyes that someone has set into its helm see very well in the dark.
+~
+64 0 0 E
+X58 300 300 300 300 300 1d1+1700 1d88
+1000 65000
+9 9 0
+E
+#3106
+brother ulmot keeper bells~
+Brother Ulmot, Keeper of the Bells~
+Brother Ulmot, Keeper of the Bells, stands among the sunken bells.
+~
+    The last brother to serve the cloister's bells, and still serving
+them.  Ulmot's robes are heavy with the water he never comes out of,
+and his hands are huge and scarred from a lifetime of bell metal.  He
+taps each of the buried bells in turn as he walks the undercroft, and
+he has not liked the sound of the great bell for some years now.
+~
+2 0 0 E
+X60 330 330 330 330 330 1d1+2400 2d50
+4000 80000
+9 9 1
+E
+#3107
+warden green nave~
+the Green Warden of the Nave~
+The Green Warden of the Nave rises out of the flooded aisle.
+~
+    The nave's great crucifix was carried off by the flood and never
+recovered, and the thing that guards the aisle where it stood is not
+a man.  It is woven of flood weed and sunken timbers in the shape of
+a tall figure, and it will not let the nave be emptied of what
+remains in it.
+~
+524352 0 0 E
+X50 250 250 250 250 250 1d1+1150 1d75
+1500 50000
+9 9 0
+E
+#3108
+revenant sanctified~
+a sanctified revenant~
+A sanctified revenant glides across the flooded floor.
+~
+    Something the cloister raised itself, in the last years, when the
+brothers wanted hands that did not tire.  It wears the robes of the
+rite and a face of green glass, and it has kept the habit of blessing
+whatever it kills, which is of no comfort whatsoever.
+~
+2097216 0 0 E
+X62 310 310 310 310 310 1d1+1800 1d94
+1200 68000
+9 9 0
+E
+#3119
+abbess drowned~
+the Abbess Drowned~
+The Abbess Drowned stands beside the sarcophagus of Abbot Mael.
+~
+    The cloister's last Abbess kept her rule after the flood came, and
+she keeps it still.  Her vestments are green-black and move as if
+there were a current in still water;  the crozier in her hand is the
+one from the sarcophagus, taken up again.  She regards the living as
+a Prioress regards latecomers to the office, and she is not pleased.
+~
+2621442 0 0 E
+X68 380 380 380 380 380 1d1+3200 2d60
+8000 110000
+9 9 2
+E
+$
