@@ -39,7 +39,6 @@ const PLR_KILLER: i64 = 1 << 0;
 const PLR_THIEF: i64 = 1 << 1;
 const PRF_SUMMONABLE: i64 = 1 << 10;
 const PRF_NOAUCT: i64 = 1 << 18;
-const JAIL_NUM: RoomVnum = 400;
 const BAIL_MULTIPLIER: i32 = 20_000;
 
 // Victim defensive skills (spells.h) and their shared difficulty scalar.
@@ -1637,7 +1636,7 @@ fn handle_pc_kill_side_effects(g: &mut GameState, killer: CharId, victim: CharId
             c.alignment = -1000;
             c.bail_amt = diff * BAIL_MULTIPLIER;
         }
-        if let Some(jail) = g.real_room(JAIL_NUM) {
+        if let Some(jail) = g.real_room(g.config.jail_num) {
             g.char_from_room(killer);
             g.char_to_room(killer, jail);
             act(
@@ -3020,7 +3019,7 @@ mod tests {
             "A fighting pit.".to_string(),
         ));
         let jail = g.add_room(Room::new(
-            JAIL_NUM,
+            g.config.jail_num,
             0,
             "Jail".to_string(),
             "A jail cell.".to_string(),

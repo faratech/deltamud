@@ -86,7 +86,6 @@ const LVL_HERO: u8 = 100;
 const LVL_DEMIGOD: u8 = 102;
 
 // jail vnum used by do_checkbail (hardcoded jail_num in C globals.c).
-const JAIL_NUM: RoomVnum = 3030;
 
 // ---------------------------------------------------------------------------
 // Small pure helpers (no GameState).
@@ -1566,7 +1565,7 @@ pub fn do_checkbail(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         .get_char(ch)
         .map(|c| (c.act_flags & PLR_KILLER != 0, c.in_room))
         .unwrap_or((false, None));
-    let in_jail = rnum == g.real_room(JAIL_NUM);
+    let in_jail = rnum == g.real_room(g.config.jail_num);
     if !(killer && in_jail) {
         g.send_to_char(ch, "You're (happily) not serving a jailterm right now.\r\n");
         return;

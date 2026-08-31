@@ -28,6 +28,10 @@ pub const FROZEN_START_ROOM: RoomVnum = 1202;
 
 #[derive(Clone)]
 pub struct Config {
+    /// C config.c:59 `jail_num = 400`.
+    pub jail_num: RoomVnum,
+    /// C config.c:77 `newbie_room = 2200`.
+    pub newbie_room: RoomVnum,
     pub database_url: String,
     pub lib_path: String,
     pub port: u16,
@@ -49,6 +53,8 @@ impl Config {
         Config {
             database_url: env::var("DATABASE_URL")
                 .unwrap_or_else(|_| "mysql://root:password@localhost/deltamud".to_string()),
+            jail_num: 400,
+            newbie_room: 2200,
             lib_path: env::var("MUD_LIB_PATH").unwrap_or_else(|_| "./lib".to_string()),
             port: env::var("MUD_PORT")
                 .unwrap_or_else(|_| "4000".to_string())
@@ -72,6 +78,8 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             database_url: String::new(),
+            jail_num: 400,
+            newbie_room: 2200,
             lib_path: "./lib".to_string(),
             port: 4000,
             use_compat_mode: false,

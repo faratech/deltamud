@@ -121,10 +121,11 @@ const SCMD_BANK: i32 = 3;
 // Game globals (constants from globals.c / config). Hardcoded to the same
 // values the rest of the port uses; the integrator can wire live config later.
 // ---------------------------------------------------------------------------
-const JAIL_NUM: RoomVnum = 3030;
-const NEWBIE_ROOM: RoomVnum = 3070;
-const BAIL_MULTIPLIER: i32 = 1000;
-const XP_MULTIPLIER: i32 = 100;
+// C config.c: bail_multiplier = 20000, xp_multiplier = 5 (#180). The jail
+// and newbie rooms come from Config (config.c jail_num=400, newbie_room=2200,
+// #181); the old 3030/3070 copies here were the wrong rooms.
+const BAIL_MULTIPLIER: i32 = 20_000;
+const XP_MULTIPLIER: i32 = 5;
 const DEFAULT_STAFF_LVL: i32 = 12;
 const DEFAULT_WAND_LVL: i32 = 12;
 const TOP_SPELL_DEFINE: i32 = 1099;
@@ -488,7 +489,7 @@ pub fn do_gen_tog(g: &mut GameState, ch: CharId, _arg: &str, subcmd: i32) {
                 .map(|c| {
                     (
                         c.act_flags & PLR_KILLER != 0,
-                        c.in_room == g.real_room(JAIL_NUM),
+                        c.in_room == g.real_room(g.config.jail_num),
                     )
                 })
                 .unwrap_or((false, false));
@@ -513,7 +514,7 @@ pub fn do_gen_tog(g: &mut GameState, ch: CharId, _arg: &str, subcmd: i32) {
                 .map(|c| {
                     (
                         c.act_flags & PLR_KILLER != 0,
-                        c.in_room == g.real_room(JAIL_NUM),
+                        c.in_room == g.real_room(g.config.jail_num),
                     )
                 })
                 .unwrap_or((false, false));
@@ -2724,7 +2725,7 @@ pub fn do_school(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         );
         return;
     }
-    let dest = match g.real_room(NEWBIE_ROOM) {
+    let dest = match g.real_room(g.config.newbie_room) {
         Some(r) => r,
         None => {
             g.send_to_char(ch, "Sorry, newbie school is temporarily unavaliable.\r\n");
@@ -3310,7 +3311,7 @@ pub fn do_postbail(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         .map(|c| {
             (
                 c.act_flags & PLR_KILLER != 0,
-                c.in_room == g.real_room(JAIL_NUM),
+                c.in_room == g.real_room(g.config.jail_num),
             )
         })
         .unwrap_or((false, false));

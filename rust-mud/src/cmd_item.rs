@@ -99,7 +99,6 @@ const W_ANKLE_R: usize = 19;
 const W_FACE: usize = 21;
 
 // Config (config.c) — jail / donation rooms, PvP, weapon restrictions.
-const JAIL_NUM: RoomVnum = 400;
 const DONATION_ROOM_1: RoomVnum = 146;
 const PK_ALLOWED: bool = false;
 const WEAPONRESTRICTIONS: i32 = 0;
@@ -937,7 +936,7 @@ pub fn do_get(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
 fn in_jail(g: &GameState, ch: CharId) -> bool {
     let in_room = g.get_char(ch).and_then(|c| c.in_room);
-    let jail = g.real_room(JAIL_NUM);
+    let jail = g.real_room(g.config.jail_num);
     in_room.is_some() && in_room == jail
 }
 
