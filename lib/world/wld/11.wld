@@ -635,6 +635,10 @@ D1
 ~
 ~
 0 0 1122
+D3
+~
+~
+0 0 1121
 E
 pillar large deteriorating brown~
    The pillar looks very old, in fact you can watch it crumble as small pieces
@@ -650,10 +654,25 @@ and why.
 ~
 S
 #1121
-An unfinished room~
-You are in an unfinished room.
+A Sunken Alcove Among the Pillars~
+   The clearing dips here into a shallow bowl of ground, as though the earth
+had slowly swallowed something that once stood upon it.  Pillar drums lie
+tumbled in the tall grass, each sheared clean through, and east the ground
+rises again into the corner of the clearing.
 ~
-11 4 0
+11 4 3
+D1
+~
+~
+0 0 1120
+E
+slab writing lines carving~
+   The slab is a flat piece of the same pale stone the pillars are made of,
+lying face down in the dirt and tilted against a stump of rock.  Working your
+boot under its edge, you roll it far enough to see the underside: it is
+covered with lines of that angular writing, neat as a ledger, every mark cut
+deep and then filled with some black stuff that has never washed out.
+~
 S
 #1122
 A Southwestern Bend in the Trail~
@@ -1298,7 +1317,7 @@ cell door east~
 S
 #1148
 A Small Room~
-   You are in an unfinished room.  It would appear that this room was created
+   You are in a small bare room.  It would appear that this room was created
 not as a prison cell, but instead it looks as if it was used as maybe a guard's
 quarters so that if there was an emergency in a cell, someone could be deployed
 from different parts of the dungeons.  Though, if this really was used as a
@@ -1453,20 +1472,42 @@ D3
 0 0 1155
 S
 #1155
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+The Warden's Office~
+   A room hardly bigger than the slab of stone that serves it as a desk, and
+everything in it built for something that sat, though not for anything shaped
+like you: the stool is cut to a height no legs you know would fit, and the
+shelf above the desk hangs low enough that you must stoop beneath it.
 ~
-11 0 0
+11 8 0
 D1
 ~
 ~
 0 0 1154
+E
+ledger sheets writing ink book~
+   The ledger is a bound stack of thin grey sheets, and the hand in it is the
+same angular writing that is cut into the stones of this place, done here
+with a brush and some brown ink gone the colour of old blood.  The last page
+that was filled stops in the middle of a line, as if the writer meant to come
+back to it, and every page after is blank.
+~
+E
+keys ring iron peg~
+   An iron ring hangs from a peg set into the wall, meant to carry the keys
+of this level.  It is all but empty: a single worn stub of a key is left on
+it, and pressed into the dust of the shelf beneath are the clean circles
+where a great weight of iron used to lie.  Whoever went out of this room last
+went out with every key but that one.
+~
 S
 #1156
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+The Mess Hall~
+   Three rows of stone tables run the length of this hall, each cut from the
+same grey rock as the walls, with benches set so close that nobody seated in
+the middle of a row could rise without climbing over his neighbour.  The
+benches of the eastern row have been pushed back, all the same distance.
 ~
-11 0 0
+11 8 0
 D1
 ~
 ~
@@ -1475,12 +1516,23 @@ D2
 ~
 ~
 0 0 1154
+E
+bowls dishes tables~
+   Hundreds of shallow bowls are set out along the tables, each in its own
+worn hollow cut into the stone, and not one of them has been knocked over or
+carried off.  What was in them has dried to a thin black skin, and the dust
+lies even in every bowl alike, so that whatever happened here did not happen
+at the tables.
+~
 S
 #1157
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+The Scullery~
+   Long troughs of stone stand along the wall of this room, each with its
+wooden bung drawn and lying beside it, and a grating in the floor beneath
+them to carry the water away.  Between the troughs and the door is a heap of
+broken bowls and cups, stacked with some care rather than thrown down.
 ~
-11 0 0
+11 8 0
 D1
 ~
 ~
@@ -1491,10 +1543,13 @@ D3
 0 0 1156
 S
 #1158
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+The Kitchen~
+   The whole of one wall is a hearth, a black-mouthed opening large enough
+to roast an ox whole, and the stone about it is split and crazed by heat long
+since gone out of it.  Iron hooks hang above the hearth, all of them empty,
+and a chopping block stands in the floor with its cleaver still in it.
 ~
-11 0 0
+11 8 0
 D0
 ~
 ~
@@ -1507,12 +1562,23 @@ D3
 ~
 ~
 0 0 1157
+E
+hearth firebox ash~
+   Ash lies in the belly of the hearth to the depth of your forearm, packed
+down hard and grey, and under it the floor of the firebox has been burnt to a
+glaze where the fire was built up against it.  Nothing has been burnt here
+for a long time, and nothing has been raked out either: the ash has been
+left just as it fell.
+~
 S
 #1159
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+The Stores~
+   Shelving has been cut straight out of the rock here, tier above tier, and
+every tier stands bare but for a few jars whose contents have dried to a
+hard dark cake.  Grain sacks lie where they were dropped, most of them split,
+and the dust about them is written over with small tracks.
 ~
-11 0 0
+11 8 0
 D0
 ~
 ~
@@ -1523,20 +1589,33 @@ D3
 0 0 1158
 S
 #1160
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+The Cold Room~
+   A breath of cold meets you at the door of this room and stays with you
+while you are in it.  The stone sweats, the grating of the floor is beaded
+grey with moisture, and a dozen hooks hang from chains in the ceiling, all
+of them empty, above a long trough crusted with salt.
 ~
-11 0 0
+11 8 0
 D2
 ~
 ~
 0 0 1159
+E
+trough salt brine~
+   The trough has been filled with something that has dried in layers, white
+over grey over white, like the rings of a tree.  You scratch at it with a
+fingernail and get the smell of brine and of something older underneath, and
+then you decide that you have learned enough about the trough.
+~
 S
 #1161
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+The Cask Room~
+   Racks of rough timber stand in rows here, the only wood on this level
+outside of the doors, and they hold casks of a single size laid on their
+sides.  Nearly all have been stood up and drained and left open, but the cask
+at the end of the middle rack has never been broached.
 ~
-11 0 0
+11 8 0
 D0
 ~
 ~
@@ -1549,12 +1628,22 @@ D3
 ~
 ~
 0 0 1162
+E
+cask barrel bung~
+   The cask is whole, its bung seated tight and the dust lying unbroken on
+its head in a skin too thick to rub off.  When you lean close you can hear
+something shift inside it, a slow, heavy movement, and then nothing at all
+for as long as you care to stand and listen.
+~
 S
 #1162
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+A Rubble-Choked Hall~
+   The roof has come down in this hall.  A spill of broken rock fills the
+middle of it nearly to the grating, and the fine dust of it rises about your
+ankles as you move, though a path has been cleared along the wall and the
+stone carried off piece by piece.
 ~
-11 0 0
+11 8 0
 D0
 ~
 ~
@@ -1567,22 +1656,42 @@ D3
 ~
 ~
 0 0 1164
+E
+rubble rock slab fall~
+   The fall has brought one of the great ceiling slabs down whole, and it
+lies half buried with its dressed face against the floor.  The rock of it is
+not the grey of the walls but a darker stone, shot through with thin stripes
+of a pale blue, and the stripes have gone dark wherever the slab is broken.
+~
 S
 #1163
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+The Scratched Chamber~
+   This little room has been closed off from the hall by nothing more than
+the rock fall outside it, and whoever cleared that path never came in here.
+Every wall is covered from grating to ceiling with the angular writing that
+is cut into the stones of this place, scratched and wandering ever lower.
 ~
-11 0 0
+11 8 0
 D2
 ~
 ~
 0 0 1162
+E
+lines writing marks script~
+   You follow the lowest line of the writing with your eye until it trails
+off into a stutter of single marks a hand's width above the floor.  Under it,
+pressed into the dust, lies a small dark heap of bones, and they are far too
+slight to have belonged to any keeper of this place.
+~
 S
 #1164
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+The Washroom~
+   A row of stone basins runs the length of the north wall, each worn smooth
+in a ring where many hands have rested, and a channel carries what was tipped
+from them to a grating in the floor.  The channel is dry, but the stain of
+the water is still to be seen on every basin.
 ~
-11 0 0
+11 8 0
 D0
 ~
 ~
@@ -1593,10 +1702,13 @@ D1
 0 0 1162
 S
 #1165
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+A Room of Iron Rings~
+   Rings of iron are set into the walls of this room at the height of a
+knee, spaced as evenly as the basins next door, with chains hanging from
+rings in the ceiling above them.  The grating has been cut away in the middle
+of the floor to a shallow drain, and the stone about it is darkly stained.
 ~
-11 0 0
+11 8 0
 D2
 ~
 ~
@@ -1605,12 +1717,22 @@ D3
 ~
 ~
 0 0 1166
+E
+drain stain pool~
+   The drain is a shallow bowl of rock no wider than a shield, sloping down
+to a hole that a man's arm could enter and nothing broader.  The stain on the
+stone stops in a neat ring all round it, as though the stone had held a pool
+of something that was then taken away.
+~
 S
 #1166
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+The Chain Store~
+   Racks of chain cover the walls of this room, coils of it hung on pegs in
+the old way, each coil gone to a rust that flakes at a breath.  Padlocks fill
+a bin by the door, and set into the wall above the bin are boards marked out
+in painted shapes, one outline for every key that belonged here.
 ~
-11 0 0
+11 8 0
 D1
 ~
 ~
@@ -1619,22 +1741,35 @@ D2
 ~
 ~
 0 0 1167
+E
+boards outlines keys shapes~
+   Not one of the painted outlines has a key hanging in it.  The boards have
+been swept clean, all of them at once, in the way of a room that has been
+tidied by someone who meant to come back to it, and the shapes they left
+behind are of keys of twenty different patterns, none of them simple.
+~
 S
 #1167
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+The Coal Hole~
+   The roof comes down to half its height in this chamber, and the whole of
+it is black with a soft black stone heaped against the walls, brought up from
+somewhere deeper and never burned.  A sledge with one shaft broken lies half
+buried in the heap, its runner marks still plain in the dust.
 ~
-11 0 0
+11 8 0
 D0
 ~
 ~
 0 0 1166
 S
 #1168
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+A Long Store-Room~
+   This room is longer than it is wide, and it has been shelved from end to
+end with slabs set on posts driven into the floor.  Great jars of clay stand
+in a double row beneath the lowest shelf, every one of them sealed and every
+one of them empty, though the seals are whole.
 ~
-11 0 0
+11 8 0
 D0
 ~
 ~
@@ -1643,12 +1778,23 @@ D2
 ~
 ~
 0 0 1161
+E
+jars clay seals stamp~
+   The seals are wax over cloth, pressed down with a stamp that has left the
+same angular mark on every jar.  Turning the nearest of them does no good:
+the thing is light as a drum and nothing shifts inside it, and the wax has
+cracked in one place where somebody long ago pressed a thumb into it to try
+it.
+~
 S
 #1169
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+The Keepers' Common Room~
+   This room was where the keepers of this level spent the hours they were
+not working.  A ring of blackened stones marks a fire that was lit here many
+times, benches stand about it close enough to feel the warmth, and the floor
+in front of the largest bench is worn into a hollow by many feet.
 ~
-11 0 0
+11 8 0
 D1
 ~
 ~
@@ -1661,12 +1807,23 @@ D3
 ~
 ~
 0 0 1172
+E
+board game pebbles grid~
+   Scratched into the floor beside the fire ring is a grid of lines, and a
+little hoard of pebbles sits beside it, some pale and some dark, all worn
+smooth by handling.  A game, and one that was left in the middle of playing:
+the pebbles stand where they were put down, and one of them has rolled
+against the bench and was never picked up.
+~
 S
 #1170
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+A Keeper's Cell~
+   A bunk has been cut into the wall of this cell, with a niche beside it to
+hold whatever a person might want close at hand in the night.  Things are
+still in the niche: a pin of copper gone green with age, a comb of bone with
+several teeth broken out of it, and a flute of the same bone.
 ~
-11 0 0
+11 8 0
 D0
 ~
 ~
@@ -1675,22 +1832,42 @@ D3
 ~
 ~
 0 0 1169
+E
+flute pipe bone~
+   The flute is bored with five holes and the mouthpiece is worn to a polish
+by a mouth that is not yours.  Lifting it, you notice how lightly it is made,
+and how small, and you set it down again on the ledge exactly where you found
+it.
+~
 S
 #1171
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+A Small Shrine~
+   The room is small and cold and holds nothing but a single block of the
+white stone that the pillars outside are made of, set up on end in the middle
+of the floor.  Its top is hollowed into a shallow bowl, and the bowl is
+stained black as though a fire had been burned in it many, many times.
 ~
-11 0 0
+11 8 0
 D2
 ~
 ~
 0 0 1170
+E
+hollow bowl stain block~
+   The stain is not soot.  It has gone into the stone itself, a grey-black
+that no scraping will touch, thickest at the bottom of the hollow and thinning
+toward the rim in the way of a thing that was poured in and burned.  The
+white stone about it is cold, colder than the room.
+~
 S
 #1172
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+The Sleeping Ward~
+   Bunks have been cut into the walls of this long room in two tiers, one
+above the other, and there are more of them than this level could ever have
+needed.  Every bunk holds its bedding still, rolled tight at the foot of the
+stone in exactly the same way, all of them, down the whole row.
 ~
-11 0 0
+11 8 0
 D0
 ~
 ~
@@ -1705,20 +1882,26 @@ D3
 0 0 1173
 S
 #1173
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+An Unused Cell~
+   This cell is one of the bunks next door walled into a room of its own,
+and it is the only place in the ward that has not gone to dust and disorder.
+The straw in the bunk is straight and pale and has never been lain on, and
+somebody was meant to be here, and never came.
 ~
-11 0 0
+11 8 0
 D1
 ~
 ~
 0 0 1172
 S
 #1174
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+The Practice Hall~
+   Sand has been laid a hand deep over the stone of this floor and raked
+flat, and it has kept every mark made in it, for nothing has walked here
+since.  Weapon racks stand along the east wall, and the wall beyond them is
+scarred from shoulder to floor in a pattern too even to be chance.
 ~
-11 0 0
+11 8 0
 D1
 ~
 ~
@@ -1729,10 +1912,13 @@ D2
 0 0 1172
 S
 #1175
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+The Armoury~
+   Racks of weapons line both walls of this room, each place in them marked
+with a painted shape of the thing that belonged there.  Every shape is empty.
+At the far end a single helm sits on its peg, rusted through at the rim, and
+nobody wanted it enough to take it.
 ~
-11 0 0
+11 8 0
 D0
 ~
 ~
@@ -1741,15 +1927,33 @@ D3
 ~
 ~
 0 0 1174
+E
+helm casque metal slit~
+   The helm is too small and too strangely made for any head you have ever
+armed.  It has no opening for the face but a single slit set low, and the
+metal of it is not iron but something darker that the rust has taken in
+patches, leaving the shape of scales beneath.
+~
 S
 #1176
-Superbuild (c) 1999 AceM2 ~
-You are in an unfinished room.
+The Sealed Stair~
+   Steps rise out of the floor of this room and climb into the rock, broad
+and shallow and worn in the middle, and they end against a wall of fitted
+stone after only a few feet.  The wall has been built from the side you are
+standing on, its courses laid with care and pointed with something dark.
 ~
-11 0 0
+11 8 0
 D2
 ~
 ~
 0 0 1175
+E
+wall stones mortar crack light~
+   The joints of the wall are not quite tight.  Hold your hand to the largest
+of them and you will feel a thread of air coming down the stair from somewhere
+above, cold and smelling faintly of growing things, and in the deepest part of
+the crack there is a thin blue gleam, like the light that runs in stripes along
+the great stair that comes down into this place.
+~
 S
 $~
