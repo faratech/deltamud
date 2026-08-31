@@ -908,6 +908,7 @@ for access.\r\n\r\n",
                     self.state.motd.clone()
                 };
                 self.out(conn_id, &motd);
+                self.user_cntr(conn_id);
                 info!("{} [{}] has connected.", name, host);
                 if load_result > 0 {
                     self.out(
@@ -927,6 +928,7 @@ for access.\r\n\r\n",
                     self.state.extract_char(stub);
                 }
                 self.out(conn_id, "\r\n\n*** PRESS RETURN: ");
+                self.user_cntr(conn_id);
                 if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                     d.state = ConState::ReadMotd;
                 }
@@ -1434,6 +1436,44 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                     d.state = ConState::Close;
                 }
             }
+        }
+    }
+
+    /// C act.informative.c:2934 user_cntr: bump the raw binary USRCNT logon
+    /// counter (8-byte long, beside lib/ as in C's cwd) and tell the player
+    /// their ordinal (#347).
+    fn user_cntr(&mut self, conn_id: ConnId) {
+        // C resolves "USRCNT" against the server cwd, which is always the
+        // directory containing lib/. Prefer the configured lib's parent.
+        let lib = if !self.lib_path.is_empty() && self.lib_path != "./lib" {
+            self.lib_path.clone()
+        } else {
+            self.state.config.lib_path.clone()
+        };
+        let path = std::path::Path::new(&lib)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.join("USRCNT"))
+            .unwrap_or_else(|| std::path::PathBuf::from("USRCNT"));
+        let mut count: i64 = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| {
+                if bytes.len() >= 8 {
+                    Some(i64::from_le_bytes(bytes[..8].try_into().unwrap()))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        count += 1;
+        if std::fs::write(&path, count.to_le_bytes()).is_ok() {
+            self.out(
+                conn_id,
+                &format!(
+                    "\r\n  You are player #{} to logon since April 13, 1998\r\n",
+                    count
+                ),
+            );
         }
     }
 
@@ -2831,7 +2871,14 @@ mod tests {
 
     fn test_game(db: Arc<MockDatabase>) -> Game {
         let db_trait: Arc<dyn DatabaseInterface> = db;
-        Game::new(GameState::new(Config::default()), db_trait)
+        let mut cfg = Config::default();
+        // Keep the user_cntr USRCNT write (lib/../USRCNT) out of the repo.
+        cfg.lib_path = std::env::temp_dir()
+            .join(format!("deltamud-game-lib-{}", std::process::id()))
+            .to_string_lossy()
+            .to_string();
+        let _ = std::fs::create_dir_all(&cfg.lib_path);
+        Game::new(GameState::new(cfg), db_trait)
     }
 
     fn attach_descriptor(game: &mut Game, conn: ConnId) {
