@@ -170,4 +170,288 @@ X68 40 40 40 40 40 1d1+1400 2d12
 900 80000
 9 9 0
 E
+#3211
+chain smith smithy overseer~
+a chain-smith of the Spire~
+A chain-smith of the Spire draws a glowing link out of the channel.
+~
+    The smith has spent so long at the white-iron channel that the
+ash has baked into the grain of its leather apron, and the mark of
+the Spire is branded into the same leather over the heart.  Every
+link it draws is stamped, weighed and logged, and it will stop
+work to check a bad stamp.
+~
+524352 0 0 E
+X79 410 410 410 410 410 1d1+4000 2d70
+800 135000
+9 9 1
+E
+#3212
+watch sergeant warder gallery~
+the Spire watch-sergeant~
+The Spire watch-sergeant stands at the green glass with a roster.
+~
+    The sergeant has kept the Ash Court's tallies for longer than
+the warders it counts have been alive, and it knows the difference
+between a number that is wrong and a number that has been made
+wrong.  Its spear is very old and has never needed replacing.
+~
+524290 0 0 E
+X80 415 415 415 415 415 1d1+4100 2d71
+900 138000
+9 9 1
+E
+#3213
+salt glass sentinel construct~
+a salt-glass sentinel~
+A salt-glass sentinel walks the crust without breaking it.
+~
+    Cast in the foundry and grown the rest of the way in the salt
+garden, the sentinel is a tall latticed thing with fire burning
+low inside it.  It tends the rows as the Gardener directs and it
+does not eat, sleep, or stop, and the crust holds under it where
+it would not hold under you.
+~
+524384 0 0 E
+X81 420 420 420 420 420 1d1+4200 2d72
+600 140000
+9 9 0
+E
+#3214
+ossuary carver bone~
+an ossuary carver~
+An ossuary carver sets a bone into the pattern on the wall.
+~
+    The carver is old, blind in one eye and entirely untroubled by
+the material it works in.  It reads the courses of the dead the
+way a clerk reads a ledger, and it will tell you, without being
+asked, exactly which course your name will be set into.
+~
+524352 0 0 E
+X82 425 425 425 425 425 1d1+4300 2d73
+1200 142000
+9 9 2
+E
+#3215
+bridge warden span chain~
+a bridge-warden of the span~
+A bridge-warden of the span stands mid-bridge over the drop.
+~
+    The warden keeps the chain bridge and nothing else:  the wire
+lashings, the worn links, and the rule that nothing crosses the
+span at a run.  It does not look down, and it has never once
+needed to be told twice what is standing behind it.
+~
+524290 0 0 E
+X83 430 430 430 430 430 1d1+4400 2d74
+1500 145000
+9 9 1
+E
+#3216
+reliquary acolyte ash priest~
+a reliquary acolyte~
+A reliquary acolyte dusts a case of black glass.
+~
+    The acolyte is grey-robed, soft-footed and quite content, and
+it has charge of the ranked and labelled dead of the Spire.  It
+knows every case by the number on its lid, and it will happily
+explain what the number means.  The dusting is the whole of the
+liturgy, and it is performed perfectly.
+~
+2621442 0 0 E
+X84 440 440 440 440 440 1d1+4600 2d76
+2000 150000
+9 9 2
+E
+#3217
+grey council scribe clerk~
+a grey council scribe~
+A grey council scribe moves an iron figure on the tin map.
+~
+    The scribe is barefoot, sexless in its long grey robe, and it
+has the Marches worked in tin and bone entirely by heart.  It
+moves the small iron figures for the councillors and never once
+for itself, and it can tell you to the hour when the map was last
+wrong.
+~
+524352 0 0 E
+X86 470 470 470 470 470 1d1+5300 3d72
+2500 160000
+9 9 0
+E
+#3218
+forge wrought warden iron~
+a forge-wrought warden~
+A forge-wrought warden steps out of the foundry's heat.
+~
+    Half harness and half furnace, the warden is what the Spire
+makes when it wants a soldier that does not have to be fed,
+broken in or buried.  The stamped plate where a face should be
+has a number on it, and the number is lower than the thralls'
+numbers, which tells you something.
+~
+524384 0 0 E
+X87 475 475 475 475 475 1d1+5400 3d73
+900 165000
+9 9 0
+E
+#3219
+keeper lead ward warden~
+a keeper of the lead ward~
+A keeper of the lead ward stands in the soundless corridor.
+~
+    The keeper walks the lead-lined passage end to end, listening
+with its hands to the warm walls for whatever the Spire keeps out
+with all that metal.  It has not heard anything in years, and it
+has never once concluded from that that there is nothing there.
+~
+524290 0 0 E
+X88 480 480 480 480 480 1d1+5600 3d75
+3000 170000
+9 9 1
+E
+#3220
+ash tithe collector gatherer~
+an ash-tithe collector~
+An ash-tithe collector comes down from the Spire with a sack.
+~
+    The collector goes out into the drowned valley and the Marches
+to gather what the Spire is owed, and it counts better than it
+fights, which is saying a great deal.  The sack over its shoulder
+is iron-framed and locked, and it has never yet come back up the
+basalt road empty.
+~
+524352 0 0 E
+X89 485 485 485 485 485 1d1+5700 3d76
+4000 175000
+9 9 0
+E
+#3221
+spellforge familiar ember spirit~
+a spellforge familiar~
+A spellforge familiar climbs out of the furnace's glow.
+~
+    Made of the same white heat the vault burns spells with, the
+familiar is a low, many-jointed thing that fetches finished work
+down into the glow and brings nothing back.  It has no voice, but
+the furnace answers it, and it is the only servant in the Spire
+the Prelate speaks to politely.
+~
+524384 0 0 E
+X90 490 490 490 490 490 1d1+5900 3d78
+500 180000
+9 9 0
+E
+#3222
+master throat heat warden~
+the Master of the Throat~
+The Master of the Throat stands on the glowing iron steps.
+~
+    Whatever the Master was before the Spire gave it the shaft, it
+is the thing now that decides what goes over the rail, and the
+rail is never far away.  It is tall, blackened, and quite
+unhurried, and it stands in a heat that would kill you standing
+still, because it does not notice the heat any more.
+~
+2621442 0 0 E
+X91 495 495 495 495 495 1d1+6100 3d79
+5000 190000
+9 9 1
+E
+#3223
+crown warden black lacquer~
+a crown-warden~
+A crown-warden in black lacquer stands below the sky of ash.
+~
+    The last rank a warder of the Spire can hold is the crown
+approach, and the ones who hold it are the ones who stopped being
+promotable a very long time ago.  This one's lacquer is unscarred,
+its visor has not opened in years, and it does not care what you
+have done to be allowed this far up.
+~
+524290 0 0 E
+X93 510 510 510 510 510 1d1+7000 3d82
+3000 210000
+9 9 0
+E
+#3224
+ash hallowed templar~
+an ash-hallowed templar~
+An ash-hallowed templar climbs the basalt stair without hurrying.
+~
+    The templars are what the Spire sends when the law alone is not
+going to be enough.  This one is robed in grey over grey plate,
+the ash sits on it without settling, and it has taken a vow about
+the stairs that makes it climb them one at a time, all the way up
+and all the way back down.
+~
+524352 0 0 E
+X94 515 515 515 515 515 1d1+7200 3d83
+2500 220000
+9 9 1
+E
+#3225
+tomb scribe names brazier~
+the tomb-scribe of the Spire~
+The tomb-scribe of the Spire adds a name to the wall.
+~
+    The list on the tomb wall stops halfway down, and the scribe is
+the one still working on it.  It has cut names into living basalt
+since before the Council had chairs, it has never once been told
+to stop, and it will tell you quite plainly that it intends to cut
+yours while it can still reach the wall.
+~
+2621442 0 0 E
+X95 520 520 520 520 520 1d1+7500 3d84
+4000 230000
+9 9 2
+E
+#3226
+basalt colossus giant statue~
+a basalt colossus~
+A basalt colossus stands in the vestibule with a spear rack's worth of iron.
+~
+    Cut out of the tower's own living rock and set on its feet by
+the foundry, the colossus is the Spire's argument in favour of
+nothing ever getting as far as the vestibule.  It has stood in
+this room since the tower was half its present height, and the
+flagstones have been replaced four times around its feet.
+~
+524290 0 0 E
+X96 530 530 530 530 530 1d1+8000 3d86
+6000 250000
+9 9 0
+E
+#3227
+voice crown herald~
+the Voice of the Crown~
+The Voice of the Crown stands among instruments that all point down.
+~
+    Nobody in the Spire has heard the Crown speak except through
+the Voice, and the Voice has held the office through three
+Prelates.  It reads the ash, the stars and the small green fields
+to the south, and it reports all of it in a level, unhurried tone
+that never once suggests what any of it might be for.
+~
+2621442 0 0 E
+X97 535 535 535 535 535 1d1+8200 3d88
+9000 260000
+9 9 0
+E
+#3228
+ashen executioner headsman~
+the Ashen Executioner~
+The Ashen Executioner waits at the foot of the twelfth chair.
+~
+    The Council's law is cut into the walls in tin, and the
+Executioner is what the law looks like when it stands up.  It is
+robed in black lacquer gone grey, it carries the long hooked
+blade the Spire's foundry made for it and no other, and it has
+never once been given a second instruction about anyone.
+~
+524384 0 0 E
+X98 540 540 540 540 540 1d1+8500 3d90
+12000 280000
+9 9 0
+E
 $
