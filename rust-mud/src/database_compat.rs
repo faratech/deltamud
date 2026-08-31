@@ -122,6 +122,13 @@ pub const PLAYER_MAIN_COLUMNS: &[&str] = &[
 /// password (the C MUD stores the crypt/hash directly in `pwd`); `host` is the
 /// connecting host string ("" if unknown).
 pub fn player_main_values(ch: &Character, pwd_hash: &str, host: &str) -> Vec<Value> {
+    // C dbinterface.c:453-463 strips the character before the row is built
+    // (unequip every slot, drain the affected list), so the persisted maxima
+    // are the bare base (real_points here) and `affected_by` only reflects
+    // affects the player_affects loader will restore - transient direct-set
+    // bits (hide/invis/group/charm) do not survive the save (#234).
+    let bare = &ch.real_points;
+    let restored_affects = ch.affected.iter().fold(0i64, |acc, a| acc | a.bitvector);
     vec![
         Value::from(ch.idnum),
         Value::from(ch.player.name.clone()),
@@ -145,19 +152,19 @@ pub fn player_main_values(ch: &Character, pwd_hash: &str, host: &str) -> Vec<Val
         Value::from(ch.last_logon.timestamp()),
         Value::from(host),
         Value::from(ch.points.mana),
-        Value::from(ch.points.max_mana),
+        Value::from(bare.max_mana),
         Value::from(ch.points.hit),
-        Value::from(ch.points.max_hit),
+        Value::from(bare.max_hit),
         Value::from(ch.points.move_points),
-        Value::from(ch.points.max_move),
+        Value::from(bare.max_move),
         Value::from(clamp_corrupt_gold(ch.points.gold)),
         Value::from(clamp_corrupt_gold(ch.points.bank_gold)),
         Value::from(ch.points.exp),
-        Value::from(ch.points.power),
-        Value::from(ch.points.mpower),
-        Value::from(ch.points.defense),
-        Value::from(ch.points.mdefense),
-        Value::from(ch.points.technique),
+        Value::from(bare.power),
+        Value::from(bare.mpower),
+        Value::from(bare.defense),
+        Value::from(bare.mdefense),
+        Value::from(bare.technique),
         Value::from(ch.real_abils.str),
         Value::from(ch.real_abils.str_add),
         Value::from(ch.real_abils.intel),
@@ -209,7 +216,7 @@ pub fn player_main_values(ch: &Character, pwd_hash: &str, host: &str) -> Vec<Val
         Value::from(ch.tloadroom),
         Value::from(ch.alignment),
         Value::from(ch.act_flags),
-        Value::from(ch.affect_flags),
+        Value::from(restored_affects),
     ]
 }
 
@@ -436,5 +443,40 @@ mod tests {
         assert_eq!(values[bank_idx], Value::from(0));
         assert_eq!(clamp_corrupt_gold(1_000_000_000), 1_000_000_000);
         assert_eq!(clamp_corrupt_gold(-1_000_000_000), -1_000_000_000);
+    }
+
+    #[test]
+    fn player_main_values_persists_bare_maxima_and_restorable_affects() {
+        // #234 / C dbinterface.c:453-463: the row is built from the stripped
+        // character - bare maxima (no equipment applies) and affected_by
+        // limited to what the affects loader restores.
+        use crate::character::Affect;
+        let mut ch = Character::new_player("Strip".to_string(), Class::Warrior, Race::Human);
+        ch.points.max_hit = 150; // 100 bare + 50 equipment apply
+        ch.real_points.max_hit = 100;
+        const AFF_HIDE: i64 = 1 << 3;
+        ch.affect_flags = 0x1 | AFF_HIDE; // restorable spell + transient bit
+        ch.affected.push(Affect {
+            spell_type: 1,
+            duration: 5,
+            modifier: 0,
+            location: 0,
+            bitvector: 0x1,
+            caster: None,
+        });
+
+        let values = player_main_values(&ch, "hash", "");
+        let idx = |name: &str| {
+            PLAYER_MAIN_COLUMNS
+                .iter()
+                .position(|c| *c == name)
+                .unwrap()
+        };
+        assert_eq!(values[idx("max_hit")], Value::from(100), "bare max_hit");
+        assert_eq!(
+            values[idx("affected_by")],
+            Value::from(0x1),
+            "transient AFF_HIDE not persisted"
+        );
     }
 }
