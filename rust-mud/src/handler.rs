@@ -187,6 +187,43 @@ impl GameState {
         // C equip path flags the PC for crash-save (BUG 14).
         self.mark_crash(cid);
         self.affect_total(cid);
+        self.enforce_weapon_restriction(cid);
+    }
+
+    /// C handler.c:665-681: after any equip, an already-wielded weapon whose
+    /// damage potential exceeds the wielder's level ceiling is force-unequipped
+    /// ('$p fumbles out of $n's inexperienced hands.'). Requires the crate's
+    /// weapon-ceiling helper (#122).
+    fn enforce_weapon_restriction(&mut self, cid: CharId) {
+        use crate::object::ObjectType;
+        let level = self.get_char(cid).map(|c| c.player.level).unwrap_or(LVL_IMPL);
+        if level >= LVL_IMMORT || crate::cmd_item::weapon_restrictions() <= 0 {
+            return;
+        }
+        let wielded = self.chars.get(&cid).and_then(|c| c.equipment[crate::types::WEAR_WIELD]);
+        let Some(w) = wielded else { return };
+        let (ty, v1, v2) = match self.objs.get(&w) {
+            Some(o) => (o.obj_type, o.values[1], o.values[2]),
+            None => return,
+        };
+        if ty != ObjectType::Weapon {
+            return;
+        }
+        let potential = ((v2 + 1) as f64 / 2.0) * v1 as f64;
+        if potential > crate::cmd_item::lvl_maxdmg_weapon(level as usize) as f64 {
+            let (on, cid_name) = match (self.objs.get(&w), self.chars.get(&cid)) {
+                (Some(o), Some(c)) => (o.short_description.clone(), c.get_name().to_string()),
+                _ => return,
+            };
+            if let Some(oid) = self.unequip_char(cid, crate::types::WEAR_WIELD) {
+                self.obj_to_char(oid, cid);
+            }
+            self.send_to_room(
+                self.chars.get(&cid).and_then(|c| c.in_room).unwrap_or(0),
+                &format!("{} fumbles out of {}'s inexperienced hands.\r\n", on, cid_name),
+                None,
+            );
+        }
     }
 
     pub fn unequip_char(&mut self, cid: CharId, pos: usize) -> Option<ObjId> {

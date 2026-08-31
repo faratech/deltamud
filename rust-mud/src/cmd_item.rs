@@ -101,7 +101,38 @@ const W_FACE: usize = 21;
 // Config (config.c) — jail / donation rooms, PvP, weapon restrictions.
 const DONATION_ROOM_1: RoomVnum = 146;
 const PK_ALLOWED: bool = false;
-const WEAPONRESTRICTIONS: i32 = 0;
+// C config.c:93 `int weaponrestrictions = YES` (=1).
+const WEAPONRESTRICTIONS: i32 = 1;
+
+pub(crate) fn weapon_restrictions() -> i32 {
+    WEAPONRESTRICTIONS
+}
+
+/// C config.c:332-346 lvl_maxdmg_weapon[LVL_IMMORT]: the maximum weapon
+/// damage potential ((val[2]+1)/2 * val[1]) a mortal of each level may
+/// wield. 15 at 0-9 rising to 100 at 90+ (#122).
+pub(crate) fn lvl_maxdmg_weapon(level: usize) -> i64 {
+    const BANDS: [(usize, i64); 11] = [
+        (0, 15),
+        (10, 20),
+        (20, 25),
+        (30, 30),
+        (40, 35),
+        (50, 45),
+        (60, 50),
+        (70, 60),
+        (80, 75),
+        (90, 100),
+        (100, 100),
+    ];
+    let mut cap = 15;
+    for (lo, v) in BANDS.iter() {
+        if level >= *lo {
+            cap = *v;
+        }
+    }
+    cap
+}
 
 // Spell/affect numbers (spells.h).
 const SPELL_POISON: i32 = 23;
@@ -2695,10 +2726,12 @@ pub fn do_wield(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         g.send_to_char(ch, "It's too heavy for you to use.\r\n");
     } else if !is_immort(g, ch)
         && WEAPONRESTRICTIONS > 0
-        && (((obj_val(g, obj, 2) + 1) as f64 / 2.0) * obj_val(g, obj, 1) as f64) > 0.0
+        && ((((obj_val(g, obj, 2) + 1) as f64 / 2.0) * obj_val(g, obj, 1) as f64)
+            > lvl_maxdmg_weapon(get_level(g, ch) as usize) as f64)
     {
-        // weaponrestrictions is disabled (== 0) in config, so this branch is
-        // never reached; lvl_maxdmg_weapon[] gating is preserved structurally.
+        // C act.item.c:1651-1660 do_wield gate: the level/damage ceiling is
+        // LIVE (config.c:93 weaponrestrictions = YES) - the port hardcoded
+        // 0 and compared against nothing (#122).
         act(
             g,
             "$p fumbles out of your inexperienced hands...",
