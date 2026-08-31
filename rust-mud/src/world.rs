@@ -497,6 +497,9 @@ impl GameState {
                     // FIRST matching object in the room; extract it once. Always
                     // sets last_cmd=1 (even if no match). On a match, C sets obj=NULL,
                     // so the trailing NO_RENT bit does NOT fire this iteration.
+                    // C db.c:2084-2092: last_cmd = 1 unconditionally (the
+                    // fall-through sits outside the range check) - altering
+                    // it changed if_flag chaining for malformed tables (#235).
                     if let Some(rnum) = self.real_room(*room_vnum) {
                         let found =
                             self.rooms[rnum].contents.iter().copied().find(|&o| {
@@ -508,10 +511,8 @@ impl GameState {
                             summary.objs_removed += 1;
                             last_obj = None;
                         }
-                        last_cmd = true;
-                    } else {
-                        last_cmd = false;
                     }
+                    last_cmd = true;
                 }
                 ResetCmd::Door {
                     room_vnum,
@@ -546,12 +547,11 @@ impl GameState {
                                 _ => {}
                             }
                             summary.doors_set += 1;
-                            last_cmd = true;
-                        } else {
-                            last_cmd = false;
                         }
-                    } else {
-                        last_cmd = false;
+                        // C db.c:2095-2125: 'D' sets last_cmd = 1 AFTER the
+                        // else, overwriting the ZONE_ERROR 0 - unconditional
+                        // for missing rooms and exits alike (#235).
+                        last_cmd = true;
                     }
                 }
             }
