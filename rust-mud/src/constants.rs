@@ -1482,6 +1482,24 @@ pub static WIS_APP: &[WisAppType] = &[
     WisAppType { bonus: 7 }, // wis = 25
 ];
 
+/// `lvl_maxdmg_weapon[LVL_IMMORT]` (config.c) — the heaviest weapon damage a
+/// mortal of that level may wield. `handler.c` / `act.item.c` refuse to equip
+/// anything above it and `stat` reports the value. Indexed by level
+/// 0..=LVL_IMMORT-1 (101 entries).
+pub static LVL_MAXDMG_WEAPON: &[i32] = &[
+    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, // 0 - 9
+    20, 20, 20, 20, 20, 20, 20, 20, 20, 20, // 10 - 19
+    25, 25, 25, 25, 25, 25, 25, 25, 25, 25, // 20 - 29
+    30, 30, 30, 30, 30, 30, 30, 30, 30, 30, // 30 - 39
+    35, 35, 35, 35, 35, 35, 35, 35, 35, 35, // 40 - 49
+    45, 45, 45, 45, 45, 45, 45, 45, 45, 45, // 50 - 59
+    50, 50, 50, 50, 50, 50, 50, 50, 50, 50, // 60 - 69
+    60, 60, 60, 60, 60, 60, 60, 60, 60, 60, // 70 - 79
+    75, 75, 75, 75, 75, 75, 75, 75, 75, 75, // 80 - 89
+    100, 100, 100, 100, 100, 100, 100, 100, 100, 100, // 90 - 99
+    100, // 100
+];
+
 /// `training_pts[LVL_IMMORT]` (config.c) — bonus training sessions awarded at
 /// each level on `advance_level`. Indexed directly by level 0..=99.
 pub static TRAINING_PTS: &[i32] = &[

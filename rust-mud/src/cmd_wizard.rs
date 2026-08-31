@@ -205,6 +205,31 @@ fn sprintbit(bits: i64, table: &[&str]) -> String {
     out
 }
 
+/// The C `CON_*` ordinal of a descriptor state, for
+/// `sprinttype(d->connected, connected_types, …)` (act.wizard.c:912-914). The
+/// ordinals are the contract — `constants::CONNECTED_TYPES` is laid out in
+/// structs.h order (CON_PLAYING 0 … CON_QDEITY 31).
+fn conn_state_index(state: ConState) -> i32 {
+    match state {
+        ConState::Playing => 0,          // CON_PLAYING
+        ConState::Close => 1,            // CON_CLOSE
+        ConState::GetName => 2,          // CON_GET_NAME
+        ConState::ConfirmName => 3,      // CON_NAME_CNFRM
+        ConState::GetOldPassword => 4,   // CON_PASSWORD
+        ConState::GetNewPassword => 5,   // CON_NEWPASSWD
+        ConState::ConfirmPassword => 6,  // CON_CNFPASSWD
+        ConState::GetSex => 7,           // CON_QSEX
+        ConState::GetClass => 8,         // CON_QCLASS
+        ConState::ReadMotd => 9,         // CON_RMOTD
+        ConState::Menu => 10,            // CON_MENU
+        ConState::GetRace => 23,         // CON_QRACE
+        ConState::RollStats => 24,       // CON_QROLLSTATS
+        ConState::GetHometown => 25,     // CON_QHOMETOWN
+        ConState::GetNewbie => 27,       // CON_NEWBIE
+        ConState::GetDeity => 31,        // CON_QDEITY
+    }
+}
+
 /// Numeric `is_number` (CircleMUD): non-empty and all-digit (optionally signed).
 fn is_number(s: &str) -> bool {
     let t = s.trim();
@@ -1121,7 +1146,16 @@ fn do_stat_room(g: &mut GameState, ch: CharId) {
         ),
     );
     let flagstr = sprintbit(flags, constants::ROOM_BITS);
-    g.send_to_char(ch, &format!("SpecProc: {}, Flags: {}\r\n", "None", flagstr));
+    // C act.wizard.c:473-474: (rm->func == NULL) ? "None" : "Exists".
+    let room_spec = crate::spec_assign::get_room_spec(room_vnum).is_some();
+    g.send_to_char(
+        ch,
+        &format!(
+            "SpecProc: {}, Flags: {}\r\n",
+            if room_spec { "Exists" } else { "None" },
+            flagstr
+        ),
+    );
 
     g.send_to_char(ch, "Description:\r\n");
     if has_desc {
@@ -1338,7 +1372,9 @@ fn do_stat_object(g: &mut GameState, ch: CharId, j: ObjId) {
         &format!("Name: '&y{}&n', Aliases: {}\r\n", short, namelist),
     );
     let typestr = sprinttype(otype, constants::ITEM_TYPES);
-    let rnum = "None"; // obj_index rnum/specproc not surfaced
+    // C act.wizard.c:605-610: obj_index[GET_OBJ_RNUM(j)].func ? "Exists" : "None".
+    let obj_spec = crate::spec_assign::get_obj_spec(vnum).is_some();
+    let rnum = if obj_spec { "Exists" } else { "None" };
     g.send_to_char(
         ch,
         &format!(
@@ -1581,6 +1617,11 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
     let followers = kc.followers.clone();
     let affected = kc.affected.clone();
     let connected = kc.desc.is_some();
+    // C sprinttype(k->desc->connected, connected_types) — the real state.
+    let conn_state = kc
+        .desc
+        .and_then(|conn| g.descriptors.get(&conn))
+        .map(|d| d.state);
     let hometown = kc.player.hometown;
     let talks = kc.talks;
     let clan = kc.clan;
@@ -1604,6 +1645,33 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
         .get(&mob_vnum)
         .map(|m| m.damsizedice)
         .unwrap_or(0);
+    // C act.wizard.c:1000-1002: mob_index[GET_MOB_RNUM(k)].func ? "Exists" : "None".
+    let mob_spec = crate::spec_assign::get_mob_spec(mob_vnum).is_some();
+    // C act.wizard.c:908: attack_hit_text[k->mob_specials.attack_type].singular.
+    let attack_type = g.mob_protos.get(&mob_vnum).map(|m| m.attack_type).unwrap_or(0);
+    let attack_word = constants::ATTACK_HIT_TEXT
+        .get(attack_type.clamp(0, constants::ATTACK_HIT_TEXT.len() as i32 - 1) as usize)
+        .map(|(s, _)| (*s).to_string())
+        .unwrap_or_else(|| "hit".to_string());
+    // C act.wizard.c:847-850 / 870-873 / 887-890: MaxWeapon, practices-per,
+    // and the hit/mana/move regen rates.
+    let maxweapon = constants::LVL_MAXDMG_WEAPON
+        .get(klevel as usize)
+        .copied()
+        .unwrap_or(0);
+    let learn_per = constants::INT_APP
+        .get((abils.intel as i32).clamp(0, constants::INT_APP.len() as i32 - 1) as usize)
+        .map(|a| a.learn)
+        .unwrap_or(0);
+    let nstl = constants::WIS_APP
+        .get((abils.wis as i32).clamp(0, constants::WIS_APP.len() as i32 - 1) as usize)
+        .map(|a| a.bonus)
+        .unwrap_or(0);
+    let (hit_regen, mana_regen, move_regen) = (
+        crate::limits::hit_gain(g, k),
+        crate::limits::mana_gain(g, k),
+        crate::limits::move_gain(g, k),
+    );
 
     let sexstr = match sex {
         Gender::Neutral => "NEUTRAL-SEX",
@@ -1671,7 +1739,7 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
     let lvl_line = if klevel < LVL_IMMORT {
         format!(
             "{}{}, Lev: [&y{:2}&n], XP: [&y{:7}&n], Align: [{:4}], MaxWeapon: [{}], Cstat: [{}]\r\n",
-            class_label, classstr, klevel, exp, align, 0, citizen + 1
+            class_label, classstr, klevel, exp, align, maxweapon, citizen + 1
         )
     } else {
         format!(
@@ -1707,7 +1775,8 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
             ch,
             &format!(
                 "Hometown: [{}], Speaks: [{}/{}/{}], (STL[{}]/per[{}]/NSTL[{}]) Clan: [{}]\r\n",
-                hometown, talks[0] as i32, talks[1] as i32, talks[2] as i32, practices, 0, 0, clan
+                hometown, talks[0] as i32, talks[1] as i32, talks[2] as i32, practices, learn_per,
+                nstl, clan
             ),
         );
     }
@@ -1726,13 +1795,13 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
             "Hit p.:[&g{}/{}+{}&n]  Mana p.:[&g{}/{}+{}&n]  Move p.:[&g{}/{}+{}&n]\r\n",
             points.hit,
             points.max_hit,
-            0,
+            hit_regen,
             points.mana,
             points.max_mana,
-            0,
+            mana_regen,
             points.move_points,
             points.max_move,
-            0
+            move_regen
         ),
     );
     g.send_to_char(
@@ -1762,10 +1831,13 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
         }
     );
     if is_mob {
-        buf.push_str(", Attack type: hit"); // attack_hit_text table not surfaced
+        buf.push_str(&format!(", Attack type: {}", attack_word));
     }
-    if connected {
-        buf.push_str(", Connected: Playing");
+    if let Some(st) = conn_state {
+        buf.push_str(&format!(
+            ", Connected: {}",
+            sprinttype(conn_state_index(st), constants::CONNECTED_TYPES)
+        ));
     }
     if !npc {
         // Arena status block (GET_ARENASTAT), matching act.wizard.c do_stat_character.
@@ -1863,7 +1935,9 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
             ch,
             &format!(
                 "Mob Spec-Proc: {}, NPC Bare Hand Dam: {}d{}\r\n",
-                "None", damnodice, damsizedice
+                if mob_spec { "Exists" } else { "None" },
+                damnodice,
+                damsizedice
             ),
         );
     }
@@ -7032,5 +7106,98 @@ WorldMap:\n",
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
         assert!(out.contains("No room exists with that number."));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ---- #204: stat's MaxWeapon / practices-per / regen rates --------------
+
+    #[test]
+    fn do_stat_character_reports_maxweapon_practices_per_and_regen() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        let vict = connected_player(&mut g, ConnId(2), "Mort", 10);
+        g.char_to_room(imm, room);
+        g.char_to_room(vict, room);
+        {
+            let c = g.get_char_mut(vict).unwrap();
+            c.spells_to_learn = 7;
+            c.aff_abils.intel = 18; // int_app[18].learn == 50
+            c.aff_abils.wis = 18; // wis_app[18].bonus == 5
+        }
+        let hit_regen = crate::limits::hit_gain(&g, vict);
+
+        do_stat_character(&mut g, imm, vict);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        // lvl_maxdmg_weapon[10] == 20 (config.c).
+        assert!(out.contains("MaxWeapon: [20]"), "out: {}", out);
+        assert!(out.contains("(STL[7]/per[50]/NSTL[5])"), "out: {}", out);
+        // The regen column is the live rate, not a literal 0.
+        assert!(hit_regen != 0, "expected a non-zero hit regen");
+        assert!(out.contains(&format!("+{}", hit_regen)), "out: {}", out);
+    }
+
+    // ---- #213: stat's Spec-Proc / attack-type / connected lookups ----------
+
+    #[test]
+    fn do_stat_character_reports_mob_spec_proc_attack_type_and_connection() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        g.char_to_room(imm, room);
+        // Mob vnum 1 (puff) carries a statically assigned spec proc.
+        g.mob_protos.insert(1, mobile_proto(1, "puff", 0));
+        g.mob_protos.get_mut(&1).unwrap().attack_type = 4; // attack_hit_text[4] == "bite"
+        let mob = g.create_char(Character::new_npc(1));
+        g.char_to_room(mob, room);
+
+        do_stat_character(&mut g, imm, mob);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("Mob Spec-Proc: Exists"), "out: {}", out);
+        assert!(out.contains(", Attack type: bite"), "out: {}", out);
+        // C only prints the Connected field when the char has a descriptor; a
+        // freshly loaded mobile does not.
+        assert!(!out.contains(", Connected:"), "out: {}", out);
+    }
+
+    #[test]
+    fn do_stat_character_reports_connected_state_for_a_live_player() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        g.char_to_room(imm, room);
+        g.descriptors.get_mut(&ConnId(1)).unwrap().state = ConState::Menu;
+
+        do_stat_character(&mut g, imm, imm);
+
+        // sprinttype(d->connected, connected_types): CON_MENU -> "Main Menu".
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains(", Connected: Main Menu"), "out: {}", out);
+    }
+
+    #[test]
+    fn stat_reports_room_and_object_spec_procs() {
+        let mut g = GameState::new(Config::default());
+        // Room 3031 is the stock pet-shop entrance (spec_assign.c ASSIGNROOM).
+        let plain = g.add_room(Room::new(100, 0, "Plain".to_string(), "Plain.".to_string()));
+        let petshop = g.add_room(Room::new(3031, 30, "Pets".to_string(), "Pets.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        g.char_to_room(imm, petshop);
+        do_stat_room(&mut g, imm);
+        assert!(g
+            .descriptors
+            .get(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .contains("SpecProc: Exists"));
+
+        // Object vnum 20 is the generic portal (ASSIGNOBJ 20 portal).
+        let obj = g.create_obj(Object::new(20, "portal".to_string(), "a shimmering portal".to_string()));
+        g.descriptors.get_mut(&ConnId(1)).unwrap().outbuf.clear();
+        g.char_to_room(imm, plain);
+        do_stat_object(&mut g, imm, obj);
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("SpecProc: Exists"), "out: {}", out);
     }
 }
