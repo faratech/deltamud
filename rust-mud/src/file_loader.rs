@@ -401,7 +401,9 @@ impl FileLoader {
                             // Extra description: keyword~ desc~
                             let keyword = Self::read_tilde_buf(&mut reader)?;
                             let descr = Self::read_tilde_buf(&mut reader)?;
-                            room.extra_descriptions.push((keyword, descr));
+                            // C db.c:828-834 PREPENDS (later duplicate keywords
+                            // resolve first in find_exdesc) (#237).
+                            room.extra_descriptions.insert(0, (keyword, descr));
                         }
                         _ => {
                             // Unknown line (blank / stray). Skip, matching the
@@ -843,13 +845,13 @@ impl FileLoader {
             }
             if let Some(p) = line.find('~') {
                 if !out.is_empty() {
-                    out.push('\n');
+                    out.push_str("\r\n"); // C fread_string \n -> \r\n (#239)
                 }
                 out.push_str(&line[..p]);
                 return Ok(out);
             }
             if !out.is_empty() {
-                out.push('\n');
+                out.push_str("\r\n"); // C fread_string \n -> \r\n (#239)
             }
             out.push_str(line.trim_end_matches(['\r', '\n']));
         }
@@ -984,7 +986,9 @@ impl FileLoader {
                     'E' => {
                         let keyword = Self::read_tilde_buf(&mut reader)?;
                         let descr = Self::read_tilde_buf(&mut reader)?;
-                        ex_descriptions.push((keyword, descr));
+                        // C db.c:1475-1481 prepends object extra descriptions
+                        // so later duplicate keywords resolve first (#237).
+                        ex_descriptions.insert(0, (keyword, descr));
                     }
                     'A' => {
                         // The 'A' marker line is followed by 'location modifier'.
