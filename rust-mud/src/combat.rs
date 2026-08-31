@@ -2094,6 +2094,26 @@ pub(crate) fn create_money(g: &mut GameState, amount: i32) -> ObjId {
     obj.values = [amount, 0, 0, 0];
     obj.cost = amount;
     obj.loc = ObjLoc::Nowhere;
+    // handler.c:1386-1432: the ex_description 'look coin(s)' shows a
+    // progressively vaguer count the larger the pile (#112).
+    let kw = if amount == 1 { "coin gold" } else { "coins gold" };
+    let ex = if amount == 1 {
+        "It's just one miserable little gold coin.".to_string()
+    } else if amount < 10 {
+        format!("There are {} coins.", amount)
+    } else if amount < 100 {
+        format!("There are about {} coins.", 10 * (amount / 10))
+    } else if amount < 1000 {
+        format!("It looks to be about {} coins.", 100 * (amount / 100))
+    } else if amount < 100000 {
+        format!(
+            "You guess there are, maybe, {} coins.",
+            1000 * ((amount / 1000) + g.rng.number(0, amount / 1000))
+        )
+    } else {
+        "There are a LOT of coins.".to_string()
+    };
+    obj.ex_descriptions.push((kw.to_string(), ex));
     g.create_obj(obj)
 }
 
