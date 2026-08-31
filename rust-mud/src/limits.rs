@@ -988,80 +988,16 @@ fn update_char_objects(g: &mut GameState, ch: CharId) {
 /// replicate that here: capped HP subtraction, then update_pos, then death if it
 /// drops far enough. SPELL_POISON (< SELF_DAMAGE) is the one VALID type, handled
 /// at its call site with its own behavior.
-fn env_damage(g: &mut GameState, ch: CharId, dmg: i32) {
-    // C: dam = MAX(MIN(dam, 1000), 0); GET_HIT(victim) -= dam.
-    let dam = dmg.clamp(0, 1000);
-    match g.get_char_mut(ch) {
-        Some(c) => c.points.hit -= dam,
-        None => return,
-    }
-    update_pos(g, ch);
+const TYPE_STARVING: i32 = 1197; // spells.h:175
+const TYPE_DROWNING: i32 = 1198; // spells.h:176
+const TYPE_SUFFERING: i32 = 1199; // spells.h:177
 
-    // Position-change notices (fight.c, sent with send_to_char/act since act()
-    // won't message a DEAD char).
-    let pos = g.get_char(ch).map(|c| c.position).unwrap_or(Position::Dead);
-    match pos {
-        Position::MortallyWounded => {
-            act(
-                g,
-                "$n is mortally wounded, and will die soon, if not aided.",
-                true,
-                ch,
-                None,
-                ActArg::None,
-                To::Room,
-            );
-            g.send_to_char(
-                ch,
-                "You are mortally wounded, and will die soon, if not aided.\r\n",
-            );
-        }
-        Position::Incapacitated => {
-            act(
-                g,
-                "$n is incapacitated and will slowly die, if not aided.",
-                true,
-                ch,
-                None,
-                ActArg::None,
-                To::Room,
-            );
-            // NB: exact C string preserves the source typo ("incapacitated an").
-            g.send_to_char(
-                ch,
-                "You are incapacitated an will slowly die, if not aided.\r\n",
-            );
-        }
-        Position::Stunned => {
-            act(
-                g,
-                "$n is stunned, but will probably regain consciousness again.",
-                true,
-                ch,
-                None,
-                ActArg::None,
-                To::Room,
-            );
-            g.send_to_char(
-                ch,
-                "You're stunned, but will probably regain consciousness again.\r\n",
-            );
-        }
-        Position::Dead => {
-            act(
-                g,
-                "$n is dead!  R.I.P.",
-                false,
-                ch,
-                None,
-                ActArg::None,
-                To::Room,
-            );
-            g.send_to_char(ch, "You are dead!  Sorry...\r\n");
-            env_die(g, ch);
-        }
-        _ => {}
-    }
+fn env_damage(g: &mut GameState, ch: CharId, dmg: i32, attacktype: i32) {
+    // C limits.c:593-646 routes environment/self damage through damage()
+    // (i.e. the full combat path): dam_multi scaling applies and
+    // SPELL_POISON prints the lib/misc/messages record + adrenaline rush
+    // (#110). The old direct hit -= dmg path was silent and unscaled.
+    crate::combat::damage_type(g, ch, ch, dmg, attacktype);
 }
 
 /// die(ch, NULL) — handle a character's death with no killer (fight.c die +
@@ -1356,7 +1292,7 @@ pub fn point_update(g: &mut GameState) {
                 .map(|c| c.affect_flags & AFF_POISON != 0)
                 .unwrap_or(false);
             if poisoned {
-                env_damage(g, ch, 2); // SPELL_POISON
+                env_damage(g, ch, 2, crate::spell_parser::SPELL_POISON);
                 if !g.char_exists(ch) {
                     continue;
                 }
@@ -1379,12 +1315,12 @@ pub fn point_update(g: &mut GameState) {
                 );
             }
         } else if pos == Position::Incapacitated {
-            env_damage(g, ch, 1); // TYPE_SUFFERING
+            env_damage(g, ch, 1, TYPE_SUFFERING);
             if !g.char_exists(ch) {
                 continue;
             }
         } else if pos == Position::MortallyWounded {
-            env_damage(g, ch, 2); // TYPE_SUFFERING
+            env_damage(g, ch, 2, TYPE_SUFFERING);
             if !g.char_exists(ch) {
                 continue;
             }
@@ -1427,7 +1363,7 @@ pub fn point_update(g: &mut GameState) {
                     );
                     g.send_to_char(ch, "You are drowning!\r\n");
                     let dmg = g.get_char(ch).map(|c| c.points.max_hit / 5).unwrap_or(0);
-                    env_damage(g, ch, dmg); // TYPE_DROWNING
+                    env_damage(g, ch, dmg, TYPE_DROWNING);
                     if !g.char_exists(ch) {
                         continue;
                     }
@@ -1454,7 +1390,7 @@ pub fn point_update(g: &mut GameState) {
                         "You are now dying of thirst! You must get something to drink quickly.\r\n",
                     );
                     let dmg = g.get_char(ch).map(|c| c.points.max_hit / 4).unwrap_or(0);
-                    env_damage(g, ch, dmg); // TYPE_STARVING
+                    env_damage(g, ch, dmg, TYPE_STARVING);
                     if !g.char_exists(ch) {
                         continue;
                     }
@@ -1489,7 +1425,7 @@ pub fn point_update(g: &mut GameState) {
                         "You are now dying of hunger! You must get something to eat soon.\r\n",
                     );
                     let dmg = g.get_char(ch).map(|c| c.points.max_hit / 8).unwrap_or(0);
-                    env_damage(g, ch, dmg); // TYPE_STARVING
+                    env_damage(g, ch, dmg, TYPE_STARVING);
                     if !g.char_exists(ch) {
                         continue;
                     }

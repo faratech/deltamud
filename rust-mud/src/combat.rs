@@ -455,6 +455,25 @@ pub fn hit_type(g: &mut GameState, ch: CharId, victim: CharId, ty: i32) {
     };
     let is_backstab = ty == SKILL_BACKSTAB as i32;
 
+    // C fight.c:1271-1274: the peaceful-room check sits at the very top of
+    // hit(), BEFORE the diceroll - no RNG draw and no DG fight triggers fire
+    // in a peaceful room (#137).
+    {
+        let ch_lvl = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
+        let peaceful = g
+            .get_char(ch)
+            .and_then(|c| c.in_room)
+            .map(|r| g.room(r).room_flags.contains(RoomFlags::PEACEFUL))
+            .unwrap_or(false);
+        if peaceful && ch != victim && ch_lvl < LVL_IMPL {
+            g.send_to_char(
+                ch,
+                "This room just has such a peaceful, easy feeling...\r\n",
+            );
+            return;
+        }
+    }
+
     crate::dg_triggers::fight_mtrigger(g, ch);
     crate::dg_triggers::fight_otrigger(g, ch);
 
@@ -1961,7 +1980,7 @@ fn change_alignment(g: &mut GameState, ch: CharId, victim: CharId) {
     }
 }
 
-fn numdisplay(val: i64) -> String {
+pub(crate) fn numdisplay(val: i64) -> String {
     let negative = val < 0;
     let digits = val.abs().to_string();
     let mut out = String::new();
