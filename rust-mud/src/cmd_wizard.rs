@@ -230,6 +230,19 @@ fn conn_state_index(state: ConState) -> i32 {
     }
 }
 
+/// IS_GOD() (utils.h:560): `!IS_NPC(ch) && (godcmds1 || godcmds2 || godcmds3
+/// || godcmds4)` — a granted-command test, NOT a level test. A level-100
+/// mortal handed bits via `set cmdgeneral on` is a god; a level-103 immortal
+/// with no bits is not. (shop.rs carries the same corrected helper for its own
+/// gates.)
+pub fn is_god(g: &GameState, id: CharId) -> bool {
+    g.get_char(id)
+        .map(|c| {
+            !c.is_npc && (c.godcmds1 != 0 || c.godcmds2 != 0 || c.godcmds3 != 0 || c.godcmds4 != 0)
+        })
+        .unwrap_or(false)
+}
+
 /// Numeric `is_number` (CircleMUD): non-empty and all-digit (optionally signed).
 fn is_number(s: &str) -> bool {
     let t = s.trim();
@@ -1591,7 +1604,8 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
     let mob_vnum = kc.nr;
     let title = kc.player.title.clone();
     let trust = kc.trust;
-    let is_god = !npc && kc.player.level >= LVL_GOD;
+    // C act.wizard.c:828 prints IS_GOD(k) — the granted-command bits.
+    let gcmd = is_god(g, k);
     let long_descr = kc.long_desc.clone();
     let class = kc.player.class as i32;
     let klevel = kc.player.level;
@@ -1711,7 +1725,7 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
             "Title: {}     Trust: {}     God-Commands: {}",
             title.clone().unwrap_or_else(|| "<None>".to_string()),
             trust,
-            if is_god { "&YYes&n\r\n" } else { "No\r\n" }
+            if gcmd { "&YYes&n\r\n" } else { "No\r\n" }
         ),
     );
 
@@ -2070,10 +2084,33 @@ pub fn do_stat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         // of re-entering this `file` branch and deferring forever.
         if rest.is_empty() {
             g.send_to_char(ch, "Stats on which player?\r\n");
-        } else if try_defer_offline(g, ch, &rest, &format!("stat player {}", rest)) {
-            // deferred to the async bridge
         } else {
-            g.send_to_char(ch, "There is no such player.\r\n");
+            // C act.wizard.c:1140-1143: retrieve_player_entry(), then refuse a
+            // target whose level exceeds the requester's — "Sorry, you can't
+            // do that." — before any record is rendered. The target's level
+            // comes from the live character when online, else the persistent
+            // player index (C's player_table, which retrieve_player_entry
+            // walks).
+            let online = get_player_vis(g, ch, &rest);
+            let target_level = match online {
+                Some(v) => Some(level_of(g, v)),
+                None => g.player_index(&rest).map(|p| p.level),
+            };
+            match target_level {
+                None => g.send_to_char(ch, "There is no such player.\r\n"),
+                Some(lvl) if lvl > level_of(g, ch) => {
+                    g.send_to_char(ch, "Sorry, you can't do that.\r\n")
+                }
+                Some(_) => match online {
+                    Some(v) => do_stat_character(g, ch, v),
+                    // Offline: the async bridge loads the record, replays
+                    // `stat player <name>` so the online path renders it, then
+                    // saves + extracts (C retrieve_player_entry/insert_player_entry).
+                    None => {
+                        try_defer_offline(g, ch, &rest, &format!("stat player {}", rest));
+                    }
+                },
+            }
         }
     } else if is_abbrev(&kind, "object") {
         if rest.is_empty() {
@@ -2526,6 +2563,13 @@ pub fn do_vstat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let number = atoi(&numstr);
     if number < 0 {
         g.send_to_char(ch, "A NEGATIVE number??\r\n");
+        return;
+    }
+    // C act.wizard.c:1481-1484: the builder gate fires before real_mobile() /
+    // real_object(), so an out-of-zone vnum is refused without the mobile ever
+    // being instantiated into room 0.
+    if level_of(g, ch) < LVL_IMMORT && !can_edit_zone(g, ch, real_zone(g, number)) {
+        g.send_to_char(ch, "You don't have permissions to that zone.\r\n");
         return;
     }
     if is_abbrev(&kind, "mob") {
@@ -5124,8 +5168,10 @@ pub fn do_set(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let mut is_mob = false;
 
     let ch_level = level_of(g, ch);
-    let is_god = !is_npc(g, ch) && ch_level >= LVL_GOD;
-    if !is_god && ch_level < LVL_IMMORT {
+    // C act.wizard.c:3895: `if (!IS_GOD(ch) && GET_LEVEL(ch) < LVL_IMMORT)`.
+    // IS_GOD is the granted-command test, so a sub-immortal holding bits is
+    // admitted where a plain level check would reject them.
+    if !is_god(g, ch) && ch_level < LVL_IMMORT {
         g.send_to_char(ch, "Huh?!?\r\n");
         return;
     }
@@ -7199,5 +7245,105 @@ WorldMap:\n",
         do_stat_object(&mut g, imm, obj);
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
         assert!(out.contains("SpecProc: Exists"), "out: {}", out);
+    }
+
+    // ---- #205: IS_GOD is a granted-command test, not a level test ----------
+
+    #[test]
+    fn set_admits_a_bit_holding_mortal_and_stat_reports_god_commands() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        let mortal = connected_player(&mut g, ConnId(2), "Granted", 100);
+        g.char_to_room(imm, room);
+        g.char_to_room(mortal, room);
+        g.get_char_mut(mortal).unwrap().godcmds4 = 1; // set cmdgeneral on
+
+        // (a) A sub-immortal with bits reaches set's field list.
+        do_set(&mut g, mortal, "Granted God_Commands on", 0);
+        let out = &g.descriptors.get(&ConnId(2)).unwrap().outbuf;
+        assert!(!out.contains("Huh?!?"), "out: {}", out);
+
+        // (b) stat prints God-Commands from the bits, not the level.
+        g.descriptors.get_mut(&ConnId(1)).unwrap().outbuf.clear();
+        do_stat_character(&mut g, imm, mortal);
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("God-Commands: &YYes&n"), "out: {}", out);
+    }
+
+    #[test]
+    fn stat_god_commands_is_no_for_a_bitless_immortal() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_GOD);
+        g.char_to_room(imm, room);
+
+        do_stat_character(&mut g, imm, imm);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("God-Commands: No\r\n"), "out: {}", out);
+    }
+
+    // ---- #201: `stat file` refuses a target above the requester ------------
+
+    #[test]
+    fn stat_file_refuses_a_higher_level_target() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMMORT);
+        let imp = connected_player(&mut g, ConnId(2), "Imp", LVL_IMPL);
+        g.char_to_room(imm, room);
+        g.char_to_room(imp, room);
+        g.update_player_index(imp_idnum(&g, imp), "Imp", LVL_IMPL, 0, "test");
+
+        do_stat(&mut g, imm, "file Imp", 0);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("Sorry, you can't do that."), "out: {}", out);
+        assert!(!out.contains("IDNum:"), "no record was rendered: {}", out);
+    }
+
+    fn imp_idnum(g: &GameState, id: CharId) -> i64 {
+        g.get_char(id).map(|c| c.idnum).unwrap_or(0)
+    }
+
+    #[test]
+    fn stat_file_still_renders_an_equal_or_lower_level_target() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        let mort = connected_player(&mut g, ConnId(2), "Mort", 10);
+        g.char_to_room(imm, room);
+        g.char_to_room(mort, room);
+
+        do_stat(&mut g, imm, "file Mort", 0);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("IDNum:"), "out: {}", out);
+        assert!(!out.contains("Sorry, you can't do that."), "out: {}", out);
+    }
+
+    // ---- #209: vstat refuses an out-of-zone vnum before instantiating ------
+
+    #[test]
+    fn vstat_denies_an_out_of_zone_vnum_for_a_builder() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        // Zone 0 belongs to "Bob"; the builder "Sally" may not edit it.
+        g.zones.push(test_zone(0, 99, "Bob"));
+        let builder = connected_player(&mut g, ConnId(1), "Sally", 1);
+        g.char_to_room(builder, room);
+        g.mob_protos.insert(1200, mobile_proto(1200, "receptionist", 0));
+
+        do_vstat(&mut g, builder, "mob 1200", 0);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(
+            out.contains("You don't have permissions to that zone."),
+            "out: {}",
+            out
+        );
+        // The mobile was never instantiated into room 0.
+        assert!(g.char_ids().iter().all(|c| !is_npc(&g, *c)));
     }
 }
