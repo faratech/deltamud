@@ -607,6 +607,10 @@ fn sedit_save_to_disk(lib_path: &str, zone: i32, shops: &[Shop]) {
 /// shop.rs, so this path preserves the current zone shop file by reading it and
 /// rewriting it through the canonical C-shaped renderer.
 pub fn sedit_save_zone_to_disk(g: &mut GameState, zone_rnum: usize) {
+    if let Some(z) = g.zones.get(zone_rnum) {
+        // C sedit.c:532 (#274).
+        crate::olc::olc_add_to_save_list(z.number, crate::olc::OLC_SAVE_SHOP);
+    }
     let zone = match g.zones.get(zone_rnum) {
         Some(z) => z.number,
         None => return,

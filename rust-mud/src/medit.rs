@@ -1271,6 +1271,9 @@ pub fn medit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
         Some(z) => (z.number, z.number * 100, z.top),
         None => return,
     };
+    // C medit.c:465: the internal save marks the save list; the disk write
+    // (this function, in the port's eager model) clears it (#274).
+    crate::olc::olc_add_to_save_list(zone_number, crate::olc::OLC_SAVE_MOB);
     let path = mob_file_path(g, zone_number);
     let mut vnums: Vec<MobVnum> = g
         .mob_protos

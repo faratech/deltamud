@@ -1510,6 +1510,10 @@ fn save_to_disk(g: &mut GameState, conn: ConnId) {
 /// zedit_save_to_disk(zone): central OLC save dispatcher entry. Writes the
 /// current in-memory zone header/reset list to `<zone>.zon`.
 pub fn zedit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
+    if let Some(z) = g.zones.get(zone_rnum) {
+        // C zedit.c:474: mark pending, cleared by the disk write below (#274).
+        crate::olc::olc_add_to_save_list(z.number, crate::olc::OLC_SAVE_ZONE);
+    }
     let z = match g.zones.get(zone_rnum) {
         Some(z) => z.clone(),
         None => return,
