@@ -281,6 +281,10 @@ pub fn do_medit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
     states().lock().unwrap().insert(conn, st);
     olc::set_active(conn, EditorKind::Medit);
+    // C olc.c:381-382: '$n starts using OLC.' + SET_BIT(PLR_WRITING) (#273).
+    if let Some(c) = g.get_char_mut(ch) {
+        c.act_flags |= crate::flags::PLR_WRITING;
+    }
     disp_menu(g, conn);
 }
 
@@ -1028,10 +1032,31 @@ fn parse_confirm_save(g: &mut GameState, conn: ConnId, line: &str) {
 }
 
 /// Tear down the editor for this connection (CircleMUD cleanup_olc).
+
+fn editor_char(g: &GameState, conn: ConnId) -> Option<CharId> {
+    g.descriptors.get(&conn).and_then(|d| d.character)
+}
+
 fn finish(g: &mut GameState, conn: ConnId) {
     states().lock().unwrap().remove(&conn);
     olc::clear_active(conn);
-    send(g, conn, "Mobile editor exited.\r\n");
+    // C olc.c:610-613 cleanup_olc: clear PLR_WRITING and act '$n stops using
+    // OLC.' The invented 'Mobile editor exited.' line appears nowhere in C
+    // (#273).
+    if let Some(cid) = editor_char(g, conn) {
+        if let Some(c) = g.get_char_mut(cid) {
+            c.act_flags &= !crate::flags::PLR_WRITING;
+        }
+        crate::act::act(
+            g,
+            "$n stops using OLC.",
+            true,
+            cid,
+            None,
+            crate::act::ActArg::None,
+            crate::act::To::Room,
+        );
+    }
 }
 
 // ---- Multi-line description editor ---------------------------------------

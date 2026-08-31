@@ -273,6 +273,12 @@ pub fn do_zedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
     states().lock().unwrap().insert(conn, st);
     olc::set_active(conn, EditorKind::Zedit);
+    // C olc.c:381-382 (#273).
+    if let Some(cid) = editor_char(g, conn) {
+        if let Some(c) = g.get_char_mut(cid) {
+            c.act_flags |= crate::flags::PLR_WRITING;
+        }
+    }
     disp_menu(g, conn);
 }
 
@@ -1362,10 +1368,29 @@ fn parse_confirm_save(g: &mut GameState, conn: ConnId, line: &str) {
     }
 }
 
+
+fn editor_char(g: &GameState, conn: ConnId) -> Option<CharId> {
+    g.descriptors.get(&conn).and_then(|d| d.character)
+}
+
 fn finish(g: &mut GameState, conn: ConnId) {
     states().lock().unwrap().remove(&conn);
     olc::clear_active(conn);
-    send(g, conn, "Zone editor exited.\r\n");
+    // C olc.c:610-613 cleanup_olc (#273).
+    if let Some(cid) = editor_char(g, conn) {
+        if let Some(c) = g.get_char_mut(cid) {
+            c.act_flags &= !crate::flags::PLR_WRITING;
+        }
+        crate::act::act(
+            g,
+            "$n stops using OLC.",
+            true,
+            cid,
+            None,
+            crate::act::ActArg::None,
+            crate::act::To::Room,
+        );
+    }
 }
 
 fn with_state<F: FnOnce(&mut ZeditState)>(conn: ConnId, f: F) {

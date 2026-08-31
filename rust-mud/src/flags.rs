@@ -28,6 +28,9 @@ pub const PRF_DISPMANA: i64 = 1 << 5;
 pub const PRF_DISPMOVE: i64 = 1 << 6;
 pub const PRF_NOHASSLE: i64 = 1 << 8;
 pub const PRF_NOREPEAT: i64 = 1 << 11;
+/// structs.h PLR_WRITING - set while composing boards/mail/OLC edits
+/// (suppresses channel traffic and hunger ticks) (#273).
+pub const PLR_WRITING: i64 = 1 << 4;
 pub const PRF_HOLYLIGHT: i64 = 1 << 12;
 pub const PRF_COLOR_1: i64 = 1 << 13;
 pub const PRF_COLOR_2: i64 = 1 << 14;
