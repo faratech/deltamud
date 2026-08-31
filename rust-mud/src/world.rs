@@ -375,15 +375,17 @@ impl GameState {
                         last_cmd = false;
                         continue;
                     }
-                    let rnum = match self.real_room(*room_vnum) {
-                        Some(r) => r,
-                        None => {
-                            last_cmd = false;
-                            continue;
-                        }
-                    };
+                    // C db.c:2012-2030: a NEGATIVE room vnum creates the
+                    // object unplaced (in_room = NOWHERE) and still counts as
+                    // a successful command (#236).
+                    let rnum = self.real_room(*room_vnum);
                     if let Some(obj) = self.load_object(*obj_vnum) {
-                        self.obj_to_room(obj, rnum);
+                        match rnum {
+                            Some(r) => self.obj_to_room(obj, r),
+                            None => {
+                                self.get_obj_mut(obj).unwrap().loc = crate::object::ObjLoc::Nowhere;
+                            }
+                        }
                         crate::dg_triggers::load_otrigger(self, obj);
                         *obj_counts.entry(*obj_vnum).or_insert(0) += 1;
                         summary.objs_spawned += 1;
