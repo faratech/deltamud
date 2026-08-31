@@ -338,7 +338,7 @@ fn is_blind(g: &GameState, ch: CharId) -> bool {
 }
 
 /// CAN_SEE_OBJ for the (Tier-0) object model: invisible items need detect.
-fn can_see_obj(g: &GameState, ch: CharId, oid: ObjId) -> bool {
+pub(crate) fn can_see_obj(g: &GameState, ch: CharId, oid: ObjId) -> bool {
     let obj = match g.get_obj(oid) {
         Some(o) => o,
         None => return false,

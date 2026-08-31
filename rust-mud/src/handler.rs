@@ -55,6 +55,15 @@ impl GameState {
         if let Some(ch) = self.chars.get_mut(&cid) {
             ch.in_room = Some(rnum);
         }
+        // C handler.c:496-499: entering a room different from your opponent's
+        // breaks the fight - both sides stop (#111).
+        if let Some(f) = self.chars.get(&cid).and_then(|ch| ch.fighting) {
+            let f_room = self.chars.get(&f).and_then(|c| c.in_room);
+            if f_room != Some(rnum) {
+                crate::combat::stop_fighting(self, f);
+                crate::combat::stop_fighting(self, cid);
+            }
+        }
         self.adjust_room_light_for_char(cid, rnum, 1);
     }
 
@@ -70,6 +79,8 @@ impl GameState {
         if let Some(ch) = self.chars.get_mut(&cid) {
             ch.in_room = None;
         }
+        // C handler.c:431-432: leaving a room stops any fight (#111).
+        crate::combat::stop_fighting(self, cid);
     }
 
     // ---- Object placement ----------------------------------------------
@@ -309,16 +320,38 @@ impl GameState {
 
         self.char_from_room(cid);
 
-        // Extract carried + worn objects.
-        let (carried, worn): (Vec<ObjId>, Vec<ObjId>) = match self.chars.get(&cid) {
+        // C handler.c:1101-1112: extraction leaves the character's objects
+        // behind - carried items and worn equipment are dropped in the room
+        // ('purge' / force-rent must not destroy gear; #103).
+        let (carried, worn, in_room) = match self.chars.get(&cid) {
             Some(ch) => (
                 ch.carrying.clone(),
-                ch.equipment.iter().flatten().copied().collect(),
+                ch.equipment.iter().flatten().copied().collect::<Vec<_>>(),
+                ch.in_room,
             ),
-            None => (Vec::new(), Vec::new()),
+            None => (Vec::new(), Vec::new(), None),
         };
-        for o in carried.into_iter().chain(worn) {
-            self.extract_obj(o);
+        if let Some(rnum) = in_room {
+            for o in carried {
+                self.obj_from_anywhere(o);
+                self.obj_to_room(o, rnum);
+            }
+            for p in 0..NUM_WEARS {
+                if let Some(o) = self.unequip_char(cid, p) {
+                    self.obj_to_room(o, rnum);
+                }
+            }
+        } else {
+            // Nowhere to drop them (void extraction) - C's obj_to_room with
+            // NOWHERE is a no-op, so the objects vanish as before.
+            for o in worn {
+                if let Some(o) = self.chars.get(&cid).and_then(|ch| ch.equipment.iter().position(|s| *s == Some(o))).and_then(|p| self.unequip_char(cid, p)) {
+                    self.extract_obj(o);
+                }
+            }
+            for o in carried {
+                self.extract_obj(o);
+            }
         }
 
         // Unlink descriptor / name index.
@@ -413,9 +446,11 @@ impl GameState {
     }
 
     /// Find an object by keyword within a list of object ids (+ ordinal).
+    /// C handler.c:1254-1275 gates each candidate on CAN_SEE_OBJ, so
+    /// ITEM_INVISIBLE objects need detect-invis to target (#106).
     pub fn get_obj_in_list_vis(
         &self,
-        _observer: CharId,
+        observer: CharId,
         arg: &str,
         list: &[ObjId],
     ) -> Option<ObjId> {
@@ -428,6 +463,9 @@ impl GameState {
                 Some(o) => o,
                 None => continue,
             };
+            if !crate::cmd_informative::can_see_obj(self, observer, oid) {
+                continue;
+            }
             if isname(&name, &obj.name) {
                 count -= 1;
                 if count == 0 {

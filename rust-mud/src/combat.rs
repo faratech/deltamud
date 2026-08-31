@@ -114,7 +114,7 @@ fn affect_from_char(g: &mut GameState, ch: CharId, spell: i32) {
     g.affect_total(ch);
 }
 
-fn stop_fighting(g: &mut GameState, ch: CharId) {
+pub(crate) fn stop_fighting(g: &mut GameState, ch: CharId) {
     if let Some(c) = g.get_char_mut(ch) {
         c.fighting = None;
         if c.position == Position::Fighting {
@@ -2895,6 +2895,10 @@ mod tests {
         ));
         let attacker = player(&mut g, "Attacker");
         let victim = connected_player(&mut g, "Victim", ConnId(1));
+        // Place both fighters FIRST: char_to_room breaks combat links across
+        // rooms (C handler.c:496-499, #111).
+        g.char_to_room(attacker, room);
+        g.char_to_room(victim, room);
         {
             let a = g.get_char_mut(attacker).unwrap();
             a.player.class = Class::Warrior;
@@ -2911,8 +2915,6 @@ mod tests {
             v.points.hit = 10_000;
             v.points.max_hit = 10_000;
         }
-        g.char_to_room(attacker, room);
-        g.char_to_room(victim, room);
 
         perform_violence(&mut g);
 
