@@ -904,6 +904,9 @@ pub fn mag_creations(g: &mut GameState, _level: i32, ch: CharId, spellnum: i32) 
         }
     };
     g.obj_to_char(tobj, ch);
+    // C magic.c:1044-1046: load_otrigger fires on the created object so
+    // OTRIG_LOAD scripts (shipped trigger on vnum 10 food) run (#146).
+    crate::dg_triggers::load_otrigger(g, tobj);
     act(
         g,
         "$n creates $p.",
@@ -1037,6 +1040,9 @@ pub fn mag_summons(g: &mut GameState, _level: i32, ch: CharId, obj: Option<ObjId
         ActArg::Char(mob),
         To::Room,
     );
+    // C magic.c:828: load_mtrigger(mob) fires before add_follower - summoned
+    // undead/clones run their MTRIG_LOAD scripts (#145).
+    crate::dg_triggers::load_mtrigger(g, mob);
     add_follower(g, mob, ch);
 
     if handle_corpse {

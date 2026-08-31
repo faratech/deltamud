@@ -571,6 +571,18 @@ impl GameState {
         if let Some(z) = self.zones.iter_mut().find(|z| z.number == zone_number) {
             z.age = 0;
         }
+
+        // C db.c:2137-2142: reset_zone finishes by walking every room vnum in
+        // the zone and firing reset_wtrigger - WTRIG_RESET scripts re-seal
+        // doors and restore one-shot state on every repop (#144).
+        if let Some(z) = self.zones.iter().find(|z| z.number == zone_number) {
+            let start = z.number * 100;
+            for vnum in start..=z.top {
+                if let Some(rnum) = self.real_room(vnum) {
+                    crate::dg_triggers::reset_wtrigger(self, rnum);
+                }
+            }
+        }
         summary
     }
 }
