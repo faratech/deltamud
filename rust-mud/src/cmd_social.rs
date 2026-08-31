@@ -1107,7 +1107,7 @@ mod tests {
     use super::*;
     use crate::character::{Character, IgnoreEntry};
     use crate::config::Config;
-    use crate::connection::{ConState, Descriptor};
+    use crate::connection::Descriptor;
     use crate::room::Room;
     use crate::types::{Class, ConnId, Race};
 
