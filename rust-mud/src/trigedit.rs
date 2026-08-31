@@ -935,6 +935,12 @@ fn save(g: &mut GameState, conn: ConnId) {
         arglist: arglist.clone(),
         cmdlist,
     };
+    // C dg_olc.c:424-470: install the edited prototype IN PLACE - dg_olc
+    // patches the table (and live trigger_list entries) without touching any
+    // other prototype. boot_triggers() cleared index/vnum_map/proto_scripts,
+    // detaching EVERY trigger in the world on each save and stripping T
+    // lines from the next redit save (#260).
+    dg_db_scripts::upsert_proto_trigger(edited.clone());
 
     // Resolve the zone range to rewrite.
     let (zone_number, zone_top) = match g.zones.get(znum) {
@@ -1022,11 +1028,6 @@ fn save(g: &mut GameState, conn: ConnId) {
         }
     }
 
-    // Refresh the live trig_index from disk so the new/edited prototype takes
-    // effect immediately (boot_triggers clears and reloads every prototype).
-    // This is the Rust equivalent of dg_olc.c rebuilding trig_index + walking
-    // trigger_list, done via the canonical loader so rnum ordering stays sane.
-    dg_db_scripts::boot_triggers(&lib_path);
 }
 
 // ---------------------------------------------------------------------------

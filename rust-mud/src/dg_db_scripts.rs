@@ -117,6 +117,21 @@ pub fn set_test_proto_trigger(kind: i32, entity_vnum: i32, proto: TrigProto) {
     idx.push(proto);
 }
 
+/// C dg_olc.c:424-470 trigedit_save: install the edited prototype IN PLACE -
+/// replace the existing table entry (or append a new one) without touching
+/// any other prototype and without clearing proto_scripts, so live trigger
+/// attachments and world files survive a trigedit save (#260).
+pub fn upsert_proto_trigger(proto: TrigProto) {
+    let mut idx = index().lock().unwrap();
+    if let Some(existing) = idx.iter().position(|t| t.vnum == proto.vnum) {
+        idx[existing] = proto;
+    } else {
+        let rnum = idx.len();
+        vnum_map().lock().unwrap().insert(proto.vnum, rnum);
+        idx.push(proto);
+    }
+}
+
 /// read_trigger(rnum): instantiate a live TrigData from a prototype, returning
 /// its TrigId (trig_data_copy + install). Returns None if rnum is invalid.
 pub fn read_trigger(rnum: usize) -> Option<dg_handler::TrigId> {
