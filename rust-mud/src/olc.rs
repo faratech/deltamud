@@ -269,6 +269,17 @@ pub fn real_zone(g: &GameState, vnum: i32) -> Option<usize> {
 }
 
 /// True when `ch` may edit the loaded zone at `zone_rnum`.
+/// True when object vnum `obj_vnum` lives in a zone the builder can edit
+/// (sedit.c:1181-1188 product gate; #267).
+pub fn obj_proto_in_owned_zone(g: &GameState, ch: CharId, obj_vnum: i32) -> bool {
+    match g.obj_protos.get(&obj_vnum) {
+        Some(p) => real_zone(g, p.vnum)
+            .map(|zr| can_edit_zone(g, ch, zr))
+            .unwrap_or(false),
+        None => false,
+    }
+}
+
 pub fn can_edit_zone(g: &GameState, ch: CharId, zone_rnum: usize) -> bool {
     let Some(c) = g.get_char(ch) else {
         return false;

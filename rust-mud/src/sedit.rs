@@ -1385,6 +1385,18 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 g.send_to_char(ch, "That object does not exist, try again : ");
                 return;
             }
+            // C sedit.c:1181-1188: a builder below LVL_GRGOD may only stock
+            // objects from zones they own (#267).
+            let level = conn_char(g, conn)
+                .and_then(|c| g.get_char(c))
+                .map(|c| c.player.level)
+                .unwrap_or(LVL_IMPL);
+            if level < LVL_GRGOD
+                && !crate::olc::obj_proto_in_owned_zone(g, ch, i)
+            {
+                g.send_to_char(ch, "You don't have permissions to that zone, try again : ");
+                return;
+            }
             with_state(conn, |st| st.shop.producing.push(i));
             sedit_products_menu(g, conn);
             return;
@@ -1407,6 +1419,22 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             }
             if g.real_room(i).is_none() {
                 g.send_to_char(ch, "That room does not exist, try again : ");
+                return;
+            }
+            // C sedit.c:1199-1206: the shop room's zone must be owned
+            // (< LVL_IMMORT) (#267).
+            let level = conn_char(g, conn)
+                .and_then(|c| g.get_char(c))
+                .map(|c| c.player.level)
+                .unwrap_or(LVL_IMPL);
+            let owned = g
+                .real_room(i)
+                .and_then(|r| g.room_opt(r))
+                .and_then(|room| crate::olc::real_zone(g, room.number))
+                .map(|zr| crate::olc::can_edit_zone(g, ch, zr))
+                .unwrap_or(false);
+            if level < LVL_IMMORT && !owned {
+                g.send_to_char(ch, "You don't have permissions to that zone, try again : ");
                 return;
             }
             with_state(conn, |st| st.shop.in_room.push(i));
