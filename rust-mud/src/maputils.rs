@@ -2040,8 +2040,7 @@ fn unit_activity(g: &mut GameState, room: RoomRnum, wtype: usize) {
                 ch,
                 "You see a holy bolt of lightning discharge from the sky in your direction!\r\n&CZZZZZZZZZZZZT&n!!\r\n",
             );
-            let bolt = g.rng.number(400, 900);
-            if apply_thunderstorm_bolt(g, ch, wtype, bolt) {
+            if apply_thunderstorm_bolt(g, ch, wtype, &mut |g| g.rng.number(400, 900)) {
                 continue; // PC died (extracted/respawned).
             }
         }
@@ -2438,7 +2437,15 @@ fn weather_update_pos(g: &mut GameState, ch: CharId) {
     }
 }
 
-fn apply_thunderstorm_bolt(g: &mut GameState, ch: CharId, wtype: usize, bolt: i32) -> bool {
+fn apply_thunderstorm_bolt(
+    g: &mut GameState,
+    ch: CharId,
+    wtype: usize,
+    roll: &mut dyn FnMut(&mut GameState) -> i32,
+) -> bool {
+    // C maputils.c:1619-1637: number(400,900) is rolled inside whichever
+    // branch runs - a redirected target rolls nothing (RNG parity, #189).
+    let bolt = roll(g);
     let sanct_divisor = if g
         .get_char(ch)
         .map(|c| c.affect_flags & AFF_SANCTUARY != 0)
@@ -2494,9 +2501,9 @@ fn apply_thunderstorm_bolt(g: &mut GameState, ch: CharId, wtype: usize, bolt: i3
     if weather_show_pos(g, ch, wtype) {
         return true;
     }
-    if !redirected {
-        g.send_to_char(ch, "You feel a little bit crispier.\r\n");
-    }
+    // C maputils.c:1639: every survivor of the bolt feels 'a little bit
+    // crispy' - redirected or not (#189).
+    g.send_to_char(ch, "You feel a little bit crispier.\r\n");
     false
 }
 
@@ -3028,10 +3035,13 @@ WorldMap:\n\
 
         assert!(!apply_thunderstorm_bolt(
             &mut g,
+
             ch,
+
             WEATHER_THUNDERSTORM,
-            800
-        ));
+
+            &mut |_g| 800,
+            ));
 
         let c = g.get_char(ch).unwrap();
         assert_eq!(c.points.hit, 950);
