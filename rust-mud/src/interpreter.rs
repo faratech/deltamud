@@ -486,6 +486,8 @@ fn dispatch(g: &mut GameState, ch: CharId, handler: HandlerId, arg: &str, subcmd
         DoIsay => cmd_wizard::do_isay(g, ch, arg, subcmd),
         DoMcasters => cmd_wizard::do_mcasters(g, ch, arg, subcmd),
         DoCopyto => cmd_wizard::do_copyto(g, ch, arg, subcmd),
+        DoCopy => crate::olc::do_copy(g, ch, arg, subcmd),
+        DoRlink => crate::olc::do_rlink(g, ch, arg, subcmd),
         DoDig => cmd_wizard::do_dig(g, ch, arg, subcmd),
         DoEsave => cmd_wizard::do_esave(g, ch, arg, subcmd),
         DoTmobdie => cmd_wizard::do_tmobdie(g, ch, arg, subcmd),

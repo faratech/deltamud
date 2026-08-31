@@ -585,6 +585,411 @@ pub fn strip_cr(s: &str) -> String {
 }
 
 // ===========================================================================
+// do_copy / do_rlink (C olc.c:735 / :880) — complete in the C source but
+// never registered in cmd_info, so builders could never reach them. Ported
+// and registered as the "finish the game" activations (registered in
+// COMPATIBILITY.md).
+// ===========================================================================
+
+const COPY_FORMAT: &str = "Usage:  copy { room | obj } <source> <target>\r\n";
+const RLINK_FORMAT: &str = "Usage:  rlink <dir> <connect|disconnect> <1|2> [target]\r\n";
+
+/// C olc.c:646 zone_number(): the builder NUMBER of the zone owning this
+/// entity. Rooms resolve through real_zone; objects/mobs use vnum/100 (the
+/// author's own truncation formula).
+fn zone_number_of_room(g: &GameState, rnum: usize) -> i32 {
+    g.rooms
+        .get(rnum)
+        .and_then(|r| real_zone(g, r.number))
+        .and_then(|zr| g.zones.get(zr).map(|z| z.number))
+        .unwrap_or(0)
+}
+
+/// C olc.c:702 copy_room: name/description/sector/flags only — the author
+/// deliberately skipped extra descriptions ("I think it will stay that way.").
+fn copy_room_fields(g: &mut GameState, src: usize, targ: usize) {
+    let (name, description, sector_type, room_flags) = {
+        let r = g.room(src);
+        (
+            r.name.clone(),
+            r.description.clone(),
+            r.sector_type,
+            r.room_flags,
+        )
+    };
+    let t = g.room_mut(targ);
+    t.name = name;
+    t.description = description;
+    t.sector_type = sector_type;
+    t.room_flags = room_flags;
+}
+
+/// C olc.c:722 copy_object: the description/flag fields of one prototype onto
+/// another (worn_on copied in C is an instance artifact and meaningless on a
+/// proto — skipped).
+fn copy_object_fields(g: &mut GameState, src_vnum: i32, targ_vnum: i32) {
+    let src = match g.obj_protos.get(&src_vnum) {
+        Some(p) => p.clone(),
+        None => return,
+    };
+    if let Some(t) = g.obj_protos.get_mut(&targ_vnum) {
+        t.name = src.name;
+        t.description = src.description;
+        t.short_desc = src.short_desc;
+        t.action_description = src.action_description;
+        t.ex_descriptions = src.ex_descriptions;
+        t.obj_type = src.obj_type;
+        t.extra_flags = src.extra_flags;
+        t.wear_flags = src.wear_flags;
+        t.weight = src.weight;
+        t.cost = src.cost;
+        t.rent = src.rent;
+        t.values = src.values;
+        t.curr_slots = src.curr_slots;
+        t.total_slots = src.total_slots;
+        t.bitvector = src.bitvector;
+        t.obj_class = src.obj_class;
+        t.min_level = src.min_level;
+    }
+}
+
+/// C olc.c:735 do_copy.
+pub fn do_copy(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
+    let (ty, rest) = crate::interpreter::one_argument(arg);
+    let (src_num, rest2) = crate::interpreter::one_argument(&rest);
+    let (targ_num, _) = crate::interpreter::one_argument(rest2);
+
+    if ty.is_empty() || src_num.is_empty() {
+        g.send_to_char(ch, COPY_FORMAT);
+        return;
+    }
+    // C olc.c:748 tests `room_or_obj == OBJECT` BEFORE the type is parsed, so
+    // this guard can never fire there; the parse-aware placement here is the
+    // evident intent (registered).
+    let is_obj = crate::interpreter::is_abbrev(&ty, "obj");
+    if targ_num.is_empty() && is_obj {
+        g.send_to_char(ch, "You must specify a target when copying objects.\r\n");
+        return;
+    }
+
+    let is_room = crate::interpreter::is_abbrev(&ty, "room");
+    let numeric = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    let numeric = |s: &str| numeric(&s.clone());
+
+    let (room_or_obj, vnum_src, rnum_src, vnum_targ, rnum_targ, save_zone) = if is_room
+        && numeric(&src_num)
+    {
+        let vnum_src: i32 = src_num.parse().unwrap_or(-1);
+        let rnum_src = g.real_room(vnum_src);
+        let (vnum_targ, rnum_targ) = if targ_num.is_empty() {
+            match g.get_char(ch).and_then(|c| c.in_room) {
+                Some(r) => (g.rooms[r].number, Some(r)),
+                None => return,
+            }
+        } else if numeric(&targ_num) {
+            let v: i32 = targ_num.parse().unwrap_or(-1);
+            (v, g.real_room(v))
+        } else {
+            g.send_to_char(ch, COPY_FORMAT);
+            return;
+        };
+        let save_zone = rnum_targ.map(|r| zone_number_of_room(g, r)).unwrap_or(0);
+        (
+            0,
+            vnum_src,
+            rnum_src.is_some(),
+            vnum_targ,
+            rnum_targ.is_some(),
+            save_zone,
+        )
+    } else if is_obj && !targ_num.is_empty() && numeric(&src_num) && numeric(&targ_num) {
+        let vnum_src: i32 = src_num.parse().unwrap_or(-1);
+        let vnum_targ: i32 = targ_num.parse().unwrap_or(-1);
+        let rnum_src = g.obj_protos.contains_key(&vnum_src);
+        let rnum_targ = g.obj_protos.contains_key(&vnum_targ);
+        (
+            1,
+            vnum_src,
+            rnum_src,
+            vnum_targ,
+            rnum_targ,
+            vnum_targ / 100, // C zone_number OBJECT formula
+        )
+    } else {
+        g.send_to_char(ch, COPY_FORMAT);
+        return;
+    };
+
+    let (src_ok, targ_ok) = (rnum_src, rnum_targ);
+    if !src_ok || !targ_ok {
+        g.send_to_char(
+            ch,
+            &format!(
+                "The source and target {}s must both currently exist.\r\n",
+                if room_or_obj == 1 { "object" } else { "room" }
+            ),
+        );
+        return;
+    }
+    if !can_edit_zone(g, ch, real_zone(g, save_zone * 100).unwrap_or(usize::MAX)) {
+        g.send_to_char(ch, "You cannot edit that zone.\r\n");
+        return;
+    }
+
+    if room_or_obj == 0 {
+        let s = g.real_room(vnum_src).unwrap();
+        let t = g.real_room(vnum_targ).unwrap();
+        copy_room_fields(g, s, t);
+    } else {
+        copy_object_fields(g, vnum_src, vnum_targ);
+    }
+
+    g.send_to_char(
+        ch,
+        &format!(
+            "You copy {} {} to {}.\r\n",
+            if room_or_obj == 0 { "room" } else { "object" },
+            vnum_src,
+            vnum_targ
+        ),
+    );
+    olc_add_to_save_list(save_zone, room_or_obj); // C: ROOM==OLC_SAVE_ROOM, OBJECT==OLC_SAVE_OBJ
+}
+
+/// C olc.c:767 create_dir: an empty exit in `dir` ("No target yet").
+fn create_dir(g: &mut GameState, rnum: usize, dir: usize) -> bool {
+    let Some(room) = g.rooms.get_mut(rnum) else {
+        return false;
+    };
+    if room.exits[dir].is_some() {
+        return false;
+    }
+    room.exits[dir] = Some(crate::room::Exit {
+        description: Some("You see nothing special.\r\n".to_string()),
+        keyword: None,
+        exit_info: 0,
+        key: -1,
+        to_room: NOWHERE,
+    });
+    true
+}
+
+/// C olc.c:785 free_dir: remove the exit entirely.
+fn free_dir(g: &mut GameState, rnum: usize, dir: usize) -> bool {
+    g.rooms
+        .get_mut(rnum)
+        .map(|room| room.exits[dir].take().is_some())
+        .unwrap_or(false)
+}
+
+/// C olc.c:880 do_rlink ("The big baby").
+pub fn do_rlink(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
+    let (direction, rest) = crate::interpreter::one_argument(arg);
+    let (command, rest2) = crate::interpreter::one_argument(&rest);
+    let (ty, rest3) = crate::interpreter::one_argument(rest2);
+    let (target, _) = crate::interpreter::one_argument(rest3);
+
+    if direction.is_empty() || command.is_empty() || ty.is_empty() {
+        g.send_to_char(ch, RLINK_FORMAT);
+        return;
+    }
+    let type_int: i32 = match ty.parse() {
+        Ok(v) if v == 1 || v == 2 => v,
+        _ => {
+            g.send_to_char(ch, RLINK_FORMAT);
+            return;
+        }
+    };
+
+    let base_rnum = match g.get_char(ch).and_then(|c| c.in_room) {
+        Some(r) => r,
+        None => return,
+    };
+    let vnum_base = g.rooms[base_rnum].number;
+
+    let disconnect = crate::interpreter::is_abbrev(&command, "disconnect");
+    let connect = crate::interpreter::is_abbrev(&command, "connect");
+    let mut create_new_room = false;
+    let mut vnum_targ: i32 = 0;
+    let mut rnum_targ: Option<usize> = None;
+    if target.is_empty() && !disconnect {
+        create_new_room = true;
+    } else if !target.is_empty() && target.chars().all(|c| c.is_ascii_digit()) {
+        vnum_targ = target.parse().unwrap_or(-1);
+        rnum_targ = g.real_room(vnum_targ);
+    } else {
+        g.send_to_char(ch, RLINK_FORMAT);
+        return;
+    }
+    // C checks `rnum_targ < 0` here; a given-but-missing target is a format
+    // error, matching the C flow (real_room returning < 0).
+    if !create_new_room && target.is_empty() {
+        g.send_to_char(ch, RLINK_FORMAT);
+        return;
+    }
+
+    let save_zone_1 = zone_number_of_room(g, base_rnum);
+    if !can_edit_zone(g, ch, real_zone(g, save_zone_1 * 100).unwrap_or(usize::MAX)) {
+        g.send_to_char(ch, "You cannot create exits in this zone.\r\n");
+        return;
+    }
+
+    let mut save_zone_2 = 0i32;
+    if create_new_room {
+        // C olc.c:950-970: first free vnum in the builder's zone becomes a new
+        // "An unfinished room" (the redit internal path). C's unreachable
+        // "no space" guard is repaired here: if no free vnum exists we say so
+        // instead of falling through with target 0 (registered).
+        let Some(zr) = real_zone(g, vnum_base) else {
+            return;
+        };
+        let top_room = match g.zones.get(zr) {
+            Some(z) => z.top,
+            None => return,
+        };
+        let mut created: Option<i32> = None;
+        for k in (save_zone_1 * 100)..=top_room {
+            if g.real_room(k).is_none() {
+                created = Some(k);
+                break;
+            }
+        }
+        let Some(k) = created else {
+            g.send_to_char(ch, "Cannot create a new room in this zone!\r\n");
+            return;
+        };
+        let room = crate::room::Room::new(
+            k,
+            zr as i32,
+            "An unfinished room".to_string(),
+            "You are in an unfinished room.\r\n".to_string(),
+        );
+        g.add_room(room);
+        vnum_targ = k;
+        rnum_targ = g.real_room(k);
+        save_zone_2 = save_zone_1;
+        g.send_to_char(ch, &format!("You have created new room #{}.\r\n", k));
+    } else {
+        let Some(rt) = rnum_targ else {
+            g.send_to_char(ch, RLINK_FORMAT);
+            return;
+        };
+        save_zone_2 = zone_number_of_room(g, rt);
+    }
+
+    if !can_edit_zone(g, ch, real_zone(g, save_zone_2 * 100).unwrap_or(usize::MAX))
+        && type_int == 2
+    {
+        g.send_to_char(ch, "You cannot create exits in the target zone.\r\n");
+        return;
+    }
+
+    let dir = match direction.chars().next().map(|c| c.to_ascii_lowercase()) {
+        Some('n') => NORTH,
+        Some('e') => EAST,
+        Some('s') => SOUTH,
+        Some('w') => WEST,
+        Some('u') => UP,
+        Some('d') => DOWN,
+        _ => {
+            g.send_to_char(ch, "No such direction!\r\n");
+            return;
+        }
+    };
+
+    if connect {
+        if g.rooms[base_rnum].exits[dir].is_none() {
+            create_dir(g, base_rnum, dir);
+        }
+        if let Some(room) = g.rooms.get_mut(base_rnum) {
+            if let Some(e) = room.exits[dir].as_mut() {
+                e.to_room = vnum_targ;
+            }
+        }
+        if type_int == 2 {
+            if let Some(rt) = rnum_targ {
+                let rdir = REV_DIR[dir];
+                if g.rooms[rt].exits[rdir].is_none() {
+                    create_dir(g, rt, rdir);
+                }
+                if let Some(room) = g.rooms.get_mut(rt) {
+                    if let Some(e) = room.exits[rdir].as_mut() {
+                        e.to_room = vnum_base;
+                    }
+                }
+            }
+            if save_zone_2 == 0 {
+                save_zone_2 = rnum_targ.map(|rt| zone_number_of_room(g, rt)).unwrap_or(0);
+            }
+        }
+    } else if disconnect {
+        // C dereferences the exit without a NULL check here (crash on a
+        // missing own exit); the guard is the registered repair.
+        let own_to = g.rooms[base_rnum].exits[dir].as_ref().map(|e| e.to_room);
+        if type_int == 2 {
+            match own_to {
+                Some(to) if to > 0 => {
+                    if g.real_room(to).is_some() {
+                        free_dir(g, to as usize, REV_DIR[dir]);
+                    }
+                    if !free_dir(g, base_rnum, dir) {
+                        g.send_to_char(ch, "No such exit!\r\n");
+                        return;
+                    }
+                    if let Some(rt) = rnum_targ {
+                        save_zone_2 = zone_number_of_room(g, rt);
+                    }
+                }
+                _ => {
+                    g.send_to_char(ch, "There is no reciprocol exit to remove.\r\n");
+                    if own_to.is_some() {
+                        free_dir(g, base_rnum, dir);
+                    } else {
+                        g.send_to_char(ch, "No such exit!\r\n");
+                        return;
+                    }
+                }
+            }
+        } else {
+            match own_to {
+                Some(to) if to > 0 => {
+                    free_dir(g, base_rnum, dir);
+                }
+                _ => {
+                    g.send_to_char(ch, "No such exit!\r\n");
+                    return;
+                }
+            }
+        }
+    } else {
+        g.send_to_char(
+            ch,
+            "Invalid command type.  Valid choices are connect and disconnect.\r\n",
+        );
+        return;
+    }
+
+    if connect {
+        g.send_to_char(
+            ch,
+            &format!(
+                "You make an exit {} to room {}.\r\n",
+                crate::constants::DIRS[dir],
+                vnum_targ
+            ),
+        );
+    } else {
+        g.send_to_char(ch, "Exit deleted.\r\n");
+    }
+
+    olc_add_to_save_list(save_zone_1, OLC_SAVE_ROOM);
+    if save_zone_2 != 0 {
+        olc_add_to_save_list(save_zone_2, OLC_SAVE_ROOM);
+    }
+}
+
+
+// ===========================================================================
 // do_olc — the OLC command interface (olc.c do_olc). Generic parsing, then a
 // hand-off to the right sub-editor's `do_X`, or a save.
 // ===========================================================================
@@ -1114,5 +1519,90 @@ mod tests {
             .contains("The database is up to date."));
 
         let _ = std::fs::remove_dir_all(&lib);
+    }
+
+    #[test]
+    fn do_copy_copies_room_fields_and_marks_dirty() {
+        let _guard = olc_test_lock();
+        let mut g = GameState::new(Config::default());
+        g.zones.push(zone(45, "Root"));
+        let mut src = crate::room::Room::new(4500, 0, "Source".into(), "Src desc.\r\n".into());
+        src.sector_type = crate::room::SectorType::Forest;
+        let targ = crate::room::Room::new(4501, 0, "Target".into(), "Tgt desc.\r\n".into());
+        g.add_room(src);
+        let t = g.add_room(targ);
+
+        let conn = ConnId(120);
+        let ch = player(&mut g, "Root", LVL_IMPL);
+        g.get_char_mut(ch).unwrap().desc = Some(conn);
+        let mut d = Descriptor::new(conn, "example.test".to_string());
+        d.character = Some(ch);
+        g.descriptors.insert(conn, d);
+        g.get_char_mut(ch).unwrap().in_room = Some(t);
+
+        do_copy(&mut g, ch, "room 4500", 0);
+
+        let room = g.room(t);
+        assert_eq!(room.name, "Source");
+        assert_eq!(room.sector_type, crate::room::SectorType::Forest);
+        assert!(g.descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("You copy room 4500 to 4501."));
+        // Save-list marks the target zone dirty (C: ROOM == OLC_SAVE_ROOM).
+        olc_remove_from_save_list(45, OLC_SAVE_ROOM);
+    }
+
+    #[test]
+    fn do_rlink_connects_disconnects_and_autocreates() {
+        let _guard = olc_test_lock();
+        let mut g = GameState::new(Config::default());
+        g.zones.push(zone(46, "Root"));
+        let a = g.add_room(crate::room::Room::new(4600, 0, "A".into(), String::new()));
+        let b = g.add_room(crate::room::Room::new(4601, 0, "B".into(), String::new()));
+
+        let conn = ConnId(121);
+        let ch = player(&mut g, "Root", LVL_IMPL);
+        g.get_char_mut(ch).unwrap().desc = Some(conn);
+        g.get_char_mut(ch).unwrap().in_room = Some(a);
+        let mut d = Descriptor::new(conn, "example.test".to_string());
+        d.character = Some(ch);
+        g.descriptors.insert(conn, d);
+
+        // One-way connect.
+        do_rlink(&mut g, ch, "east connect 1 4601", 0);
+        assert_eq!(g.room(a).exits[EAST].as_ref().unwrap().to_room, 4601);
+        assert!(g.room(b).exits[WEST].is_none());
+        assert!(g.descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("You make an exit east to room 4601."));
+
+        // Two-way connect builds the reciprocal exit.
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        g.get_char_mut(ch).unwrap().in_room = Some(b);
+        do_rlink(&mut g, ch, "west connect 2 4600", 0);
+        assert_eq!(g.room(b).exits[WEST].as_ref().unwrap().to_room, 4600);
+        assert_eq!(g.room(a).exits[EAST].as_ref().unwrap().to_room, 4601);
+
+        // Disconnect removes the own exit (stand in B, own the west exit).
+        // C quirk kept: despite the usage string's "[target]", the parse
+        // demands a numeric target even for disconnect (is_number("") fails).
+        g.get_char_mut(ch).unwrap().in_room = Some(b);
+        do_rlink(&mut g, ch, "west disconnect 1 4600", 0);
+        assert!(g.room(b).exits[WEST].is_none());
+        assert!(g.descriptors.get(&conn).unwrap().outbuf.contains("Exit deleted."));
+
+        // Auto-create: omitting the target makes the first free vnum in the zone.
+        g.get_char_mut(ch).unwrap().in_room = Some(a);
+        do_rlink(&mut g, ch, "south connect 1", 0);
+        assert_eq!(
+            g.room(a).exits[SOUTH].as_ref().map(|e| e.to_room),
+            Some(4602)
+        );
+        assert_eq!(g.room(g.real_room(4602).unwrap()).name, "An unfinished room");
+        olc_remove_from_save_list(46, OLC_SAVE_ROOM);
     }
 }

@@ -102,6 +102,18 @@ correct behavior and records it here. Everything else matches the C.
 | redit special-exit `-1` | Menu stays in context | After clearing a special-exit destination, C re-displays the regular exit menu (a copy-paste slip at redit.c:1210) | Re-displays the special-exit menu | #268 |
 | Multiplay gate | Matches shipped C | `check_multiplaying` begins with `return 1` ("development mode"), so multi-boxing is never blocked (comm.c:2749) | Same default; the full C counting logic is live behind `MUD_ENFORCE_MULTIPLAY=1` | #219 |
 
+### Finish-the-game completions (in progress, 2026-08)
+
+Per the approved completion roadmap, previously-dead C systems are being activated.
+Each activation is a registered, intentional divergence from the shipped C binary:
+
+| Feature | C oracle state | Port state |
+|---|---|---|
+| `copy` / `rlink` builder commands | Complete in olc.c but never registered in cmd_info — unreachable | Registered (`copy`/`rlink`, GOD_CMD2/OLC). C's never-firing object-target guard placed after type parse; rlink's unreachable "no space in zone" guard repaired; rlink disconnect NULL-exit deref guarded |
+| `lweather` admin console | Unconditional hex-echo + return above the whole subcommand chain | Subcommands (`update_weather_activity`, `update_weather_map`, `new`, `destroy`, fallthrough `listweather`) are live; non-subcommand arguments still get C's hex echo. The abandoned gmode experiment and the interactive `edit` walker are not carried |
+| `togglemap off` | Early return + "NO! YOU'LL HURT SOMEONE!" before unload_map | Kept as shipped — the author's guard is a deliberate choice, not a bug |
+| `show_on_who_list` (builders visible in `who`) | Function written ("future expansion capabilities") but its call site commented out; builders hidden | No change needed: the port's who walks in-world players, so builders are visible — the author's intent already holds |
+
 ## Runtime Fidelity Gaps
 
 The 2026-08 parity program (GitHub issues #96-#347, epic #348) audited all 12

@@ -1656,16 +1656,161 @@ fn weatherchar<'a>(m: &'a MapData, x: i32, y: i32, inx: i32) -> &'a str {
     }
 }
 
-/// lweather (maputils.c): in production this command echoes a hex parse of its
-/// first argument and returns immediately — every editing path below the early
-/// `return` is dead code. We reproduce the observable behaviour exactly.
+/// lweather (maputils.c:1945) — the immortal weather-admin console. The C
+/// shipped this with an unconditional hex-echo + return above the whole
+/// subcommand chain, leaving every editing path unreachable dead code; the
+/// "finish the game" activation routes subcommands to their handlers and
+/// keeps the hex echo as the fallback for non-subcommand arguments (so the
+/// shipped observable behaviour for a bare argument is preserved).
+/// The author's own commented-out gmode experiment and the interactive
+/// `edit` walker (a raw w_index list-walk the port's storm Vec supersedes)
+/// are deliberately not carried.
 pub fn lweather(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
-    let first = get_arg(arg, 1);
-    // C: sscanf(argument, "%x", &k); sprintf(buf, "%i\r\n", k);
-    // sscanf("%x") reads a leading hex number from the whole argument string.
+    let first = get_arg(arg, 1).to_lowercase();
+
+    if first == "update_weather_activity" {
+        weather_activity(g);
+        return;
+    }
+    if first == "update_weather_map" {
+        with_map_mut(g, |m| m.update_weather_map());
+        return;
+    }
+    if first == "new" {
+        let type_word = get_arg(arg, 2).to_lowercase();
+        let at = get_arg(arg, 3).to_lowercase();
+        // C matches the first letter of each weather name.
+        let wtype = (0..WEATHER_TOTAL).find(|&i| {
+            WEATHER_NAMES[i]
+                .split_whitespace()
+                .next()
+                .map(|w| w.to_lowercase().starts_with(&type_word))
+                .unwrap_or(false)
+        });
+        let Some(wtype) = wtype else {
+            return;
+        };
+        // cdsr(): "NxM" coordinates, else a random map room.
+        // Without an explicit cdsr target C draws a random map room; the cell
+        // is derived uniformly from the grid's linear index.
+        let grid = with_map(g, |m| (m.max_x, m.max_y));
+        let cells = (grid.0 * grid.1) as i64;
+        let r = g.rng.number(0, (cells - 1).max(0) as i32) as i64;
+        let (x, y) = parse_cdsr(&at).unwrap_or((
+            (r % grid.0 as i64) as i32 + 1,
+            ((r - r % grid.0 as i64) / grid.1 as i64) as i32 + 1,
+        ));
+        let name = WEATHER_NAMES[wtype].to_string();
+        // Pre-roll the direction here (spawn_weather only draws when given an
+        // invalid dir); the map lock borrows g immutably so the game RNG must
+        // not be captured across it.
+        let dir = g.rng.number(0, 3);
+        let mut unused_rng = crate::rng::Rng::default();
+        with_map_mut(g, |m| {
+            m.spawn_weather(wtype, dir, x, y, &mut unused_rng);
+            m.update_weather_map();
+        });
+        g.send_to_char(
+            ch,
+            &format!("Spawned a {} at {:>2}x{:>2}.\r\n", name, x, y),
+        );
+        return;
+    }
+    if first == "destroy" {
+        let Ok(n) = get_arg(arg, 2).parse::<usize>() else {
+            return;
+        };
+        if n == 0 {
+            return;
+        }
+        // C destroy_weather: WEATHER_MSG_STOP to the covered cells, then drop
+        // the storm; also update the weather map afterwards (C's caller does).
+        let storm = with_map_mut(g, |m| {
+            if n > m.storms.len() {
+                return None;
+            }
+            let s = m.storms.remove(n - 1);
+            m.num_weather = m.num_weather.saturating_sub(1);
+            m.update_weather_map();
+            Some((s.wtype, s.radius, s.x, s.y))
+        });
+        if let Some((wtype, radius, x, y)) = storm {
+            send_weather_messages(g, WEATHER_MSG_STOP, wtype, radius, x, y);
+            g.send_to_char(
+                ch,
+                &format!("Attempted to destroy meteoric occurence #{}.\r\n", n),
+            );
+        }
+        return;
+    }
+    if !first.is_empty() && first.chars().next().map(|c| c.is_ascii_hexdigit()).unwrap_or(false)
+        && !first.starts_with("update")
+    {
+        // No subcommand matched: C's shipped behaviour is the hex echo.
+    }
     let k = parse_leading_hex(arg.trim_start());
-    let _ = first;
     g.send_to_char(ch, &format!("{}\r\n", k));
+    listweather(g, ch);
+}
+
+/// C cdsr() coordinate form ("12x34") -> 1-based map cell.
+fn parse_cdsr(s: &str) -> Option<(i32, i32)> {
+    let s = s.trim();
+    let idx = s.find('x')?;
+    let x: i32 = s[..idx].trim().parse().ok()?;
+    let y: i32 = s[idx + 1..].trim().parse().ok()?;
+    Some((x, y))
+}
+
+/// C listweather (maputils.c:1831).
+fn listweather(g: &mut GameState, ch: CharId) {
+    let map_ok = with_map(g, |m| m.is_active());
+    if !map_ok {
+        g.send_to_char(ch, "Map not loaded.\r\n");
+        return;
+    }
+    let (lines, autospawn) = with_map(g, |m| {
+        let mut lines = Vec::new();
+        for (i, w) in m.storms.iter().enumerate() {
+            let mut line = format!(
+                "({}) There is a {:>13} with a radius of {:>2} {}",
+                i + 1,
+                WEATHER_NAMES[w.wtype],
+                w.radius,
+                if WEATHER_DATA[w.wtype][0] <= 0 {
+                    "[stationary] "
+                } else {
+                    ""
+                }
+            );
+            if WEATHER_DATA[w.wtype][0] > 0 {
+                let going = match w.dir {
+                    0 => "going  north ",
+                    1 => "going   east ",
+                    2 => "going  south ",
+                    3 => "going   west ",
+                    _ => "",
+                };
+                line.push_str(going);
+            }
+            line.push_str(&format!(
+                "at {:>2}x{:>2}. Expiration in mins: {}.{}\r\n",
+                w.x,
+                w.y,
+                w.left / 2,
+                if w.left % 2 == 0 { 0 } else { 5 }
+            ));
+            lines.push(line);
+        }
+        (
+            lines,
+            (MAX_WEATHER as i32).saturating_sub(m.num_weather),
+        )
+    });
+    for line in lines {
+        g.send_to_char(ch, &line);
+    }
+    g.send_to_char(ch, &format!("Weather to be autospawned: {}\r\n", autospawn));
 }
 
 /// do_togglemap (maputils.c): "togglemap on|off" loads/unloads the surface map.
