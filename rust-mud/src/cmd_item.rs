@@ -2245,6 +2245,12 @@ fn perform_wear(g: &mut GameState, ch: CharId, obj: ObjId, mut where_: usize) {
     if !crate::dg_triggers::wear_otrigger(g, obj, ch, where_) {
         return;
     }
+    // C order (act.item.c:1459-1466 + handler.c:653-665): the wear message
+    // prints FIRST, then equip_char runs the zap check - so a zapped item
+    // shows 'You wear $p...' followed by the zap line. The port zapped
+    // before any message (#130).
+    wear_message(g, ch, obj, where_);
+    g.obj_from_anywhere(obj);
     if wear_restriction_zaps(g, ch, obj) {
         act(
             g,
@@ -2264,11 +2270,10 @@ fn perform_wear(g: &mut GameState, ch: CharId, obj: ObjId, mut where_: usize) {
             ActArg::None,
             To::Room,
         );
+        // Back to inventory, never equipped.
+        g.obj_to_char(obj, ch);
         return;
     }
-
-    wear_message(g, ch, obj, where_);
-    g.obj_from_anywhere(obj);
     g.equip_char(ch, obj, where_);
 }
 

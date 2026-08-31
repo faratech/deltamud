@@ -192,6 +192,12 @@ pub fn perform_move(g: &mut GameState, ch: CharId, dir: i32, need_specials_check
 /// by sector loss, applies the leave/arrive broadcasts (suppressed by sneak),
 /// relocates the char, and shows the new room. Returns true on success.
 pub(crate) fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check: bool) -> bool {
+    // C act.movement.c:151: `if (need_specials_check && special(ch, dir + 1,
+    // "")) return 0;` - a room spec proc can veto the move (followers path).
+    // The port accepted the flag but ignored it (#133).
+    if need_specials_check && crate::spec_assign::special(g, ch, "", "") {
+        return false;
+    }
     let rnum = match g.get_char(ch).and_then(|c| c.in_room) {
         Some(r) => r,
         None => return false,
