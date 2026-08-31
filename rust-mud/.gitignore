@@ -57,4 +57,4 @@ lib/etc/players
 lib/plrmail
 lib/plrobjs/*
 !lib/plrobjs/.gitkeep
-log/
+log/.claude/
