@@ -71,9 +71,9 @@ fn rotate_if_needed(base: &str) {
         return;
     }
     // Shift the existing generations up: syslog.(N-1) -> syslog.N, oldest first.
-    for gen in (1..SYSLOG_GENERATIONS).rev() {
-        let from = format!("{}.{}", base, gen);
-        let to = format!("{}.{}", base, gen + 1);
+    for slot in (1..SYSLOG_GENERATIONS).rev() {
+        let from = format!("{}.{}", base, slot);
+        let to = format!("{}.{}", base, slot + 1);
         let _ = std::fs::rename(&from, &to);
     }
     // syslog -> syslog.1 (truncating any prior syslog.1 we didn't shift).

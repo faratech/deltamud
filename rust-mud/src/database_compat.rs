@@ -387,8 +387,8 @@ pub fn skill_rows(ch: &Character) -> Vec<(i32, i32)> {
     let mut rows: Vec<(i32, i32)> = ch
         .skills
         .iter()
-        .filter(|(_, &v)| v > 0)
-        .map(|(&k, &v)| (k as i32, v as i32))
+        .filter(|&(_, v)| *v > 0)
+        .map(|(k, v)| (*k as i32, *v as i32))
         .collect();
     rows.sort_by_key(|&(k, _)| k); // deterministic ordering
     rows

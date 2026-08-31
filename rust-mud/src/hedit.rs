@@ -313,10 +313,10 @@ pub fn do_hedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             .lock()
             .unwrap()
             .iter()
-            .find(|(&c, st)| c != conn && st.rnum == rnum)
-            .and_then(|(&c, _)| {
+            .find(|&(c, st)| *c != conn && st.rnum == rnum)
+            .and_then(|(c, _)| {
                 g.descriptors
-                    .get(&c)
+                    .get(c)
                     .and_then(|d| d.character)
                     .and_then(|cid| g.get_char(cid))
                     .map(|c| c.player.name.clone())

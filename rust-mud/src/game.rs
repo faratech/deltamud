@@ -1639,8 +1639,8 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             .state
             .descriptors
             .iter()
-            .filter(|(&c, d)| {
-                c != conn_id
+            .filter(|&(c, d)| {
+                *c != conn_id
                     && d.character
                         .map(|cid| {
                             self.state
