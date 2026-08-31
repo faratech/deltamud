@@ -1650,7 +1650,7 @@ fn make_corpse_for_victim(g: &mut GameState, victim: CharId) {
         .get_char(victim)
         .map(|c| c.display_for_others())
         .unwrap_or_default();
-    let corpse = make_corpse(g, &name);
+    let corpse = make_corpse(g, &name, victim);
 
     let carried = g
         .get_char(victim)
@@ -1920,7 +1920,7 @@ fn numdisplay(val: i64) -> String {
     out
 }
 
-fn make_corpse(g: &mut GameState, who: &str) -> ObjId {
+fn make_corpse(g: &mut GameState, who: &str, victim: CharId) -> ObjId {
     let mut obj = Object::new(
         NOTHING,
         format!("corpse {}", who),
@@ -1928,7 +1928,15 @@ fn make_corpse(g: &mut GameState, who: &str) -> ObjId {
     );
     obj.description = format!("The corpse of {} is lying here.", who);
     obj.obj_type = ObjectType::Container;
-    obj.timer = 60;
+    // C fight.c:315-318: GET_OBJ_TIMER(corpse) = IS_NPC(ch) ?
+// max_npc_corpse_time (5) : max_pc_corpse_time (10) (config.c:120-121),
+// decremented once per mud hour by point_update. The flat 60 made
+// corpses persist 6-12x longer than C (#102).
+    obj.timer = if g.get_char(victim).map(|c| c.is_npc).unwrap_or(true) {
+        5
+    } else {
+        10
+    };
     // values[3]=1 marks this as a corpse so limits::point_update decays it.
     obj.values = [0, 0, 0, 1];
     obj.loc = ObjLoc::Nowhere;

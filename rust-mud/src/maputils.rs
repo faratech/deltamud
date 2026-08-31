@@ -2368,7 +2368,7 @@ fn weather_die(g: &mut GameState, ch: CharId, wtype: usize) {
             .get_char(ch)
             .map(|c| c.display_for_others())
             .unwrap_or_default();
-        let corpse = make_weather_corpse(g, &name, wtype);
+        let corpse = make_weather_corpse(g, &name, wtype, ch);
         let gold = g.get_char(ch).map(|c| c.points.gold).unwrap_or(0);
         let create_gold = g
             .get_char(ch)
@@ -2423,7 +2423,7 @@ fn cleanup_weather_death_player_state(g: &mut GameState, ch: CharId) {
 
 /// make_weather_corpse (maputils.c): a corpse container holding the victim's
 /// loot. values[3]=1 marks it a corpse so the object decay path reaps it.
-fn make_weather_corpse(g: &mut GameState, who: &str, wtype: usize) -> ObjId {
+fn make_weather_corpse(g: &mut GameState, who: &str, wtype: usize, victim: CharId) -> ObjId {
     use crate::object::{ObjLoc, Object, ObjectType};
     let corpse_name = WEATHER_CORPSE_NAMES.get(wtype).copied().unwrap_or(" ");
     let adjective = if corpse_name.starts_with(' ') {
@@ -2438,7 +2438,15 @@ fn make_weather_corpse(g: &mut GameState, who: &str, wtype: usize) -> ObjId {
     );
     obj.description = format!("The {}corpse of {} is lying here.", adjective, who);
     obj.obj_type = ObjectType::Container;
-    obj.timer = 60;
+    // C fight.c:315-318: GET_OBJ_TIMER(corpse) = IS_NPC(ch) ?
+// max_npc_corpse_time (5) : max_pc_corpse_time (10) (config.c:120-121),
+// decremented once per mud hour by point_update. The flat 60 made
+// corpses persist 6-12x longer than C (#102).
+    obj.timer = if g.get_char(victim).map(|c| c.is_npc).unwrap_or(true) {
+        5
+    } else {
+        10
+    };
     obj.values = [0, 0, 0, 1];
     obj.loc = ObjLoc::Nowhere;
     g.create_obj(obj)
