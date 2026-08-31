@@ -261,10 +261,12 @@ pub(crate) fn run_command(g: &mut GameState, ch: CharId, input: &str) {
     }
 
     // Try special procedures before the normal command (C interpreter.c:856:
-    // `else if (!special(ch, cmd, line)) ...`). `arg` is the typed command word
-    // (lowercased); spec procs prefix-match it against canonical names. If any
-    // proc consumes the command we skip normal dispatch entirely.
-    if crate::spec_assign::special(g, ch, &arg, line) {
+    // `else if (!special(ch, cmd, line)) ...`). C passes the RESOLVED command
+    // index and CMD_IS compares complete_cmd_info[cmd].command, so spec procs
+    // see the canonical name: `prac`, `ren`, `bu` all reach the guild master /
+    // receptionist / shopkeeper. We hand them entry.name, the resolved table
+    // name (#179). If any proc consumes the command we skip normal dispatch.
+    if crate::spec_assign::special(g, ch, entry.name, line) {
         return;
     }
 
