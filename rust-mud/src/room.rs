@@ -44,13 +44,20 @@ pub enum SectorType {
     Mountain = 5,
     WaterSwim = 6,
     WaterNoSwim = 7,
-    Flying = 8,
-    Underwater = 9,
-    Ice = 10,
+    Underwater = 8,
+    Flying = 9,
+    Road = 10,
+    Wall = 11,
+    Swamp = 12,
+    Desert = 13,
+    Bridge = 14,
 }
 
 impl SectorType {
     pub fn from_i32(v: i32) -> SectorType {
+        // C structs.h:89-106. The old enum had Flying=8/Underwater=9 swapped
+        // and folded Road..Bridge into Inside, erasing Swamp rooms on redit
+        // save (#259).
         match v {
             1 => SectorType::City,
             2 => SectorType::Field,
@@ -59,9 +66,13 @@ impl SectorType {
             5 => SectorType::Mountain,
             6 => SectorType::WaterSwim,
             7 => SectorType::WaterNoSwim,
-            8 => SectorType::Flying,
-            9 => SectorType::Underwater,
-            10 => SectorType::Ice,
+            8 => SectorType::Underwater,
+            9 => SectorType::Flying,
+            10 => SectorType::Road,
+            11 => SectorType::Wall,
+            12 => SectorType::Swamp,
+            13 => SectorType::Desert,
+            14 => SectorType::Bridge,
             _ => SectorType::Inside,
         }
     }

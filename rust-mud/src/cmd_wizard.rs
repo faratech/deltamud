@@ -6311,6 +6311,10 @@ pub fn do_copyover(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     use std::io::Write;
     use std::os::unix::io::RawFd;
 
+    // C act.wizard.c:1927-1990: flush the OLC save list to disk before the
+    // exec, so redit/oedit work survives the reboot (#262).
+    crate::olc::flush_save_list_to_disk(g);
+
     let listener_fd = crate::state::listener_fd();
     if listener_fd < 0 {
         // No inherited listener => seamless reboot impossible; abort like C's

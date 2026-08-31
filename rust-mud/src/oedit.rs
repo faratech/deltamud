@@ -217,12 +217,20 @@ pub fn do_oedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 }
 
 fn from_proto(p: &ObjectProto) -> ObjEdit {
+    // C oedit_setup_existing (oedit.c:97-136) copies the WHOLE proto and
+    // re-dups only the strings. The field-slice here zeroed 9 persisted
+    // fields, so editing + saving destroyed applies/perm-affects/class/
+    // level/durability/extra-descs on the object (#258).
     ObjEdit {
         vnum: p.vnum,
         name: p.name.clone(),
         short_description: p.short_desc.clone(),
         description: p.description.clone(),
-        action_description: None,
+        action_description: if p.action_description.is_empty() {
+            None
+        } else {
+            Some(p.action_description.clone())
+        },
         obj_type: p.obj_type,
         extra_flags: p.extra_flags,
         wear_flags: p.wear_flags,
@@ -230,14 +238,20 @@ fn from_proto(p: &ObjectProto) -> ObjEdit {
         weight: p.weight,
         cost: p.cost,
         rent: p.rent,
-        timer: 0,
-        level: 0,
-        obj_class: CLASS_UNDEFINED,
-        cslots: 0,
-        tslots: 0,
-        bitvector: 0,
-        affects: [(0, 0); MAX_OBJ_AFFECT],
-        extra_descriptions: Vec::new(),
+        timer: 0, // protos carry no timer (C copies it, default 0 on read)
+        level: p.min_level,
+        obj_class: p.obj_class,
+        cslots: p.curr_slots,
+        tslots: p.total_slots,
+        bitvector: p.bitvector,
+        affects: {
+            let mut a = [(0, 0); MAX_OBJ_AFFECT];
+            for (i, af) in p.affects.iter().take(MAX_OBJ_AFFECT).enumerate() {
+                a[i] = (af.location, af.modifier);
+            }
+            a
+        },
+        extra_descriptions: p.ex_descriptions.clone(),
     }
 }
 

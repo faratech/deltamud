@@ -202,6 +202,30 @@ pub fn olc_remove_from_save_list(zone: i32, kind: i32) {
         .retain(|&(z, t)| !(z == zone && t == kind));
 }
 
+
+/// C act.wizard.c:1927-1990 / comm.c:458-510: before copyover or shutdown,
+/// every entry on the save list is written to disk. Wired into do_copyover
+/// and the Game shutdown path; unsaved redit/oedit work would otherwise be
+/// lost on a routine reboot (#262).
+pub fn flush_save_list_to_disk(g: &mut GameState) {
+    let entries: Vec<(i32, i32)> = save_list().lock().unwrap().clone();
+    for (zone, kind) in entries {
+        let zone_rnum = match real_zone(g, zone * 100) {
+            Some(z) => z,
+            None => continue,
+        };
+        match kind {
+            OLC_SAVE_ROOM => crate::redit::redit_save_to_disk(g, zone_rnum),
+            OLC_SAVE_OBJ => crate::oedit::oedit_save_to_disk(g, zone_rnum),
+            OLC_SAVE_MOB => crate::medit::medit_save_to_disk(g, zone_rnum),
+            OLC_SAVE_ZONE => crate::zedit::zedit_save_to_disk(g, zone_rnum),
+            OLC_SAVE_SHOP => crate::sedit::sedit_save_zone_to_disk(g, zone_rnum),
+            _ => {}
+        }
+        log::info!("OLC: Reboot saving for zone {}.", zone);
+    }
+}
+
 /// olc_saveinfo: tell the immortal which OLC components still need saving.
 pub fn olc_saveinfo(g: &mut GameState, ch: CharId) {
     let entries: Vec<(i32, i32)> = save_list().lock().unwrap().clone();

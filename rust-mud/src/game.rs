@@ -339,6 +339,8 @@ impl Game {
     /// log the count, and return so `run` exits cleanly instead of being killed
     /// with unsaved state.
     async fn shutdown(&mut self) {
+        // C comm.c:458-510: flush the OLC save list before stopping (#262).
+        crate::olc::flush_save_list_to_disk(&mut self.state);
         // Count online players (those with a character attached) before saving.
         let n_players = self
             .state
