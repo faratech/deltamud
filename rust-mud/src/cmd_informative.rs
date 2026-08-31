@@ -929,6 +929,19 @@ pub fn look_at_room(g: &mut GameState, ch: CharId, ignore_brief: bool) {
         return;
     }
 
+    // C act.informative.c:779-780: the map renders before the room name
+    // (suppressed by PRF2_NOMAP). printmap existed with zero callers (#329).
+    {
+        let nomap = g
+            .get_char(ch)
+            .map(|c| c.prf2_flags & PRF2_NOMAP != 0)
+            .unwrap_or(false);
+        let is_map = g.room(rnum).map_x.is_some();
+        if !nomap && is_map {
+            crate::maputils::printmap(g, ch);
+        }
+    }
+
     let roomflags = g
         .get_char(ch)
         .map(|c| c.prf_flags & PRF_ROOMFLAGS != 0)
@@ -966,6 +979,48 @@ pub fn look_at_room(g: &mut GameState, ch: CharId, ignore_brief: bool) {
         .unwrap_or(false)
     {
         do_auto_exits(g, ch);
+    }
+
+    // Snow / blood ground messages (act.informative.c:734-762 tables and
+    // :806-809 sends) - both levels are tracked and decay but were never
+    // rendered (#329).
+    {
+        const SNOW_MESSAGES: [&str; 11] = [
+            "&WShould never see this. (bug, please report).&n",
+            "&WThere is less than an inch of snow on the ground.&n",
+            "&WThere is an inch of white snow on the ground.&n",
+            "&WThere are three inches of snow on the ground.&n",
+            "&WThere are six inches of snow on the ground.&n",
+            "&WThere is a foot of snow on the ground.&n",
+            "&WThere are two feet of snow on the ground.&n",
+            "&WThere are three feet of snow on the ground.&n",
+            "&WThere are four feet of snow on the ground..&n",
+            "&WThere are five feet of snow on the ground!&n",
+            "&WTHERE IS SNOW EVERYWHERE.. . YOU CAN BARELY SEE@!*%###@%#@!&n",
+        ];
+        const BLOOD_MESSAGES: [&str; 11] = [
+            "&RShould never see this (bug, please report).&n",
+            "&RSome drops of blood can be seen here.&n",
+            "&RMany drops of blood can be seen here.&n",
+            "&RThere is a small pool of blood that has been spilt here.&n",
+            "&RThere is a medium pool of blood that has been spilt here.&n",
+            "&RThere is a large pool of blood that has been spilt here.&n",
+            "&RSome blood and guts are all around you.&n",
+            "&RSome blood and guts are all around you.&n",
+            "&RAlot of blood and guts are here..&n",
+            "&RThere are blood and guts all over the place..&n",
+            "&RYou see nothing but blood and guts everywhere!&n",
+        ];
+        let room = g.room(rnum);
+        let (snow, blood) = (room.snow as usize, room.blood as usize);
+        if snow > 0 {
+            g.send_to_char(ch, SNOW_MESSAGES[snow.min(10)]);
+            g.send_to_char(ch, "\r\n");
+        }
+        if blood > 0 {
+            g.send_to_char(ch, BLOOD_MESSAGES[blood.min(10)]);
+            g.send_to_char(ch, "\r\n");
+        }
     }
 
     // Ground objects.
