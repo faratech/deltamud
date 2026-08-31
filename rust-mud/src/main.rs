@@ -28,6 +28,7 @@ mod cmd_social;
 mod cmd_wizard;
 mod combat;
 mod command_table;
+mod cformat;
 mod commands;
 mod config;
 mod connection;
