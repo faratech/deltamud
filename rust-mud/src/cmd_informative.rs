@@ -1410,7 +1410,7 @@ pub fn do_examine(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     };
     let (otype, tslots, cslots) = g
         .get_obj(oid)
-        .map(|o| (o.obj_type, o.values[2], o.values[3]))
+        .map(|o| (o.obj_type, o.total_slots, o.curr_slots))
         .unwrap();
 
     if otype == ObjectType::LiqContainer
@@ -1421,7 +1421,9 @@ pub fn do_examine(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         look_in_obj(g, ch, &arg);
     }
 
-    // Condition is a percentage of total slots (DeltaMUD: tslots=v2, cslots=v3).
+    // C act.informative.c:1106: condition = curr_slots*100 / total_slots
+    // (utils.h GET_OBJ_CSLOTS/TSLOTS). The port read value[3]/value[2] and
+    // swapped the operands (#328).
     let condition = if tslots != 0 {
         (cslots * 100) / tslots
     } else {

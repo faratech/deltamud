@@ -120,8 +120,8 @@ const ROOM_IMPROOM_BIT: u32 = 1 << 16;
 const ITEM_NORENT: u64 = 1 << 2;
 
 // Common short strings.
-const OK: &str = "Okay.\r\n";
-const NOPERSON: &str = "No-one by that name here.\r\n";
+const OK: &str = "&YOkay.&n\r\n";
+const NOPERSON: &str = "&CNo-one by that name here.&n\r\n";
 
 // config.c: impboard=1200 — the immortal board object vnum protected from
 // `load` by non-GRGOD immortals (do_load).
@@ -6612,7 +6612,7 @@ mod tests {
         assert_eq!(victim.points.exp, exp_to_level(9));
 
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
-        assert!(out.contains("Okay.\r\n"));
+        assert!(out.contains("&YOkay.&n\r\n"));
         assert!(out.contains("(GC) Imm has advanced Mort to level 10."));
     }
 

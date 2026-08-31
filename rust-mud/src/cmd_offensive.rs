@@ -75,8 +75,8 @@ const PK_ALLOWED: bool = false;
 const PK_VICTIM_MIN: Level = 10;
 
 // Standard C messages (interpreter.c).
-const NOPERSON: &str = "No-one by that name here.\r\n";
-const OK: &str = "Ok.\r\n";
+const NOPERSON: &str = "&CNo-one by that name here.&n\r\n";
+const OK: &str = "&YOkay.&n\r\n";
 
 // ---------------------------------------------------------------------------
 // Small accessors mirroring the utils.h macros against the live state.
@@ -172,12 +172,10 @@ fn numdisplay(val: i64) -> String {
 /// stop_fighting(ch) (fight.c): clear the fight target, drop out of POS_FIGHTING.
 /// (combat::stop_fighting is private; this matches its behaviour.)
 fn stop_fighting(g: &mut GameState, ch: CharId) {
-    if let Some(c) = g.get_char_mut(ch) {
-        c.fighting = None;
-        if c.position == Position::Fighting {
-            c.position = Position::Standing;
-        }
-    }
+    // Delegate to the canonical combat::stop_fighting (fight.c:279-281):
+    // the local copy skipped update_pos, leaving sitters sitting through
+    // rescue/camouflage/blanket disengages (#129).
+    combat::stop_fighting(g, ch);
 }
 
 fn raw_kill(g: &mut GameState, victim: CharId, killer: CharId) {
@@ -292,7 +290,7 @@ pub fn do_assist(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 // HIT / MURDER / DEATHBLOW
 // ===========================================================================
 
-pub fn do_hit(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
+pub fn do_hit(g: &mut GameState, ch: CharId, argument: &str, mut subcmd: i32) {
     let (arg, _) = crate::interpreter::one_argument(argument);
 
     if arg.is_empty() {
@@ -335,8 +333,11 @@ pub fn do_hit(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
 
     if !PK_ALLOWED {
         if !is_npc(g, vict) && !is_npc(g, ch) {
-            // Arena mod: arena combatants always treated as murder. No arena
-            // state in the port, so this never fires (combatant flag is off).
+            // C act.offensive.c:106-113: two arena combatants may 'hit' each
+            // other - the command is rewritten to SCMD_MURDER (#126).
+            if crate::arena::is_arena_combatant(ch) && crate::arena::is_arena_combatant(vict) {
+                subcmd = SCMD_MURDER;
+            }
             if subcmd != SCMD_MURDER && subcmd != SCMD_DEATHBLOW {
                 g.send_to_char(ch, "Use 'murder' to hit another player.\r\n");
                 return;

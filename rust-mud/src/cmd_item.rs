@@ -1328,7 +1328,7 @@ fn give_find_vict(g: &mut GameState, ch: CharId, arg: &str) -> Option<CharId> {
     }
     match g.get_char_room_vis(ch, arg) {
         None => {
-            g.send_to_char(ch, "No-one by that name here.\r\n");
+            g.send_to_char(ch, "&CNo-one by that name here.&n\r\n");
             None
         }
         Some(v) if v == ch => {
@@ -1351,7 +1351,7 @@ fn perform_give_gold(g: &mut GameState, ch: CharId, vict: CharId, amount: i32) {
         g.send_to_char(ch, "You don't have that many coins!\r\n");
         return;
     }
-    g.send_to_char(ch, "Ok.\r\n");
+    g.send_to_char(ch, "&YOkay.&n\r\n");
     let line = format!(
         "$n gives you {} gold coin{}.",
         amount,
