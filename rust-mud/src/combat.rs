@@ -1861,7 +1861,7 @@ fn apply_death_penalty(g: &mut GameState, victim: CharId) {
     }
 }
 
-fn award_kill_experience(g: &mut GameState, killer: CharId, victim: CharId) {
+pub(crate) fn award_kill_experience(g: &mut GameState, killer: CharId, victim: CharId) {
     let Some(k) = g.get_char(killer) else {
         return;
     };

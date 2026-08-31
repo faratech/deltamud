@@ -329,9 +329,10 @@ fn record_proto(kind: i32, entity_vnum: i32, trig_vnum: i32) -> bool {
     }
     let mut guard = proto_scripts().lock().unwrap();
     let list = guard.entry((kind, entity_vnum)).or_default();
-    if !list.contains(&trig_vnum) {
-        list.push(trig_vnum);
-    }
+    // C dg_db_scripts.c:231-242/295-305 appends unconditionally: listing a
+    // trigger twice attaches and fires it twice. The dedupe silently masked
+    // duplicates instead of reproducing C (#159).
+    list.push(trig_vnum);
     true
 }
 

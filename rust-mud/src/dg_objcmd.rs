@@ -733,13 +733,17 @@ fn do_odamage(g: &mut GameState, obj: ObjId, argument: &str) {
     // Build the target set. "all" -> everyone in the room of the outermost
     // container's carrier/wearer; otherwise the single named target.
     let all = name.eq_ignore_ascii_case("all");
+    // C dg_objcmd.c:502-510: for 'all', only an object that is carried or
+    // worn has a room; an object LYING ON THE FLOOR resolves in_room == -1
+    // and 'odamage all' does NOTHING (the Rust arm added ObjLoc::Room and
+    // damaged the whole room instead - #150).
+    let all = name.eq_ignore_ascii_case("all");
     let targets: Vec<CharId> = if all {
         let top = cycle_up(g, obj);
         let in_room = match g.get_obj(top).map(|o| o.loc) {
             Some(ObjLoc::Worn(cid, _)) | Some(ObjLoc::Carried(cid)) => {
                 g.get_char(cid).and_then(|c| c.in_room)
             }
-            Some(ObjLoc::Room(r)) => Some(r),
             _ => None,
         };
         match in_room {
@@ -953,7 +957,7 @@ pub(crate) fn apply_script_damage(g: &mut GameState, ch: CharId, dam: i32, kille
                 .unwrap_or_else(|| "a trap".to_string());
             log::warn!("{} killed by {}", who, killer_name);
         }
-        script_die(g, ch);
+        script_die(g, ch, killer);
     }
 }
 
@@ -983,7 +987,7 @@ fn update_pos(g: &mut GameState, ch: CharId) {
 /// no-killer path (the killer only matters for death triggers, which the body
 /// extraction here already accounts for). Produces an identical corpse so DG and
 /// combat deaths look the same in the world.
-fn script_die(g: &mut GameState, ch: CharId) {
+fn script_die(g: &mut GameState, ch: CharId, killer: Option<CharId>) {
     let (exp, level, is_npc) = match g.get_char(ch) {
         Some(c) => (c.points.exp, c.player.level as i32, c.is_npc),
         None => return,
@@ -993,6 +997,15 @@ fn script_die(g: &mut GameState, ch: CharId) {
     crate::limits::gain_exp(g, ch, penalty);
     if !g.char_exists(ch) {
         return;
+    }
+
+    // C dg_objcmd.c:561-562 routes the kill through die(ch, carrier/wearer),
+    // so a script-trap kill credits the object's carrier/wearer with XP and
+    // the PK flag path. The port dropped the killer entirely (#150).
+    if let (Some(k), true) = (killer, is_npc) {
+        if k != ch {
+            crate::combat::award_kill_experience(g, k, ch);
+        }
     }
 
     if !is_npc {
