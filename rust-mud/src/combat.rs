@@ -2156,6 +2156,15 @@ fn respawn_pc(g: &mut GameState, victim: CharId) {
 }
 
 fn ghost_pc(g: &mut GameState, victim: CharId) {
+    // C handler.c:1129-1132 (extract_char type==1 ghost path): save_char
+    // then Crash_delete_crashfile, so a ghost does not keep a stale rent
+    // file that would resurrect old gear on next login (#115).
+    if let Some(ch) = g.get_char(victim) {
+        if !ch.is_npc {
+            g.request_player_save(victim);
+            crate::objsave::crash_delete_crashfile(g, victim);
+        }
+    }
     g.char_from_room(victim);
     let rnum = g.real_room(99).unwrap_or(0);
     if let Some(c) = g.get_char_mut(victim) {

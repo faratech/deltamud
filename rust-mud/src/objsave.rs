@@ -622,6 +622,12 @@ fn write_crash_file(g: &GameState, ch: CharId, rent: &RentInfo) -> bool {
     std::fs::write(&path, body).is_ok()
 }
 
+/// Crash_delete_crashfile (objsave.c:161): remove the player's plrobjs
+/// crash file outright (ghost extraction; #115).
+pub fn crash_delete_crashfile(g: &GameState, ch: CharId) {
+    crash_delete_file(g, ch);
+}
+
 fn crash_delete_file(g: &GameState, ch: CharId) {
     let name = get_name(g, ch);
     if let Some(path) = crash_filename(&g.config.lib_path, &name) {
