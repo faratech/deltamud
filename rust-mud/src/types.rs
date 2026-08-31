@@ -189,6 +189,9 @@ impl Gender {
 // ---------------------------------------------------------------------------
 // Immortal level thresholds (structs.h LVL_*).
 // ---------------------------------------------------------------------------
+pub const LVL_HERO: u8 = 100; // structs.h:542 (first immortal tier)
+/// C sysdep.h MAX_INPUT_LENGTH: the per-line input cap (#224).
+pub const MAX_INPUT_LENGTH: usize = 256;
 pub const LVL_IMPL: Level = 105;
 pub const LVL_GRGOD: Level = 104;
 pub const LVL_GOD: Level = 103;

@@ -496,11 +496,91 @@ impl Game {
         }
     }
 
-    async fn handle_input(&mut self, conn_id: ConnId, input: String) {
+        /// C comm.c perform_subst (1911-1960): "^telm^tell" replaces the first
+    /// occurrence of the text between the carets in `orig` with the
+    /// replacement. Returns None when the syntax is bad or the search text is
+    /// absent (caller prints "Invalid substitution.").
+    fn perform_subst(orig: &str, subst: &str) -> Option<String> {
+        let rest = &subst[1..];
+        let idx = rest.find('^')?;
+        let first = &rest[..idx];
+        let second = &rest[idx + 1..];
+        let pos = orig.find(first)?;
+        let mut new = String::with_capacity(orig.len() + second.len());
+        new.push_str(&orig[..pos]);
+        new.push_str(second);
+        new.push_str(&orig[pos + first.len()..]);
+        Some(
+            new.chars()
+                .take(crate::types::MAX_INPUT_LENGTH)
+                .collect(),
+        )
+    }
+
+async fn handle_input(&mut self, conn_id: ConnId, input: String) {
         let state = match self.state.descriptors.get(&conn_id) {
             Some(d) => d.state,
             None => return,
         };
+
+        // C comm.c process_input (1836-1960), applied to every completed line
+        // regardless of connection state:
+        //   1. every '$' is doubled on entry (act() renders '$$' as one
+        //      literal '$', so 'say Hi $n' says 'Hi $n') (#222);
+        //   2. the line is capped at MAX_INPUT_LENGTH (256) with C's
+        //      'Line too long. Truncated to:' notice (#224);
+        //   3. '!' repeats last_input and '^old^new' performs the csh-style
+        //      substitution on it; otherwise last_input records the line.
+        let mut doubled = String::with_capacity(input.len() + 8);
+        for c in input.chars() {
+            if c == '$' {
+                doubled.push_str("$$");
+            } else {
+                doubled.push(c);
+            }
+        }
+        let max_len = crate::types::MAX_INPUT_LENGTH;
+        let mut line = if doubled.chars().count() > max_len {
+            let truncated: String = doubled.chars().take(max_len).collect();
+            self.out(
+                conn_id,
+                &format!("Line too long.  Truncated to:\r\n{}\r\n", truncated),
+            );
+            truncated
+        } else {
+            doubled
+        };
+        if line.starts_with('!') {
+            let last = self
+                .state
+                .descriptors
+                .get(&conn_id)
+                .map(|d| d.last_input.clone())
+                .unwrap_or_default();
+            line = last;
+        } else if line.starts_with('^') {
+            let last = self
+                .state
+                .descriptors
+                .get(&conn_id)
+                .map(|d| d.last_input.clone())
+                .unwrap_or_default();
+            match Game::perform_subst(&last, &line) {
+                Some(new) => {
+                    line = new;
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.last_input = line.clone();
+                    }
+                }
+                None => {
+                    self.out(conn_id, "Invalid substitution.\r\n");
+                    return;
+                }
+            }
+        } else if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+            d.last_input = line.clone();
+        }
+        let input = line;
 
         if state == ConState::Playing {
             if crate::modify::page_active(conn_id) {
@@ -2299,7 +2379,112 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         }
     }
 
+    /// C comm.c make_prompt (1213-1293) for playing descriptors (#220): the
+    /// invis prefix, the DISPHP/DISPMANA/DISPMOVE vitals, AFK, the
+    /// DISPEXP-to-level counter, the DISPMOB opponent condition, mail-waiting
+    /// and drunk indicators, and the final prompt mark.
+    fn make_playing_prompt(&mut self, conn_id: ConnId) -> String {
+        use crate::flags::{
+            PRF_AFK, PRF_DISPEXP, PRF_DISPHP, PRF_DISPMANA, PRF_DISPMOVE, PRF2_DISPMOB,
+        };
+        let Some(cid) = self
+            .state
+            .descriptors
+            .get(&conn_id)
+            .and_then(|d| d.character)
+        else {
+            return String::new();
+        };
+        let c = match self.state.get_char(cid) {
+            Some(c) => c,
+            None => return String::new(),
+        };
+        let mut prompt = String::new();
+        let invis = c.invis_level;
+        if invis > 0 {
+            prompt.push_str(&format!("&Ri&Y{}&n ", invis));
+        }
+        if c.prf_flags & PRF_DISPHP != 0 {
+            prompt.push_str(&format!("&G{}&ghp&w ", c.points.hit));
+        }
+        if c.prf_flags & PRF_DISPMANA != 0 {
+            prompt.push_str(&format!("&C{}&cmp&w ", c.points.mana));
+        }
+        if c.prf_flags & PRF_DISPMOVE != 0 {
+            match c.riding.map(|rid| self.state.get_char(rid)).flatten() {
+                Some(mount) => prompt.push_str(&format!(
+                    "&M{}&m&ym&mmv&w ",
+                    mount.points.move_points
+                )),
+                None => prompt.push_str(&format!("&M{}&mmv&w ", c.points.move_points)),
+            }
+        }
+        let mut fighting_diag: Option<String> = None;
+        if c.prf_flags & PRF_AFK != 0 {
+            prompt.push_str("&W(&naway&W)&n ");
+        } else {
+            if c.prf_flags & PRF_DISPEXP != 0 && c.player.level < LVL_HERO {
+                let need = crate::class::exp_to_level(c.player.level as i32);
+                prompt.push_str(&format!("&W(&n{}&W) ", need - c.points.exp));
+            }
+            if c.prf_flags & PRF2_DISPMOB != 0 {
+                if let Some(vict) = c.fighting {
+                    if let Some(v) = self.state.get_char(vict) {
+                        let percent = if v.points.max_hit > 0 {
+                            (100 * v.points.hit) / v.points.max_hit
+                        } else {
+                            -1
+                        };
+                        // C act.informative.c:239-266 prompt_diag.
+                        let word = match percent {
+                            p if p >= 100 => "excellent",
+                            p if p >= 90 => "scratched",
+                            p if p >= 75 => "bruised",
+                            p if p >= 50 => "wounded",
+                            p if p >= 30 => "nasty",
+                            p if p >= 15 => "hurt",
+                            p if p >= 0 => "awful",
+                            _ => "bleeding",
+                        };
+                        fighting_diag = Some(word.to_string());
+                    }
+                }
+            }
+        }
+        if let Some(word) = fighting_diag {
+            prompt.push_str(&format!("&R(&n{}&R) ", word));
+        }
+        let idnum = c.idnum;
+        if crate::mail::has_mail(idnum) {
+            prompt.push_str("&B(&Ymail&B)&n ");
+        }
+        if c.conditions[DRUNK] > 4 {
+            prompt.push_str("&G(&ndrunk&G)&n ");
+        }
+        prompt.push_str("&R>&w ");
+        prompt
+    }
+
     fn write_prompt(&mut self, conn_id: ConnId) {
+        // C make_prompt (comm.c:1220-1226): an active pager or string editor
+        // owns the prompt, whatever the connection state (#229).
+        if crate::modify::page_active(conn_id) {
+            let (page, count) = crate::modify::page_position(conn_id);
+            let prompt = format!(
+                "\r[ Return to continue, (q)uit, (r)efresh, (b)ack, or page number ({}/{}) ]",
+                page, count
+            );
+            if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                d.write(&prompt);
+            }
+            return;
+        }
+        if crate::modify::editing_any(conn_id) {
+            if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                d.write("] ");
+            }
+            return;
+        }
         let state = match self.state.descriptors.get(&conn_id) {
             Some(d) => d.state,
             None => return,
@@ -2354,23 +2539,8 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
  ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: "
             .to_string(),
             ConState::Playing => {
-                if let Some(cid) = self
-                    .state
-                    .descriptors
-                    .get(&conn_id)
-                    .and_then(|d| d.character)
-                {
-                    if let Some(c) = self.state.get_char(cid) {
-                        format!(
-                            "&g{}H &c{}M &y{}V&n> ",
-                            c.points.hit, c.points.mana, c.points.move_points
-                        )
-                    } else {
-                        String::new()
-                    }
-                } else {
-                    String::new()
-                }
+                // C comm.c:1213-1293 make_prompt: the full PRF_* chain (#220).
+                self.make_playing_prompt(conn_id)
             }
             _ => String::new(),
         };
@@ -3146,5 +3316,66 @@ mod tests {
             .unwrap()
             .outbuf
             .contains("land called reality"));
+    }
+
+    #[tokio::test]
+    async fn input_doubles_dollars_and_supports_history() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        let conn = ConnId(30);
+        attach_descriptor(&mut game, conn);
+        let mut ch = crate::character::Character::new_player(
+            "Hist".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        ch.desc = Some(conn);
+        let cid = game.state.create_char(ch);
+        game.state.descriptors.get_mut(&conn).unwrap().character = Some(cid);
+        game.state.descriptors.get_mut(&conn).unwrap().state = ConState::Playing;
+
+        // '$' is doubled on entry so act() renders one literal '$' (#222).
+        game.handle_input(conn, "say Hi $n".to_string()).await;
+        assert_eq!(
+            game.state.descriptors.get(&conn).unwrap().input_queue.back().map(|q| q.line.clone()),
+            Some("say Hi $$n".to_string())
+        );
+
+        // '!' repeats the previous line, '^old^new' substitutes (#224).
+        game.state.descriptors.get_mut(&conn).unwrap().input_queue.clear();
+        game.handle_input(conn, "!".to_string()).await;
+        assert_eq!(
+            game.state.descriptors.get(&conn).unwrap().input_queue.back().map(|q| q.line.clone()),
+            Some("say Hi $$n".to_string())
+        );
+        game.handle_input(conn, "^Hi^Bye".to_string()).await;
+        assert_eq!(
+            game.state.descriptors.get(&conn).unwrap().input_queue.back().map(|q| q.line.clone()),
+            Some("say Bye $$n".to_string())
+        );
+        // Bad substitution refuses cleanly.
+        game.handle_input(conn, "^zzz^qqq".to_string()).await;
+        assert!(game
+            .state
+            .descriptors
+            .get(&conn)
+            .unwrap()
+            .outbuf
+            .contains("Invalid substitution."));
+    }
+
+    #[test]
+    fn perform_subst_mirrors_the_c_semantics() {
+        // C comm.c:1911-1960: '^telm^tell' repairs the typo in last_input.
+        assert_eq!(
+            Game::perform_subst("telm bob hello", "^telm^tell").as_deref(),
+            Some("tell bob hello")
+        );
+        assert_eq!(
+            Game::perform_subst("say Hi", "^Hi^Bye").as_deref(),
+            Some("say Bye")
+        );
+        assert_eq!(Game::perform_subst("say Hi", "^zzz^qqq"), None);
+        assert_eq!(Game::perform_subst("say Hi", "^Hi"), None);
     }
 }

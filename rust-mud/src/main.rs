@@ -308,6 +308,9 @@ async fn serve_metrics(listener: TcpListener, metrics: Arc<metrics::Metrics>) {
 
 /// Database abstraction (CircleMUD dbinterface.c). Implemented by the
 /// MySQL-backed `Database` and the in-memory `MockDatabase`.
+/// C sysdep.h MAX_RAW_INPUT_LENGTH: the per-connection raw input bound.
+pub const MAX_RAW_INPUT_LENGTH: usize = 2048;
+
 #[async_trait::async_trait]
 pub trait DatabaseInterface: Send + Sync {
     async fn init_tables(&self) -> Result<()>;

@@ -32,6 +32,8 @@ pub const PRF_NOREPEAT: i64 = 1 << 11;
 /// (suppresses channel traffic and hunger ticks) (#273).
 pub const PLR_WRITING: i64 = 1 << 4;
 pub const PRF_HOLYLIGHT: i64 = 1 << 12;
+/// structs.h:257 PRF_AFK.
+pub const PRF_AFK: i64 = 1 << 22;
 pub const PRF_COLOR_1: i64 = 1 << 13;
 pub const PRF_COLOR_2: i64 = 1 << 14;
 pub const PRF_DISPEXP: i64 = 1 << 26;

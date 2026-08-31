@@ -1239,6 +1239,22 @@ pub fn page_active(conn: ConnId) -> bool {
     pagers().lock().unwrap().contains_key(&conn)
 }
 
+/// The 1-based (current, total) page position for the pager prompt
+/// (C make_prompt's d->showstr_page / d->showstr_count) (#229).
+pub fn page_position(conn: ConnId) -> (usize, usize) {
+    let guard = pagers().lock().unwrap();
+    match guard.get(&conn) {
+        Some(p) => (p.page + 1, p.pages.len()),
+        None => (0, 0),
+    }
+}
+
+/// True when `conn` has any active string editor (C make_prompt's `d->str`)
+/// — the '] ' editor prompt (#229).
+pub fn editing_any(conn: ConnId) -> bool {
+    edits().lock().unwrap().contains_key(&conn)
+}
+
 /// page_input: feed a pager command line (RETURN/Q/R/B/<n>) for an active
 /// pager. Returns true if the connection was paging (input was consumed).
 pub fn page_input(g: &mut GameState, conn: ConnId, line: &str) -> bool {

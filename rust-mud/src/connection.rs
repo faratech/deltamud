@@ -146,7 +146,13 @@ impl TelnetFilter {
                     // also covers the old bare-CR `\r\0` and stray control noise.
                     0x20..=0x7e => {
                         self.in_newline_run = false;
-                        self.line.push(b);
+                        // C comm.c:1749-1752 drops the connection when the raw
+                        // buffer overflows MAX_RAW_INPUT_LENGTH (2k); here the
+                        // excess bytes are dropped instead, which keeps the
+                        // per-connection buffer bounded the same way.
+                        if self.line.len() < crate::MAX_RAW_INPUT_LENGTH {
+                            self.line.push(b);
+                        }
                     }
                     _ => {
                         // Non-printable control / high-bit byte: drop it. A
@@ -340,6 +346,9 @@ pub struct Descriptor {
     /// Menu option 2's finished description, applied to the player at
     /// enter-game (C edits d->character->player.description directly) (#198).
     pub temp_description: Option<String>,
+    /// C d->last_input: the previous completed input line, for the '!' and
+    /// '^a^b' history substitution (comm.c:1861-1868) (#224).
+    pub last_input: String,
 }
 
 impl Descriptor {
@@ -367,6 +376,7 @@ impl Descriptor {
             bad_pws: 0,
             wants_colour: None,
             temp_description: None,
+            last_input: String::new(),
         }
     }
 

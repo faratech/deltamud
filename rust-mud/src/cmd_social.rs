@@ -62,6 +62,7 @@ pub struct SocialMessg {
 
 /// Loaded social table, sorted by `sort_as` (C create_command_list() resort)
 /// and indexed by `command` for O(1) lookup from the interpreter.
+#[derive(Default)]
 struct SocialTable {
     list: Vec<SocialMessg>,
     by_command: HashMap<String, usize>,
@@ -1005,6 +1006,38 @@ fn cap_first(s: &mut String) {
         if first.is_ascii_lowercase() {
             let upper = first.to_ascii_uppercase();
             s.replace_range(0..first.len_utf8(), &upper.to_string());
+        }
+    }
+}
+
+/// The social's permanent hide bit (C soc_mess_list[].hide), for the
+/// intangible-player forced-hide run (#229).
+pub fn social_hide(command: &str) -> Option<bool> {
+    SOCIALS
+        .get_or_init(|| RwLock::new(SocialTable::default()))
+        .read()
+        .unwrap()
+        .by_command
+        .get(&command.to_lowercase())
+        .and_then(|&i| {
+            SOCIALS
+                .get_or_init(|| RwLock::new(SocialTable::default()))
+                .read()
+                .unwrap()
+                .list
+                .get(i)
+                .map(|s| s.hide)
+        })
+}
+
+/// Temporarily override a social's hide bit (intangible-player run).
+pub fn set_social_hide(command: &str, hide: bool) {
+    let table = SOCIALS
+        .get_or_init(|| RwLock::new(SocialTable::default()));
+    let mut guard = table.write().unwrap();
+    if let Some(&i) = guard.by_command.get(&command.to_lowercase()) {
+        if let Some(s) = guard.list.get_mut(i) {
+            s.hide = hide;
         }
     }
 }

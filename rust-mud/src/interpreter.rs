@@ -222,8 +222,24 @@ pub(crate) fn run_command(g: &mut GameState, ch: CharId, input: &str) {
                 let allowed = crate::cmd_social::social_min_level(&name)
                     .map(|min| level as i32 >= min)
                     .unwrap_or(false);
+                // C interpreter.c:806-819: an intangible (non-building) player
+                // may run socials, but the social is forced hidden for this
+                // run so ghosts don't broadcast to the room (#229).
+                let ghost_social = prf2_flags & PRF2_INTANGIBLE != 0
+                    && prf2_flags & PRF2_MBUILDING == 0
+                    && !crate::handler::isname(&arg, CMDS_DEAD_CAN_USE);
                 if allowed {
+                    let prev = if ghost_social {
+                        let prev = crate::cmd_social::social_hide(&name);
+                        crate::cmd_social::set_social_hide(&name, true);
+                        prev
+                    } else {
+                        None
+                    };
                     crate::cmd_social::do_action_named(g, ch, &name, line);
+                    if let Some(prev) = prev {
+                        crate::cmd_social::set_social_hide(&name, prev);
+                    }
                 } else {
                     g.send_to_char(ch, "Huh?!?\r\n");
                 }
