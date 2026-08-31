@@ -1297,15 +1297,18 @@ fn parse_min_lvl(g: &mut GameState, conn: ConnId, line: &str) {
     let t = line.trim();
     if !starts_digit(t) {
         send(g, conn, "Value must be an integer value. Minimum level? ");
+        disp_menu(g, conn); // C zedit.c:1626-1643: error, then back to the menu (#280)
         return;
     }
     let pos = atoi(t);
     if pos > 100 {
         send(g, conn, "Value must be below 100. Minimum level? ");
+        disp_menu(g, conn);
         return;
     }
     if pos < 0 {
         send(g, conn, "Value must be above 0. Minimum level? ");
+        disp_menu(g, conn);
         return;
     }
     with_state(conn, |s| {
@@ -1319,15 +1322,18 @@ fn parse_max_lvl(g: &mut GameState, conn: ConnId, line: &str) {
     let t = line.trim();
     if !starts_digit(t) {
         send(g, conn, "Value must be an integer value. Maximum level? ");
+        disp_menu(g, conn); // #280
         return;
     }
     let pos = atoi(t);
     if pos > 100 {
         send(g, conn, "Value must be below 100. Maximum level? ");
+        disp_menu(g, conn);
         return;
     }
     if pos < 0 {
         send(g, conn, "Value must be above 0. Maximum level? ");
+        disp_menu(g, conn);
         return;
     }
     with_state(conn, |s| {
@@ -1498,7 +1504,7 @@ fn save_to_disk(g: &mut GameState, conn: ConnId) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if std::fs::write(&path, out.as_bytes()).is_err() {
+    if atomic_write(&path, out.as_bytes()).is_err() {
         send(
             g,
             conn,
@@ -1559,7 +1565,7 @@ pub fn zedit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(&path, out.as_bytes());
+    let _ = atomic_write(&path, out.as_bytes());
     olc::olc_remove_from_save_list(z.number, olc::OLC_SAVE_ZONE);
 }
 
@@ -2000,6 +2006,15 @@ mod tests {
 /// stub files, append the new zone to every world index file, and insert the
 /// zone into the live zone table ('olc zedit new <zone>'; issue #263).
 const LVL_BUILDER_LEVEL: u8 = 100;
+
+
+/// C zedit.c:489/600-603: write to "<file>.new" then rename over the target,
+/// so a crash mid-write cannot truncate the live .zon (#283).
+fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let new_path = path.with_extension("zon.new");
+    std::fs::write(&new_path, bytes)?;
+    std::fs::rename(&new_path, path)
+}
 
 pub fn zedit_new_zone(g: &mut GameState, ch: CharId, vzone_num: i32) {
     const MAX_ZONE_NUM: i32 = 999;

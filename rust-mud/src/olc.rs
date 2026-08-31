@@ -37,6 +37,8 @@ use std::sync::OnceLock;
 // SCMD_OLC_* — must match command_table.rs's private constants exactly.
 // (redit=0 oedit=1 zedit=2 medit=3 sedit=4 trigedit=5 hedit=6 aedit=7 info=8)
 // ---------------------------------------------------------------------------
+const LVL_BUILDER_LEVEL: u8 = 100; // LVL_BUILDER
+
 pub const SCMD_OLC_REDIT: i32 = 0;
 pub const SCMD_OLC_OEDIT: i32 = 1;
 pub const SCMD_OLC_ZEDIT: i32 = 2;
@@ -709,6 +711,25 @@ pub fn do_olc(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
                 znumber
             ),
         );
+        // C olc.c:283: mudlog 'OLC: %s saves %s info for zone %d.' (#276).
+        {
+            let name = g
+                .get_char(ch)
+                .map(|c| c.get_name().to_string())
+                .unwrap_or_default();
+            let level = g.get_char(ch).map(|c| c.player.level).unwrap_or(LVL_BUILDER_LEVEL);
+            crate::syslog::mudlog(
+                g,
+                &format!(
+                    "OLC: {} saves {} info for zone {}.",
+                    name,
+                    olc_type_word(subcmd),
+                    znumber
+                ),
+                crate::syslog::CMP,
+                LVL_BUILDER_LEVEL.max(level),
+            );
+        }
         olc_save_to_disk(g, zr, kind);
         return;
     }
