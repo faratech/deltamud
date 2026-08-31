@@ -5,7 +5,7 @@ The Mayor of Locris Ferry greets travelers from the square.
 ~
     A practical woman with a river pilot's weathered face.
 ~
-3 0 0 E
+2 0 0 E
 X8 30 30 30 30 30 1d1+120 1d12
 300 900
 9 9 0
@@ -17,7 +17,7 @@ The Ferry Trader arranges wares on a river-worn table.
 ~
     The Ferry Trader has sold everything at least once.
 ~
-3 0 0 E
+2 0 0 E
 X5 20 20 20 20 20 1d1+60 1d8
 150 300
 9 9 0
@@ -29,7 +29,7 @@ The Locris Guard keeps the peace along the riverfront.
 ~
     One sworn officer of the Locris Ferry watch.
 ~
-3 0 0 E
+2 0 0 E
 X8 30 30 30 30 30 1d1+120 1d12
 100 800
 9 9 0
