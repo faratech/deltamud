@@ -956,14 +956,72 @@ fn parse_worldmap(lib_path: &str) -> MapData {
 }
 
 /// Run `f` against the (lazily parsed, per-lib_path cached) map data.
-/// Per-room weather type via the room's map coordinates (C reads
-/// world[room].weather, set by swc's zone fan-out; #121/#120). Rooms off the
-/// map return -1 (no weather).
+/// Per-room weather type. C reads world[room].weather, which swc sets for
+/// map cells AND fans out to every outdoor room of a wzonecontrol zone
+/// (maputils.c:2084-2096); rooms off the map with no fanned-out cell return
+/// -1 (#121/#120/#190).
 pub fn room_weather_type(g: &GameState, room: &crate::room::Room) -> i32 {
+    if room.weather >= 0 {
+        return room.weather;
+    }
     let (Some(x), Some(y)) = (room.map_x, room.map_y) else {
         return -1;
     };
     with_map(g, |m| m.cell_weather(x, y))
+}
+
+/// C maputils.c:2084-2096 swc's second half: mirror the storm grid onto the
+/// world rooms - each map cell's weather, plus every OUTDOOR room of a
+/// wzonecontrol zone. Called from the weather heartbeat (weather_activity).
+pub fn sync_room_weather(g: &mut GameState) {
+    if !map_active(g) {
+        return;
+    }
+    // Map cells.
+    let cell_updates: Vec<(RoomRnum, i32)> = g
+        .rooms
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.map_x.is_some() && r.map_y.is_some())
+        .map(|(i, r)| (i, room_weather_type(g, r)))
+        .collect();
+    for (i, w) in cell_updates {
+        if let Some(room) = g.rooms.get_mut(i) {
+            room.weather = w;
+        }
+    }
+    // Zone fan-out: outdoor rooms of every controlled zone take their
+    // ZWeatherPoint cell's weather.
+    let zone_updates: Vec<(i32, i32)> = {
+        let tbl = map_table().lock().unwrap();
+        tbl.values()
+            .flat_map(|m| {
+                m.z_weather_points
+                    .iter()
+                    .filter_map(|zwp| {
+                        m.cell_weather(zwp.x, zwp.y);
+                        m.cell_wzone_control
+                            .get((zwp.y - 1) as usize)?
+                            .get((zwp.x - 1) as usize)?
+                            .map(|zn| (zn, m.cell_weather(zwp.x, zwp.y)))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    for (zone_number, w) in zone_updates {
+        for room in g.rooms.iter_mut() {
+            if room.zone == zone_number
+                && !room.room_flags.contains(crate::room::RoomFlags::INDOORS)
+            {
+                room.weather = w;
+            }
+        }
+    }
+}
+
+fn map_active(g: &GameState) -> bool {
+    g.map_start_rnum.is_some()
 }
 
 fn with_map<R>(g: &GameState, f: impl FnOnce(&MapData) -> R) -> R {
@@ -1861,6 +1919,9 @@ pub fn weather_activity(g: &mut GameState) {
             WeatherEvent::Radial(hit) => radial_activity(g, hit),
         }
     }
+
+    // Mirror the storm grid onto world rooms (swc zone fan-out, #190).
+    sync_room_weather(g);
 }
 
 fn outdoor_room_has_people(g: &GameState, rnum: RoomRnum) -> bool {

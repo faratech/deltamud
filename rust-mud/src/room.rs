@@ -124,6 +124,10 @@ pub struct Room {
     pub map_x: Option<i32>,
     pub map_y: Option<i32>,
     pub mapmv: i32,
+    /// C world[room].weather (maputils.c swc): the live storm type over this
+    /// room (map cells and outdoor rooms of wzonecontrol zones); -1 = none
+    /// (#190).
+    pub weather: i32,
 
     // City-interior links (Map mods - Storm; structs.h linkmapnum/linkrnum).
     // linkrnum: real-room index of the city interior reached from a surface
@@ -161,6 +165,7 @@ impl Room {
             map_x: None,
             map_y: None,
             mapmv: -1,
+            weather: -1,
             linkrnum: None,
             linkmapnum: None,
             people: Vec::new(),
