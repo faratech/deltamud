@@ -164,6 +164,10 @@ pub struct GameState {
     /// the PvP spell guards; toggled by `set Legal_PKS ON|OFF`
     /// (act.wizard.c:3914-3921).
     pub pk_allowed: bool,
+    /// `nameserver_is_slow` (config.c:254, initialised to YES). Toggled by the
+    /// immortal `slowns` command (act.other.c do_gen_toggle SCMD_SLOWNS); the
+    /// resolver itself is not modelled, only the reported state.
+    pub nameserver_is_slow: bool,
 
     // Surface ("outside") world-map splice (maputils.c read_map). The 99x99
     // grid of map cells is appended to `rooms` *after* the real-room block, so
@@ -199,6 +203,8 @@ impl GameState {
             rng: Rng::default(),
             shutdown_requested: false,
             pk_allowed: false,
+            // config.c:254 `int nameserver_is_slow = YES;`
+            nameserver_is_slow: true,
             credits: String::new(),
             news: String::new(),
             info: String::new(),

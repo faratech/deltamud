@@ -217,31 +217,40 @@ pub(crate) fn run_command(g: &mut GameState, ch: CharId, input: &str) {
         None => {
             // Socials are loaded dynamically and are not in the static CMD_INFO
             // table (C splices them in via create_command_list()); try them
-            // before giving up.
+            // before giving up. In C the resolved social IS a
+            // complete_cmd_info[] entry, so the build-mode gate below runs on
+            // it before the command executes — apply it here for the same
+            // ordering (interpreter.c:800-804).
             if let Some(name) = crate::cmd_social::find_social(&arg) {
                 let allowed = crate::cmd_social::social_min_level(&name)
                     .map(|min| level as i32 >= min)
                     .unwrap_or(false);
+                if !allowed {
+                    g.send_to_char(ch, "Huh?!?\r\n");
+                    return;
+                }
+                if prf2_flags & PRF2_MBUILDING != 0
+                    && crate::handler::isname(&name, CMDS_MORTAL_BUILDERS_CANT_USE)
+                {
+                    g.send_to_char(ch, CMD_MBUILDING_BLOCK_MSG);
+                    return;
+                }
                 // C interpreter.c:806-819: an intangible (non-building) player
                 // may run socials, but the social is forced hidden for this
                 // run so ghosts don't broadcast to the room (#229).
                 let ghost_social = prf2_flags & PRF2_INTANGIBLE != 0
                     && prf2_flags & PRF2_MBUILDING == 0
-                    && !crate::handler::isname(&arg, CMDS_DEAD_CAN_USE);
-                if allowed {
-                    let prev = if ghost_social {
-                        let prev = crate::cmd_social::social_hide(&name);
-                        crate::cmd_social::set_social_hide(&name, true);
-                        prev
-                    } else {
-                        None
-                    };
-                    crate::cmd_social::do_action_named(g, ch, &name, line);
-                    if let Some(prev) = prev {
-                        crate::cmd_social::set_social_hide(&name, prev);
-                    }
+                    && !crate::handler::isname(&name, CMDS_DEAD_CAN_USE);
+                let prev_hide = if ghost_social {
+                    let prev = crate::cmd_social::social_hide(&name);
+                    crate::cmd_social::set_social_hide(&name, true);
+                    prev
                 } else {
-                    g.send_to_char(ch, "Huh?!?\r\n");
+                    None
+                };
+                crate::cmd_social::do_action_named(g, ch, &name, line);
+                if let Some(prev) = prev_hide {
+                    crate::cmd_social::set_social_hide(&name, prev);
                 }
             } else {
                 g.send_to_char(ch, "Huh?!?\r\n");
@@ -711,5 +720,98 @@ mod tests {
         command_interpreter(&mut g, ch, "'hello");
 
         assert!(!outbuf(&g, conn).contains("Huh?!?"));
+    }
+
+    /// #315: a social whose command word is in cmds_mortal_builders_cant_use is
+    /// refused in build mode, exactly as C refuses it once the socials are
+    /// spliced into complete_cmd_info[] (interpreter.c:800-804).
+    #[test]
+    fn build_mode_blocks_a_builder_blocked_social_315() {
+        let _guard = crate::cmd_social::socials_test_lock();
+        // The shipped socials file has no command colliding with
+        // cmds_mortal_builders_cant_use, so install the real table plus one
+        // extra social — "sacrafice", a blocked word that is not itself a
+        // command, so the interpreter still reaches the social branch.
+        let real = std::fs::read_to_string("../lib/misc/socials").unwrap();
+        let mut extra = String::from("\n~sacrafice sacrafice 0 5 0 0\n");
+        extra.push_str("You sacrafice a fish.\r\n"); // char_no_arg
+        extra.push_str("$n sacrafices a fish.\r\n"); // others_no_arg
+        for _ in 0..11 {
+            extra.push_str("#\r\n"); // the remaining NULL slots
+        }
+        extra.push_str("$\r\n");
+
+        let path = std::env::temp_dir().join(format!(
+            "deltamud-socials-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // The loader stops at the file's "$" sentinel, so append our social
+        // before it rather than after it.
+        let body = match real.trim_end().strip_suffix('$') {
+            Some(head) => head.to_string(),
+            None => real.clone(),
+        };
+        std::fs::write(&path, format!("{}{}\n$\n", body, extra)).unwrap();
+        crate::cmd_social::boot_socials(Some(path.to_str().unwrap()));
+
+        let (mut g, ch, conn) = test_game_with_player();
+        g.get_char_mut(ch).unwrap().prf2_flags |= PRF2_MBUILDING;
+
+        command_interpreter(&mut g, ch, "sacrafice salmon");
+
+        assert_eq!(outbuf(&g, conn), CMD_MBUILDING_BLOCK_MSG);
+
+        // A social outside the blocked list still runs in build mode.
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        command_interpreter(&mut g, ch, "smile");
+        assert!(outbuf(&g, conn).contains("You smile happily."));
+
+        // Restore the shipped socials table for the remaining tests.
+        crate::cmd_social::boot_socials(Some("../lib/misc/socials"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #315: outside build mode the blocked social runs normally.
+    #[test]
+    fn builder_blocked_social_runs_outside_build_mode_315() {
+        let _guard = crate::cmd_social::socials_test_lock();
+        let real = std::fs::read_to_string("../lib/misc/socials").unwrap();
+        let mut extra = String::from("\n~sacrafice sacrafice 0 5 0 0\n");
+        extra.push_str("You sacrafice a fish.\r\n");
+        extra.push_str("$n sacrafices a fish.\r\n");
+        for _ in 0..11 {
+            extra.push_str("#\r\n");
+        }
+        extra.push_str("$\r\n");
+
+        let path = std::env::temp_dir().join(format!(
+            "deltamud-socials-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // The loader stops at the file's "$" sentinel, so append our social
+        // before it rather than after it.
+        let body = match real.trim_end().strip_suffix('$') {
+            Some(head) => head.to_string(),
+            None => real.clone(),
+        };
+        std::fs::write(&path, format!("{}{}\n$\n", body, extra)).unwrap();
+        crate::cmd_social::boot_socials(Some(path.to_str().unwrap()));
+
+        let (mut g, ch, conn) = test_game_with_player();
+
+        command_interpreter(&mut g, ch, "sacrafice salmon");
+
+        assert_eq!(outbuf(&g, conn), "You sacrafice a fish.\r\n");
+
+        crate::cmd_social::boot_socials(Some("../lib/misc/socials"));
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -530,10 +530,12 @@ pub fn do_gen_tog(g: &mut GameState, ch: CharId, _arg: &str, subcmd: i32) {
         SCMD_NOREPEAT => prf_tog_chk(g, ch, PRF_NOREPEAT),
         SCMD_HOLYLIGHT => prf_tog_chk(g, ch, PRF_HOLYLIGHT),
         SCMD_SLOWNS => {
-            // nameserver_is_slow toggles globally; we don't model the resolver,
-            // so report the flip without persistent state (the message pair is
-            // symmetric anyway). Default state OFF -> first toggle = ON.
-            true
+            // C act.other.c:1707: `result = (nameserver_is_slow =
+            // !nameserver_is_slow)` — the stored state flips and the message
+            // reports the NEW value, starting from YES (config.c:254). So the
+            // first toggle prints "changed to NO", the second "changed to YES".
+            g.nameserver_is_slow = !g.nameserver_is_slow;
+            g.nameserver_is_slow
         }
         SCMD_AUTOEXIT => prf_tog_chk(g, ch, PRF_AUTOEXIT),
         SCMD_AUTOSPLIT => prf_tog_chk(g, ch, PRF_AUTOSPLIT),
@@ -903,41 +905,64 @@ pub fn do_practice(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) 
     }
 }
 
-/// list_skills (spec_procs.c). Prints the practice-sessions header and the
-/// player's known skills/spells by name. The full per-class min_level gating +
-/// alphabetical spell_sort_info[] ordering lands with the spell_info table;
-/// until then this lists the skills the player has actually learned (prof > 0),
-/// rendered by real name via the ported spells[] table (spell_parser::skill_name)
-/// with C's how_good() proficiency descriptor.
+/// list_skills (spec_procs.c:140-171): the practice-session header followed by
+/// every skill/spell the character's class+level can know, alphabetically
+/// ordered (C spell_sort_info[]) and paged through the descriptor pager.
+/// `%-20s %s` renders each row as C does.
 fn list_skills(g: &mut GameState, ch: CharId) {
-    let learn = g.get_char(ch).map(|c| c.spells_to_learn).unwrap_or(0);
-    g.send_to_char(
-        ch,
-        &format!(
-            "You have {} practice session{} left.\r\n",
+    // MAX_STRING_LENGTH (structs.h:569).
+    const MAX_STRING_LENGTH: usize = 16384;
+
+    let (learn, class, level) = g
+        .get_char(ch)
+        .map(|c| (c.spells_to_learn, c.player.class, c.player.level))
+        .unwrap_or((0, Class::Warrior, 1));
+
+    // C: `if (!GET_PRACTICES(ch)) strcpy(buf, "You have no practice sessions
+    // remaining.") else sprintf("You have %d practice session%s remaining.")`.
+    let mut buf = if learn == 0 {
+        "You have no practice sessions remaining.\r\n".to_string()
+    } else {
+        format!(
+            "You have {} practice session{} remaining.\r\n",
             learn,
             if learn == 1 { "" } else { "s" }
-        ),
-    );
-    g.send_to_char(ch, "You know of the following skills:\r\n");
-    let mut skills: Vec<(u16, u8)> = g
-        .get_char(ch)
-        .map(|c| {
-            c.skills
-                .iter()
-                .filter(|(_, &v)| v > 0)
-                .map(|(&k, &v)| (k, v))
-                .collect()
-        })
-        .unwrap_or_default();
-    skills.sort_by_key(|&(k, _)| k);
-    if skills.is_empty() {
-        g.send_to_char(ch, " None.\r\n");
+        )
+    };
+    // SPLSKL(ch) = prac_types[prac_params[PRAC_TYPE][class]] ("spell"/"skill").
+    let kind = if crate::class::prac_type_is_spell(class) {
+        "spell"
     } else {
-        for (num, prof) in skills {
-            let name = crate::spell_parser::skill_name(num as i32);
-            g.send_to_char(ch, &format!("{:<20}{}\r\n", name, how_good(prof as i32)));
+        "skill"
+    };
+    buf.push_str(&format!("You know of the following {}s:\r\n", kind));
+
+    let mut buf2 = buf.clone();
+    // spell_sort_info[] (spec_procs.c:74-90): the spell/skill indices sorted by
+    // strcmp() on their spells[] names.
+    let mut sort_info: Vec<i32> = (1..MAX_SKILLS as i32).collect();
+    sort_info.sort_by(|&a, &b| skill_name(a).cmp(skill_name(b)));
+
+    for &i in &sort_info {
+        if buf2.len() >= MAX_STRING_LENGTH - 32 {
+            buf2.push_str("**OVERFLOW**\r\n");
+            break;
         }
+        if level as i32 >= spell_info(i).min_level[class as usize] {
+            let prof = g.get_char(ch).map(|c| c.skill(i as u16)).unwrap_or(0);
+            buf2.push_str(&format!(
+                "{:<20} {}\r\n",
+                skill_name(i),
+                how_good(prof as i32)
+            ));
+        }
+    }
+
+    // C hands the whole block to page_string(ch->desc, buf2, 1).
+    let conn = g.get_char(ch).and_then(|c| c.desc);
+    match conn {
+        Some(conn) => crate::modify::page_string(g, conn, &buf2),
+        None => g.send_to_char(ch, &buf2),
     }
 }
 
@@ -2205,10 +2230,10 @@ pub fn do_wimpy(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 // ===========================================================================
 
 pub fn do_gen_write(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
-    let cmd_name = match subcmd {
-        SCMD_BUG => "bug",
-        SCMD_TYPO => "typo",
-        SCMD_IDEA => "idea",
+    let (cmd_name, filename) = match subcmd {
+        SCMD_BUG => ("bug", "misc/bugs"),
+        SCMD_TYPO => ("typo", "misc/typos"),
+        SCMD_IDEA => ("idea", "misc/ideas"),
         _ => return,
     };
 
@@ -2223,13 +2248,65 @@ pub fn do_gen_write(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) 
         return;
     }
 
-    // The C path writes to BUG/TYPO/IDEA flat files (with a max-filesize guard)
-    // and mudlogs the report. Persistent bug/typo/idea files + the mudlog
-    // immortal channel are owned outside the command layer (documented gap); the
-    // player-facing flow is: log intent, then acknowledge.
-    let _ = cmd_name;
+    let name = g
+        .get_char(ch)
+        .map(|c| c.player.name.clone())
+        .unwrap_or_default();
+    let room = g
+        .get_char(ch)
+        .and_then(|c| c.in_room)
+        .and_then(|r| g.room_opt(r))
+        .map(|r| format!("{:5}", r.number))
+        .unwrap_or_else(|| "    ?".to_string());
+
+    // C act.other.c:1544-1545: mudlog the report for the immortals.
+    crate::syslog::mudlog(
+        g,
+        &format!("{} {} (room {}): {}", name, cmd_name, room, argument),
+        crate::syslog::PFT,
+        LVL_IMMORT,
+    );
+
+    // C writes the report to lib/misc/{bugs,typos,ideas} (db.h BUG_FILE /
+    // TYPO_FILE / IDEA_FILE), refusing once the file reaches max_filesize
+    // (config.c:232 = 50000 bytes).
+    let path = std::path::Path::new(&g.config.lib_path).join(filename);
+    let full = match std::fs::metadata(&path) {
+        // C perror()s and silently returns when the file cannot be statted.
+        Err(_) => {
+            eprintln!("Error statting file: {}", path.display());
+            return;
+        }
+        Ok(m) => m,
+    };
+    if full.len() >= MAX_FILESIZE {
+        g.send_to_char(ch, "Sorry, the file is full right now.. try again later.\r\n");
+        return;
+    }
+    let mut fl = match std::fs::OpenOptions::new().append(true).open(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("do_gen_write: {}: {}", path.display(), e);
+            g.send_to_char(ch, "Could not open the file.  Sorry.\r\n");
+            return;
+        }
+    };
+
+    // C act.other.c:1564: "%-8s (%6.6s) [%5s] %s\n" — name, the asctime "Mmm dd"
+    // slice, the room vnum, then the report.
+    let stamp = chrono::Local::now().format("%b %e").to_string();
+    use std::io::Write;
+    let line = format!("{:<8} ({:6.6}) [{}] {}\n", name, stamp, room, argument);
+    if fl.write_all(line.as_bytes()).is_err() {
+        g.send_to_char(ch, "Could not open the file.  Sorry.\r\n");
+        return;
+    }
     g.send_to_char(ch, "Okay.  Thanks!\r\n");
 }
+
+/// max_filesize (config.c:232) — the bug/typo/idea files stop accepting
+/// reports at this many bytes.
+const MAX_FILESIZE: u64 = 50000;
 
 // ===========================================================================
 // do_sneak / do_hide / do_steal  (the thief skills in this file)
@@ -2754,11 +2831,77 @@ pub fn do_school(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     crate::cmd_informative::look_at_room(g, ch, false);
 }
 
-pub fn do_observe(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
-    // Arena observation requires ARENA_OBSERVER status + the observatory room,
-    // neither of which is modelled (arena subsystem, documented gap). A non-
-    // observer always hits the first guard, exactly as a fresh PC does in C.
-    g.send_to_char(ch, "You can't do that now! Get to the observatory!\r\n");
+pub fn do_observe(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
+    // ARENA_OBSERVEROOM (config.c / arena.rs): the observatory.
+    const ARENA_OBSERVEROOM: RoomVnum = 4899;
+
+    let in_room = g.get_char(ch).and_then(|c| c.in_room);
+    let stat = crate::arena::arena_stat(ch);
+    let observatory = g.real_room(ARENA_OBSERVEROOM);
+
+    // C act.other.c:1801-1805: an observer must be standing in the observatory.
+    if stat != crate::arena::ARENA_OBSERVER || in_room != observatory {
+        g.send_to_char(ch, "You can't do that now! Get to the observatory!\r\n");
+        return;
+    }
+
+    let (arg, _) = one_argument(argument);
+
+    // No argument: report who is currently being watched.
+    if arg.is_empty() {
+        let who = crate::arena::arena_observing(ch)
+            .map(|v| {
+                g.get_char(v)
+                    .map(|c| c.player.name.clone())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_else(|| "nobody".to_string());
+        g.send_to_char(
+            ch,
+            &format!("You're currently observing the actions of {}.\r\n", who),
+        );
+        return;
+    }
+
+    // get_char_vis(): the room first, then a world scan — combatants are in the
+    // arena, not in the observatory, so the world scan is the normal path.
+    let victim = match get_char_vis(g, ch, &arg) {
+        Some(v) => v,
+        None => {
+            g.send_to_char(ch, "No such person around.\r\n");
+            return;
+        }
+    };
+
+    let vlevel = g
+        .get_char(victim)
+        .map(|c| c.player.level)
+        .unwrap_or(0);
+    if vlevel >= LVL_IMMORT && victim != ch {
+        g.send_to_char(ch, "You dare not.\r\n");
+        return;
+    }
+
+    if victim == ch {
+        crate::arena::deobserve(ch);
+        g.send_to_char(ch, "Ok. You're observing nobody now.\r\n");
+        return;
+    }
+
+    if !crate::arena::is_arena_combatant(victim) {
+        g.send_to_char(ch, "Hey! That person's not an arena combatant!\r\n");
+    } else {
+        crate::arena::deobserve(ch);
+        crate::arena::linkobserve(ch, victim);
+        let vname = g
+            .get_char(victim)
+            .map(|c| c.player.name.clone())
+            .unwrap_or_default();
+        g.send_to_char(
+            ch,
+            &format!("You're now observing the actions of {}.\r\n", vname),
+        );
+    }
 }
 
 pub fn do_lockout(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
@@ -2771,15 +2914,29 @@ pub fn do_lockout(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         .map(|c| c.prf2_flags & PRF2_LOCKOUT != 0)
         .unwrap_or(false);
     if locked {
-        // Password verification is owned by the auth layer (CRYPT); the stored
-        // hash isn't on the Tier-0 Character. We accept any non-empty unlock
-        // attempt and reject empty, matching the "type unlock <password>" flow.
-        if argument.is_empty() {
-            g.send_to_char(
-                ch,
-                "Password mismatch! Sorry.\r\nTo unlock please type 'unlock <yourpassword>'\r\n",
-            );
-        } else {
+        // C act.other.c:1852-1857: strncmp(CRYPT(argument, GET_PASSWD(ch)),
+        // GET_PASSWD(ch), strlen(GET_PASSWD(ch))) — the typed password is
+        // hashed and compared against the stored one. The session hash is
+        // cached on the descriptor at login (the Character never carries it);
+        // a pending `set password` re-hash takes precedence, since that is what
+        // the saved pfile now holds. With no cached hash at all (a copyover
+        // recovery re-attaches without the nanny) the gate degrades to the
+        // pre-fix behaviour rather than locking the player out for good.
+        let hash = g
+            .get_char(ch)
+            .and_then(|c| c.desc)
+            .and_then(|conn| g.descriptors.get(&conn))
+            .and_then(|d| d.password_hash.clone());
+        let hash = g
+            .get_char(ch)
+            .and_then(|c| c.pending_password_hash.clone())
+            .or(hash);
+
+        let ok = match hash.as_deref() {
+            Some(stored) => crate::password::check_password(stored, argument),
+            None => true,
+        };
+        if ok {
             g.send_to_char(ch, "OK. Your terminal is now unlocked.\r\n");
             if let Some(c) = g.get_char_mut(ch) {
                 c.prf2_flags &= !PRF2_LOCKOUT;
@@ -2792,6 +2949,11 @@ pub fn do_lockout(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
                 None,
                 ActArg::None,
                 To::Room,
+            );
+        } else {
+            g.send_to_char(
+                ch,
+                "Password mismatch! Sorry.\r\nTo unlock please type 'unlock <yourpassword>'\r\n",
             );
         }
         return;
@@ -3148,23 +3310,62 @@ fn any_one_arg(argument: &str) -> (String, &str) {
     }
 }
 
+/// get_char_vis(ch, arg) (handler.c): the visible character matching `arg` in
+/// the actor's room first, then a whole-world scan. Implemented here (as in
+/// cmd_wizard.rs / cmd_social.rs) because the shared contract exposes only the
+/// room-scoped finder.
+fn get_char_vis(g: &GameState, ch: CharId, arg: &str) -> Option<CharId> {
+    if let Some(id) = g.get_char_room_vis(ch, arg) {
+        return Some(id);
+    }
+    let (mut count, name) = crate::handler::get_number(arg);
+    if count == 0 {
+        return None;
+    }
+    for cid in g.char_ids() {
+        let target_name = g
+            .get_char(cid)
+            .map(|c| c.player.name.clone())
+            .unwrap_or_default();
+        if isname(&name, &target_name) && g.can_see(ch, cid) {
+            count -= 1;
+            if count == 0 {
+                return Some(cid);
+            }
+        }
+    }
+    None
+}
+
 // ===========================================================================
 // do_gen_atm — bank commands (balance / deposit / withdraw / bank menu).
 // ===========================================================================
 
-/// atm_is_in_room: ATM object in room, banker mob, carried/worn bankcard.
+/// atm_is_in_room (act.other.c:2194-2225): an ITEM_ATM object lying in the
+/// room, a MOB_BANKER mob in the room, a carried ITEM_ATM bankcard, or a worn
+/// ITEM_ATM bankcard. The carried test additionally requires that the object
+/// has no equipment position (`find_eq_pos(ch, obj, NULL) < 0`) — i.e. it is
+/// not a wearable item, which only counts while actually worn.
 fn atm_is_in_room(g: &GameState, ch: CharId) -> bool {
-    // ITEM_ATM is a DeltaMUD-specific item type (structs.h value 24) not in the
-    // Tier-0 ObjectType enum; such objects deserialize to ObjectType::Other. We
-    // detect the banker mob (MOB_BANKER), the common case; ATM items/bankcards
-    // are recognised once the extended item types land (documented gap).
     let rnum = match g.get_char(ch).and_then(|c| c.in_room) {
         Some(r) => r,
         None => return false,
     };
+
+    // (1) any ATM object in the room.
+    for oid in g.room(rnum).contents.clone() {
+        if g
+            .get_obj(oid)
+            .map(|o| o.obj_type == ObjectType::Atm)
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+
+    // (2) a banker mob in the room (Mulder 10/6/99).
     const MOB_BANKER: i64 = 1 << 29;
-    let people = g.room(rnum).people.clone();
-    for vict in people {
+    for vict in g.room(rnum).people.clone() {
         let is_banker = g
             .get_char(vict)
             .map(|c| c.is_npc && c.act_flags & MOB_BANKER != 0)
@@ -3173,7 +3374,37 @@ fn atm_is_in_room(g: &GameState, ch: CharId) -> bool {
             return true;
         }
     }
+
+    // (3) carrying a bankcard (an unwearable ITEM_ATM in the inventory).
+    for oid in g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default() {
+        if let Some(o) = g.get_obj(oid) {
+            if o.obj_type == ObjectType::Atm && !wearable_eq_pos(o) {
+                return true;
+            }
+        }
+    }
+
+    // (4) wearing a bankcard.
+    for slot in g.get_char(ch).map(|c| c.equipment).unwrap_or([None; NUM_WEARS]) {
+        if let Some(oid) = slot {
+            if g
+                .get_obj(oid)
+                .map(|o| o.obj_type == ObjectType::Atm)
+                .unwrap_or(false)
+            {
+                return true;
+            }
+        }
+    }
+
     false
+}
+
+/// `find_eq_pos(ch, obj, NULL) < 0` — the object has no equipment position,
+/// i.e. none of the C CAN_WEAR positions (everything except TAKE/WIELD/HOLD)
+/// is set on its wear bits.
+fn wearable_eq_pos(o: &Object) -> bool {
+    (o.wear_flags - WearFlags::TAKE - WearFlags::WIELD - WearFlags::HOLD).bits() != 0
 }
 
 pub fn do_gen_atm(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
@@ -3218,8 +3449,10 @@ pub fn do_gen_atm(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
                     g.send_to_char(ch, &format!("You deposit {} coins.\r\n", amount));
                 }
             } else {
-                // Transfer deposit: deposit <name> <amount>.
-                let vict = g.get_char_room_vis(ch, &b1);
+                // Transfer deposit: deposit <name> <amount>. C act.other.c:2276
+                // uses get_char_vis() — the room first, then a whole-world scan —
+                // so gold can be sent to a player anywhere in the game.
+                let vict = get_char_vis(g, ch, &b1);
                 match vict {
                     None => g.send_to_char(ch, "No-one by that name here.\r\n"),
                     Some(v) if v == ch || g.get_char(v).map(|c| c.is_npc).unwrap_or(true) => {
@@ -3443,11 +3676,11 @@ pub fn do_affected(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
             );
             continue;
         }
-        // Spell name table arrives in Batch 6; until then a known affect prints
-        // its skill/spell number, an undefined one prints "TYPE UNDEFINED",
-        // matching C's spells[] lookup bounds.
+        // C act.other.c:300-301: `spells[aff->type]` when the type is in range,
+        // else the literal "TYPE UNDEFINED". skill_name() is the ported spells[]
+        // lookup ("!RESERVED!" / "!UNUSED!" / "UNDEFINED" filler included).
         let label = if aff.spell_type >= 0 && aff.spell_type <= MAX_SKILLS as i32 {
-            format!("spell #{}", aff.spell_type)
+            skill_name(aff.spell_type).to_string()
         } else {
             "TYPE UNDEFINED".to_string()
         };
@@ -4094,5 +4327,377 @@ mod tests {
         do_email(&mut g, mortal, "Target", 0);
         assert_eq!(output(&g, ConnId(1)), "public@example.test\r\n");
         let _ = std::fs::remove_dir_all(lib);
+    }
+
+    fn add_test_room(g: &mut GameState, vnum: RoomVnum) -> RoomRnum {
+        g.add_room(crate::room::Room::new(
+            vnum,
+            0,
+            "A test room".to_string(),
+            "A featureless test room.".to_string(),
+        ))
+    }
+
+    #[test]
+    fn do_affected_names_the_spell_314() {
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(1);
+        let ch = connected_player(&mut g, conn, "Aured", 30);
+        g.get_char_mut(ch).unwrap().affected.push(Affect {
+            spell_type: 25, // sanctuary
+            duration: 4,
+            modifier: 0,
+            location: 0,
+            bitvector: crate::flags::AFF_SANCTUARY,
+            caster: None,
+        });
+
+        do_affected(&mut g, ch, "", 0);
+
+        let out = output(&g, conn);
+        assert!(out.contains("sanctuary"), "got: {}", out);
+        assert!(!out.contains("spell #"), "got: {}", out);
+    }
+
+    #[test]
+    fn slowns_alternates_between_yes_and_no_322() {
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(1);
+        let ch = connected_player(&mut g, conn, "Togger", LVL_IMMORT);
+
+        // config.c:254 seeds nameserver_is_slow = YES, so the first toggle
+        // reports NO and the second YES (act.other.c:1706-1708).
+        do_gen_tog(&mut g, ch, "", SCMD_SLOWNS);
+        assert_eq!(
+            output(&g, conn),
+            "Nameserver_is_slow changed to NO; IP addresses will now be resolved.\r\n"
+        );
+        assert!(!g.nameserver_is_slow);
+
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        do_gen_tog(&mut g, ch, "", SCMD_SLOWNS);
+        assert_eq!(
+            output(&g, conn),
+            "Nameserver_is_slow changed to YES; sitenames will no longer be resolved.\r\n"
+        );
+        assert!(g.nameserver_is_slow);
+    }
+
+    #[test]
+    fn deposit_transfer_reaches_a_player_in_another_room_323() {
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(1);
+        let ch = connected_player(&mut g, conn, "Donor", 10);
+        let here = add_test_room(&mut g, 3001);
+        g.char_to_room(ch, here);
+
+        let mut target = Character::new_player("Away".to_string(), Class::Warrior, Race::Human);
+        target.player.level = 10;
+        let away = g.create_char(target);
+        let there = add_test_room(&mut g, 3015);
+        g.char_to_room(away, there);
+
+        // The bank has to be reachable: a type-28 ATM object in the room.
+        let mut machine =
+            crate::object::Object::new(NOTHING, "atm machine".to_string(), "an atm".to_string());
+        machine.obj_type = ObjectType::Atm;
+        let machine = g.create_obj(machine);
+        g.obj_to_room(machine, here);
+
+        g.get_char_mut(ch).unwrap().points.gold = 100;
+
+        do_gen_atm(&mut g, ch, "Away 40", SCMD_DEPOSIT);
+
+        assert!(output(&g, conn).contains("You deposit 40 coins into"));
+        assert_eq!(g.get_char(ch).unwrap().points.gold, 60);
+        assert_eq!(g.get_char(away).unwrap().points.bank_gold, 40);
+    }
+
+    #[test]
+    fn atm_recognises_room_and_carried_bankcards_326() {
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(1);
+        let ch = connected_player(&mut g, conn, "Banker", 10);
+        let here = add_test_room(&mut g, 3001);
+        g.char_to_room(ch, here);
+
+        // No ATM anywhere: refuses.
+        assert!(!atm_is_in_room(&g, ch));
+
+        // A type-28 (ITEM_ATM) object lying in the room counts.
+        let mut machine =
+            crate::object::Object::new(NOTHING, "atm machine".to_string(), "an atm".to_string());
+        machine.obj_type = ObjectType::Atm;
+        let machine = g.create_obj(machine);
+        g.obj_to_room(machine, here);
+        assert!(atm_is_in_room(&g, ch));
+        g.obj_from_anywhere(machine);
+        g.extract_obj(machine);
+        assert!(!atm_is_in_room(&g, ch));
+
+        // An unwearable bankcard in the inventory counts too.
+        let mut card = crate::object::Object::new(
+            NOTHING,
+            "bankcard card".to_string(),
+            "a bankcard".to_string(),
+        );
+        card.obj_type = ObjectType::Atm;
+        let card = g.create_obj(card);
+        g.obj_to_char(card, ch);
+        assert!(atm_is_in_room(&g, ch));
+        g.obj_from_anywhere(card);
+        g.extract_obj(card);
+        assert!(!atm_is_in_room(&g, ch));
+
+        // A wearable ITEM_ATM does not count while merely carried (C: the
+        // carried test requires find_eq_pos(ch, obj, NULL) < 0).
+        let mut tabard = crate::object::Object::new(
+            NOTHING,
+            "bank tabard".to_string(),
+            "a bank tabard".to_string(),
+        );
+        tabard.obj_type = ObjectType::Atm;
+        tabard.wear_flags = WearFlags::TAKE | WearFlags::ABOUT;
+        let tabard = g.create_obj(tabard);
+        g.obj_to_char(tabard, ch);
+        assert!(
+            !atm_is_in_room(&g, ch),
+            "a wearable ATM object must not count while carried"
+        );
+
+        // ...but it counts once worn.
+        g.equip_char(ch, tabard, WEAR_ABOUT);
+        assert!(atm_is_in_room(&g, ch));
+        let _ = output(&g, conn);
+    }
+
+    #[test]
+    fn lockout_rejects_a_wrong_password_313() {
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(1);
+        let ch = connected_player(&mut g, conn, "Locked", 10);
+        g.descriptors.get_mut(&conn).unwrap().password_hash =
+            Some(crate::password::hash_password("sesame"));
+        g.get_char_mut(ch).unwrap().prf2_flags |= 1 << 1; // PRF2_LOCKOUT
+
+        do_lockout(&mut g, ch, "wrong", 0);
+        assert_eq!(
+            output(&g, conn),
+            "Password mismatch! Sorry.\r\nTo unlock please type 'unlock <yourpassword>'\r\n"
+        );
+        assert_ne!(g.get_char(ch).unwrap().prf2_flags & (1 << 1), 0);
+
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        do_lockout(&mut g, ch, "sesame", 0);
+        assert_eq!(output(&g, conn), "OK. Your terminal is now unlocked.\r\n");
+        assert_eq!(g.get_char(ch).unwrap().prf2_flags & (1 << 1), 0);
+    }
+
+    #[test]
+    fn lockout_rejects_an_empty_password_313() {
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(1);
+        let ch = connected_player(&mut g, conn, "Still", 10);
+        g.descriptors.get_mut(&conn).unwrap().password_hash =
+            Some(crate::password::hash_password("pw"));
+        g.get_char_mut(ch).unwrap().prf2_flags |= 1 << 1;
+
+        do_lockout(&mut g, ch, "", 0);
+        assert!(output(&g, conn).contains("Password mismatch!"));
+        assert_ne!(g.get_char(ch).unwrap().prf2_flags & (1 << 1), 0);
+    }
+
+    #[test]
+    fn gen_write_appends_report_to_the_typo_file_321() {
+        let lib = temp_lib("genwrite");
+        std::fs::create_dir_all(std::path::Path::new(&lib).join("misc")).unwrap();
+        for f in ["bugs", "typos", "ideas"] {
+            std::fs::write(std::path::Path::new(&lib).join("misc").join(f), "").unwrap();
+        }
+        let mut cfg = Config::default();
+        cfg.lib_path = lib.clone();
+        let mut g = GameState::new(cfg);
+        let conn = ConnId(1);
+        let ch = connected_player(&mut g, conn, "Reporter", 10);
+        let here = add_test_room(&mut g, 3001);
+        g.char_to_room(ch, here);
+
+        do_gen_write(&mut g, ch, "the ceiling leaks", SCMD_TYPO);
+        assert_eq!(output(&g, conn), "Okay.  Thanks!\r\n");
+
+        // C act.other.c:1564: "%-8s (%6.6s) [%5s] %s\n", with rcds()'s "%5d".
+        let data = std::fs::read_to_string(std::path::Path::new(&lib).join("misc").join("typos"))
+            .unwrap();
+        assert!(data.starts_with("Reporter "), "got: {:?}", data);
+        assert!(
+            data.contains(") [ 3001] the ceiling leaks\n"),
+            "got: {:?}",
+            data
+        );
+        // The other two files stay untouched.
+        for f in ["bugs", "ideas"] {
+            let other = std::fs::read(std::path::Path::new(&lib).join("misc").join(f)).unwrap();
+            assert!(other.is_empty());
+        }
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
+    #[test]
+    fn gen_write_refuses_when_the_file_is_full_321() {
+        let lib = temp_lib("genwrite-full");
+        std::fs::create_dir_all(std::path::Path::new(&lib).join("misc")).unwrap();
+        std::fs::write(
+            std::path::Path::new(&lib).join("misc").join("bugs"),
+            "x".repeat(MAX_FILESIZE as usize),
+        )
+        .unwrap();
+
+        let mut cfg = Config::default();
+        cfg.lib_path = lib.clone();
+        let mut g = GameState::new(cfg);
+        let conn = ConnId(1);
+        let ch = connected_player(&mut g, conn, "Reporter", 10);
+        let here = add_test_room(&mut g, 3001);
+        g.char_to_room(ch, here);
+
+        do_gen_write(&mut g, ch, "stuck", SCMD_BUG);
+        assert_eq!(
+            output(&g, conn),
+            "Sorry, the file is full right now.. try again later.\r\n"
+        );
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
+    #[test]
+    fn practice_lists_class_skills_with_min_level_gating_312() {
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(1);
+        let ch = connected_player(&mut g, conn, "Recruit", 1);
+
+        do_practice(&mut g, ch, "", 0);
+
+        let out = output(&g, conn);
+        // The C header, verbatim (spec_procs.c:146 / 148).
+        assert!(out.contains("You have no practice sessions remaining.\r\n"));
+        assert!(out.contains("You know of the following skills:\r\n"));
+        // kick is min_level 1 for warriors: listed even though not learned.
+        assert!(out.contains(&format!("{:<20} {}\r\n", "kick", how_good(0))));
+        // mount is min_level 3 for warriors: gated out at level 1.
+        assert!(!out.contains("mount"));
+
+        while crate::modify::page_active(conn) {
+            crate::modify::page_input(&mut g, conn, "q");
+        }
+        assert!(!crate::modify::page_active(conn));
+    }
+
+    #[test]
+    fn practice_shows_remaining_sessions_and_proficiency_312() {
+        use crate::spell_parser::SKILL_KICK;
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(1);
+        let ch = connected_player(&mut g, conn, "Fighter", 30);
+        g.get_char_mut(ch).unwrap().spells_to_learn = 1;
+        g.get_char_mut(ch).unwrap().set_skill(SKILL_KICK as u16, 65);
+
+        do_practice(&mut g, ch, "", 0);
+
+        let out = output(&g, conn);
+        assert!(out.contains("You have 1 practice session remaining.\r\n"));
+        assert!(out.contains(&format!("{:<20} {}\r\n", "kick", how_good(65))));
+        // Gating is by level, not proficiency: parry is warrior level 31.
+        assert!(!out.contains("parry"));
+
+        // The pager is process-global and keyed by ConnId; drain it so a later
+        // test on this connection is not treated as a pager command.
+        while crate::modify::page_active(conn) {
+            crate::modify::page_input(&mut g, conn, "q");
+        }
+        assert!(!crate::modify::page_active(conn));
+    }
+
+    #[test]
+    fn observe_blocks_a_non_observer_outside_the_observatory_311() {
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(1);
+        let ch = connected_player(&mut g, conn, "Watcher", 10);
+        let here = add_test_room(&mut g, 3001);
+        g.char_to_room(ch, here);
+
+        do_observe(&mut g, ch, "", 0);
+        assert_eq!(
+            output(&g, conn),
+            "You can't do that now! Get to the observatory!\r\n"
+        );
+    }
+
+    #[test]
+    fn observe_reports_and_retargets_from_the_observatory_311() {
+        use crate::arena::{set_stat_for_test, ARENA_COMBATANT1, ARENA_OBSERVER};
+        crate::arena::reset_for_tests();
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(1);
+
+        // The arena status table is process-global and keyed by CharId, so burn
+        // a block of ids that no other test's chars (which all start from 1)
+        // can ever reach before touching the table.
+        for _ in 0..500 {
+            let _ = g.create_char(Character::new_player(
+                "Filler".to_string(),
+                Class::Warrior,
+                Race::Human,
+            ));
+        }
+
+        let ch = connected_player(&mut g, conn, "Watcher", 10);
+        let obs = add_test_room(&mut g, 4899);
+        g.char_to_room(ch, obs);
+        set_stat_for_test(ch, ARENA_OBSERVER);
+
+        // An arena combatant somewhere else in the world.
+        let mut foe = Character::new_player("Gladiatr".to_string(), Class::Warrior, Race::Human);
+        foe.player.level = 10;
+        let foe = g.create_char(foe);
+        let pit = add_test_room(&mut g, 3005);
+        g.char_to_room(foe, pit);
+        set_stat_for_test(foe, ARENA_COMBATANT1);
+
+        // No argument: "nobody" initially.
+        do_observe(&mut g, ch, "", 0);
+        assert!(output(&g, conn).contains("observing the actions of nobody."));
+
+        // An immortal is refused even though visible.
+        let mut god = Character::new_player("Zap".to_string(), Class::Warrior, Race::Human);
+        god.player.level = LVL_IMPL;
+        let god = g.create_char(god);
+        let den = add_test_room(&mut g, 3006);
+        g.char_to_room(god, den);
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        do_observe(&mut g, ch, "zap", 0);
+        assert_eq!(output(&g, conn), "You dare not.\r\n");
+
+        // The world-scope lookup finds the combatant and links the chain.
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        do_observe(&mut g, ch, "gladiatr", 0);
+        assert_eq!(
+            output(&g, conn),
+            "You're now observing the actions of Gladiatr.\r\n"
+        );
+        assert_eq!(crate::arena::arena_observing(ch), Some(foe));
+
+        // Observing yourself by name detaches (C act.other.c:1826-1830).
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        do_observe(&mut g, ch, "watcher", 0);
+        assert_eq!(
+            output(&g, conn),
+            "Ok. You're observing nobody now.\r\n"
+        );
+        assert_eq!(crate::arena::arena_observing(ch), None);
+
+        // Drop our entries so the shared table stays clean.
+        crate::arena::forget_char(ch);
+        crate::arena::forget_char(foe);
+        crate::arena::forget_char(god);
+        crate::arena::reset_for_tests();
     }
 }

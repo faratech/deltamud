@@ -870,6 +870,13 @@ async fn handle_input(&mut self, conn_id: ConnId, input: String) {
                     }
                 }
 
+                // Cache the session password hash so `unlock <password>`
+                // (act.other.c do_lockout) can verify against the real account
+                // password (C compares against GET_PASSWD(ch)) (#313).
+                if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    d.password_hash = Some(crate::password::hash_password(&input));
+                }
+
                 // C 1957-1967: BAN_SELECT without PLR_SITEOK.
                 let banned = crate::ban::isbanned(&host);
                 if banned >= crate::ban::BanType::Select && rec.act_flags & PLR_SITEOK == 0 {
@@ -883,6 +890,7 @@ async fn handle_input(&mut self, conn_id: ConnId, input: String) {
                     }
                     return;
                 }
+
                 // C 1968-1979: multiplay gate (comm.c check_multiplaying;
                 // the C build returns 1 immediately — dev-mode bypass kept).
                 if !crate::cmd_comm::check_multiplaying(&self.state, &host)
@@ -981,6 +989,11 @@ for access.\r\n\r\n",
                 if matches {
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                         d.state = ConState::GetNewbie;
+                        // Session password hash, for the `unlock` gate.
+                        d.password_hash = d
+                            .temp_password
+                            .as_ref()
+                            .map(|p| crate::password::hash_password(p));
                     }
                 } else {
                     // C interpreter.c:2057: '...start over.' + inline prompt.

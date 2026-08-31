@@ -22,6 +22,15 @@ use std::sync::{OnceLock, RwLock};
 const PRF_NOGOSS: i64 = 1 << 19;
 // ROOM_SOUNDPROOF — matches room.rs RoomFlags::SOUNDPROOF (1 << 5).
 const ROOM_SOUNDPROOF: u32 = 1 << 5;
+// PLR_WRITING (structs.h:186) — the player is composing a board/mail/OLC
+// message and must not be interrupted by socials or channel traffic.
+const PLR_WRITING: i64 = 1 << 4;
+// Ignore-list type bits (act.comm.c / structs.h). cmd_comm owns the ignore
+// command; these are read-only mirrors so the social paths can consult them.
+const IGNORE_PUBLIC: i64 = 1 << 0;
+const IGNORE_EMOTE: i64 = 1 << 2;
+// screen.h colour level "normal" (CCYEL / CCNRM gate).
+const C_NRM: i32 = 2;
 
 /// One social, mirroring C `struct social_messg`. A `None` field is the C
 /// NULL pointer (the loader stores `#` placeholder lines as `None`).
@@ -558,8 +567,9 @@ fn subst_body_part(msg: &str, body: &str) -> String {
 }
 
 /// C ac_to_room(): send `string` to everyone in the actor's room except the
-/// actor, as a TO_VICT act() so the recipient's perspective renders. Visibility
-/// follows the hide flag (the ignore/PLR_WRITING gates land with those systems).
+/// actor, as a TO_VICT act() so the recipient's perspective renders — skipping
+/// anyone ignoring the actor's public emotes and anyone mid-writing
+/// (act.social.c:92-98).
 fn ac_to_room(g: &mut GameState, string: &str, hide: bool, ch: CharId) {
     let rnum = match g.get_char(ch).and_then(|c| c.in_room) {
         Some(r) => r,
@@ -568,6 +578,18 @@ fn ac_to_room(g: &mut GameState, string: &str, hide: bool, ch: CharId) {
     let people = g.room(rnum).people.clone();
     for vict in people {
         if vict == ch {
+            continue;
+        }
+        // C: !isignore(vict, ch, IGNORE_PUBLIC) — the recipient is not ignoring
+        // the actor's public/emote traffic.
+        if isignore(g, vict, ch, IGNORE_PUBLIC) {
+            continue;
+        }
+        // C: !PLR_FLAGGED(vict, PLR_WRITING) — don't interrupt a composer.
+        if g.get_char(vict)
+            .map(|c| c.act_flags & PLR_WRITING != 0)
+            .unwrap_or(false)
+        {
             continue;
         }
         // C: send if (CAN_SEE || !hide_invis). When hide is false, always send;
@@ -584,6 +606,61 @@ fn ac_to_room(g: &mut GameState, string: &str, hide: bool, ch: CharId) {
                 false,
             );
         }
+    }
+}
+
+/// isignore(ch1, ch2, type) (act.comm.c): is ch2 on ch1's ignore list for
+/// `type`? Local mirror of cmd_comm::isignore, which is private to that module.
+fn isignore(g: &GameState, ch1: CharId, ch2: CharId, ty: i64) -> bool {
+    let entries = match g.get_char(ch1) {
+        Some(c) => c.ignore_list.clone(),
+        None => return false,
+    };
+    entries
+        .iter()
+        .any(|i| (i.type_bits & ty) != 0 && ignore_matches(g, i, ch2))
+}
+
+/// ignore_matches(entry, ch2) (act.comm.c): an entry matches by idnum when both
+/// are known, otherwise by name (case-insensitive).
+fn ignore_matches(g: &GameState, i: &crate::character::IgnoreEntry, ch2: CharId) -> bool {
+    let target = g.get_char(ch2).map(|c| c.idnum).unwrap_or(-1);
+    if target >= 0 && i.id >= 0 {
+        return i.id == target;
+    }
+    let n2 = g
+        .get_char(ch2)
+        .map(|c| c.player.name.clone())
+        .unwrap_or_default();
+    !n2.is_empty() && i.name.eq_ignore_ascii_case(&n2)
+}
+
+/// COLOR_LEV(ch) (screen.h): PRF_COLOR_1 + 2 * PRF_COLOR_2.
+fn color_lev(g: &GameState, id: CharId) -> i32 {
+    let prf = g.get_char(id).map(|c| c.prf_flags).unwrap_or(0);
+    (if prf & crate::flags::PRF_COLOR_1 != 0 { 1 } else { 0 })
+        + (if prf & crate::flags::PRF_COLOR_2 != 0 {
+            2
+        } else {
+            0
+        })
+}
+
+/// CCYEL(ch, C_NRM): "&Y" when the viewer's colour level reaches C_NRM, else "".
+fn ccyel(g: &GameState, id: CharId) -> &'static str {
+    if color_lev(g, id) >= C_NRM {
+        "&Y"
+    } else {
+        ""
+    }
+}
+
+/// CCNRM(ch, C_NRM): "&n" when the viewer's colour level reaches C_NRM, else "".
+fn ccnrm(g: &GameState, id: CharId) -> &'static str {
+    if color_lev(g, id) >= C_NRM {
+        "&n"
+    } else {
+        ""
     }
 }
 
@@ -815,9 +892,10 @@ pub fn do_gmote(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     do_gmote_named(g, ch, &resolved, &rest);
 }
 
-/// C act() TO_GMOTE path: render `str` (per recipient) to every connected,
-/// non-NOGOSS, non-writing player whose room isn't soundproof, wrapped in
-/// yellow. The leading "&c[&YGOSSIP&c]&n " prefix is already on `str`.
+/// C act() TO_GMOTE path (comm.c:2469-2484): render `str` (per recipient) to
+/// every connected, non-NOGOSS, non-writing, non-soundproof player who is not
+/// ignoring the sender's emotes, framed by that viewer's own CCYEL/CCNRM.
+/// The leading "&c[&YGOSSIP&c]&n " prefix is already on `str`.
 fn gmote_broadcast(g: &mut GameState, msg: &str, ch: CharId, vict: Option<CharId>) {
     if msg.is_empty() {
         return;
@@ -835,6 +913,13 @@ fn gmote_broadcast(g: &mut GameState, msg: &str, ch: CharId, vict: Option<CharId
         {
             continue;
         }
+        // PLR_WRITING gate (comm.c:2475) — don't interrupt a composer.
+        if g.get_char(to_id)
+            .map(|c| c.act_flags & PLR_WRITING != 0)
+            .unwrap_or(false)
+        {
+            continue;
+        }
         // Soundproof room gate.
         let soundproof = g
             .get_char(to_id)
@@ -844,16 +929,20 @@ fn gmote_broadcast(g: &mut GameState, msg: &str, ch: CharId, vict: Option<CharId
         if soundproof {
             continue;
         }
+        // isignore(to, ch, IGNORE_EMOTE) gate (comm.c:2477).
+        if isignore(g, to_id, ch, IGNORE_EMOTE) {
+            continue;
+        }
         // Must be connected & in the game.
         if g.get_char(to_id).map(|c| c.desc.is_none()).unwrap_or(true) {
             continue;
         }
-        // act() TO_GMOTE wraps each line in yellow (CCYEL .. CCNRM). Render the
-        // per-viewer substitution then frame it.
+        // act() TO_GMOTE frames each line with the *viewer's* CCYEL .. CCNRM
+        // (comm.c:2478-2482), so colour-off players get the bare line.
         let line = render_for(g, msg, ch, vict_arg.clone(), to_id);
-        g.send_to_char(to_id, "&Y");
+        g.send_to_char(to_id, ccyel(g, to_id));
         g.send_to_char(to_id, &line);
-        g.send_to_char(to_id, "&n");
+        g.send_to_char(to_id, ccnrm(g, to_id));
     }
 }
 
@@ -1010,6 +1099,7 @@ fn cap_first(s: &mut String) {
     }
 }
 
+
 /// The social's permanent hide bit (C soc_mess_list[].hide), for the
 /// intangible-player forced-hide run (#229).
 pub fn social_hide(command: &str) -> Option<bool> {
@@ -1039,5 +1129,191 @@ pub fn set_social_hide(command: &str, hide: bool) {
         if let Some(s) = guard.list.get_mut(i) {
             s.hide = hide;
         }
+    }
+}
+
+/// Serialize tests that swap the process-global socials table (boot_socials).
+#[cfg(test)]
+pub(crate) fn socials_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap()
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::{Character, IgnoreEntry};
+    use crate::config::Config;
+    use crate::connection::Descriptor;
+    use crate::room::Room;
+    use crate::types::{Class, ConnId, Race};
+
+    fn connected_player(g: &mut GameState, conn: ConnId, name: &str, level: Level) -> CharId {
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        ch.desc = Some(conn);
+        ch.player.level = level;
+        let id = g.create_char(ch);
+        g.players_by_name.insert(name.to_lowercase(), id);
+        id
+    }
+
+    fn shared_room(g: &mut GameState, ids: &[CharId]) {
+        let rnum = g.add_room(Room::new(
+            3001,
+            0,
+            "A test room".to_string(),
+            "A featureless test room.".to_string(),
+        ));
+        for &id in ids {
+            g.char_to_room(id, rnum);
+        }
+    }
+
+    fn outbuf(g: &GameState, conn: ConnId) -> &str {
+        &g.descriptors.get(&conn).unwrap().outbuf
+    }
+
+    /// #324: a player who `ignore <someone> pub` must not receive that
+    /// player's no-argument socials (act.social.c:96).
+    #[test]
+    fn no_arg_social_skips_a_public_ignorer_324() {
+        boot_socials(Some("../lib/misc/socials"));
+        let mut g = GameState::new(Config::default());
+        let a = connected_player(&mut g, ConnId(1), "Screamer", 10);
+        let b = connected_player(&mut g, ConnId(2), "Deafer", 10);
+        shared_room(&mut g, &[a, b]);
+
+        let idnum = g.get_char(a).unwrap().idnum;
+        g.get_char_mut(b).unwrap().ignore_list.push(IgnoreEntry {
+            id: idnum,
+            type_bits: IGNORE_PUBLIC,
+            name: "Screamer".to_string(),
+            reason: "spam".to_string(),
+        });
+
+        do_action_named(&mut g, a, "smile", "");
+
+        assert!(outbuf(&g, ConnId(1)).contains("You smile happily."));
+        assert!(
+            outbuf(&g, ConnId(2)).is_empty(),
+            "ignorer must see nothing, got {:?}",
+            outbuf(&g, ConnId(2))
+        );
+    }
+
+    /// #324: a player composing mail/board/OLC text is not interrupted by
+    /// socials (act.social.c:97).
+    #[test]
+    fn no_arg_social_skips_a_writing_player_324() {
+        boot_socials(Some("../lib/misc/socials"));
+        let mut g = GameState::new(Config::default());
+        let a = connected_player(&mut g, ConnId(1), "Waver", 10);
+        let b = connected_player(&mut g, ConnId(2), "Writer", 10);
+        shared_room(&mut g, &[a, b]);
+        g.get_char_mut(b).unwrap().act_flags |= PLR_WRITING;
+
+        do_action_named(&mut g, a, "smile", "");
+
+        assert!(outbuf(&g, ConnId(1)).contains("You smile happily."));
+        assert!(
+            outbuf(&g, ConnId(2)).is_empty(),
+            "writer must see nothing, got {:?}",
+            outbuf(&g, ConnId(2))
+        );
+    }
+
+    /// Sanity for the same path: an uninvolved room-mate still sees it.
+    #[test]
+    fn no_arg_social_reaches_an_ordinary_room_mate() {
+        boot_socials(Some("../lib/misc/socials"));
+        let mut g = GameState::new(Config::default());
+        let a = connected_player(&mut g, ConnId(1), "Waver", 10);
+        let b = connected_player(&mut g, ConnId(2), "Watcher", 10);
+        shared_room(&mut g, &[a, b]);
+
+        do_action_named(&mut g, a, "smile", "");
+
+        assert!(outbuf(&g, ConnId(2)).contains("smiles happily."));
+    }
+
+    /// #325: the gossip-emote broadcast honours PLR_WRITING, IGNORE_EMOTE and
+    /// the per-viewer colour level (comm.c:2469-2483).
+    #[test]
+    fn gmote_skips_writers_and_ignorers_and_forces_no_colour_325() {
+        boot_socials(Some("../lib/misc/socials"));
+        let mut g = GameState::new(Config::default());
+        let a = connected_player(&mut g, ConnId(1), "Gossiper", 10);
+        let b = connected_player(&mut g, ConnId(2), "Writer", 10);
+        let c = connected_player(&mut g, ConnId(3), "Deafer", 10);
+        let d = connected_player(&mut g, ConnId(4), "Mono", 10);
+        shared_room(&mut g, &[a, b, c, d]);
+
+        g.get_char_mut(b).unwrap().act_flags |= PLR_WRITING;
+        let idnum = g.get_char(a).unwrap().idnum;
+        g.get_char_mut(c).unwrap().ignore_list.push(IgnoreEntry {
+            id: idnum,
+            type_bits: IGNORE_EMOTE,
+            name: "Gossiper".to_string(),
+            reason: "gossip".to_string(),
+        });
+        // `d` keeps every colour preference off (COLOR_LEV 0).
+
+        do_gmote_named(&mut g, a, "smile", "");
+
+        // The writer and the ignorer see nothing.
+        assert!(
+            outbuf(&g, ConnId(2)).is_empty(),
+            "writer got {:?}",
+            outbuf(&g, ConnId(2))
+        );
+        assert!(
+            outbuf(&g, ConnId(3)).is_empty(),
+            "ignorer got {:?}",
+            outbuf(&g, ConnId(3))
+        );
+        // The remaining viewer still sees the line, but without the forced
+        // CCYEL/CCNRM framing. The "&c[&YGOSSIP&c]&n " prefix is part of the
+        // social template itself (C do_gmote sprintf's it into buf) and the
+        // per-viewer colour pipeline strips it later, so exactly one "&Y" —
+        // the template's — may be present for a colour-off viewer.
+        let mono = outbuf(&g, ConnId(4));
+        assert!(mono.contains("smiles happily."), "got {:?}", mono);
+        assert_eq!(
+            mono.matches("&Y").count(),
+            1,
+            "colour-off viewer got extra framing: {:?}",
+            mono
+        );
+        assert!(!mono.contains("&n&n"), "got {:?}", mono);
+    }
+
+    /// #325 sanity: a colour-enabled viewer still gets the yellow framing.
+    #[test]
+    fn gmote_frames_colour_viewers_in_yellow_325() {
+        boot_socials(Some("../lib/misc/socials"));
+        let mut g = GameState::new(Config::default());
+        let a = connected_player(&mut g, ConnId(1), "Gossiper", 10);
+        let d = connected_player(&mut g, ConnId(4), "Colour", 10);
+        shared_room(&mut g, &[a, d]);
+        g.get_char_mut(d).unwrap().prf_flags |=
+            crate::flags::PRF_COLOR_1 | crate::flags::PRF_COLOR_2;
+
+        do_gmote_named(&mut g, a, "smile", "");
+
+        let out = outbuf(&g, ConnId(4));
+        // CCYEL .. line .. CCNRM on top of the template's own "&Y".
+        assert_eq!(
+            out.matches("&Y").count(),
+            2,
+            "colour viewer must be framed in yellow: {:?}",
+            out
+        );
+        assert!(out.contains("&n"), "got {:?}", out);
     }
 }

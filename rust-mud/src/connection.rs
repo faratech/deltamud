@@ -353,6 +353,13 @@ pub struct Descriptor {
     /// as 'Illegal password.\r\nPassword: ' carry the prompt); the normal
     /// post-nanny prompt is skipped once, mirroring C's SEND_TO_Q-and-return.
     pub suppress_prompt: bool,
+    /// Hash of the password that opened this session, cached at login so the
+    /// synchronous `unlock` handler (act.other.c do_lockout) can verify a
+    /// `unlock <password>` against the real account password. C keeps
+    /// GET_PASSWD(ch) on the character itself; the Rust Character never carries
+    /// it, so the session hash lives on the descriptor. Empty after a copyover
+    /// recovery (which skips the nanny), where C would still have it (#313).
+    pub password_hash: Option<String>,
 }
 
 impl Descriptor {
@@ -382,6 +389,7 @@ impl Descriptor {
             temp_description: None,
             last_input: String::new(),
             suppress_prompt: false,
+            password_hash: None,
         }
     }
 

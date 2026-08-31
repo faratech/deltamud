@@ -215,6 +215,11 @@ fn spell_mana_params(spellnum: i32) -> Option<(i32, i32, i32)> {
         39 => (100, 50, 1),   // fear
         40 => (150, 75, 1),   // recharge
         42 => (240, 120, 2),  // group stone skin
+        // spell_parser.c:1327 (portal) and :1354 (redirect charge). Without
+        // these two a scribe produced portal / redirect-charge scrolls for
+        // zero mana.
+        41 => (170, 100, 5),  // portal
+        51 => (200, 100, 5),  // redirect charge
         44 => (110, 85, 5),   // convergence of power
         45 => (140, 100, 5),  // mana autus
         46 => (200, 100, 2),  // resist portal
@@ -533,7 +538,10 @@ fn make_potion(g: &mut GameState, ch: CharId, potion: i32, container: ObjId) {
         format!("a {} potion", colour),
     );
     obj.description = format!("A {} potion lies here.", colour);
-    obj.action_description = Some(format!("It appears to be a {} potion.", sname));
+    // C act.other.c:184-190: the hint goes in an extra description keyed by the
+    // potion's name, so "look potion" reveals which spell it holds.
+    obj.ex_descriptions
+        .push((obj.name.clone(), format!("It appears to be a {} potion.", sname)));
     obj.obj_type = ObjectType::Potion;
     obj.wear_flags = WearFlags::TAKE;
     obj.extra_flags = ExtraFlags::NO_RENT;
@@ -688,7 +696,12 @@ fn make_scroll(g: &mut GameState, ch: CharId, scroll: i32, paper: ObjId) {
         "A parchment inscribed with the runes '{}' lies here.",
         garbled
     );
-    obj.action_description = Some(format!("It appears to be a {} scroll.", spell_name(scroll)));
+    // C act.other.c:369-375: an extra description keyed by the scroll's name,
+    // so "look scroll" reveals which spell it carries.
+    obj.ex_descriptions.push((
+        obj.name.clone(),
+        format!("It appears to be a {} scroll.", spell_name(scroll)),
+    ));
     obj.obj_type = ObjectType::Scroll;
     obj.wear_flags = WearFlags::TAKE;
     obj.extra_flags = ExtraFlags::NO_RENT;
@@ -929,4 +942,157 @@ pub fn do_forge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         ActArg::None,
         To::Room,
     );
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::interpreter::one_argument;
+
+    fn artisan(g: &mut GameState, name: &str) -> CharId {
+        let mut ch = Character::new_player(name.to_string(), Class::Artisan, Race::Human);
+        ch.player.level = 30;
+        ch.points.mana = 1_000_000;
+        let id = g.create_char(ch);
+        g.get_char_mut(id).unwrap().set_skill(SKILL_BREW, 100);
+        g.get_char_mut(id).unwrap().set_skill(SKILL_SCRIBE, 100);
+        id
+    }
+
+    fn bottle_in_inventory(g: &mut GameState, ch: CharId, name: &str) -> ObjId {
+        let mut obj = crate::object::Object::new(
+            NOTHING,
+            format!("{} bottle vial", name),
+            format!("a {} bottle", name),
+        );
+        obj.obj_type = ObjectType::LiqContainer;
+        let oid = g.create_obj(obj);
+        g.obj_to_char(oid, ch);
+        oid
+    }
+
+    /// #317: the brewed potion carries its hint as an extra description keyed
+    /// by the potion's name (act.create.c:184-190), so "look potion" reveals
+    /// the spell; action_description stays unset as in C.
+    #[test]
+    fn brewed_potion_hints_via_ex_description_317() {
+        let mut g = GameState::new(Config::default());
+        let ch = artisan(&mut g, "Brewer");
+
+        // Brewing has a 1-in-3 explosion for mortals and consumes the bottle,
+        // so retry with a fresh bottle until a potion survives.
+        let mut oid = None;
+        for attempt in 0..40 {
+            let _bottle = bottle_in_inventory(&mut g, ch, "glass");
+            do_brew(&mut g, ch, "glass 'sanctuary'", 0);
+            oid = g
+                .get_char(ch)
+                .map(|c| c.carrying.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .find(|&id| {
+                    g.get_obj(id)
+                        .map(|o| o.obj_type == ObjectType::Potion)
+                        .unwrap_or(false)
+                });
+            if oid.is_some() {
+                break;
+            }
+            if attempt == 39 {
+                panic!("brew never produced a potion (40 attempts)");
+            }
+        }
+        let oid = oid.expect("brew should eventually produce a potion");
+        let potion = g.get_obj(oid).unwrap();
+
+        assert!(
+            potion.action_description.is_none(),
+            "C leaves action_description NULL"
+        );
+        let (keyword, descr) = &potion.ex_descriptions[0];
+        assert_eq!(keyword, &potion.name);
+        assert_eq!(descr, "It appears to be a sanctuary potion.");
+        let _ = one_argument("");
+    }
+
+    /// #317: the scribed scroll's extra description reveals the spell
+    /// (act.create.c:369-375).
+    #[test]
+    fn scribed_scroll_hints_via_ex_description_317() {
+        let mut g = GameState::new(Config::default());
+        let ch = artisan(&mut g, "Scrivener");
+        // Scribing has a 1-in-3 explosion for mortals and consumes the paper,
+        // so retry with a fresh sheet until a scroll survives.
+        for attempt in 0..40 {
+            let mut paper = crate::object::Object::new(
+                NOTHING,
+                "paper parchment".to_string(),
+                "a paper".to_string(),
+            );
+            paper.obj_type = ObjectType::Note;
+            let paper = g.create_obj(paper);
+            g.obj_to_char(paper, ch);
+
+            do_scribe(&mut g, ch, "paper 'portal'", 0);
+            let done = g
+                .get_char(ch)
+                .map(|c| c.carrying.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .any(|id| {
+                    g.get_obj(id)
+                        .map(|o| o.obj_type == ObjectType::Scroll)
+                        .unwrap_or(false)
+                });
+            if done || attempt == 39 {
+                break;
+            }
+        }
+
+        let sid = g
+            .get_char(ch)
+            .map(|c| c.carrying.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .find(|&id| {
+                g.get_obj(id)
+                    .map(|o| o.obj_type == ObjectType::Scroll)
+                    .unwrap_or(false)
+            })
+            .expect("scribe should eventually produce a scroll");
+        let scroll = g.get_obj(sid).unwrap();
+
+        assert!(scroll.action_description.is_none());
+        let (keyword, descr) = &scroll.ex_descriptions[0];
+        assert_eq!(keyword, &scroll.name);
+        assert!(descr.starts_with("It appears to be a portal scroll."));
+        // The scroll's own name carries the garbled runes, as C's keyword copy.
+        assert!(keyword.contains("portal"));
+    }
+
+    /// #318: scribing portal / redirect charge charges the C mana cost
+    /// (spell_parser.c:1327 / 1354) instead of being free.
+    #[test]
+    fn spell_mana_params_cover_portal_and_redirect_charge_318() {
+        assert_eq!(spell_mana_params(41), Some((170, 100, 5)));
+        assert_eq!(spell_mana_params(51), Some((200, 100, 5)));
+
+        // mag_manacost: min_level[class] is LVL_IMMORT for scribable spells, so
+        // at level 30 the cost is mana_max - change * (30 - 101), floored at
+        // mana_min => mana_max + change * 71.
+        let mut g = GameState::new(Config::default());
+        let mut ch = Character::new_player("Scr".to_string(), Class::Artisan, Race::Human);
+        ch.player.level = 30;
+        ch.points.mana = 100000;
+        let ch = g.create_char(ch);
+
+        assert_eq!(mag_manacost(&g, ch, 41), 170 + 5 * 71);
+        assert_eq!(mag_manacost(&g, ch, 51), 200 + 5 * 71);
+    }
 }
