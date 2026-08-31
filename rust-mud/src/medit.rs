@@ -323,7 +323,7 @@ fn seed_from_proto(g: &GameState, proto: &MobileProto, vnum: MobVnum) -> EditMob
     let mut m = EditMob {
         alias: proto.name.clone(),
         short_desc: proto.short_desc.clone(),
-        long_desc: trim_trailing_nl(&proto.long_desc),
+        long_desc: proto.long_desc.clone(),
         description: proto.description.clone(),
         mob_flags: MOB_ISNPC,
         aff_flags: 0,
@@ -708,11 +708,15 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             after_edit(g, conn);
         }
         Mode::LongDesc => {
-            let v = if line.trim().is_empty() {
+            // C medit.c:1112-1115 stores the long description WITH its
+            // trailing \r\n (render_mob_block must write 'desc\n~', not
+            // 'desc~') (#266).
+            let mut v = if line.trim().is_empty() {
                 "undefined".to_string()
             } else {
                 line.trim().to_string()
             };
+            v.push_str("\r\n");
             with_mob(conn, |m| m.long_desc = v);
             after_edit(g, conn);
         }
@@ -1589,11 +1593,14 @@ fn asciiflag_conv(flag: &str) -> i64 {
 
 fn set_mob_stats(m: &mut EditMob, _level: i32) {
     let level = m.level as f64;
-    m.defense = ((level * 7.5) as i32) * 7 / 10;
-    m.mdefense = ((level * 7.5) as i32) * 7 / 10;
-    m.power = ((level * 7.5) as i32) * 8 / 10;
-    m.mpower = ((level * 7.5) as i32) * 7 / 10;
-    m.technique = ((level * 7.5) as i32) * 7 / 10;
+    // C medit.c:1442-1447: '7.5' is double, so the whole expression
+    // evaluates in FP and truncates ONCE on assignment. The intermediate
+    // i32 cast lost 1 point per odd level (#265).
+    m.defense = (level * 7.5 * 7.0 / 10.0) as i32;
+    m.mdefense = (level * 7.5 * 7.0 / 10.0) as i32;
+    m.power = (level * 7.5 * 8.0 / 10.0) as i32;
+    m.mpower = (level * 7.5 * 7.0 / 10.0) as i32;
+    m.technique = (level * 7.5 * 7.0 / 10.0) as i32;
     m.num_dam_dice = 1;
     m.size_dam_dice = 1 + (m.level - 1) * 3;
     m.movep = 20 + (m.level - 1) * 17;

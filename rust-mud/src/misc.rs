@@ -928,19 +928,19 @@ fn rebalance_object_proto(proto: &mut crate::world::ObjectProto) {
 }
 
 fn rebalance_mobile_proto(proto: &mut crate::world::MobileProto) {
-    let level = proto.level as i32;
-    let scaled = (level as f64 * 7.5) as i32;
-    proto.defense = (scaled * 7 / 10).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    let level = proto.level as f64;
+    // Same medit.c:1442-1447 double-math fix as set_mob_stats (#265).
+    proto.defense = ((level * 7.5 * 7.0 / 10.0) as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
     proto.mdefense = proto.defense;
-    proto.power = (scaled * 8 / 10).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    proto.power = ((level * 7.5 * 8.0 / 10.0) as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
     proto.mpower = proto.defense;
     proto.technique = proto.defense;
     proto.damnodice = 1;
-    proto.damsizedice = 1 + (level - 1) * 3;
-    proto.hitpoints = 20 + (level - 1) * 17;
-    proto.gold = (level * 10) as Gold;
-    let etl_now = crate::limits::exp_to_level(level);
-    let etl_prev = crate::limits::exp_to_level(level - 1);
+    proto.damsizedice = 1 + ((proto.level as i32) - 1) * 3;
+    proto.hitpoints = 20 + ((proto.level as i32) - 1) * 17;
+    proto.gold = ((proto.level as i64) * 10) as Gold;
+    let etl_now = crate::limits::exp_to_level(proto.level as i32);
+    let etl_prev = crate::limits::exp_to_level(proto.level as i32 - 1);
     proto.experience = (((etl_now - etl_prev) / (19 + level as i64)) as f64 * 1.5) as Experience;
 }
 
