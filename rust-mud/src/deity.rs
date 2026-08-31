@@ -85,16 +85,20 @@ pub static DEITY_TYPES: &[&str] = PC_DEITY_TYPES;
 /// `deity_menu` — the deity-selection menu shown in interpreter.c (CON_QDEITY).
 /// Color is emitted as literal `&`-codes (stripped per player on output); this
 /// reproduces the C string byte-for-byte, including the three-column layout.
-pub static DEITY_MENU: &str = "\r\n\
-&YSelect a deity to worship&n&R:&n\r\n\
-\r\n\
-    Good                Neutral               Evil&n\r\n\
-    &g-&y-&g-&y-                &g-&y-&g-&y-&g-&y-&g-               &g-&y-&g-&y-&n\r\n\
-  &c[&na&c]&n Aetos           &c[&nf&c]&n Cailia           &c[&nk&c]&n Elestra\r\n\
-  &c[&nb&c]&n Corgus          &c[&ng&c]&n Marbin           &c[&nl&c]&n Nemonica\r\n\
-  &c[&nc&c]&n Lythern         &c[&nh&c]&n Poseidon         &c[&nm&c]&n Durn\r\n\
-  &c[&nd&c]&n Pallas          &c[&ni&c]&n Lelu             &c[&nn&c]&n Ranus\r\n\
-  &c[&ne&c]&n Eros            &c[&nj&c]&n Chaos            &c[&no&c]&n Incubus\r\n";
+/// Built with `concat!` so the C rows' leading two spaces survive (`\`
+/// continuations strip continuation-line whitespace) (#253).
+pub static DEITY_MENU: &str = concat!(
+    "\r\n",
+    "&YSelect a deity to worship&n&R:&n\r\n",
+    "\r\n",
+    "    Good                Neutral               Evil&n\r\n",
+    "    &g-&y-&g-&y-                &g-&y-&g-&y-&g-&y-&g-               &g-&y-&g-&y-&n\r\n",
+    "  &c[&na&c]&n Aetos           &c[&nf&c]&n Cailia           &c[&nk&c]&n Elestra\r\n",
+    "  &c[&nb&c]&n Corgus          &c[&ng&c]&n Marbin           &c[&nl&c]&n Nemonica\r\n",
+    "  &c[&nc&c]&n Lythern         &c[&nh&c]&n Poseidon         &c[&nm&c]&n Durn\r\n",
+    "  &c[&nd&c]&n Pallas          &c[&ni&c]&n Lelu             &c[&nn&c]&n Ranus\r\n",
+    "  &c[&ne&c]&n Eros            &c[&nj&c]&n Chaos            &c[&no&c]&n Incubus\r\n",
+);
 
 /// `deity_abbrev(deity)` — DEITY_ABBR for a PC, or "--" when `is_npc`.
 /// Bounds-guards the deity index (C indexes blindly; we degrade to "--").
@@ -163,5 +167,22 @@ pub fn find_deity_bitvector(arg: char) -> i64 {
         'n' => 1 << 13,
         'o' => 1 << 14,
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #253: the deity menu keeps its two-space row indent (the C source's
+    /// `  &c[&na&c]&n ...` rows were rendered flush-left by `\` continuations).
+    #[test]
+    fn deity_menu_keeps_its_two_space_row_indent() {
+        for line in DEITY_MENU.split("\r\n").filter(|l| l.contains("&c[&n")) {
+            assert!(line.starts_with("  "), "row lost its indent: {:?}", line);
+        }
+        // The three-column header keeps its own four-space indent.
+        assert!(DEITY_MENU.contains("\r\n    Good                Neutral"));
+        assert!(DEITY_MENU.contains("&c[&nk&c]&n Elestra"));
     }
 }

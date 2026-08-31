@@ -67,17 +67,21 @@ pub static RACE_TYPES: &[&str] = PC_RACE_TYPES;
 /// `race_menu` — the race-selection menu shown in interpreter.c (CON_QRACE).
 /// Color is emitted as literal `&`-codes (the output path strips them per
 /// player), exactly matching the C string including the trailing `\r\n`.
-pub static RACE_MENU: &str = "\r\n\
-&YSelect a race&n&R:&n\r\n\
-  &c[&na&c]&n Human    - average creatures of diplomacy, ethics, and adventure\r\n\
-  &c[&nb&c]&n Elf      - smart, dexterious creatures, lacking strength & endurance\r\n\
-  &c[&nc&c]&n Gnome    - highly intelligent creatures who remain without wisdom\r\n\
-  &c[&nd&c]&n Dwarf    - healthy creatures who tend to remain isolated from others\r\n\
-  &c[&ne&c]&n Troll    - large masters of combat who lack intelligence and speed\r\n\
-  &c[&nf&c]&n Goblin   - grotesque, evil gnomes, well-known for their trickery\r\n\
-  &c[&ng&c]&n Drow     - strange, innovative people originating from another land\r\n\
-  &c[&nh&c]&n Orc      - rabbid wild creatures who take whatever they want\r\n\
-  &c[&ni&c]&n Minotaur - half human, half bull monsters who thrive on flesh\r\n";
+/// Built with `concat!` so the two-space row indent of the C source survives
+/// (`\` continuations strip leading whitespace) (#253).
+pub static RACE_MENU: &str = concat!(
+    "\r\n",
+    "&YSelect a race&n&R:&n\r\n",
+    "  &c[&na&c]&n Human    - average creatures of diplomacy, ethics, and adventure\r\n",
+    "  &c[&nb&c]&n Elf      - smart, dexterious creatures, lacking strength & endurance\r\n",
+    "  &c[&nc&c]&n Gnome    - highly intelligent creatures who remain without wisdom\r\n",
+    "  &c[&nd&c]&n Dwarf    - healthy creatures who tend to remain isolated from others\r\n",
+    "  &c[&ne&c]&n Troll    - large masters of combat who lack intelligence and speed\r\n",
+    "  &c[&nf&c]&n Goblin   - grotesque, evil gnomes, well-known for their trickery\r\n",
+    "  &c[&ng&c]&n Drow     - strange, innovative people originating from another land\r\n",
+    "  &c[&nh&c]&n Orc      - rabbid wild creatures who take whatever they want\r\n",
+    "  &c[&ni&c]&n Minotaur - half human, half bull monsters who thrive on flesh\r\n",
+);
 
 /// `stat_table[9][12]` (defined in class.c) — racial {min,max} ability bounds.
 /// Twelve columns are six {min,max} pairs in stat order: Str, Int, Wis, Dex,
@@ -170,5 +174,31 @@ pub fn find_race_bitvector(arg: char) -> i64 {
         'h' => 1 << 7,
         'i' => 1 << 8,
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #335: race_abbrevs[] is C's nine rows, so Goblin -> "Gob" and
+    /// Drow -> "Dro" (not the neighbouring "Orc"/"Min").
+    #[test]
+    fn race_abbrevs_match_races_c() {
+        assert_eq!(
+            &RACE_ABBREVS[..NUM_RACES],
+            &["Hum", "Elf", "Gno", "Dwa", "Tro", "Gob", "Dro", "Orc", "Min"]
+        );
+        assert_eq!(race_abbrev(RACE_GOBLIN, false), "Gob");
+        assert_eq!(race_abbrev(RACE_DROW, false), "Dro");
+    }
+
+    /// #253: the race menu keeps its two-space row indent.
+    #[test]
+    fn race_menu_keeps_its_two_space_row_indent() {
+        for line in RACE_MENU.split("\r\n").filter(|l| l.contains("&c[&n")) {
+            assert!(line.starts_with("  "), "row lost its indent: {:?}", line);
+        }
+        assert!(RACE_MENU.contains("\r\n  &c[&nf&c]&n Goblin"));
     }
 }

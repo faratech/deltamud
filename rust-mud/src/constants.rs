@@ -15,6 +15,11 @@
 pub static CIRCLEMUD_VERSION: &str =
     "DeltaMUD v3.0 - Beta Test\r\nBased on CircleMUD v3.0bpl12\r\n";
 
+/// `DG_SCRIPT_VERSION` (dg_scripts.h:12), sent after `circlemud_version` by
+/// `version` (act.informative.c:2267-2269).
+pub static DG_SCRIPT_VERSION: &str =
+    "DG Scripts Version 0.99 Patch Level 5a    8/98\r\n";
+
 /// `dirs[]` — cardinal direction names (terminated with `"\n"`).
 pub static DIRS: &[&str] = &["north", "east", "south", "west", "up", "down", "\n"];
 

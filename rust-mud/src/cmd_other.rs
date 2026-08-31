@@ -195,15 +195,11 @@ fn delete_doubledollar(s: &str) -> String {
     s.replace("$$", "$")
 }
 
-/// CircleMUD CLASS_ABBR(ch).
+/// CircleMUD CLASS_ABBR(ch) (utils.h:492 -> class.c `class_abbrevs[]`):
+/// "Mu/Cl/Th/Wa/Ar". Delegates to the authoritative `class.rs` table — the
+/// local copy had drifted to "Mag/Cle/Thi/War/Art" (#251).
 fn class_abbr(class: Class) -> &'static str {
-    match class {
-        Class::MagicUser => "Mag",
-        Class::Cleric => "Cle",
-        Class::Thief => "Thi",
-        Class::Warrior => "War",
-        Class::Artisan => "Art",
-    }
+    crate::class::class_abbrev(class)
 }
 
 /// dex_app_skill[].sneak / .hide / .p_pocket (constants.c). Index clamps to
