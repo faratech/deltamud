@@ -495,7 +495,7 @@ fn serialize_obj_line(g: &GameState, oid: ObjId, depth: usize, out: &mut String)
     };
     let ty = o.obj_type as i32;
     out.push_str(&format!(
-        "{} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+        "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
         depth,
         o.item_number,
         ty,
@@ -509,6 +509,10 @@ fn serialize_obj_line(g: &GameState, oid: ObjId, depth: usize, out: &mut String)
         o.values[1],
         o.values[2],
         o.values[3],
+        o.level,       // min_level
+        o.bitvector,   // affect bitvector
+        o.curr_slots,  // durability counters (#233)
+        o.total_slots,
         o.affects.len()
     ));
     for a in &o.affects {
@@ -649,10 +653,23 @@ fn parse_obj_line(g: &mut GameState, line: &str) -> Option<(ObjId, usize, bool)>
     let v1: i32 = nums[10].parse().unwrap_or(0);
     let v2: i32 = nums[11].parse().unwrap_or(0);
     let v3: i32 = nums[12].parse().unwrap_or(0);
-    let naff: usize = nums[13].parse().unwrap_or(0);
+    // Records written before the #233 fix lack level/bitvector/curr_slots/
+    // total_slots (14 head numbers); new records carry 18. Old files load
+    // with the pre-fix defaults.
+    let (level, bitvector, curr_slots, total_slots, naff, mut idx) = if nums.len() >= 18 {
+        (
+            nums[13].parse().unwrap_or(0),
+            nums[14].parse().unwrap_or(0),
+            nums[15].parse().unwrap_or(0),
+            nums[16].parse().unwrap_or(0),
+            nums[17].parse::<usize>().unwrap_or(0),
+            18,
+        )
+    } else {
+        (0, 0, 0, 0, nums[13].parse::<usize>().unwrap_or(0), 14)
+    };
 
     let mut affects = Vec::new();
-    let mut idx = 14;
     for _ in 0..naff {
         if idx + 1 < nums.len() {
             let loc: i32 = nums[idx].parse().unwrap_or(0);
@@ -682,6 +699,10 @@ fn parse_obj_line(g: &mut GameState, line: &str) -> Option<(ObjId, usize, bool)>
     obj.timer = timer;
     obj.values = [v0, v1, v2, v3];
     obj.affects = affects;
+    obj.level = level.clamp(0, u8::MAX as i32) as u8;
+    obj.bitvector = bitvector;
+    obj.curr_slots = curr_slots;
+    obj.total_slots = total_slots;
 
     let is_key_or_norent = obj.obj_type == ObjectType::Key || (extra & ITEM_NORENT) != 0;
     let oid = g.create_obj(obj);

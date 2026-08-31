@@ -205,8 +205,9 @@ fn mudlog(g: &mut GameState, line: &str, min_level: u8) {
 // obj_file_elem packed (de)serialization — the OBJ <locate> ... line.
 // ===========================================================================
 
-/// Obj_to_store_from(): append one object record at `locate`. Mirrors the
-/// packed obj_file_elem write (bitvector/curr_slots/total_slots written as 0).
+/// Obj_to_store_from() (objsave.c:89-117): append one object record at
+/// `locate`, carrying the affect bitvector and the durability counters
+/// (C objsave.c writes curr_slots/total_slots/bitvector per record; #233).
 fn obj_to_store(g: &GameState, oid: ObjId, locate: i32, out: &mut String) {
     let o = match g.get_obj(oid) {
         Some(o) => o,
@@ -224,10 +225,10 @@ fn obj_to_store(g: &GameState, oid: ObjId, locate: i32, out: &mut String) {
         o.cost,
         o.rent,
         o.timer,
-        o.level, // min_level
-        0,       // bitvector (no Object field yet)
-        0,       // curr_slots
-        0,       // total_slots
+        o.level,            // min_level
+        o.bitvector,        // affect bitvector
+        o.curr_slots,       // durability counters
+        o.total_slots,
         o.values[0],
         o.values[1],
         o.values[2],
@@ -274,9 +275,9 @@ fn obj_from_store(g: &mut GameState, line: &str) -> Option<(ObjId, i32)> {
     let rent: i32 = nums[7].parse().unwrap_or(0);
     let timer: i32 = nums[8].parse().unwrap_or(-1);
     let min_level: i32 = nums[9].parse().unwrap_or(0);
-    let _bitvector: i64 = nums[10].parse().unwrap_or(0);
-    let _curr_slots: i32 = nums[11].parse().unwrap_or(0);
-    let _total_slots: i32 = nums[12].parse().unwrap_or(0);
+    let bitvector: i64 = nums[10].parse().unwrap_or(0);
+    let curr_slots: i32 = nums[11].parse().unwrap_or(0);
+    let total_slots: i32 = nums[12].parse().unwrap_or(0);
     let v0: i32 = nums[13].parse().unwrap_or(0);
     let v1: i32 = nums[14].parse().unwrap_or(0);
     let v2: i32 = nums[15].parse().unwrap_or(0);
@@ -318,6 +319,9 @@ fn obj_from_store(g: &mut GameState, line: &str) -> Option<(ObjId, i32)> {
     obj.level = min_level.clamp(0, u8::MAX as i32) as u8;
     obj.values = [v0, v1, v2, v3];
     obj.affects = affects;
+    obj.bitvector = bitvector;
+    obj.curr_slots = curr_slots;
+    obj.total_slots = total_slots;
 
     let oid = g.create_obj(obj);
     Some((oid, locate))
@@ -1776,5 +1780,31 @@ mod tests {
         crash_cryosave(&mut g, ch, 0);
         assert_eq!(g.get_char(ch).unwrap().load_room, g.room(room).number);
         assert_eq!(g.player_save_requests, vec![ch]);
+    }
+}
+
+#[cfg(test)]
+mod durability_roundtrip_tests {
+    use super::*;
+
+    #[test]
+    fn obj_to_store_round_trips_bitvector_and_durability() {
+        // Issue #233: the record must carry bitvector + curr/total_slots;
+        // a rent cycle used to zero them (objsave.c:89-117 writes all three).
+        let mut g = GameState::new(crate::config::Config::default());
+        let mut o = crate::object::Object::new(99, "scythe death".into(), "the Scythe of Death".into());
+        o.bitvector = 0x4000_0000;
+        o.curr_slots = 7;
+        o.total_slots = 42;
+        let oid = g.create_obj(o);
+
+        let mut out = String::new();
+        obj_to_store(&g, oid, 3, &mut out);
+        let (back, locate) = obj_from_store(&mut g, out.trim_end()).expect("line parses");
+        assert_eq!(locate, 3);
+        let o2 = g.get_obj(back).unwrap();
+        assert_eq!(o2.bitvector, 0x4000_0000, "bitvector survives a rent cycle");
+        assert_eq!(o2.curr_slots, 7);
+        assert_eq!(o2.total_slots, 42);
     }
 }
