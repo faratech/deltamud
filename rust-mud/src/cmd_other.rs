@@ -4558,6 +4558,11 @@ mod tests {
         assert!(out.contains(&format!("{:<20} {}\r\n", "kick", how_good(0))));
         // mount is min_level 3 for warriors: gated out at level 1.
         assert!(!out.contains("mount"));
+
+        while crate::modify::page_active(conn) {
+            crate::modify::page_input(&mut g, conn, "q");
+        }
+        assert!(!crate::modify::page_active(conn));
     }
 
     #[test]
@@ -4576,6 +4581,13 @@ mod tests {
         assert!(out.contains(&format!("{:<20} {}\r\n", "kick", how_good(65))));
         // Gating is by level, not proficiency: parry is warrior level 31.
         assert!(!out.contains("parry"));
+
+        // The pager is process-global and keyed by ConnId; drain it so a later
+        // test on this connection is not treated as a pager command.
+        while crate::modify::page_active(conn) {
+            crate::modify::page_input(&mut g, conn, "q");
+        }
+        assert!(!crate::modify::page_active(conn));
     }
 
     #[test]
