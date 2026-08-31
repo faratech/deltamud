@@ -1036,6 +1036,15 @@ pub fn redit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
         Some(z) => (z.number, z.top),
         None => return,
     };
+    // C redit.c:379-381 MAP_ACTIVE guard: the synthetic surface-map zone's
+    // .wld is never written by OLC - 'olc redit save <map zone>' would
+    // otherwise write every generated map cell into 20000.wld (#264).
+    if let Some(start_rnum) = g.map_start_rnum {
+        if g.rooms.get(start_rnum).map(|room| room.number / 100) == Some(zone_number) {
+            log::warn!("SYSERR: refused OLC write of the surface-map zone {}.", zone_number);
+            return;
+        }
+    }
     let start = zone_number * 100;
 
     let mut out = String::new();

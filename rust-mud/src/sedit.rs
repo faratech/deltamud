@@ -1316,6 +1316,16 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 g.send_to_char(ch, "That mobile does not exist, try again : ");
                 return;
             } else {
+                // C sedit.c:1130-1134: the keeper mob must be in a zone the
+                // builder can edit (< LVL_IMMORT) (#267).
+                let level = conn_char(g, conn)
+                    .and_then(|c| g.get_char(c))
+                    .map(|c| c.player.level)
+                    .unwrap_or(LVL_IMPL);
+                if level < LVL_IMMORT && !crate::olc::can_edit_zone(g, ch, zone_rnum_of(g, i)) {
+                    g.send_to_char(ch, "You don't have permissions to that zone, try again : ");
+                    return;
+                }
                 with_state(conn, |st| st.shop.keeper = i);
             }
         }
@@ -1483,6 +1493,11 @@ fn sedit_save_internally(g: &mut GameState, conn: ConnId) {
 fn cleanup(conn: ConnId) {
     take_state(conn);
     olc::clear_active(conn);
+}
+
+/// zone rnum for a mob vnum (C real_zone).
+fn zone_rnum_of(g: &GameState, mob_vnum: i32) -> usize {
+    crate::olc::real_zone(g, mob_vnum).unwrap_or(usize::MAX)
 }
 
 fn conn_char(g: &GameState, conn: ConnId) -> Option<CharId> {
