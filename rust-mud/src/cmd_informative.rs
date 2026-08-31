@@ -2064,13 +2064,41 @@ pub fn do_help(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         return;
     }
     let arg = argument.trim();
+    // C act.informative.c:1627-1630: an empty argument pages the general
+    // help page (the `help` global - the first entry in help.hlp).
     if arg.is_empty() {
-        // The general help screen text isn't in the contract.
-        g.send_to_char(ch, "No help available.\r\n");
+        match crate::hedit::general_help_page() {
+            Some(page) if !page.is_empty() => {
+                let conn = g.get_char(ch).and_then(|c| c.desc).unwrap();
+                crate::modify::page_string(g, conn, &page);
+            }
+            _ => g.send_to_char(ch, "No help available.\r\n"),
+        }
         return;
     }
-    // The help index/table isn't loaded in the contract.
-    g.send_to_char(ch, "There is no help on that word.\r\n");
+    // C act.informative.c:1636-1654: find_help with a min-level gate; a
+    // miss (or a too-high min_level) reports 'There is no help on that
+    // word.' and logs the lookup.
+    let (level, lib) = (
+        g.get_char(ch).map(|c| c.player.level).unwrap_or(0),
+        g.config.lib_path.clone(),
+    );
+    match crate::hedit::lookup_help(&lib, arg, level as i32) {
+        Some(page) => {
+            let conn = g.get_char(ch).and_then(|c| c.desc).unwrap();
+            crate::modify::page_string(g, conn, &page);
+        }
+        None => {
+            g.send_to_char(ch, "There is no help on that word.\r\n");
+            log::info!("HELP: {} tried to get help on {}", name_of(g, ch), arg);
+        }
+    }
+}
+
+fn name_of(g: &GameState, ch: CharId) -> String {
+    g.get_char(ch)
+        .map(|c| c.get_name().to_string())
+        .unwrap_or_else(|| "someone".into())
 }
 
 const WIZ_LEVELS: [&str; 5] = [

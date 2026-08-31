@@ -440,6 +440,9 @@ async fn main() -> Result<()> {
     // Load socials (CircleMUD boot_social_messages); spliced into command
     // lookup as a fallback since they are not in the static command table.
     cmd_social::boot_socials(Some(&format!("{}/misc/socials", config.lib_path)));
+    // db.c:299-300 index_boot(DB_BOOT_HLP) - serve the 73k-line help index
+    // to the live `help` command (#232).
+    hedit::boot_help_table(&config.lib_path);
 
     // Load the combat hit-messages (fight.c load_messages, lib/misc/messages):
     // flavourful per-skill / per-weapon death/hit/miss/god messages.

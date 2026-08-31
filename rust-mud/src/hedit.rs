@@ -67,6 +67,42 @@ fn help_table() -> &'static Mutex<Vec<HelpEntry>> {
 /// True once the table has been populated from disk this run.
 static HELP_LOADED: OnceLock<Mutex<bool>> = OnceLock::new();
 
+/// Boot the help table for the live `help` command (db.c:299-300
+/// index_boot(DB_BOOT_HLP)); the hedit editor loaded lazily before, but
+/// nothing booted the table for the command path (#232).
+pub fn boot_help_table(lib_path: &str) {
+    ensure_loaded(lib_path);
+}
+
+/// The general page: C's `help` global is the FIRST entry's body (the
+/// 'help' keywords record at the top of help.hlp).
+pub fn general_help_page() -> Option<String> {
+    let guard = match help_table().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.first().map(|e| e.entry.clone())
+}
+
+/// find_help + min-level gate; returns the formatted page
+/// "keywords\r\nentry" (act.informative.c:1620-1654).
+pub fn lookup_help(lib_path: &str, keyword: &str, level: i32) -> Option<String> {
+    ensure_loaded(lib_path);
+    if crate::hedit::find_help_rnum(keyword).is_none() {
+        return None;
+    }
+    let guard = match help_table().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let rnum = crate::hedit::find_help_rnum(keyword)?;
+    let e = guard.get(rnum)?;
+    if e.min_level > level {
+        return None;
+    }
+    Some(format!("{}\r\n{}", e.keywords, e.entry))
+}
+
 fn ensure_loaded(lib_path: &str) {
     let flag = HELP_LOADED.get_or_init(|| Mutex::new(false));
     let mut loaded = match flag.lock() {
