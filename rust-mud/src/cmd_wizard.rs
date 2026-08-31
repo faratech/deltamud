@@ -4171,7 +4171,9 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 "  {:5} players in game  {:5} connected\r\n",
                 players, connected
             ));
-            buf.push_str(&format!("  {:5} registered\r\n", g.players_by_name.len()));
+            // C act.wizard.c:2800: top_of_p_table + 1 — the persistent player
+            // index, not the set of currently instantiated PCs.
+            buf.push_str(&format!("  {:5} registered\r\n", g.player_table.len()));
             buf.push_str(&format!(
                 "  {:5} mobiles          {:5} prototypes\r\n",
                 mobiles,
@@ -5571,6 +5573,13 @@ pub fn do_mcasters(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     const MOB_CASTER: i64 = 1 << 21;
 
     let magic_user = crate::spec_procs::magic_user as crate::spec_assign::SpecFn;
+    // C act.wizard.c:4489-4494 filters on mob_index[i].func == magic_user alone.
+    // That binding comes from two places: the static ASSIGNMOB table, and
+    // db.c:1346-1349, which sets `mob_index[i].func = magic_user` for EVERY
+    // MOB_CASTER prototype while the mob file loads. So C lists flag-only
+    // casters too — the bit merely picks the "(Type: CASTER)" label — and the
+    // disjunction below is the faithful rendering of that combined binding, not
+    // an extra filter.
     let mut casters: Vec<_> = g
         .mob_protos
         .values()
@@ -6964,16 +6973,50 @@ mod tests {
         let mut g = GameState::new(Config::default());
         let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
         g.mob_protos
-            .insert(3095, mobile_proto(3095, "a magic user", 0));
-        g.mob_protos
-            .insert(4000, mobile_proto(4000, "a flagged non-caster", MOB_CASTER));
+            .insert(4000, mobile_proto(4000, "a flagged caster", MOB_CASTER));
+        // Mob 1 (puff) carries a spec proc that is NOT magic_user, and no flag.
+        g.mob_protos.insert(1, mobile_proto(1, "puff", 0));
 
         do_mcasters(&mut g, imm, "", 0);
 
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
         assert!(out.starts_with("Spellcasting mobs:\r\n"));
-        assert!(out.contains("[3095] a magic user (Type: ASSIGNED)\r\n"));
-        assert!(out.contains("[4000] a flagged non-caster (Type: CASTER)\r\n"));
+        // db.c:1346-1349 binds magic_user to every MOB_CASTER prototype at load,
+        // so C's `mob_index[i].func == magic_user` lists it (label CASTER).
+        assert!(out.contains("[4000] a flagged caster (Type: CASTER)\r\n"));
+        // A mob with neither the flag nor a magic_user binding is not listed.
+        assert!(!out.contains("puff"));
+    }
+
+    // ---- #215: `show stats` counts registered players from the index -------
+
+    #[test]
+    fn show_stats_counts_registered_players_from_the_persistent_index() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        g.char_to_room(imm, room);
+        // Three persistent rows, of which only `Imm` is instantiated.
+        g.update_player_index(1, "Imm", LVL_IMPL, 0, "test");
+        g.update_player_index(2, "Offline", 12, 0, "test");
+        g.update_player_index(3, "Gone", 20, 0, "test");
+
+        show_stats_case_4(&mut g, imm);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("Current stats:"), "out: {}", out);
+        assert!(out.contains("players in game"), "out: {}", out);
+        let line = out
+            .lines()
+            .find(|l| l.contains("registered"))
+            .expect("registered line");
+        assert!(line.contains("3"), "expected 3 registered, got: {}", line);
+    }
+
+    /// `show stats` case 4 (act.wizard.c:2780-2811) — the dispatcher arm that
+    /// prints the "Current stats:" block.
+    fn show_stats_case_4(g: &mut GameState, ch: CharId) {
+        do_show(g, ch, "stats", 0);
     }
 
     #[test]
