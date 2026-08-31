@@ -219,6 +219,8 @@ fn race_name(race: Race) -> &'static str {
         Race::Gnome => "Gnome",
         Race::Dwarf => "Dwarf",
         Race::Troll => "Troll",
+        Race::Goblin => "Goblin",
+        Race::Drow => "Drow",
         Race::Orc => "Orc",
         Race::Minotaur => "Minotaur",
         // Remaining DeltaMUD races fall through to a sane label.
@@ -277,6 +279,8 @@ fn race_abbr(race: Race) -> &'static str {
         Race::Gnome => "Gno",
         Race::Dwarf => "Dwa",
         Race::Troll => "Tro",
+        Race::Goblin => "Gob",
+        Race::Drow => "Dro",
         Race::Orc => "Orc",
         Race::Minotaur => "Min",
         Race::HalfElf => "Hel",

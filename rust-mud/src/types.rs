@@ -97,13 +97,17 @@ pub enum Race {
     Gnome = 2,
     Dwarf = 3,
     Troll = 4,
-    Orc = 5,
-    HalfElf = 6,
-    Kender = 7,
+    Goblin = 5,
+    Drow = 6,
+    Orc = 7,
     Minotaur = 8,
-    Vampire = 9,
-    Ogre = 10,
-    HalfOrc = 11,
+    // Non-C races kept beyond the playable C range (RACE_UNDEFINED=-1, 0..=8
+    // are the structs.h indices persisted to player_main.race).
+    HalfElf = 9,
+    Kender = 10,
+    Vampire = 11,
+    Ogre = 12,
+    HalfOrc = 13,
 }
 
 impl Race {
@@ -114,12 +118,14 @@ impl Race {
             2 => Race::Gnome,
             3 => Race::Dwarf,
             4 => Race::Troll,
-            5 => Race::Orc,
-            6 => Race::HalfElf,
-            7 => Race::Kender,
+            5 => Race::Goblin,
+            6 => Race::Drow,
+            7 => Race::Orc,
             8 => Race::Minotaur,
-            9 => Race::Vampire,
-            10 => Race::Ogre,
+            9 => Race::HalfElf,
+            10 => Race::Kender,
+            11 => Race::Vampire,
+            12 => Race::Ogre,
             _ => Race::HalfOrc,
         }
     }
@@ -243,3 +249,27 @@ pub const DIR_NAMES: [&str; NUM_OF_DIRS] = ["north", "east", "south", "west", "u
 
 /// The direction you came *from* when arriving via `dir` (for arrival msgs).
 pub const REV_DIR: [usize; NUM_OF_DIRS] = [SOUTH, WEST, NORTH, EAST, DOWN, UP];
+
+#[cfg(test)]
+mod race_index_tests {
+    use super::*;
+
+    #[test]
+    fn race_ordinals_match_c_structs_h_indices() {
+        // C structs.h:134-142 / races.c parse_race: the persisted player_main
+        // .race value is the C index. Before #243 the enum had Orc=5,
+        // HalfElf=6, Kender=7, so a Goblin ('f' -> 5) was stored, loaded and
+        // displayed as Orc, a Drow as Half-Elf, an Orc as Kender.
+        assert_eq!(Race::Goblin as u8, 5);
+        assert_eq!(Race::Drow as u8, 6);
+        assert_eq!(Race::Orc as u8, 7);
+        assert_eq!(Race::Minotaur as u8, 8);
+        for letter in ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'] {
+            let idx = crate::races::parse_race(letter);
+            assert!(idx >= 0);
+            assert_eq!(Race::from_u8(idx as u8) as u8, idx as u8);
+        }
+        assert_eq!(Race::from_u8(5), Race::Goblin);
+        assert_eq!(Race::from_u8(7), Race::Orc);
+    }
+}

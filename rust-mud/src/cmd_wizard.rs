@@ -4271,18 +4271,9 @@ fn parse_class(c: char) -> i32 {
 
 /// parse_race(c): first-letter race parse. -1 == RACE_UNDEFINED.
 fn parse_race(c: char) -> i32 {
-    match c.to_ascii_lowercase() {
-        'h' => Race::Human as i32,
-        'e' => Race::Elf as i32,
-        'g' => Race::Gnome as i32,
-        'd' => Race::Dwarf as i32,
-        't' => Race::Troll as i32,
-        'o' => Race::Orc as i32,
-        'k' => Race::Kender as i32,
-        'm' => Race::Minotaur as i32,
-        'v' => Race::Vampire as i32,
-        _ => -1,
-    }
+    // C act.wizard.c:3400 uses races.c parse_race (menu letters a..i); the
+    // Rust copy invented name-initial letters and could not set Goblin/Drow.
+    crate::races::parse_race(c)
 }
 
 /// perform_set: apply one set field. Returns true on a change that should be
