@@ -376,6 +376,11 @@ fn write_ban_list(d: &BanData) {
 /// CircleMUD isbanned(): lowercase the host, wildmatch every ban mask against
 /// it, and return the strongest matching BanType (MAX over matches). An empty
 /// host is never banned.
+// NOTE (W6 audit): bans match against the canonical IP STRING the connection
+// reports (addr.ip().to_string()). Hostname masks ("*.aol.com") and C's
+// zero-padded form ("010.000.000.001") written by the old server are INERT.
+// Normalize legacy badsites entries to IP globs on import.
+
 pub fn isbanned(host: &str) -> BanType {
     if host.is_empty() {
         return BanType::None;

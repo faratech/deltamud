@@ -561,7 +561,7 @@ pub fn do_bid(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     if bidder_id >= 0 {
         if let Some(prev) = get_ch_by_id(g, bidder_id) {
             if let Some(c) = g.get_char_mut(prev) {
-                c.points.gold += cur_bid as i32;
+                c.points.gold = c.points.gold.saturating_add(cur_bid as i32);
             }
         }
     }
@@ -575,7 +575,7 @@ pub fn do_bid(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         a.ticks = AUC_BID;
     }
     if let Some(c) = g.get_char_mut(ch) {
-        c.points.gold -= bid as i32;
+        c.points.gold = c.points.gold.saturating_sub(bid as i32);
     }
 
     let bname = get_name(g, ch);
