@@ -58,6 +58,7 @@ mod house;
 mod interpreter;
 mod language;
 mod limits;
+mod lock_ok;
 mod magic;
 mod mail;
 mod maputils;
@@ -98,7 +99,7 @@ use config::Config;
 use log::{info, warn};
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::os::unix::io::{FromRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -330,6 +331,53 @@ async fn serve_metrics(
             let _ = sock.write_all(resp.as_bytes()).await;
             let _ = sock.shutdown().await;
         });
+    }
+}
+
+/// SO_KEEPALIVE with an aggressive profile on accepted client sockets: a peer
+/// that vanished without RST (power loss, NAT drop) is detected in ~80s
+/// instead of never, so the reader loop wakes and the descriptor/connection
+/// slot is reclaimed (W6 live-ops).
+fn enable_tcp_keepalive(fd: RawFd) {
+    use std::time::Duration;
+    const ON: libc::c_int = 1;
+    let secs = |d: Duration| d.as_secs() as libc::c_int;
+    unsafe {
+        if libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_KEEPALIVE,
+            &ON as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&ON) as libc::socklen_t,
+        ) != 0
+        {
+            return;
+        }
+        // Idle 60s, probe every 10s, 2 failed probes => dead (~80s total).
+        let idle = secs(Duration::from_secs(60));
+        let intvl = secs(Duration::from_secs(10));
+        let cnt: libc::c_int = 2;
+        let _ = libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_KEEPIDLE,
+            &idle as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&idle) as libc::socklen_t,
+        );
+        let _ = libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_KEEPINTVL,
+            &intvl as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&intvl) as libc::socklen_t,
+        );
+        let _ = libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_KEEPCNT,
+            &cnt as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&cnt) as libc::socklen_t,
+        );
     }
 }
 
@@ -756,6 +804,7 @@ async fn main() -> Result<()> {
         };
 
         let ip = peer.ip();
+        enable_tcp_keepalive(stream.as_raw_fd());
 
         // Task 3: reject banned hosts at accept, before spawning a handler.
         // BanType::All means "no connection at all"; we also reject BanType::New

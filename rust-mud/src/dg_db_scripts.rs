@@ -96,18 +96,18 @@ pub fn real_trigger(vnum: i32) -> i32 {
 }
 
 pub fn top_of_trigt() -> usize {
-    index().lock().unwrap().len()
+    crate::lock_ok::lock(&index()).len()
 }
 
 pub fn trig_proto(rnum: usize) -> Option<TrigProto> {
-    index().lock().unwrap().get(rnum).cloned()
+    crate::lock_ok::lock(&index()).get(rnum).cloned()
 }
 
 #[cfg(test)]
 pub fn set_test_proto_trigger(kind: i32, entity_vnum: i32, proto: TrigProto) {
-    let mut idx = index().lock().unwrap();
+    let mut idx = crate::lock_ok::lock(&index());
     let rnum = idx.len();
-    vnum_map().lock().unwrap().insert(proto.vnum, rnum);
+    crate::lock_ok::lock(&vnum_map()).insert(proto.vnum, rnum);
     proto_scripts()
         .lock()
         .unwrap()
@@ -122,12 +122,12 @@ pub fn set_test_proto_trigger(kind: i32, entity_vnum: i32, proto: TrigProto) {
 /// any other prototype and without clearing proto_scripts, so live trigger
 /// attachments and world files survive a trigedit save (#260).
 pub fn upsert_proto_trigger(proto: TrigProto) {
-    let mut idx = index().lock().unwrap();
+    let mut idx = crate::lock_ok::lock(&index());
     if let Some(existing) = idx.iter().position(|t| t.vnum == proto.vnum) {
         idx[existing] = proto;
     } else {
         let rnum = idx.len();
-        vnum_map().lock().unwrap().insert(proto.vnum, rnum);
+        crate::lock_ok::lock(&vnum_map()).insert(proto.vnum, rnum);
         idx.push(proto);
     }
 }
@@ -135,7 +135,7 @@ pub fn upsert_proto_trigger(proto: TrigProto) {
 /// read_trigger(rnum): instantiate a live TrigData from a prototype, returning
 /// its TrigId (trig_data_copy + install). Returns None if rnum is invalid.
 pub fn read_trigger(rnum: usize) -> Option<dg_handler::TrigId> {
-    let proto = index().lock().unwrap().get(rnum).cloned()?;
+    let proto = crate::lock_ok::lock(&index()).get(rnum).cloned()?;
     let t = TrigData {
         nr: rnum,
         vnum: proto.vnum,
@@ -160,9 +160,9 @@ pub fn read_trigger(rnum: usize) -> Option<dg_handler::TrigId> {
 /// `index` file for the list of .trg files (falling back to a directory scan),
 /// then parses each `#vnum` block. Clears any previous index first.
 pub fn boot_triggers(lib_path: &str) {
-    index().lock().unwrap().clear();
-    vnum_map().lock().unwrap().clear();
-    proto_scripts().lock().unwrap().clear();
+    crate::lock_ok::lock(&index()).clear();
+    crate::lock_ok::lock(&vnum_map()).clear();
+    crate::lock_ok::lock(&proto_scripts()).clear();
 
     let dir = Path::new(lib_path).join("world").join("trg");
     let files = read_index(&dir);
@@ -271,11 +271,11 @@ fn parse_trigger(vnum: i32, lines: &[&str], i: &mut usize) {
         cmdlist,
     };
 
-    let mut idx = index().lock().unwrap();
+    let mut idx = crate::lock_ok::lock(&index());
     let rnum = idx.len();
     idx.push(proto);
     drop(idx);
-    vnum_map().lock().unwrap().insert(vnum, rnum);
+    crate::lock_ok::lock(&vnum_map()).insert(vnum, rnum);
 }
 
 /// Read a `~`-terminated string block (fread_string). Accepts an inline `~`
@@ -342,7 +342,7 @@ fn record_proto(kind: i32, entity_vnum: i32, trig_vnum: i32) -> bool {
         ));
         return false;
     }
-    let mut guard = proto_scripts().lock().unwrap();
+    let mut guard = crate::lock_ok::lock(&proto_scripts());
     let list = guard.entry((kind, entity_vnum)).or_default();
     // C dg_db_scripts.c:231-242/295-305 appends unconditionally: listing a
     // trigger twice attaches and fires it twice. The dedupe silently masked
@@ -367,7 +367,7 @@ pub fn insert_proto_trigger(kind: i32, entity_vnum: i32, trig_vnum: i32, pos: us
         ));
         return false;
     }
-    let mut guard = proto_scripts().lock().unwrap();
+    let mut guard = crate::lock_ok::lock(&proto_scripts());
     let list = guard.entry((kind, entity_vnum)).or_default();
     if list.contains(&trig_vnum) {
         return true;
@@ -379,7 +379,7 @@ pub fn insert_proto_trigger(kind: i32, entity_vnum: i32, trig_vnum: i32, pos: us
 
 /// Remove one named/numbered prototype trigger binding.
 pub fn remove_proto_trigger(kind: i32, entity_vnum: i32, name: &str) -> bool {
-    let mut guard = proto_scripts().lock().unwrap();
+    let mut guard = crate::lock_ok::lock(&proto_scripts());
     let Some(list) = guard.get_mut(&(kind, entity_vnum)) else {
         return false;
     };
@@ -410,7 +410,7 @@ pub fn remove_proto_trigger_at(kind: i32, entity_vnum: i32, pos: usize) -> bool 
     if pos == 0 {
         return false;
     }
-    let mut guard = proto_scripts().lock().unwrap();
+    let mut guard = crate::lock_ok::lock(&proto_scripts());
     let Some(list) = guard.get_mut(&(kind, entity_vnum)) else {
         return false;
     };

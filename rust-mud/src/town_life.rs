@@ -144,7 +144,7 @@ fn routes() -> &'static Mutex<HashMap<MobVnum, Vec<RoomRnum>>> {
 /// (the map cells must exist for the mixed-graph BFS). Idempotent: a second
 /// call (copyover recovery) simply recomputes the same routes.
 pub fn boot_town_life(g: &GameState) {
-    let mut table = routes().lock().unwrap();
+    let mut table = crate::lock_ok::lock(&routes());
     table.clear();
     for car in CARAVANS {
         let (Some(src), Some(dst)) = (g.real_room(car.home), g.real_room(car.far)) else {
@@ -318,7 +318,7 @@ fn drive_caravan(g: &mut GameState, ch: CharId, nr: MobVnum) {
     let Some(entry) = lookup_caravan(nr) else {
         return;
     };
-    let path = routes().lock().unwrap().get(&nr).cloned();
+    let path = crate::lock_ok::lock(&routes()).get(&nr).cloned();
     let Some(path) = path else { return };
     if path.len() < 2 {
         return;
@@ -478,7 +478,7 @@ mod tests {
         crate::maputils::integrate_map_rooms(&mut g);
         boot_town_life(&g);
 
-        let table = routes().lock().unwrap();
+        let table = crate::lock_ok::lock(&routes());
         for car in CARAVANS {
             let path = table
                 .get(&car.mob_vnum)
@@ -513,7 +513,7 @@ mod tests {
         crate::maputils::integrate_map_rooms(&mut g);
         boot_town_life(&g);
 
-        let path = routes().lock().unwrap().get(&304).cloned().unwrap();
+        let path = crate::lock_ok::lock(&routes()).get(&304).cloned().unwrap();
         let home = path[0];
         let courier = npc(&mut g, 304, home);
 

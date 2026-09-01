@@ -551,7 +551,7 @@ pub fn king_welmar(g: &mut GameState, _ch: CharId, me: CharId, cmd: &str, _arg: 
 
     // Pull (or default-initialise) this king's walk state.
     let (mut path, mut index, mut moving) = {
-        let map = king_walks().lock().unwrap();
+        let map = crate::lock_ok::lock(&king_walks());
         match map.get(&ch) {
             Some(w) => (w.path, w.index, w.moving),
             None => (BEDROOM_PATH, 0, false),
@@ -701,7 +701,7 @@ pub fn king_welmar(g: &mut GameState, _ch: CharId, me: CharId, cmd: &str, _arg: 
 }
 
 fn store_king_walk(ch: CharId, path: &'static [u8], index: usize, moving: bool) {
-    let mut map = king_walks().lock().unwrap();
+    let mut map = crate::lock_ok::lock(&king_walks());
     map.insert(
         ch,
         KingWalk {

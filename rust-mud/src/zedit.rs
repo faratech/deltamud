@@ -138,7 +138,7 @@ fn states() -> &'static Mutex<HashMap<ConnId, ZeditState>> {
 /// mid-edit), releasing the per-conn working copy. `olc::abort_editor` clears
 /// active.
 pub fn abort(conn: ConnId) {
-    states().lock().unwrap().remove(&conn);
+    crate::lock_ok::lock(&states()).remove(&conn);
 }
 
 // ---------------------------------------------------------------------------
@@ -266,11 +266,11 @@ pub fn do_zedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         level_of_editor: level,
     };
     // C olc.c:198-212 (#272): key on the zone being edited.
-    if states().lock().unwrap().values().any(|s| s.zone_number == st.zone_number) {
+    if crate::lock_ok::lock(&states()).values().any(|s| s.zone_number == st.zone_number) {
         g.send_to_char(ch, "That zone is currently being edited by someone else.\r\n");
         return;
     }
-    states().lock().unwrap().insert(conn, st);
+    crate::lock_ok::lock(&states()).insert(conn, st);
     olc::set_active(conn, EditorKind::Zedit);
     // C olc.c:381-382 (#273).
     if let Some(cid) = editor_char(g, conn) {
@@ -692,7 +692,7 @@ fn equipment_name(i: i32) -> &'static str {
 // ===========================================================================
 
 fn snapshot(conn: ConnId) -> Option<ZeditState> {
-    states().lock().unwrap().get(&conn).map(|s| ZeditState {
+    crate::lock_ok::lock(&states()).get(&conn).map(|s| ZeditState {
         room_vnum: s.room_vnum,
         zone_number: s.zone_number,
         zone_index: s.zone_index,
@@ -705,7 +705,7 @@ fn snapshot(conn: ConnId) -> Option<ZeditState> {
 }
 
 fn set_mode(conn: ConnId, mode: Mode) {
-    if let Some(s) = states().lock().unwrap().get_mut(&conn) {
+    if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
         s.mode = mode;
     }
 }
@@ -720,7 +720,7 @@ fn state_room(conn: ConnId) -> RoomVnum {
 }
 
 fn cur_cmd_letter(conn: ConnId) -> char {
-    let g = states().lock().unwrap();
+    let g = crate::lock_ok::lock(&states());
     g.get(&conn)
         .and_then(|s| s.cmds.get(s.cur))
         .map(|c| c.command)
@@ -728,7 +728,7 @@ fn cur_cmd_letter(conn: ConnId) -> char {
 }
 
 fn with_cur<F: FnOnce(&mut RawCmd)>(conn: ConnId, f: F) {
-    let mut g = states().lock().unwrap();
+    let mut g = crate::lock_ok::lock(&states());
     if let Some(s) = g.get_mut(&conn) {
         let cur = s.cur;
         if let Some(c) = s.cmds.get_mut(cur) {
@@ -738,12 +738,12 @@ fn with_cur<F: FnOnce(&mut RawCmd)>(conn: ConnId, f: F) {
 }
 
 fn mark_cmds_changed(conn: ConnId) {
-    if let Some(s) = states().lock().unwrap().get_mut(&conn) {
+    if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
         s.hdr.cmds_changed = true;
     }
 }
 fn mark_header_changed(conn: ConnId) {
-    if let Some(s) = states().lock().unwrap().get_mut(&conn) {
+    if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
         s.hdr.header_changed = true;
     }
 }
@@ -753,7 +753,7 @@ fn mark_header_changed(conn: ConnId) {
 // ===========================================================================
 
 pub fn zedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
-    let mode = match states().lock().unwrap().get(&conn) {
+    let mode = match crate::lock_ok::lock(&states()).get(&conn) {
         Some(s) => s.mode,
         None => {
             olc::clear_active(conn);
@@ -926,7 +926,7 @@ fn parse_change_entry(g: &mut GameState, conn: ConnId, line: &str) {
 /// Insert a new blank command at `pos` (CircleMUD new_command). Returns false
 /// if pos is out of range.
 fn new_command(conn: ConnId, pos: usize) -> bool {
-    let mut g = states().lock().unwrap();
+    let mut g = crate::lock_ok::lock(&states());
     let s = match g.get_mut(&conn) {
         Some(s) => s,
         None => return false,
@@ -940,7 +940,7 @@ fn new_command(conn: ConnId, pos: usize) -> bool {
 
 /// Delete command at `pos` if in range (CircleMUD delete_command).
 fn delete_command(conn: ConnId, pos: usize) {
-    let mut g = states().lock().unwrap();
+    let mut g = crate::lock_ok::lock(&states());
     if let Some(s) = g.get_mut(&conn) {
         if pos < s.cmds.len() {
             s.cmds.remove(pos);
@@ -950,7 +950,7 @@ fn delete_command(conn: ConnId, pos: usize) {
 
 /// Set the "current" command index to pos if valid (CircleMUD start_change_command).
 fn start_change_command(conn: ConnId, pos: usize) -> bool {
-    let mut g = states().lock().unwrap();
+    let mut g = crate::lock_ok::lock(&states());
     let s = match g.get_mut(&conn) {
         Some(s) => s,
         None => return false,
@@ -1223,7 +1223,7 @@ fn parse_zone_builders(g: &mut GameState, conn: ConnId, line: &str) {
 fn parse_zone_top(g: &mut GameState, conn: ConnId, line: &str) {
     let val = atoi(line.trim());
     let (zone_index, zone_number) = {
-        let st = states().lock().unwrap();
+        let st = crate::lock_ok::lock(&states());
         match st.get(&conn) {
             Some(s) => (s.zone_index, s.zone_number),
             None => return,
@@ -1379,7 +1379,7 @@ fn editor_char(g: &GameState, conn: ConnId) -> Option<CharId> {
 }
 
 fn finish(g: &mut GameState, conn: ConnId) {
-    states().lock().unwrap().remove(&conn);
+    crate::lock_ok::lock(&states()).remove(&conn);
     olc::clear_active(conn);
     // C olc.c:610-613 cleanup_olc (#273).
     if let Some(cid) = editor_char(g, conn) {
@@ -1399,7 +1399,7 @@ fn finish(g: &mut GameState, conn: ConnId) {
 }
 
 fn with_state<F: FnOnce(&mut ZeditState)>(conn: ConnId, f: F) {
-    if let Some(s) = states().lock().unwrap().get_mut(&conn) {
+    if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
         f(s);
     }
 }

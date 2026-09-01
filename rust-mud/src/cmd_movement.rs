@@ -2857,7 +2857,7 @@ mod tests {
 
     #[test]
     fn arena_combatant_exit_runs_prep_room_cleanup() {
-        let _guard = ARENA_TEST_LOCK.lock().unwrap();
+        let _guard = crate::lock_ok::lock(&ARENA_TEST_LOCK);
         let (mut g, ch, master, entrance, prep, _observer) = arena_exit_game();
 
         assert!(crate::arena::arenaentrancemaster(
@@ -2890,7 +2890,7 @@ mod tests {
 
     #[test]
     fn arena_observer_exit_detaches_observer_state() {
-        let _guard = ARENA_TEST_LOCK.lock().unwrap();
+        let _guard = crate::lock_ok::lock(&ARENA_TEST_LOCK);
         let (mut g, combatant, master, entrance, _prep, observer_room) = arena_exit_game();
         assert!(crate::arena::arenaentrancemaster(
             &mut g,

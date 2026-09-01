@@ -153,12 +153,12 @@ fn active() -> &'static Mutex<HashMap<ConnId, EditorKind>> {
 
 /// Mark `conn` as actively editing in `kind`. Called by each `do_X` on entry.
 pub fn set_active(conn: ConnId, kind: EditorKind) {
-    active().lock().unwrap().insert(conn, kind);
+    crate::lock_ok::lock(&active()).insert(conn, kind);
 }
 
 /// Clear `conn`'s OLC editor (called on save/quit by each editor's parser).
 pub fn clear_active(conn: ConnId) {
-    active().lock().unwrap().remove(&conn);
+    crate::lock_ok::lock(&active()).remove(&conn);
 }
 
 /// Abort whatever OLC editor `conn` is in WITHOUT saving, then clear active.
@@ -187,12 +187,12 @@ pub fn abort_editor(conn: ConnId) {
 /// True if `conn` is currently inside any OLC editor. game.rs consults this to
 /// route raw input into `olc_input` instead of the command interpreter.
 pub fn in_olc(conn: ConnId) -> bool {
-    active().lock().unwrap().contains_key(&conn)
+    crate::lock_ok::lock(&active()).contains_key(&conn)
 }
 
 /// The currently-active editor kind for `conn`, if any.
 pub fn active_editor(conn: ConnId) -> Option<EditorKind> {
-    active().lock().unwrap().get(&conn).copied()
+    crate::lock_ok::lock(&active()).get(&conn).copied()
 }
 
 /// Master input router (CircleMUD: the `case CON_*EDIT:` block of nanny()).
@@ -228,7 +228,7 @@ fn save_list() -> &'static Mutex<Vec<(i32, i32)>> {
 /// olc_add_to_save_list: record that `zone` (the builder zone *number*, not
 /// rnum) has unsaved `kind` changes. No-op if already present.
 pub fn olc_add_to_save_list(zone: i32, kind: i32) {
-    let mut list = save_list().lock().unwrap();
+    let mut list = crate::lock_ok::lock(&save_list());
     if !list.iter().any(|&(z, t)| z == zone && t == kind) {
         // C prepends; order only matters for olc_saveinfo display, where we
         // iterate the whole list, so prepend to mirror C exactly.
@@ -250,7 +250,7 @@ pub fn olc_remove_from_save_list(zone: i32, kind: i32) {
 /// and the Game shutdown path; unsaved redit/oedit work would otherwise be
 /// lost on a routine reboot (#262).
 pub fn flush_save_list_to_disk(g: &mut GameState) {
-    let entries: Vec<(i32, i32)> = save_list().lock().unwrap().clone();
+    let entries: Vec<(i32, i32)> = crate::lock_ok::lock(&save_list()).clone();
     for (zone, kind) in entries {
         let zone_rnum = match real_zone(g, zone * 100) {
             Some(z) => z,
@@ -270,7 +270,7 @@ pub fn flush_save_list_to_disk(g: &mut GameState) {
 
 /// olc_saveinfo: tell the immortal which OLC components still need saving.
 pub fn olc_saveinfo(g: &mut GameState, ch: CharId) {
-    let entries: Vec<(i32, i32)> = save_list().lock().unwrap().clone();
+    let entries: Vec<(i32, i32)> = crate::lock_ok::lock(&save_list()).clone();
     if entries.is_empty() {
         g.send_to_char(ch, "The database is up to date.\r\n");
         return;

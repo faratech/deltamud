@@ -199,9 +199,9 @@ fn memory() -> &'static Mutex<HashMap<CharId, Vec<ScriptMemory>>> {
 /// Wipe all runtime script state (boot / copyover). Prototypes (dg_db_scripts)
 /// are reloaded separately.
 pub fn boot_handler() {
-    scripts().lock().unwrap().clear();
-    trigs().lock().unwrap().clear();
-    memory().lock().unwrap().clear();
+    crate::lock_ok::lock(&scripts()).clear();
+    crate::lock_ok::lock(&trigs()).clear();
+    crate::lock_ok::lock(&memory()).clear();
     NEXT_TRIG_ID.store(1, Ordering::Relaxed);
 }
 
@@ -219,7 +219,7 @@ pub fn script_check(key: ScriptKey, ty: i64) -> bool {
 }
 
 pub fn has_script(key: ScriptKey) -> bool {
-    scripts().lock().unwrap().contains_key(&key)
+    crate::lock_ok::lock(&scripts()).contains_key(&key)
 }
 
 pub fn script_types(key: ScriptKey) -> i64 {
@@ -250,7 +250,7 @@ pub fn get_context(key: ScriptKey) -> i64 {
         .unwrap_or(0)
 }
 pub fn set_context(key: ScriptKey, ctx: i64) {
-    if let Some(sc) = scripts().lock().unwrap().get_mut(&key) {
+    if let Some(sc) = crate::lock_ok::lock(&scripts()).get_mut(&key) {
         sc.context = ctx;
     }
 }
@@ -258,7 +258,7 @@ pub fn set_context(key: ScriptKey, ctx: i64) {
 /// Read a global variable honouring context (find_replacement global-var path):
 /// matches name and (context==0 || context==sc.context).
 pub fn get_global_var(key: ScriptKey, name: &str) -> Option<String> {
-    let map = scripts().lock().unwrap();
+    let map = crate::lock_ok::lock(&scripts());
     let sc = map.get(&key)?;
     sc.global_vars
         .iter()
@@ -284,14 +284,14 @@ pub fn global_vars(key: ScriptKey) -> Vec<(String, String, i64)> {
 
 /// add_var into a script's global list (used by remote/global, and load).
 pub fn add_global_var(key: ScriptKey, name: &str, value: &str, context: i64) {
-    let mut map = scripts().lock().unwrap();
+    let mut map = crate::lock_ok::lock(&scripts());
     let sc = map.entry(key).or_default();
     add_var_in(&mut sc.global_vars, name, value, context);
 }
 
 /// remove_var from a script's globals; returns true if found.
 pub fn remove_global_var(key: ScriptKey, name: &str) -> bool {
-    if let Some(sc) = scripts().lock().unwrap().get_mut(&key) {
+    if let Some(sc) = crate::lock_ok::lock(&scripts()).get_mut(&key) {
         let before = sc.global_vars.len();
         sc.global_vars
             .retain(|v| !v.name.eq_ignore_ascii_case(name));
@@ -329,20 +329,20 @@ pub fn remove_var_in(list: &mut Vec<TrigVar>, name: &str) -> bool {
 pub fn install_trig(mut t: TrigData) -> TrigId {
     let id = TrigId(NEXT_TRIG_ID.fetch_add(1, Ordering::Relaxed));
     t.purged = false;
-    trigs().lock().unwrap().insert(id, t);
+    crate::lock_ok::lock(&trigs()).insert(id, t);
     id
 }
 
 pub fn with_trig<R>(id: TrigId, f: impl FnOnce(&TrigData) -> R) -> Option<R> {
-    trigs().lock().unwrap().get(&id).map(f)
+    crate::lock_ok::lock(&trigs()).get(&id).map(f)
 }
 
 pub fn with_trig_mut<R>(id: TrigId, f: impl FnOnce(&mut TrigData) -> R) -> Option<R> {
-    trigs().lock().unwrap().get_mut(&id).map(f)
+    crate::lock_ok::lock(&trigs()).get_mut(&id).map(f)
 }
 
 pub fn trig_clone(id: TrigId) -> Option<TrigData> {
-    trigs().lock().unwrap().get(&id).cloned()
+    crate::lock_ok::lock(&trigs()).get(&id).cloned()
 }
 
 // ---- add_trigger / remove_trigger / extract (dg_scripts.c / dg_handler.c) --
@@ -352,7 +352,7 @@ pub fn trig_clone(id: TrigId) -> Option<TrigData> {
 /// trigger's type bits into SCRIPT_TYPES.
 pub fn add_trigger(key: ScriptKey, t: TrigId, loc: i32) {
     let ttype = with_trig(t, |tr| tr.trigger_type).unwrap_or(0);
-    let mut map = scripts().lock().unwrap();
+    let mut map = crate::lock_ok::lock(&scripts());
     let sc = map.entry(key).or_default();
 
     if loc == 0 {
@@ -370,7 +370,7 @@ pub fn add_trigger(key: ScriptKey, t: TrigId, loc: i32) {
 pub fn extract_trigger(id: TrigId) {
     let ev = with_trig(id, |t| t.wait_event).flatten();
     dg_event::cancel_for_trigger(ev);
-    trigs().lock().unwrap().remove(&id);
+    crate::lock_ok::lock(&trigs()).remove(&id);
 }
 
 /// extract_script(sc): remove every trigger on `key`, then drop the script
@@ -380,7 +380,7 @@ pub fn extract_script(key: ScriptKey) {
     for id in ids {
         extract_trigger(id);
     }
-    scripts().lock().unwrap().remove(&key);
+    crate::lock_ok::lock(&scripts()).remove(&key);
 }
 
 /// remove_trigger(sc, name): name may be "N.keyword", a bare number, or a
@@ -430,7 +430,7 @@ pub fn remove_trigger(key: ScriptKey, name: &str) -> bool {
     let tid = ids[idx];
 
     {
-        let mut map = scripts().lock().unwrap();
+        let mut map = crate::lock_ok::lock(&scripts());
         if let Some(sc) = map.get_mut(&key) {
             sc.trig_list.retain(|&t| t != tid);
         }
@@ -440,13 +440,13 @@ pub fn remove_trigger(key: ScriptKey, name: &str) -> bool {
     // Recompute SCRIPT_TYPES; drop empty script.
     let remaining = trigger_ids(key);
     if remaining.is_empty() {
-        scripts().lock().unwrap().remove(&key);
+        crate::lock_ok::lock(&scripts()).remove(&key);
     } else {
         let mut types = 0i64;
         for t in &remaining {
             types |= with_trig(*t, |x| x.trigger_type).unwrap_or(0);
         }
-        if let Some(sc) = scripts().lock().unwrap().get_mut(&key) {
+        if let Some(sc) = crate::lock_ok::lock(&scripts()).get_mut(&key) {
             sc.types = types;
         }
     }
@@ -456,14 +456,14 @@ pub fn remove_trigger(key: ScriptKey, name: &str) -> bool {
 // ---- script memory (mob greet/entry memory triggers) ----------------------
 
 pub fn remember(ch: CharId, id: i64, cmd: Option<String>) {
-    let mut map = memory().lock().unwrap();
+    let mut map = crate::lock_ok::lock(&memory());
     let list = map.entry(ch).or_default();
     // C remember() prepends a new node unconditionally.
     list.insert(0, ScriptMemory { id, cmd });
 }
 
 pub fn forget(ch: CharId, id: i64) {
-    if let Some(list) = memory().lock().unwrap().get_mut(&ch) {
+    if let Some(list) = crate::lock_ok::lock(&memory()).get_mut(&ch) {
         list.retain(|m| m.id != id);
     }
 }
@@ -478,7 +478,7 @@ pub fn memory_for(ch: CharId) -> Vec<ScriptMemory> {
 }
 
 pub fn extract_script_mem(ch: CharId) {
-    memory().lock().unwrap().remove(&ch);
+    crate::lock_ok::lock(&memory()).remove(&ch);
 }
 
 /// Called when a char/obj is extracted from the world so its attached script

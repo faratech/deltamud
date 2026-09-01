@@ -1020,7 +1020,7 @@ pub fn mayor(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &str) 
 
     // Snapshot + update the static patrol state.
     let (moving, open, mut index) = {
-        let mut st = MAYOR.lock().unwrap();
+        let mut st = crate::lock_ok::lock(&MAYOR);
         if !st.moving {
             if hour == 6 {
                 st.moving = true;
@@ -1050,7 +1050,7 @@ pub fn mayor(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &str) 
         Some(&b) => b,
         None => {
             // Off the end (shouldn't happen — '.' terminates) — stop patrolling.
-            MAYOR.lock().unwrap().moving = false;
+            crate::lock_ok::lock(&MAYOR).moving = false;
             return false;
         }
     };
@@ -1164,14 +1164,14 @@ pub fn mayor(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &str) 
             crate::cmd_movement::do_gen_door(g, ch, "gate", SCMD_LOCK);
         }
         b'.' => {
-            MAYOR.lock().unwrap().moving = false;
+            crate::lock_ok::lock(&MAYOR).moving = false;
         }
         _ => {}
     }
 
     index += 1;
     {
-        let mut st = MAYOR.lock().unwrap();
+        let mut st = crate::lock_ok::lock(&MAYOR);
         // Only advance if we're still on the same patrol (a '.' may have cleared
         // moving; the index still advances in C, harmlessly, since the next tick
         // re-checks `move`).

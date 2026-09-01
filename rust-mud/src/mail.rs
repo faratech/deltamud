@@ -240,7 +240,7 @@ pub fn boot_mail(lib_path: &str) -> bool {
 fn install(m: MailSystem) {
     match MAIL.get() {
         Some(lock) => {
-            *lock.lock().unwrap() = m;
+            *crate::lock_ok::lock(&lock) = m;
         }
         None => {
             let _ = MAIL.set(Mutex::new(m));
@@ -258,7 +258,7 @@ pub fn mail_register_player(idnum: i64, name: &str) {
         return;
     }
     let lname = name.to_lowercase();
-    let mut m = sys().lock().unwrap();
+    let mut m = crate::lock_ok::lock(&sys());
     m.id_to_name.insert(idnum, lname.clone());
     m.name_to_id.insert(lname, idnum);
 }
@@ -283,7 +283,7 @@ fn get_id_by_name(g: &GameState, name: &str) -> i64 {
     if let Some(id) = g.get_id_by_name(&lname) {
         return id;
     }
-    let m = sys().lock().unwrap();
+    let m = crate::lock_ok::lock(&sys());
     *m.name_to_id.get(&lname).unwrap_or(&-1)
 }
 
@@ -301,7 +301,7 @@ fn get_name_by_id(g: &GameState, id: i64) -> String {
     if let Some(n) = g.get_name_by_id(id) {
         return n;
     }
-    let m = sys().lock().unwrap();
+    let m = crate::lock_ok::lock(&sys());
     m.id_to_name
         .get(&id)
         .map(|s| cap_first(s))
@@ -461,7 +461,7 @@ fn read_text(src: &[u8], cap: usize) -> String {
 
 /// has_mail(): does this recipient have any mail waiting? (mail.c has_mail)
 pub fn has_mail(recipient: i64) -> bool {
-    let m = sys().lock().unwrap();
+    let m = crate::lock_ok::lock(&sys());
     m.index
         .get(&recipient)
         .map(|e| !e.positions.is_empty())
@@ -472,7 +472,7 @@ pub fn has_mail(recipient: i64) -> bool {
 /// across a HEADER block plus a FAT-chained run of DATA blocks, reusing free
 /// (deleted) blocks where possible. (mail.c store_mail)
 pub fn store_mail(to: i64, from: i64, message: &str) {
-    let mut m = sys().lock().unwrap();
+    let mut m = crate::lock_ok::lock(&sys());
     if m.no_mail {
         return;
     }
@@ -532,7 +532,7 @@ pub fn store_mail(to: i64, from: i64, message: &str) {
 /// return the full text. Returns None when there is no mail / on error.
 /// (mail.c read_delete)
 pub fn read_delete(g: &GameState, recipient: i64) -> Option<String> {
-    let mut m = sys().lock().unwrap();
+    let mut m = crate::lock_ok::lock(&sys());
     if recipient < 0 {
         log::error!("SYSERR: Mail system -- non-fatal error #6.");
         return None;
@@ -650,7 +650,7 @@ pub fn postmaster(
         return false;
     }
 
-    if sys().lock().unwrap().no_mail {
+    if crate::lock_ok::lock(&sys()).no_mail {
         g.send_to_char(
             ch,
             "Sorry, the mail system is having technical difficulties.\r\n",
@@ -859,7 +859,7 @@ pub fn do_mail(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
     if !has_desc {
         return;
     }
-    if sys().lock().unwrap().no_mail {
+    if crate::lock_ok::lock(&sys()).no_mail {
         g.send_to_char(
             ch,
             "Sorry, the mail system is having technical difficulties.\r\n",
@@ -919,7 +919,7 @@ fn open_compose_editor(g: &mut GameState, ch: CharId, to: i64, from: i64) {
 /// the message and clears the pending entry. Returns true if a pending mail
 /// was found for this connection (so the integrator knows it owned this save).
 pub fn finish_mail(g: &GameState, conn_id: ConnId, body: &str) -> bool {
-    let pm = match pending().lock().unwrap().remove(&conn_id) {
+    let pm = match crate::lock_ok::lock(&pending()).remove(&conn_id) {
         Some(p) => p,
         None => return false,
     };
@@ -939,12 +939,12 @@ pub fn finish_mail(g: &GameState, conn_id: ConnId, body: &str) -> bool {
 /// (player disconnects / quits the editor without saving). Drops the pending
 /// entry without storing anything. Returns true if one was pending.
 pub fn abort_mail(conn_id: ConnId) -> bool {
-    pending().lock().unwrap().remove(&conn_id).is_some()
+    crate::lock_ok::lock(&pending()).remove(&conn_id).is_some()
 }
 
 /// has_pending_mail(): whether a connection is mid-compose (PLR_MAILING).
 pub fn has_pending_mail(conn_id: ConnId) -> bool {
-    pending().lock().unwrap().contains_key(&conn_id)
+    crate::lock_ok::lock(&pending()).contains_key(&conn_id)
 }
 
 // ===========================================================================

@@ -55,7 +55,7 @@ fn event_list() -> &'static Mutex<Vec<EventInfo>> {
 /// Clear the event queue (called from boot to drop any stale events across a
 /// world reload / copyover, paralleling a fresh `event_list = NULL`).
 pub fn boot_events() {
-    event_list().lock().unwrap().clear();
+    crate::lock_ok::lock(&event_list()).clear();
 }
 
 /// add_event(time, func, info): schedule `payload` to fire in `time` pulses.
@@ -73,7 +73,7 @@ pub fn add_event(time: i64, payload: WaitEvent) -> EventId {
         payload,
     };
 
-    let mut list = event_list().lock().unwrap();
+    let mut list = crate::lock_ok::lock(&event_list());
     // Sorted insert in next-to-fire order (C add_event).
     let pos = list
         .iter()
@@ -85,7 +85,7 @@ pub fn add_event(time: i64, payload: WaitEvent) -> EventId {
 
 /// remove_event(event): cancel a scheduled event by id. Safe if absent.
 pub fn remove_event(id: EventId) {
-    let mut list = event_list().lock().unwrap();
+    let mut list = crate::lock_ok::lock(&event_list());
     list.retain(|e| e.id != id);
 }
 
@@ -95,7 +95,7 @@ pub fn remove_event(id: EventId) {
 /// schedule new waits without deadlocking on the same mutex.
 pub fn process_events(g: &mut GameState) {
     let due: Vec<WaitEvent> = {
-        let mut list = event_list().lock().unwrap();
+        let mut list = crate::lock_ok::lock(&event_list());
         let mut fired = Vec::new();
         // Decrement counters; gather the ones that hit zero.
         for e in list.iter_mut() {

@@ -94,7 +94,7 @@ fn auction() -> &'static Mutex<AuctionData> {
 /// CircleMUD auction_reset(): return the auction to a non-bidding state. Does
 /// NOT touch the escrowed object — callers decide what happens to it first.
 fn auction_reset() {
-    let mut a = auction().lock().unwrap();
+    let mut a = crate::lock_ok::lock(&auction());
     a.bidder = -1;
     a.seller = -1;
     a.obj = None;
@@ -109,7 +109,7 @@ fn auction_reset() {
 /// unused because the auction has no on-disk state.
 pub fn boot_auction(_lib_path: &str) {
     match AUCTION.get() {
-        Some(m) => *m.lock().unwrap() = AuctionData::empty(),
+        Some(m) => *crate::lock_ok::lock(&m) = AuctionData::empty(),
         None => {
             let _ = AUCTION.set(Mutex::new(AuctionData::empty()));
         }
@@ -245,7 +245,7 @@ fn get_ch_by_id_desc(g: &GameState, idnum: i64) -> Option<CharId> {
 // (connected, not writing, not PRF_NOAUCT, not in a soundproof room) matches C.
 // ---------------------------------------------------------------------------
 fn auction_output(g: &mut GameState, color: &str, black: &str) {
-    let crier = auction().lock().unwrap().auctioneer.clone();
+    let crier = crate::lock_ok::lock(&auction()).auctioneer.clone();
 
     // Recipient set: every playing descriptor with an attached character.
     let recipients: Vec<CharId> = g
@@ -308,7 +308,7 @@ fn coin_s(bid: i64) -> &'static str {
 pub fn auction_update(g: &mut GameState) {
     // Snapshot the table (copy locals before any send/act, per borrow rules).
     let (ticks, seller_id, bidder_id, obj, bid) = {
-        let a = auction().lock().unwrap();
+        let a = crate::lock_ok::lock(&auction());
         (a.ticks, a.seller, a.bidder, a.obj, a.bid)
     };
 
@@ -464,7 +464,7 @@ pub fn auction_update(g: &mut GameState) {
 
 /// Increment the auction timer (C: auction.ticks++).
 fn bump_ticks() {
-    let mut a = auction().lock().unwrap();
+    let mut a = crate::lock_ok::lock(&auction());
     a.ticks += 1;
 }
 
@@ -480,7 +480,7 @@ pub fn do_bid(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
     // Snapshot the auction state.
     let (ticks, seller_id, bidder_id, obj, cur_bid) = {
-        let a = auction().lock().unwrap();
+        let a = crate::lock_ok::lock(&auction());
         (a.ticks, a.seller, a.bidder, a.obj, a.bid)
     };
 
@@ -555,7 +555,7 @@ pub fn do_bid(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     // Record the new bid, take the gold, and reset to first-chance.
     let my_id = get_idnum(g, ch);
     {
-        let mut a = auction().lock().unwrap();
+        let mut a = crate::lock_ok::lock(&auction());
         a.bid = bid;
         a.bidder = my_id;
         a.ticks = AUC_BID;
@@ -592,7 +592,7 @@ pub fn do_auction(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     }
 
     let (ticks, seller_id, obj, cur_bid) = {
-        let a = auction().lock().unwrap();
+        let a = crate::lock_ok::lock(&auction());
         (a.ticks, a.seller, a.obj, a.bid)
     };
 
@@ -659,7 +659,7 @@ pub fn do_auction(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     g.obj_from_anywhere(obj);
 
     {
-        let mut a = auction().lock().unwrap();
+        let mut a = crate::lock_ok::lock(&auction());
         a.ticks = AUC_BID;
         a.seller = seller_idnum;
         a.bid = minimum;
@@ -691,7 +691,7 @@ pub fn do_auctioneer(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32
         return;
     }
     {
-        let mut a = auction().lock().unwrap();
+        let mut a = crate::lock_ok::lock(&auction());
         a.auctioneer = name.to_string();
     }
     g.send_to_char(ch, "&YOkay.&n\r\n");
@@ -703,7 +703,7 @@ pub fn do_auctioneer(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32
 // ---------------------------------------------------------------------------
 pub fn do_stop_auction(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
     let (seller_id, bidder_id, obj, bid) = {
-        let a = auction().lock().unwrap();
+        let a = crate::lock_ok::lock(&auction());
         (a.seller, a.bidder, a.obj, a.bid)
     };
 

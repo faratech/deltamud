@@ -101,7 +101,7 @@ fn states() -> &'static Mutex<HashMap<ConnId, ReditState>> {
 
 // Helper: run a closure with mutable access to a conn's edit state.
 fn with_state<R>(conn: ConnId, f: impl FnOnce(&mut ReditState) -> R) -> Option<R> {
-    states().lock().unwrap().get_mut(&conn).map(f)
+    crate::lock_ok::lock(&states()).get_mut(&conn).map(f)
 }
 
 fn send(g: &mut GameState, conn: ConnId, msg: &str) {
@@ -135,7 +135,7 @@ pub fn do_redit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     };
 
     // Already-being-edited check.
-    let conflict = states().lock().unwrap().values().any(|s| s.vnum == vnum);
+    let conflict = crate::lock_ok::lock(&states()).values().any(|s| s.vnum == vnum);
     if conflict {
         g.send_to_char(ch, "That room is currently being edited.\r\n");
         return;
@@ -158,7 +158,7 @@ pub fn do_redit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
     };
 
-    states().lock().unwrap().insert(
+    crate::lock_ok::lock(&states()).insert(
         conn,
         ReditState {
             vnum,
@@ -204,7 +204,7 @@ fn snapshot_room(room: &Room) -> RoomEdit {
 // Menu display.
 // ===========================================================================
 fn disp_menu(g: &mut GameState, conn: ConnId) {
-    let s = match states().lock().unwrap().get(&conn).map(|s| {
+    let s = match crate::lock_ok::lock(&states()).get(&conn).map(|s| {
         (
             s.vnum,
             s.znum,
@@ -775,7 +775,7 @@ fn text_bufs() -> &'static Mutex<HashMap<ConnId, String>> {
 }
 
 fn begin_text(g: &mut GameState, conn: ConnId, seed: &str, mode: ReditMode) {
-    text_bufs().lock().unwrap().insert(conn, seed.to_string());
+    crate::lock_ok::lock(&text_bufs()).insert(conn, seed.to_string());
     let _ = with_state(conn, |s| s.mode = mode);
     // C redit.c:900/1030/1321 use a distinct banner per sub-editor (#291).
     let prompt = match mode {
@@ -826,7 +826,7 @@ fn text_input(
         .unwrap_or_default();
     match crate::modify::editor_buffer_input(g, conn, &mut buf, max, line) {
         crate::modify::BufferEditorResult::Continue => {
-            text_bufs().lock().unwrap().insert(conn, buf);
+            crate::lock_ok::lock(&text_bufs()).insert(conn, buf);
             None
         }
         crate::modify::BufferEditorResult::Save => Some(Some(buf)),
@@ -1376,13 +1376,13 @@ fn save_internally(g: &mut GameState, conn: ConnId) {
 /// state-removal half of `finish`/`cleanup_olc` minus the save and the room
 /// announce. `olc::abort_editor` calls `olc::clear_active` for us.
 pub fn abort(conn: ConnId) {
-    states().lock().unwrap().remove(&conn);
-    text_bufs().lock().unwrap().remove(&conn);
+    crate::lock_ok::lock(&states()).remove(&conn);
+    crate::lock_ok::lock(&text_bufs()).remove(&conn);
 }
 
 fn finish(g: &mut GameState, conn: ConnId) {
-    states().lock().unwrap().remove(&conn);
-    text_bufs().lock().unwrap().remove(&conn);
+    crate::lock_ok::lock(&states()).remove(&conn);
+    crate::lock_ok::lock(&text_bufs()).remove(&conn);
     olc::clear_active(conn);
     if let Some(ch) = conn_char(g, conn) {
         crate::act::act(
@@ -1597,7 +1597,7 @@ mod tests {
         let out = &g.descriptors.get(&conn).unwrap().outbuf;
         // C redit.c:1015-1023: refusal, not a silent purge (#292).
         assert!(out.contains("Please specify an exit number or purge the exit."));
-        let kept = states().lock().unwrap()[&conn]
+        let kept = crate::lock_ok::lock(&states())[&conn]
             .room
             .exits[NORTH]
             .as_ref()
@@ -1611,7 +1611,7 @@ mod tests {
         let (mut g, _ch, conn) = setup(102, ConnId(72));
         redit_parse(&mut g, conn, "1");
         redit_parse(&mut g, conn, &"x".repeat(200));
-        let name = states().lock().unwrap()[&conn].room.name.clone();
+        let name = crate::lock_ok::lock(&states())[&conn].room.name.clone();
         // C writes arg[MAX_ROOM_NAME - 1] = '\0' (74 kept chars).
         assert_eq!(name.len(), MAX_ROOM_NAME - 1);
     }
@@ -1636,7 +1636,7 @@ mod tests {
         redit_parse(&mut g, conn, "105");
         redit_parse(&mut g, conn, "5"); // leave message
         redit_parse(&mut g, conn, "$n steps through the portal!");
-        let se = states().lock().unwrap()[&conn].room.special_exit.clone().unwrap();
+        let se = crate::lock_ok::lock(&states())[&conn].room.special_exit.clone().unwrap();
         assert_eq!(se.to_room, 105);
         assert_eq!(se.ex_name.as_deref(), Some("portal"));
         assert_eq!(
@@ -1646,6 +1646,6 @@ mod tests {
 
         // Purge path clears the scratch and returns to the main menu.
         redit_parse(&mut g, conn, "8");
-        assert!(states().lock().unwrap()[&conn].room.special_exit.is_none());
+        assert!(crate::lock_ok::lock(&states())[&conn].room.special_exit.is_none());
     }
 }

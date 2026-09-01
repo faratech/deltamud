@@ -185,7 +185,7 @@ fn states() -> &'static Mutex<HashMap<ConnId, MeditState>> {
 /// mid-edit). The MeditState (including its in-progress description buffer) is
 /// removed so nothing lingers until reboot. `olc::abort_editor` clears active.
 pub fn abort(conn: ConnId) {
-    states().lock().unwrap().remove(&conn);
+    crate::lock_ok::lock(&states()).remove(&conn);
 }
 
 // ---------------------------------------------------------------------------
@@ -274,11 +274,11 @@ pub fn do_medit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     };
     // C olc.c:198-212: refuse when another descriptor is editing the same
     // entity (issue #272).
-    if states().lock().unwrap().values().any(|s| s.vnum == st.vnum) {
+    if crate::lock_ok::lock(&states()).values().any(|s| s.vnum == st.vnum) {
         g.send_to_char(ch, "That mobile is currently being edited by someone else.\r\n");
         return;
     }
-    states().lock().unwrap().insert(conn, st);
+    crate::lock_ok::lock(&states()).insert(conn, st);
     olc::set_active(conn, EditorKind::Medit);
     // C olc.c:381-382: '$n starts using OLC.' + SET_BIT(PLR_WRITING) (#273).
     if let Some(c) = g.get_char_mut(ch) {
@@ -433,7 +433,7 @@ fn mob_file_path(g: &GameState, zone_number: i32) -> std::path::PathBuf {
 // ===========================================================================
 
 fn disp_menu(g: &mut GameState, conn: ConnId) {
-    let st = match states().lock().unwrap().get(&conn).cloned_state() {
+    let st = match crate::lock_ok::lock(&states()).get(&conn).cloned_state() {
         Some(s) => s,
         None => return,
     };
@@ -538,7 +538,7 @@ fn disp_attack_types(g: &mut GameState, conn: ConnId) {
 }
 
 fn disp_mob_flags(g: &mut GameState, conn: ConnId) {
-    let st = match states().lock().unwrap().get(&conn).cloned_state() {
+    let st = match crate::lock_ok::lock(&states()).get(&conn).cloned_state() {
         Some(s) => s,
         None => return,
     };
@@ -564,7 +564,7 @@ fn disp_mob_flags(g: &mut GameState, conn: ConnId) {
 }
 
 fn disp_aff_flags(g: &mut GameState, conn: ConnId) {
-    let st = match states().lock().unwrap().get(&conn).cloned_state() {
+    let st = match crate::lock_ok::lock(&states()).get(&conn).cloned_state() {
         Some(s) => s,
         None => return,
     };
@@ -637,7 +637,7 @@ fn sprintbit(bits: i64, names: &[&str], out: &mut String) {
 // ===========================================================================
 
 fn set_mode(conn: ConnId, mode: Mode) {
-    if let Some(s) = states().lock().unwrap().get_mut(&conn) {
+    if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
         s.mode = mode;
     }
 }
@@ -664,7 +664,7 @@ impl ClonedState for Option<&MeditState> {
 // ===========================================================================
 
 pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
-    let mode = match states().lock().unwrap().get(&conn) {
+    let mode = match crate::lock_ok::lock(&states()).get(&conn) {
         Some(s) => s.mode,
         None => {
             // Not actually editing — defensively clear and bail.
@@ -787,7 +787,7 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 line.trim(),
             );
             if keep {
-                if let Some(s) = states().lock().unwrap().get_mut(&conn) {
+                if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
                     s.mode = Mode::Script(script_mode);
                     s.changed = true;
                 }
@@ -849,14 +849,14 @@ fn num_set<F: FnOnce(&mut EditMob, i32)>(
 
 /// Mark the edit changed and redisplay the menu (the C fall-through tail).
 fn after_edit(g: &mut GameState, conn: ConnId) {
-    if let Some(s) = states().lock().unwrap().get_mut(&conn) {
+    if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
         s.changed = true;
     }
     disp_menu(g, conn);
 }
 
 fn with_mob<F: FnOnce(&mut EditMob)>(conn: ConnId, f: F) {
-    if let Some(s) = states().lock().unwrap().get_mut(&conn) {
+    if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
         f(&mut s.mob);
     }
 }
@@ -904,7 +904,7 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
         }
         '5' => {
             set_mode(conn, Mode::DDesc);
-            if let Some(s) = states().lock().unwrap().get_mut(&conn) {
+            if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
                 s.ddesc_buf = s.mob.description.clone();
             }
             send(
@@ -1039,7 +1039,7 @@ fn editor_char(g: &GameState, conn: ConnId) -> Option<CharId> {
 }
 
 fn finish(g: &mut GameState, conn: ConnId) {
-    states().lock().unwrap().remove(&conn);
+    crate::lock_ok::lock(&states()).remove(&conn);
     olc::clear_active(conn);
     // C olc.c:610-613 cleanup_olc: clear PLR_WRITING and act '$n stops using
     // OLC.' The invented 'Mobile editor exited.' line appears nowhere in C
@@ -1091,7 +1091,7 @@ fn ddesc_input(g: &mut GameState, conn: ConnId, line: &str) {
         .unwrap_or_default();
     match crate::modify::editor_buffer_input(g, conn, &mut buf, MAX_MOB_DESC, line) {
         crate::modify::BufferEditorResult::Continue => {
-            if let Some(s) = states().lock().unwrap().get_mut(&conn) {
+            if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
                 s.ddesc_buf = buf;
             }
         }
@@ -1100,7 +1100,7 @@ fn ddesc_input(g: &mut GameState, conn: ConnId, line: &str) {
             after_edit(g, conn);
         }
         crate::modify::BufferEditorResult::Abort => {
-            if let Some(s) = states().lock().unwrap().get_mut(&conn) {
+            if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
                 s.ddesc_buf.clear();
                 s.mode = Mode::MainMenu;
             }
@@ -1119,7 +1119,7 @@ fn ddesc_input(g: &mut GameState, conn: ConnId, line: &str) {
 /// (flags/abilities/alignment/etc.) live only on disk; they are preserved by
 /// the byte-faithful `.mob` write that follows.
 fn save_internally(g: &mut GameState, conn: ConnId) {
-    let st = match states().lock().unwrap().get(&conn).cloned_state() {
+    let st = match crate::lock_ok::lock(&states()).get(&conn).cloned_state() {
         Some(s) => s,
         None => return,
     };
@@ -1205,7 +1205,7 @@ fn save_internally(g: &mut GameState, conn: ConnId) {
 /// re-emit every mob in the zone: the one just edited from the scratch state,
 /// all others from their on-disk blocks (so their espec fields survive).
 fn save_to_disk(g: &mut GameState, conn: ConnId) {
-    let st = match states().lock().unwrap().get(&conn).cloned_state() {
+    let st = match crate::lock_ok::lock(&states()).get(&conn).cloned_state() {
         Some(s) => s,
         None => return,
     };

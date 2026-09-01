@@ -351,6 +351,10 @@ impl Game {
     pub async fn run(&mut self, mut game_rx: mpsc::Receiver<GameMessage>) -> Result<()> {
         info!("Game loop starting...");
         let mut tick = interval(Duration::from_millis(100)); // 10 pulses/sec
+        // A stall (blocked flush, slow DB) must not turn into a catch-up
+        // burst of hundreds of back-to-back pulses on resume: Delay skips to
+        // the next future deadline instead (tokio default is Burst).
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         // SIGTERM stream (systemd stop / kill -TERM). Ctrl-C (SIGINT) is handled
         // by tokio::signal::ctrl_c. On either, we run a clean shutdown: crash-save
@@ -2591,7 +2595,19 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                     1 + self.state.rng.dice(1, max)
                 });
                 if let Some(tx) = self.outputs.get(&conn_id) {
-                    let _ = tx.send(rendered).await;
+                    // C comm.c:1713 closes on would-block rather than waiting:
+                    // a client that stops reading must not park the Game task
+                    // (a full bounded channel means the writer is stalled on
+                    // TCP backpressure). try_send + close on Full is the
+                    // non-blocking equivalent; the loop's to_close pass
+                    // disconnects the descriptor below.
+                    if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
+                        tx.try_send(rendered)
+                    {
+                        if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                            d.state = ConState::Close;
+                        }
+                    }
                 }
             }
             if closing {

@@ -1621,14 +1621,14 @@ fn script_mem() -> &'static Mutex<HashMap<CharId, Vec<ScriptMemory>>> {
 }
 
 fn script_mem_add(mob: CharId, victim: CharId, cmd: Option<String>) {
-    let mut m = script_mem().lock().unwrap();
+    let mut m = crate::lock_ok::lock(&script_mem());
     m.entry(mob)
         .or_default()
         .push(ScriptMemory { id: victim, cmd });
 }
 
 fn script_mem_forget(mob: CharId, victim: CharId) {
-    let mut m = script_mem().lock().unwrap();
+    let mut m = crate::lock_ok::lock(&script_mem());
     if let Some(list) = m.get_mut(&mob) {
         list.retain(|e| e.id != victim);
         if list.is_empty() {
@@ -1651,7 +1651,7 @@ pub fn script_mem_list(mob: CharId) -> Vec<ScriptMemory> {
 /// recycled CharId never inherits stale memory — C frees SCRIPT_MEM in
 /// free_char).
 pub fn script_mem_clear(mob: CharId) {
-    script_mem().lock().unwrap().remove(&mob);
+    crate::lock_ok::lock(&script_mem()).remove(&mob);
 }
 
 // ---------------------------------------------------------------------------

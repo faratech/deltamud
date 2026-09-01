@@ -106,7 +106,7 @@ fn set_edit(conn: ConnId, target: EditTarget, max_len: usize) {
 }
 
 fn take_edit(conn: ConnId) -> Option<EditState> {
-    edits().lock().unwrap().remove(&conn)
+    crate::lock_ok::lock(&edits()).remove(&conn)
 }
 
 fn edit_max_len(conn: ConnId) -> usize {
@@ -261,7 +261,7 @@ fn push_editor_with(
     }
     // Mark the character PLR_WRITING (and PLR_MAILING for mail).
     let mailing = matches!(
-        edits().lock().unwrap().get(&conn).map(|e| &e.target),
+        crate::lock_ok::lock(&edits()).get(&conn).map(|e| &e.target),
         Some(EditTarget::Mail)
     );
     if let Some(cid) = conn_char(g, conn) {
@@ -1236,13 +1236,13 @@ pub fn page_string(g: &mut GameState, conn: ConnId, str: &str) {
 
 /// page_active: whether `conn` is mid-pagination (has pending pages).
 pub fn page_active(conn: ConnId) -> bool {
-    pagers().lock().unwrap().contains_key(&conn)
+    crate::lock_ok::lock(&pagers()).contains_key(&conn)
 }
 
 /// The 1-based (current, total) page position for the pager prompt
 /// (C make_prompt's d->showstr_page / d->showstr_count) (#229).
 pub fn page_position(conn: ConnId) -> (usize, usize) {
-    let guard = pagers().lock().unwrap();
+    let guard = crate::lock_ok::lock(&pagers());
     // C prints the 0-based showstr_page (comm.c:1222), so the first page
     // reads "(0/N)".
     match guard.get(&conn) {
@@ -1254,7 +1254,7 @@ pub fn page_position(conn: ConnId) -> (usize, usize) {
 /// True when `conn` has any active string editor (C make_prompt's `d->str`)
 /// — the '] ' editor prompt (#229).
 pub fn editing_any(conn: ConnId) -> bool {
-    edits().lock().unwrap().contains_key(&conn)
+    crate::lock_ok::lock(&edits()).contains_key(&conn)
 }
 
 /// page_input: feed a pager command line (RETURN/Q/R/B/<n>) for an active
@@ -1270,7 +1270,7 @@ pub fn page_input(g: &mut GameState, conn: ConnId, line: &str) -> bool {
 /// show_string (modify.c): display the next page (or honor Q/R/B/<n>).
 fn show_string(g: &mut GameState, conn: ConnId, input: &str) {
     let (cmd, count, total) = {
-        let guard = pagers().lock().unwrap();
+        let guard = crate::lock_ok::lock(&pagers());
         let p = match guard.get(&conn) {
             Some(p) => p,
             None => return,
@@ -1285,17 +1285,17 @@ fn show_string(g: &mut GameState, conn: ConnId, input: &str) {
 
     match cmd {
         Some('q') => {
-            pagers().lock().unwrap().remove(&conn);
+            crate::lock_ok::lock(&pagers()).remove(&conn);
             return;
         }
         Some('r') => {
-            let mut guard = pagers().lock().unwrap();
+            let mut guard = crate::lock_ok::lock(&pagers());
             if let Some(p) = guard.get_mut(&conn) {
                 p.page = p.page.saturating_sub(1);
             }
         }
         Some('b') => {
-            let mut guard = pagers().lock().unwrap();
+            let mut guard = crate::lock_ok::lock(&pagers());
             if let Some(p) = guard.get_mut(&conn) {
                 p.page = p.page.saturating_sub(2);
             }
@@ -1303,7 +1303,7 @@ fn show_string(g: &mut GameState, conn: ConnId, input: &str) {
         Some(c) if c.is_ascii_digit() => {
             let want = input.trim().parse::<i64>().unwrap_or(1);
             let new = (want - 1).clamp(0, total as i64 - 1) as usize;
-            let mut guard = pagers().lock().unwrap();
+            let mut guard = crate::lock_ok::lock(&pagers());
             if let Some(p) = guard.get_mut(&conn) {
                 p.page = new;
             }
@@ -1322,7 +1322,7 @@ fn show_string(g: &mut GameState, conn: ConnId, input: &str) {
 
     // Emit the current page; if it was the last one, drop the pager.
     let (text, last) = {
-        let guard = pagers().lock().unwrap();
+        let guard = crate::lock_ok::lock(&pagers());
         let p = match guard.get(&conn) {
             Some(p) => p,
             None => return,
@@ -1332,9 +1332,9 @@ fn show_string(g: &mut GameState, conn: ConnId, input: &str) {
     };
     send_to_q(g, conn, &text);
     if last {
-        pagers().lock().unwrap().remove(&conn);
+        crate::lock_ok::lock(&pagers()).remove(&conn);
     } else {
-        let mut guard = pagers().lock().unwrap();
+        let mut guard = crate::lock_ok::lock(&pagers());
         if let Some(p) = guard.get_mut(&conn) {
             p.page += 1;
         }

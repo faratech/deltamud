@@ -96,7 +96,7 @@ fn givers() -> &'static Mutex<HashMap<CharId, CharId>> {
 }
 
 fn set_questgiver(ch: CharId, questman: Option<CharId>) {
-    let mut g = givers().lock().unwrap();
+    let mut g = crate::lock_ok::lock(&givers());
     match questman {
         Some(q) => {
             g.insert(ch, q);
@@ -108,13 +108,13 @@ fn set_questgiver(ch: CharId, questman: Option<CharId>) {
 }
 
 fn get_questgiver(ch: CharId) -> Option<CharId> {
-    givers().lock().unwrap().get(&ch).copied()
+    crate::lock_ok::lock(&givers()).get(&ch).copied()
 }
 
 /// Integrator boot hook. No data file (quest state is per-player); just clears
 /// the runtime questgiver bindings so a fresh boot starts clean.
 pub fn boot_quest(_lib_path: &str) {
-    givers().lock().unwrap().clear();
+    crate::lock_ok::lock(&givers()).clear();
 }
 
 // ---------------------------------------------------------------------------

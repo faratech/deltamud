@@ -169,8 +169,12 @@ impl TelnetFilter {
                 },
                 TelnetState::Iac => match b {
                     IAC => {
-                        // Escaped 0xFF -> literal data byte.
-                        self.line.push(IAC);
+                        // Escaped 0xFF -> literal data byte (same cap as the
+                        // printable branch: an IAC-escape flood must not grow
+                        // the line buffer without bound).
+                        if self.line.len() < crate::MAX_RAW_INPUT_LENGTH {
+                            self.line.push(IAC);
+                        }
                         self.state = TelnetState::Data;
                     }
                     WILL | WONT | DO | DONT => self.state = TelnetState::Negotiate(b),
@@ -547,7 +551,11 @@ pub async fn handle_client(
         })
         .await?;
 
-    let write_handle = tokio::spawn(async move {
+    // The writer's death (socket error) must drive cleanup just like the
+    // reader's EOF does — otherwise a peer that vanished without RST leaves a
+    // zombie descriptor, a leaked connection slot, and a permanently deaf
+    // client. select! over both halves: whichever finishes first disconnects.
+    let mut write_handle = tokio::spawn(async move {
         while let Some(msg) = output_rx.recv().await {
             if writer.write_all(msg.as_bytes()).await.is_err() {
                 break;
@@ -558,10 +566,25 @@ pub async fn handle_client(
         }
     });
 
-    run_input_loop(&mut reader, conn_id, &game_tx, &output_tx).await;
+    let reader = run_input_loop(&mut reader, conn_id, &game_tx, &output_tx);
+    // Bias the select toward the reader: on simultaneous completion the
+    // reader's own Disconnect path is the well-tested one.
+    let writer_dead = async {
+        let _ = (&mut write_handle).await;
+    };
+    tokio::select! {
+        biased;
+        _ = reader => {},
+        _ = writer_dead => {
+            // Writer died mid-session: tell the Game this connection is gone.
+            let _ = game_tx
+                .send(GameMessage::Disconnect { conn_id })
+                .await;
+            return Ok(());
+        }
+    }
 
     let _ = game_tx.send(GameMessage::Disconnect { conn_id }).await;
-    write_handle.abort();
     Ok(())
 }
 
@@ -651,7 +674,7 @@ pub async fn handle_recovered(
         })
         .await?;
 
-    let write_handle = tokio::spawn(async move {
+    let mut write_handle = tokio::spawn(async move {
         while let Some(msg) = output_rx.recv().await {
             if writer.write_all(msg.as_bytes()).await.is_err() {
                 break;

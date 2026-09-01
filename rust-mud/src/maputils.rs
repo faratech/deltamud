@@ -993,7 +993,7 @@ pub fn sync_room_weather(g: &mut GameState) {
     // Zone fan-out: outdoor rooms of every controlled zone take their
     // ZWeatherPoint cell's weather.
     let zone_updates: Vec<(i32, i32)> = {
-        let tbl = map_table().lock().unwrap();
+        let tbl = crate::lock_ok::lock(&map_table());
         tbl.values()
             .flat_map(|m| {
                 m.z_weather_points
@@ -1026,7 +1026,7 @@ fn map_active(g: &GameState) -> bool {
 
 fn with_map<R>(g: &GameState, f: impl FnOnce(&MapData) -> R) -> R {
     let lib = g.config.lib_path.clone();
-    let mut tbl = map_table().lock().unwrap();
+    let mut tbl = crate::lock_ok::lock(&map_table());
     if !tbl.contains_key(&lib) {
         let data = parse_worldmap(&lib);
         tbl.insert(lib.clone(), data);
@@ -1037,7 +1037,7 @@ fn with_map<R>(g: &GameState, f: impl FnOnce(&MapData) -> R) -> R {
 /// Mutable variant for togglemap's active flag.
 fn with_map_mut<R>(g: &GameState, f: impl FnOnce(&mut MapData) -> R) -> R {
     let lib = g.config.lib_path.clone();
-    let mut tbl = map_table().lock().unwrap();
+    let mut tbl = crate::lock_ok::lock(&map_table());
     if !tbl.contains_key(&lib) {
         let data = parse_worldmap(&lib);
         tbl.insert(lib.clone(), data);
@@ -1887,7 +1887,7 @@ pub fn integrate_map_rooms(g: &mut GameState) -> EntryPointReport {
     // Snapshot the parsed map (grid + sectors + entry points) out of the cache so
     // we can mutate g.rooms without holding the map lock.
     let (max_x, max_y, grid, glyph_meta, entry_points) = {
-        let mut tbl = map_table().lock().unwrap();
+        let mut tbl = crate::lock_ok::lock(&map_table());
         if !tbl.contains_key(&lib) {
             let data = parse_worldmap(&lib);
             tbl.insert(lib.clone(), data);
@@ -2082,7 +2082,7 @@ fn make_exit(to_vnum: RoomVnum) -> crate::room::Exit {
 /// the surface map is not active (no worldmap file).
 pub fn prime_weather(g: &mut GameState) {
     let lib = g.config.lib_path.clone();
-    let mut tbl = map_table().lock().unwrap();
+    let mut tbl = crate::lock_ok::lock(&map_table());
     if !tbl.contains_key(&lib) {
         let data = parse_worldmap(&lib);
         tbl.insert(lib.clone(), data);
@@ -2105,7 +2105,7 @@ pub fn weather_activity(g: &mut GameState) {
     // produced by each storm step. Release the lock BEFORE replaying them so
     // unit_activity (which mutates g.rooms / characters) is not deadlocked.
     let events = {
-        let mut tbl = map_table().lock().unwrap();
+        let mut tbl = crate::lock_ok::lock(&map_table());
         if !tbl.contains_key(&lib) {
             let data = parse_worldmap(&lib);
             tbl.insert(lib.clone(), data);

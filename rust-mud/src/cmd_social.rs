@@ -1124,7 +1124,7 @@ pub fn social_hide(command: &str) -> Option<bool> {
 pub fn set_social_hide(command: &str, hide: bool) {
     let table = SOCIALS
         .get_or_init(|| RwLock::new(SocialTable::default()));
-    let mut guard = table.write().unwrap();
+    let mut guard = crate::lock_ok::write(&table);
     if let Some(&i) = guard.by_command.get(&command.to_lowercase()) {
         if let Some(s) = guard.list.get_mut(i) {
             s.hide = hide;

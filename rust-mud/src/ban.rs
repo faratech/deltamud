@@ -234,7 +234,7 @@ pub fn boot_ban(lib_path: &str) {
         lib_path: lib_path.to_string(),
     };
     match BAN.get() {
-        Some(m) => *m.lock().unwrap() = new_data,
+        Some(m) => *crate::lock_ok::lock(&m) = new_data,
         None => {
             let _ = BAN.set(Mutex::new(new_data));
         }
@@ -381,7 +381,7 @@ pub fn isbanned(host: &str) -> BanType {
         return BanType::None;
     }
     let host = host.to_ascii_lowercase();
-    let d = data().lock().unwrap();
+    let d = crate::lock_ok::lock(&data());
     let mut worst = BanType::None;
     for node in &d.ban_list {
         if wildmatch(&node.site, &host) {
@@ -404,7 +404,7 @@ pub fn isbanned(host: &str) -> BanType {
 /// performs only the substring check (still useful where the world isn't
 /// threaded, and matching C's behaviour when `mob_proto` is empty).
 pub fn valid_name(newname: &str) -> bool {
-    let d = data().lock().unwrap();
+    let d = crate::lock_ok::lock(&data());
     if d.invalid.is_empty() {
         return true;
     }
@@ -423,7 +423,7 @@ pub fn valid_name(newname: &str) -> bool {
 /// loaded mob prototype.
 pub fn valid_name_in(g: &GameState, newname: &str) -> bool {
     {
-        let d = data().lock().unwrap();
+        let d = crate::lock_ok::lock(&data());
         if d.invalid.is_empty() {
             // C returns valid if the list doesn't exist; the mob check still
             // runs in C, but with no invalid list the substring loop is the only
@@ -484,7 +484,7 @@ pub fn do_ban(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     // ----- No argument: print the ban list. -----
     if argument.is_empty() {
         let rows: Vec<(String, &'static str, String, String)> = {
-            let d = data().lock().unwrap();
+            let d = crate::lock_ok::lock(&data());
             if d.ban_list.is_empty() {
                 drop(d);
                 g.send_to_char(ch, "No sites are banned.\r\n");
@@ -546,7 +546,7 @@ pub fn do_ban(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
     // Duplicate check + insert under the lock, then persist a snapshot.
     let duplicate = {
-        let d = data().lock().unwrap();
+        let d = crate::lock_ok::lock(&data());
         d.ban_list.iter().any(|n| str_cmp(&n.site, &site))
     };
     if duplicate {
@@ -558,7 +558,7 @@ pub fn do_ban(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     }
 
     {
-        let mut d = data().lock().unwrap();
+        let mut d = crate::lock_ok::lock(&data());
         let mut banner_t: String = banner.chars().take(MAX_NAME_LENGTH).collect();
         banner_t.truncate(MAX_NAME_LENGTH);
         d.ban_list.insert(
@@ -595,7 +595,7 @@ pub fn do_unban(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
     // Find + remove the node, capturing its type/site for the log message.
     let removed = {
-        let mut d = data().lock().unwrap();
+        let mut d = crate::lock_ok::lock(&data());
         match d.ban_list.iter().position(|n| str_cmp(&n.site, &site)) {
             Some(idx) => {
                 let node = d.ban_list.remove(idx);

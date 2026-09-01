@@ -239,7 +239,7 @@ pub fn boot_clans(lib_path: &str) {
     // Install (or, on a double-boot, replace the contents of) the static.
     match CLANS.get() {
         Some(m) => {
-            *m.lock().unwrap() = new_table;
+            *crate::lock_ok::lock(&m) = new_table;
         }
         None => {
             let _ = CLANS.set(Mutex::new(new_table));
@@ -258,7 +258,7 @@ pub fn boot_clans(lib_path: &str) {
 /// C boot_clans(): start every loaded clan at zero, count only valid clan
 /// indexes, and ignore applicants whose clan_rank is -1.
 pub fn recount_member_counts(counts: &[(i32, i32)]) {
-    let mut t = table().lock().unwrap();
+    let mut t = crate::lock_ok::lock(&table());
     for clan in &mut t.clans {
         clan.members = 0;
     }
@@ -276,7 +276,7 @@ pub fn recount_member_counts(counts: &[(i32, i32)]) {
 
 /// CircleMUD save_clans(): serialize the whole table to clans.dat.
 fn save_clans() {
-    let t = table().lock().unwrap();
+    let t = crate::lock_ok::lock(&table());
     let bytes = encode_clans(&t.clans);
     let path = clan_file_path(&t.lib_path);
     if let Some(parent) = std::path::Path::new(&path).parent() {
@@ -491,7 +491,7 @@ fn get_player_vis(g: &GameState, observer: CharId, name: &str) -> Option<CharId>
 
 /// Read a clan field by index without holding the lock across a send.
 fn with_clan<R>(idx: i32, f: impl FnOnce(&ClanInfo) -> R) -> Option<R> {
-    let t = table().lock().unwrap();
+    let t = crate::lock_ok::lock(&table());
     let i = usize::try_from(idx).ok()?;
     t.clans.get(i).map(f)
 }
@@ -502,7 +502,7 @@ pub fn clan_display_name_and_rank(idx: i32, rank: i32) -> Option<(String, String
 
 #[cfg(test)]
 pub fn set_test_clans(clans: Vec<(String, Vec<String>)>) {
-    let mut table = table().lock().unwrap();
+    let mut table = crate::lock_ok::lock(&table());
     table.clans = clans
         .into_iter()
         .enumerate()
@@ -520,7 +520,7 @@ pub fn set_test_clans(clans: Vec<(String, Vec<String>)>) {
 }
 
 fn num_of_clans() -> i32 {
-    table().lock().unwrap().clans.len() as i32
+    crate::lock_ok::lock(&table()).clans.len() as i32
 }
 
 // ---------------------------------------------------------------------------
@@ -609,7 +609,7 @@ fn clan_create(g: &mut GameState, ch: CharId, arg: &str) {
     let leader_name = get_name(g, leader);
     let new_index;
     {
-        let mut t = table().lock().unwrap();
+        let mut t = crate::lock_ok::lock(&table());
         let number = t.clans.len() as i32;
         let mut info = ClanInfo::default();
         info.name = cap(&arg2);
@@ -644,7 +644,7 @@ fn find_clan(arg: &str) -> Option<i32> {
         return None;
     }
     let target = cap(arg);
-    let t = table().lock().unwrap();
+    let t = crate::lock_ok::lock(&table());
     t.clans
         .iter()
         .position(|c| cap(&c.name) == target)
@@ -693,7 +693,7 @@ fn clan_destroy(g: &mut GameState, ch: CharId, arg: &str) {
     }
 
     {
-        let mut t = table().lock().unwrap();
+        let mut t = crate::lock_ok::lock(&table());
         let idx = i as usize;
         if idx < t.clans.len() {
             t.clans.remove(idx);
@@ -824,7 +824,7 @@ fn set_priv(g: &mut GameState, ch: CharId, arg: &str) {
     match target {
         Some((priv_idx, label)) => {
             {
-                let mut t = table().lock().unwrap();
+                let mut t = crate::lock_ok::lock(&table());
                 if let Some(c) = t.clans.get_mut(cl as usize) {
                     c.privilege[priv_idx] = level;
                 }
@@ -869,7 +869,7 @@ fn handle_rank(g: &mut GameState, ch: CharId, arg: &str) {
         }
         g.send_to_char(ch, &format!("Clan ranks changed to {}.\r\n", n));
         {
-            let mut t = table().lock().unwrap();
+            let mut t = crate::lock_ok::lock(&table());
             if let Some(c) = t.clans.get_mut(cl as usize) {
                 let mut i = c.ranks;
                 while i < n {
@@ -894,7 +894,7 @@ fn handle_rank(g: &mut GameState, ch: CharId, arg: &str) {
         }
         g.send_to_char(ch, &format!("Clan ranks changed to {}.\r\n", n));
         {
-            let mut t = table().lock().unwrap();
+            let mut t = crate::lock_ok::lock(&table());
             if let Some(c) = t.clans.get_mut(cl as usize) {
                 c.ranks = n;
             }
@@ -961,7 +961,7 @@ fn clan_rank_name(g: &mut GameState, ch: CharId, arg: &str) {
         return;
     }
     {
-        let mut t = table().lock().unwrap();
+        let mut t = crate::lock_ok::lock(&table());
         if let Some(c) = t.clans.get_mut(cl as usize) {
             let slot = (lvl - 1) as usize;
             if slot < MAX_RANKS - 1 {
@@ -1024,7 +1024,7 @@ fn clan_resign(g: &mut GameState, ch: CharId) {
         return;
     }
     if get_clan_rank(g, ch) > 0 {
-        let mut t = table().lock().unwrap();
+        let mut t = crate::lock_ok::lock(&table());
         if let Some(c) = t.clans.get_mut(cl as usize) {
             c.members -= 1;
         }
@@ -1093,7 +1093,7 @@ fn clan_enlist(g: &mut GameState, ch: CharId, arg: &str) {
         &format!("{} has been enlisted into your clan!\r\n", vic_name),
     );
     {
-        let mut t = table().lock().unwrap();
+        let mut t = crate::lock_ok::lock(&table());
         if let Some(c) = t.clans.get_mut(cl as usize) {
             c.members += 1;
         }
@@ -1154,7 +1154,7 @@ fn clan_expel(g: &mut GameState, ch: CharId, arg: &str) {
         &format!("You have expelled {} from the clan.\r\n", vic_name),
     );
     {
-        let mut t = table().lock().unwrap();
+        let mut t = crate::lock_ok::lock(&table());
         if let Some(c) = t.clans.get_mut(cl as usize) {
             c.members -= 1;
         }
@@ -1173,7 +1173,7 @@ fn clan_list(g: &mut GameState, ch: CharId) {
          ------ -------------------------------- ---->\r\n",
     );
     let rows: Vec<(i32, String, String)> = {
-        let t = table().lock().unwrap();
+        let t = crate::lock_ok::lock(&table());
         t.clans
             .iter()
             .enumerate()
@@ -1360,7 +1360,7 @@ fn clan_who_title(g: &mut GameState, ch: CharId, arg: &str) {
         return;
     }
     {
-        let mut t = table().lock().unwrap();
+        let mut t = crate::lock_ok::lock(&table());
         if let Some(c) = t.clans.get_mut(num as usize) {
             c.who_name = arg2.clone();
         }
@@ -1621,7 +1621,7 @@ fn clan_new_owner(g: &mut GameState, ch: CharId, arg: &str) {
     }
     let vic_name = get_name(g, victim);
     {
-        let mut t = table().lock().unwrap();
+        let mut t = crate::lock_ok::lock(&table());
         if let Some(c) = t.clans.get_mut(num as usize) {
             c.leader = vic_name;
         }
@@ -1661,7 +1661,7 @@ fn set_clanroom(g: &mut GameState, ch: CharId, arg: &str) {
         ),
     );
     {
-        let mut t = table().lock().unwrap();
+        let mut t = crate::lock_ok::lock(&table());
         if let Some(c) = t.clans.get_mut(num as usize) {
             c.clan_room = room_vnum;
         }
@@ -1726,7 +1726,7 @@ fn do_clan_withdraw(g: &mut GameState, ch: CharId, arg: &str) {
     }
 
     {
-        let mut t = table().lock().unwrap();
+        let mut t = crate::lock_ok::lock(&table());
         if let Some(c) = t.clans.get_mut(cl as usize) {
             c.gold -= amount as i64;
         }
@@ -1775,7 +1775,7 @@ fn do_clan_deposit(g: &mut GameState, ch: CharId, arg: &str) {
     }
 
     {
-        let mut t = table().lock().unwrap();
+        let mut t = crate::lock_ok::lock(&table());
         if let Some(c) = t.clans.get_mut(cl as usize) {
             c.gold += amount as i64;
         }

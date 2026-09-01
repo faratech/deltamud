@@ -346,7 +346,7 @@ pub mod test_clock {
                 .unwrap_or(0);
             Mutex::new(reset_time(now, &Config::default().lib_path))
         });
-        let mut tw = mtx.lock().unwrap();
+        let mut tw = crate::lock_ok::lock(&mtx);
         tw.hours = h;
     }
 }

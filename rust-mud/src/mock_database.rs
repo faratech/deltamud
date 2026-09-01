@@ -44,8 +44,8 @@ impl crate::DatabaseInterface for MockDatabase {
     }
 
     async fn create_player(&self, character: &Character, password: &str) -> Result<i64> {
-        let mut players = self.players.lock().unwrap();
-        let mut idnum = self.next_idnum.lock().unwrap();
+        let mut players = crate::lock_ok::lock(&self.players);
+        let mut idnum = crate::lock_ok::lock(&self.next_idnum);
         let id = *idnum;
         *idnum += 1;
         let mut ch = character.clone();
@@ -61,7 +61,7 @@ impl crate::DatabaseInterface for MockDatabase {
     }
 
     async fn load_player(&self, name: &str) -> Result<Character> {
-        let players = self.players.lock().unwrap();
+        let players = crate::lock_ok::lock(&self.players);
         players
             .get(&name.to_lowercase())
             .map(|s| s.character.clone())
@@ -69,7 +69,7 @@ impl crate::DatabaseInterface for MockDatabase {
     }
 
     async fn save_player(&self, character: &Character) -> Result<()> {
-        let mut players = self.players.lock().unwrap();
+        let mut players = crate::lock_ok::lock(&self.players);
         if let Some(s) = players.get_mut(&character.get_name().to_lowercase()) {
             s.character = character.clone();
             if let Some(hash) = &character.pending_password_hash {
@@ -80,7 +80,7 @@ impl crate::DatabaseInterface for MockDatabase {
     }
 
     async fn verify_password(&self, name: &str, password: &str) -> Result<bool> {
-        let players = self.players.lock().unwrap();
+        let players = crate::lock_ok::lock(&self.players);
         match players.get(&name.to_lowercase()) {
             Some(s) => Ok(crate::password::check_password(&s.password, password)),
             None => Ok(false),
@@ -88,19 +88,19 @@ impl crate::DatabaseInterface for MockDatabase {
     }
 
     async fn get_password_hash(&self, name: &str) -> Result<Option<String>> {
-        let players = self.players.lock().unwrap();
+        let players = crate::lock_ok::lock(&self.players);
         Ok(players.get(&name.to_lowercase()).map(|s| s.password.clone()))
     }
 
     async fn delete_deleted_players(&self) -> Result<u64> {
-        let mut players = self.players.lock().unwrap();
+        let mut players = crate::lock_ok::lock(&self.players);
         let before = players.len();
         players.retain(|_, s| (s.character.act_flags & crate::flags::PLR_DELETED) == 0);
         Ok((before - players.len()) as u64)
     }
 
     async fn clan_destroy_fixup(&self, destroyed: i32) -> Result<()> {
-        let mut players = self.players.lock().unwrap();
+        let mut players = crate::lock_ok::lock(&self.players);
         for stored in players.values_mut() {
             let c = &mut stored.character;
             if c.clan == destroyed {
@@ -114,7 +114,7 @@ impl crate::DatabaseInterface for MockDatabase {
     }
 
     async fn clan_lower_ranks(&self, clan: i32) -> Result<()> {
-        let mut players = self.players.lock().unwrap();
+        let mut players = crate::lock_ok::lock(&self.players);
         for stored in players.values_mut() {
             let c = &mut stored.character;
             if c.clan == clan && c.clan_rank != -1 {
@@ -125,7 +125,7 @@ impl crate::DatabaseInterface for MockDatabase {
     }
 
     async fn clan_member_counts(&self) -> Result<Vec<(i32, i32)>> {
-        let players = self.players.lock().unwrap();
+        let players = crate::lock_ok::lock(&self.players);
         let mut counts: HashMap<i32, i32> = HashMap::new();
         for stored in players.values() {
             if stored.character.clan >= 0 && stored.character.clan_rank != -1 {
@@ -141,7 +141,7 @@ impl crate::DatabaseInterface for MockDatabase {
         // Build index rows from the stored Character clones (the mock has no
         // host column — host is connection-derived, "" here; the live
         // descriptor's host is folded in later via update_player_index).
-        let players = self.players.lock().unwrap();
+        let players = crate::lock_ok::lock(&self.players);
         let out = players
             .values()
             .map(|s| crate::state::PlayerIndex {

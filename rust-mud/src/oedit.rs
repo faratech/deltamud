@@ -116,7 +116,7 @@ fn states() -> &'static Mutex<HashMap<ConnId, OeditState>> {
 }
 
 fn with_state<R>(conn: ConnId, f: impl FnOnce(&mut OeditState) -> R) -> Option<R> {
-    states().lock().unwrap().get_mut(&conn).map(f)
+    crate::lock_ok::lock(&states()).get_mut(&conn).map(f)
 }
 
 fn send(g: &mut GameState, conn: ConnId, msg: &str) {
@@ -191,7 +191,7 @@ pub fn do_oedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
     };
 
-    states().lock().unwrap().insert(
+    crate::lock_ok::lock(&states()).insert(
         conn,
         OeditState {
             znum,
@@ -263,7 +263,7 @@ fn text_bufs() -> &'static Mutex<HashMap<ConnId, String>> {
 }
 
 fn begin_text(g: &mut GameState, conn: ConnId, seed: &str, mode: OeditMode) {
-    text_bufs().lock().unwrap().insert(conn, seed.to_string());
+    crate::lock_ok::lock(&text_bufs()).insert(conn, seed.to_string());
     let _ = with_state(conn, |s| s.mode = mode);
     // C oedit.c:1032/1428: distinct banner per sub-editor (#291).
     let prompt = match mode {
@@ -297,7 +297,7 @@ fn text_input(g: &mut GameState, conn: ConnId, line: &str) -> Option<Option<Stri
         .unwrap_or_default();
     match crate::modify::editor_buffer_input(g, conn, &mut buf, MAX_MESSAGE_LENGTH, line) {
         crate::modify::BufferEditorResult::Continue => {
-            text_bufs().lock().unwrap().insert(conn, buf);
+            crate::lock_ok::lock(&text_bufs()).insert(conn, buf);
             None
         }
         crate::modify::BufferEditorResult::Save => Some(Some(buf)),
@@ -1347,13 +1347,13 @@ fn save_internally(g: &mut GameState, conn: ConnId) {
 /// mid-edit). Releases the per-conn working copy and text buffer so nothing
 /// lingers until reboot. `olc::abort_editor` calls `olc::clear_active`.
 pub fn abort(conn: ConnId) {
-    states().lock().unwrap().remove(&conn);
-    text_bufs().lock().unwrap().remove(&conn);
+    crate::lock_ok::lock(&states()).remove(&conn);
+    crate::lock_ok::lock(&text_bufs()).remove(&conn);
 }
 
 fn finish(g: &mut GameState, conn: ConnId) {
-    states().lock().unwrap().remove(&conn);
-    text_bufs().lock().unwrap().remove(&conn);
+    crate::lock_ok::lock(&states()).remove(&conn);
+    crate::lock_ok::lock(&text_bufs()).remove(&conn);
     olc::clear_active(conn);
     if let Some(ch) = conn_char(g, conn) {
         crate::act::act(

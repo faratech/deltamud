@@ -234,7 +234,7 @@ fn boards() -> &'static Mutex<BoardRuntime> {
 /// board files live at `<lib_path>/etc/board/...`.
 pub fn boot_boards(lib_path: &str) {
     let rt = boards();
-    let mut guard = rt.lock().unwrap();
+    let mut guard = crate::lock_ok::lock(&rt);
     guard.lib_path = lib_path.trim_end_matches('/').to_string();
     guard.pending.clear();
     for b in 0..NUM_OF_BOARDS {
@@ -358,7 +358,7 @@ pub fn board_write(g: &mut GameState, board_type: usize, ch: CharId, arg: &str) 
 
     {
         let rt = boards();
-        let guard = rt.lock().unwrap();
+        let guard = crate::lock_ok::lock(&rt);
         if guard.boards[board_type].len() >= MAX_BOARD_MESSAGES {
             drop(guard);
             g.send_to_char(ch, "The board is full.\r\n");
@@ -399,7 +399,7 @@ pub fn board_write(g: &mut GameState, board_type: usize, ch: CharId, arg: &str) 
     let msg_index;
     {
         let rt = boards();
-        let mut guard = rt.lock().unwrap();
+        let mut guard = crate::lock_ok::lock(&rt);
         guard.boards[board_type].push(BoardMsg {
             heading,
             message: String::new(),
@@ -442,7 +442,7 @@ pub fn board_write(g: &mut GameState, board_type: usize, ch: CharId, arg: &str) 
 pub fn board_finish_write(g: &mut GameState, conn: ConnId, body: &str, save: bool) -> bool {
     let pending = {
         let rt = boards();
-        let mut guard = rt.lock().unwrap();
+        let mut guard = crate::lock_ok::lock(&rt);
         guard.pending.remove(&conn.0)
     };
     let (board_type, msg_index) = match pending {
@@ -459,7 +459,7 @@ pub fn board_finish_write(g: &mut GameState, conn: ConnId, body: &str, save: boo
     }
 
     let rt = boards();
-    let mut guard = rt.lock().unwrap();
+    let mut guard = crate::lock_ok::lock(&rt);
     if board_type >= guard.boards.len() {
         return true;
     }
@@ -682,7 +682,7 @@ pub fn board_remove(g: &mut GameState, board_type: usize, ch: CharId, arg: &str)
     // (board, index).
     {
         let rt = boards();
-        let guard = rt.lock().unwrap();
+        let guard = crate::lock_ok::lock(&rt);
         let authoring = guard
             .pending
             .values()
@@ -702,7 +702,7 @@ pub fn board_remove(g: &mut GameState, board_type: usize, ch: CharId, arg: &str)
     // pointing at the right message.
     {
         let rt = boards();
-        let mut guard = rt.lock().unwrap();
+        let mut guard = crate::lock_ok::lock(&rt);
         if ind < guard.boards[board_type].len() {
             guard.boards[board_type].remove(ind);
         }
@@ -877,7 +877,7 @@ fn REMOVE_LVL(b: usize) -> Level {
 /// touching GameState for I/O).
 fn board_msgs(board_type: usize) -> Vec<BoardMsg> {
     let rt = boards();
-    let guard = rt.lock().unwrap();
+    let guard = crate::lock_ok::lock(&rt);
     guard.boards.get(board_type).cloned().unwrap_or_default()
 }
 

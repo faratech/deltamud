@@ -74,7 +74,7 @@ fn table() -> &'static Mutex<HashMap<i64, Vec<AliasEntry>>> {
 
 /// Replace a player's entire alias list (C read_aliases load path).
 pub fn set_aliases(idnum: i64, list: Vec<AliasEntry>) {
-    table().lock().unwrap().insert(idnum, list);
+    crate::lock_ok::lock(&table()).insert(idnum, list);
 }
 
 /// Snapshot a player's alias list for saving (C write_aliases) — newest-first,
@@ -90,7 +90,7 @@ pub fn get_aliases(idnum: i64) -> Vec<AliasEntry> {
 
 /// Drop a player's aliases from the live table (e.g. on extract). Idempotent.
 pub fn clear_aliases(idnum: i64) {
-    table().lock().unwrap().remove(&idnum);
+    crate::lock_ok::lock(&table()).remove(&idnum);
 }
 
 fn alias_bucket(name: &str) -> &'static str {
@@ -311,7 +311,7 @@ pub fn alias_expand(g: &GameState, ch: CharId, input: &str) -> Option<AliasExpan
     }
 
     let matched = {
-        let guard = table().lock().unwrap();
+        let guard = crate::lock_ok::lock(&table());
         let list = guard.get(&idnum)?;
         let idx = find_alias_index(list, first_arg)?;
         list[idx].clone()
@@ -371,7 +371,7 @@ pub fn do_alias(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     // (C: REMOVE_FROM_LIST + free_alias). `existed` tracks whether one was
     // present, to choose the delete-vs-no-such message below.
     let existed = {
-        let mut guard = table().lock().unwrap();
+        let mut guard = crate::lock_ok::lock(&table());
         let list = guard.entry(idnum).or_default();
         if let Some(idx) = find_alias_index(list, arg) {
             list.remove(idx);
@@ -410,7 +410,7 @@ pub fn do_alias(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     // Prepend (C: a->next = GET_ALIASES(ch); GET_ALIASES(ch) = a) so the list
     // stays newest-first.
     {
-        let mut guard = table().lock().unwrap();
+        let mut guard = crate::lock_ok::lock(&table());
         let list = guard.entry(idnum).or_default();
         list.insert(
             0,

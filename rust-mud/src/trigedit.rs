@@ -122,7 +122,7 @@ fn states() -> &'static Mutex<HashMap<ConnId, TrigEditState>> {
 /// abort: drop this conn's editor state without saving (player disconnected
 /// mid-edit). `olc::abort_editor` calls `olc::clear_active`.
 pub fn abort(conn: ConnId) {
-    states().lock().unwrap().remove(&conn);
+    crate::lock_ok::lock(&states()).remove(&conn);
 }
 
 // ---------------------------------------------------------------------------
@@ -279,7 +279,7 @@ pub fn do_trigedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
     // Check that this trigger isn't already being edited on another connection.
     let busy_name: Option<String> = {
-        let map = states().lock().unwrap();
+        let map = crate::lock_ok::lock(&states());
         let mut who = None;
         for (&other_conn, st) in map.iter() {
             if other_conn != conn && st.vnum == number {
@@ -310,7 +310,7 @@ pub fn do_trigedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         _ => setup_new(number, znum),
     };
 
-    states().lock().unwrap().insert(conn, state);
+    crate::lock_ok::lock(&states()).insert(conn, state);
     olc::set_active(conn, EditorKind::Trigedit);
     disp_menu(g, conn);
 }
@@ -372,7 +372,7 @@ fn setup_new(vnum: i32, znum: usize) -> TrigEditState {
 
 fn disp_menu(g: &mut GameState, conn: ConnId) {
     let (attach_label, trgtypes, vnum, name, narg, arglist, storage) = {
-        let map = states().lock().unwrap();
+        let map = crate::lock_ok::lock(&states());
         let st = match map.get(&conn) {
             Some(s) => s,
             None => return,
@@ -422,7 +422,7 @@ fn disp_menu(g: &mut GameState, conn: ConnId) {
 
 fn disp_types(g: &mut GameState, conn: ConnId) {
     let (table, cur) = {
-        let map = states().lock().unwrap();
+        let map = crate::lock_ok::lock(&states());
         let st = match map.get(&conn) {
             Some(s) => s,
             None => return,
@@ -456,13 +456,13 @@ fn disp_types(g: &mut GameState, conn: ConnId) {
 // ---------------------------------------------------------------------------
 
 fn set_mode(conn: ConnId, mode: Mode) {
-    if let Some(st) = states().lock().unwrap().get_mut(&conn) {
+    if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
         st.mode = mode;
     }
 }
 
 fn get_mode(conn: ConnId) -> Option<Mode> {
-    states().lock().unwrap().get(&conn).map(|s| s.mode)
+    crate::lock_ok::lock(&states()).get(&conn).map(|s| s.mode)
 }
 
 // ---------------------------------------------------------------------------
@@ -526,7 +526,7 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         Mode::Name => {
             // C dg_olc.c:340 stores the raw line (str_dup); no trim (#300).
             let arg = line;
-            if let Some(st) = states().lock().unwrap().get_mut(&conn) {
+            if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
                 st.name = if arg.is_empty() {
                     "undefined".to_string()
                 } else {
@@ -537,7 +537,7 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
         Mode::Intended => {
             let v = atoi(line);
-            if let Some(st) = states().lock().unwrap().get_mut(&conn) {
+            if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
                 // C: ((atoi>=MOB_TRIGGER) || (atoi<=WLD_TRIGGER)) — that guard is
                 // always true in C, so any value is accepted, stored as
                 // (byte)atoi (wraps 0-255, dg_olc.c:353) (#300).
@@ -547,7 +547,7 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
         Mode::Narg => {
             let v = atoi(line);
-            if let Some(st) = states().lock().unwrap().get_mut(&conn) {
+            if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
                 st.narg = v;
                 st.val += 1;
             }
@@ -555,7 +555,7 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         Mode::Argument => {
             // C dg_olc.c:356 stores the raw line; no trim (#300).
             let arg = line;
-            if let Some(st) = states().lock().unwrap().get_mut(&conn) {
+            if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
                 st.arglist = arg.to_string();
                 st.val += 1;
             }
@@ -565,7 +565,7 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             if i == 0 {
                 // fall through to main menu
             } else {
-                if let Some(st) = states().lock().unwrap().get_mut(&conn) {
+                if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
                     if i > 0 && i <= NUM_TRIG_TYPE_FLAGS as i32 {
                         st.trigger_type ^= 1 << (i - 1);
                     }
@@ -654,7 +654,7 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
                     send(g, conn, &s);
                 }
             }
-            if let Some(st) = states().lock().unwrap().get_mut(&conn) {
+            if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
                 st.back_storage = Some(st.storage.clone());
                 st.val = 1;
             }
@@ -682,12 +682,12 @@ fn commands_input(g: &mut GameState, conn: ConnId, line: &str) {
 
     match crate::modify::editor_buffer_input(g, conn, &mut buf, MAX_CMD_LENGTH, line) {
         crate::modify::BufferEditorResult::Continue => {
-            if let Some(st) = states().lock().unwrap().get_mut(&conn) {
+            if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
                 st.storage = buf;
             }
         }
         crate::modify::BufferEditorResult::Save => {
-            if let Some(st) = states().lock().unwrap().get_mut(&conn) {
+            if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
                 st.storage = buf;
                 st.back_storage = None;
             }
@@ -695,7 +695,7 @@ fn commands_input(g: &mut GameState, conn: ConnId, line: &str) {
             disp_menu(g, conn);
         }
         crate::modify::BufferEditorResult::Abort => {
-            if let Some(st) = states().lock().unwrap().get_mut(&conn) {
+            if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
                 if let Some(back) = st.back_storage.take() {
                     st.storage = back;
                 }
@@ -715,7 +715,7 @@ fn commands_input(g: &mut GameState, conn: ConnId, line: &str) {
 fn save(g: &mut GameState, conn: ConnId) {
     // Snapshot the scratch trigger out of edit state.
     let (vnum, znum, name, attach_type, trigger_type, narg, arglist, storage) = {
-        let map = states().lock().unwrap();
+        let map = crate::lock_ok::lock(&states());
         let st = match map.get(&conn) {
             Some(s) => s,
             None => return,
@@ -849,7 +849,7 @@ fn save(g: &mut GameState, conn: ConnId) {
 // ---------------------------------------------------------------------------
 
 fn cleanup(g: &mut GameState, conn: ConnId) {
-    states().lock().unwrap().remove(&conn);
+    crate::lock_ok::lock(&states()).remove(&conn);
     olc::clear_active(conn);
     // C cleanup_olc returns to the playing prompt; the framework restores the
     // descriptor state. Echo a blank line so the player sees the prompt return.

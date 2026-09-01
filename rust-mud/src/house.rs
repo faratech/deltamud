@@ -162,7 +162,7 @@ fn get_id_by_name(g: &GameState, name: &str) -> i64 {
         return id;
     }
     // Fall back to the control-file name cache.
-    let table = houses().lock().unwrap();
+    let table = crate::lock_ok::lock(&houses());
     for h in table.iter() {
         if h.owner >= 0 && h.owner_name.eq_ignore_ascii_case(&lower) {
             return h.owner;
@@ -195,7 +195,7 @@ fn get_name_by_id(g: &GameState, id: i64) -> Option<String> {
     if let Some(n) = g.get_name_by_id(id) {
         return Some(n);
     }
-    let table = houses().lock().unwrap();
+    let table = crate::lock_ok::lock(&houses());
     for h in table.iter() {
         if h.owner == id && !h.owner_name.is_empty() {
             return Some(h.owner_name.clone());
@@ -284,7 +284,7 @@ fn mudlog(g: &mut GameState, line: &str, min_level: u8) {
 
 /// Index of the house whose vnum == `vnum`, or None.
 fn find_house(vnum: RoomVnum) -> Option<usize> {
-    let table = houses().lock().unwrap();
+    let table = crate::lock_ok::lock(&houses());
     table.iter().position(|h| h.vnum == vnum)
 }
 
@@ -304,7 +304,7 @@ fn house_save_control(g: &GameState) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let table = houses().lock().unwrap();
+    let table = crate::lock_ok::lock(&houses());
     let mut out = String::new();
     for h in table.iter() {
         out.push_str(&format!(
@@ -513,7 +513,7 @@ pub fn house_boot(g: &mut GameState) {
     }
 
     {
-        let mut table = houses().lock().unwrap();
+        let mut table = crate::lock_ok::lock(&houses());
         *table = accepted;
     }
 
@@ -806,7 +806,7 @@ fn house_listrent(g: &mut GameState, ch: CharId, vnum: RoomVnum) {
 // ===========================================================================
 
 fn hcontrol_list_houses(g: &mut GameState, ch: CharId, showguests: bool) {
-    let table: Vec<HouseControlRec> = houses().lock().unwrap().clone();
+    let table: Vec<HouseControlRec> = crate::lock_ok::lock(&houses()).clone();
     if table.is_empty() {
         g.send_to_char(ch, "No houses have been defined.\r\n");
         return;
@@ -855,7 +855,7 @@ fn hcontrol_list_houses(g: &mut GameState, ch: CharId, showguests: bool) {
 }
 
 fn hcontrol_list_houses_guests(g: &mut GameState, ch: CharId) {
-    let table: Vec<HouseControlRec> = houses().lock().unwrap().clone();
+    let table: Vec<HouseControlRec> = crate::lock_ok::lock(&houses()).clone();
     if table.is_empty() {
         g.send_to_char(ch, "No houses have been defined.\r\n");
         return;
@@ -896,7 +896,7 @@ fn hcontrol_list_houses_guests(g: &mut GameState, ch: CharId) {
 }
 
 fn hcontrol_build_house(g: &mut GameState, ch: CharId, arg: &str) {
-    if houses().lock().unwrap().len() >= MAX_HOUSES {
+    if crate::lock_ok::lock(&houses()).len() >= MAX_HOUSES {
         g.send_to_char(ch, "Max houses already defined.\r\n");
         return;
     }
@@ -981,7 +981,7 @@ fn hcontrol_build_house(g: &mut GameState, ch: CharId, arg: &str) {
     temp.guests = Vec::new();
     temp.guest_names = Vec::new();
 
-    houses().lock().unwrap().push(temp);
+    crate::lock_ok::lock(&houses()).push(temp);
 
     room_flag_set(g, real_house, ROOM_HOUSE | ROOM_PRIVATE);
     room_flag_set(g, real_atrium, ROOM_ATRIUM);
@@ -992,7 +992,7 @@ fn hcontrol_build_house(g: &mut GameState, ch: CharId, arg: &str) {
 }
 
 fn hcontrol_crashsave_house(g: &mut GameState, ch: CharId, arg: &str) {
-    if houses().lock().unwrap().len() >= MAX_HOUSES {
+    if crate::lock_ok::lock(&houses()).len() >= MAX_HOUSES {
         g.send_to_char(ch, "Max crashsaveables/houses already defined.\r\n");
         return;
     }
@@ -1025,7 +1025,7 @@ fn hcontrol_crashsave_house(g: &mut GameState, ch: CharId, arg: &str) {
     temp.guests = Vec::new();
     temp.guest_names = Vec::new();
 
-    houses().lock().unwrap().push(temp);
+    crate::lock_ok::lock(&houses()).push(temp);
 
     room_flag_set(g, real_house, ROOM_HOUSE | ROOM_PRIVATE);
     house_crashsave(g, virt_house);
@@ -1049,7 +1049,7 @@ fn hcontrol_destroy_house(g: &mut GameState, ch: CharId, arg: &str) {
     };
 
     let (atrium_vnum, house_vnum) = {
-        let table = houses().lock().unwrap();
+        let table = crate::lock_ok::lock(&houses());
         (table[i].atrium, table[i].vnum)
     };
 
@@ -1064,14 +1064,14 @@ fn hcontrol_destroy_house(g: &mut GameState, ch: CharId, arg: &str) {
 
     house_delete_file(g, house_vnum);
 
-    houses().lock().unwrap().remove(i);
+    crate::lock_ok::lock(&houses()).remove(i);
 
     g.send_to_char(ch, "House deleted.\r\n");
     house_save_control(g);
 
     // Re-set ROOM_ATRIUM on every surviving house's atrium (in case the
     // destroyed house shared an atrium with another). --JE 9/19/94
-    let atriums: Vec<RoomVnum> = houses().lock().unwrap().iter().map(|h| h.atrium).collect();
+    let atriums: Vec<RoomVnum> = crate::lock_ok::lock(&houses()).iter().map(|h| h.atrium).collect();
     for av in atriums {
         if let Some(ra) = g.real_room(av) {
             room_flag_set(g, ra, ROOM_ATRIUM);
@@ -1102,7 +1102,7 @@ fn hcontrol_pay_house(g: &mut GameState, ch: CharId, arg: &str) {
     mudlog(g, &msg, LVL_IMMORT.max(invis));
 
     {
-        let mut table = houses().lock().unwrap();
+        let mut table = crate::lock_ok::lock(&houses());
         table[i].last_payment = now();
     }
     house_save_control(g);
@@ -1186,7 +1186,7 @@ fn hcontrol_update_house(g: &mut GameState, ch: CharId, arg: &str) {
     }
 
     {
-        let mut table = houses().lock().unwrap();
+        let mut table = crate::lock_ok::lock(&houses());
         table[house].atrium = virt_atrium;
         table[house].exit_num = exit_num as i32;
         if owner != -1 {
@@ -1258,7 +1258,7 @@ pub fn do_house(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     };
 
     let my_idnum = g.get_char(ch).map(|c| c.idnum).unwrap_or(-1);
-    let owner = houses().lock().unwrap()[i].owner;
+    let owner = crate::lock_ok::lock(&houses())[i].owner;
     if my_idnum != owner {
         g.send_to_char(ch, "Only the primary owner can set guests.\r\n");
         return;
@@ -1266,7 +1266,7 @@ pub fn do_house(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
     if arg.is_empty() {
         // List guests.
-        let guests = houses().lock().unwrap()[i].guests.clone();
+        let guests = crate::lock_ok::lock(&houses())[i].guests.clone();
         g.send_to_char(ch, "Guests of your house:\r\n");
         if guests.is_empty() {
             g.send_to_char(ch, "  None.\r\n");
@@ -1288,7 +1288,7 @@ pub fn do_house(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     // Toggle: remove if already a guest, else add.
     let mut deleted = false;
     {
-        let mut table = houses().lock().unwrap();
+        let mut table = crate::lock_ok::lock(&houses());
         if let Some(pos) = table[i].guests.iter().position(|&gx| gx == id) {
             table[i].guests.remove(pos);
             if pos < table[i].guest_names.len() {
@@ -1305,7 +1305,7 @@ pub fn do_house(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         g.send_to_char(ch, "Guest deleted.\r\n");
     } else {
         // Enforce MAX_GUESTS like C's fixed array would.
-        let mut table = houses().lock().unwrap();
+        let mut table = crate::lock_ok::lock(&houses());
         if table[i].guests.len() > MAX_GUESTS {
             table[i].guests.truncate(MAX_GUESTS);
             table[i].guest_names.truncate(MAX_GUESTS);
@@ -1375,7 +1375,7 @@ pub fn do_bed(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
         }
     };
     let my_idnum = g.get_char(ch).map(|c| c.idnum).unwrap_or(-1);
-    let owner = houses().lock().unwrap()[i].owner;
+    let owner = crate::lock_ok::lock(&houses())[i].owner;
     if my_idnum != owner {
         g.send_to_char(ch, "Only the primary owner can go to bed in the house.\r\n");
         return;
@@ -1460,7 +1460,7 @@ pub fn do_bed(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
 /// House_save_all(): crash-save every house whose room carries ROOM_HOUSE_CRASH.
 /// Call from the periodic save heartbeat (C: House_save_all in the autosave).
 pub fn house_save_all(g: &mut GameState) {
-    let vnums: Vec<RoomVnum> = houses().lock().unwrap().iter().map(|h| h.vnum).collect();
+    let vnums: Vec<RoomVnum> = crate::lock_ok::lock(&houses()).iter().map(|h| h.vnum).collect();
     for vnum in vnums {
         if let Some(rnum) = g.real_room(vnum) {
             if room_flag_isset(g, rnum, ROOM_HOUSE_CRASH) {
@@ -1478,7 +1478,7 @@ pub fn house_for_owner(idnum: i64) -> Option<RoomVnum> {
     if idnum < 0 {
         return None;
     }
-    let table = houses().lock().unwrap();
+    let table = crate::lock_ok::lock(&houses());
     let mut found: Option<RoomVnum> = None;
     for h in table.iter() {
         if h.owner == idnum {
@@ -1493,7 +1493,7 @@ pub fn house_owned_by(vnum: RoomVnum, owner_idnum: i64) -> bool {
     if owner_idnum < 0 {
         return false;
     }
-    let table = houses().lock().unwrap();
+    let table = crate::lock_ok::lock(&houses());
     table
         .iter()
         .any(|h| h.vnum == vnum && h.owner == owner_idnum)
@@ -1510,7 +1510,7 @@ pub fn house_can_enter(g: &GameState, ch: CharId, house: RoomVnum) -> bool {
         Some(i) => i,
         None => return true,
     };
-    let table = houses().lock().unwrap();
+    let table = crate::lock_ok::lock(&houses());
     let h = &table[i];
     let my_idnum = g.get_char(ch).map(|c| c.idnum).unwrap_or(-1);
     match h.mode {
@@ -1530,7 +1530,7 @@ pub fn house_can_enter(g: &GameState, ch: CharId, house: RoomVnum) -> bool {
 
 #[cfg(test)]
 pub fn set_test_houses(house_records: Vec<(RoomVnum, i64)>) {
-    let mut table = houses().lock().unwrap();
+    let mut table = crate::lock_ok::lock(&houses());
     table.clear();
     for (vnum, owner) in house_records {
         let mut rec = HouseControlRec::blank();

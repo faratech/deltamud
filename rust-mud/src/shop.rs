@@ -2488,7 +2488,7 @@ mod tests {
         let ch = connected_player(&mut g, conn, "Imm", LVL_IMPL);
 
         {
-            let mut guard = shops().lock().unwrap();
+            let mut guard = crate::lock_ok::lock(&shops());
             guard.clear();
             for i in 0..40 {
                 let mut shop = ShopData::new(10_000 + i);
@@ -2505,14 +2505,14 @@ mod tests {
         assert!(out.contains("Virtual"));
         assert!(!out.contains("10039"));
 
-        shops().lock().unwrap().clear();
+        crate::lock_ok::lock(&shops()).clear();
         let _ = crate::modify::page_input(&mut g, conn, "q");
     }
 
     #[test]
     fn is_shop_keeper_vnum_matches_loaded_shop_table() {
         {
-            let mut guard = shops().lock().unwrap();
+            let mut guard = crate::lock_ok::lock(&shops());
             guard.clear();
             let mut shop = ShopData::new(1);
             shop.keeper = 4242;
@@ -2522,7 +2522,7 @@ mod tests {
         assert!(is_shop_keeper_vnum(4242));
         assert!(!is_shop_keeper_vnum(4243));
 
-        shops().lock().unwrap().clear();
+        crate::lock_ok::lock(&shops()).clear();
     }
 
     #[test]
@@ -2543,7 +2543,7 @@ mod tests {
         g.char_to_room(attacker, room);
         g.char_to_room(keeper, room);
         {
-            let mut guard = shops().lock().unwrap();
+            let mut guard = crate::lock_ok::lock(&shops());
             guard.clear();
             let mut shop = ShopData::new(1);
             shop.keeper = 4242;
@@ -2562,7 +2562,7 @@ mod tests {
             .outbuf
             .contains(MSG_CANT_KILL_KEEPER));
 
-        shops().lock().unwrap().clear();
+        crate::lock_ok::lock(&shops()).clear();
     }
 
     #[test]
@@ -2605,7 +2605,7 @@ mod tests {
         g.obj_to_char(stock, keeper);
 
         {
-            let mut guard = shops().lock().unwrap();
+            let mut guard = crate::lock_ok::lock(&shops());
             guard.clear();
             let mut shop = ShopData::new(1);
             shop.producing.push(5100);
@@ -2629,7 +2629,7 @@ mod tests {
             crate::dg_handler::get_global_var(ScriptKey::Obj(bought), "bought").as_deref(),
             Some("yes")
         );
-        shops().lock().unwrap().clear();
+        crate::lock_ok::lock(&shops()).clear();
     }
 }
 
