@@ -2168,6 +2168,9 @@ fn ghost_pc(g: &mut GameState, victim: CharId) {
     // file that would resurrect old gear on next login (#115).
     if let Some(ch) = g.get_char(victim) {
         if !ch.is_npc {
+            // Restore arena-backed-up state (wimpy/recall/affects) BEFORE the
+            // save, or the zeroed combatant snapshot persists to SQL (#390).
+            crate::arena::restore_bup_affects(g, victim);
             g.request_player_save(victim);
             crate::objsave::crash_delete_crashfile(g, victim);
         }

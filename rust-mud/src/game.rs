@@ -27,8 +27,8 @@ use tokio::time::{interval, Duration};
 // String path (render_color iterates `.chars()`, which would mangle the lone
 // 0xFF IAC byte). Instead they go straight down the per-conn output channel,
 // exactly like connection.rs's negotiation-refusal path, which wraps raw telnet
-// bytes via String::from_utf8_unchecked and relies on the writer only ever
-// calling `.as_bytes()`.
+// bytes. The output channel carries Vec<u8>: telnet frames are not valid
+// UTF-8, and the writer writes them verbatim.
 const IAC_WILL_ECHO: [u8; 3] = [0xFF, 0xFB, 0x01]; // IAC WILL ECHO
 const IAC_WONT_ECHO: [u8; 3] = [0xFF, 0xFC, 0x01]; // IAC WONT ECHO
 
@@ -236,7 +236,7 @@ pub struct Game {
     db: Arc<dyn DatabaseInterface>,
     /// Async output channel per connection (the writer half lives in the
     /// connection task). The Descriptor (in GameState) only buffers text.
-    outputs: HashMap<ConnId, mpsc::Sender<String>>,
+    outputs: HashMap<ConnId, mpsc::Sender<Vec<u8>>>,
     /// Character-creation choices accumulated across nanny steps.
     pending: HashMap<ConnId, PendingChoices>,
     /// Player records loaded at password-verify time (gates + motd choice)
@@ -2061,7 +2061,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         host: String,
         raw_fd: RawFd,
         name: String,
-        output_tx: mpsc::Sender<String>,
+        output_tx: mpsc::Sender<Vec<u8>>,
     ) {
         info!("Copyover recovery: re-attaching {} (fd {})", name, raw_fd);
         let mut d = Descriptor::with_fd(conn_id, host, raw_fd);
@@ -2654,7 +2654,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                     // non-blocking equivalent; the loop's to_close pass
                     // disconnects the descriptor below.
                     if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
-                        tx.try_send(rendered)
+                        tx.try_send(rendered.into_bytes())
                     {
                         if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                             d.state = ConState::Close;
@@ -2873,14 +2873,13 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
     /// `.as_bytes()`, so wrapping arbitrary bytes in a String is lossless.
     fn send_raw_bytes(&self, conn_id: ConnId, bytes: &[u8]) {
         if let Some(tx) = self.outputs.get(&conn_id) {
-            // SAFETY: the downstream writer only calls `.as_bytes()` on this
-            // String and never treats it as UTF-8 text; the bytes round-trip
-            // unchanged (same contract as connection.rs run_input_loop refusals).
-            let s = unsafe { String::from_utf8_unchecked(bytes.to_vec()) };
+            // The channel carries raw bytes: telnet frames are NOT valid
+            // UTF-8 (IAC = 0xFF), and Vec<u8> makes that contract
+            // compile-enforced instead of a from_utf8_unchecked UB risk.
             // try_send avoids making this async; the bounded(256) channel is
             // effectively never full for a 3-byte control sequence, and dropping
             // an echo-negotiation byte under extreme backpressure is harmless.
-            let _ = tx.try_send(s);
+            let _ = tx.try_send(bytes.to_vec());
         }
     }
     fn descriptor_name(&self, conn_id: ConnId) -> String {
@@ -4214,7 +4213,7 @@ mod shutdown_tests {
         assert_eq!(report.save_errors, 0);
         // The shutdown notice + prompt went through the output channel.
         let drained = rx.recv().await.expect("shutdown notice flushed");
-        assert!(drained.contains("shutting down"), "notice must be flushed");
+        assert!(String::from_utf8_lossy(&drained).contains("shutting down"), "notice must be flushed");
 
         // SQL row: reload through the db and check the core fields survived.
         let loaded = db.load_player("Shutdownee").await.expect("player persisted");

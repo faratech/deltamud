@@ -1002,9 +1002,13 @@ fn take_window(s: &str, start: usize, cap: usize) -> String {
     if start >= s.len() {
         return String::new();
     }
-    let mut begin = start;
-    while begin < s.len() && !s.is_char_boundary(begin) {
-        begin += 1;
+    // Back UP to the char boundary: a multi-byte character straddling the
+    // block seam would otherwise be DROPPED (its head in the previous block,
+    // its tail skipped here). Re-reading the few seam bytes in both blocks
+    // duplicates at most one character instead of losing it.
+    let mut begin = start.min(s.len());
+    while begin > 0 && !s.is_char_boundary(begin) {
+        begin -= 1;
     }
     let mut end = (begin + cap).min(s.len());
     while end > begin && !s.is_char_boundary(end) {

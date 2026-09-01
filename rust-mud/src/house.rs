@@ -1299,19 +1299,19 @@ pub fn do_house(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         } else {
             table[i].guests.push(id);
             table[i].guest_names.push(arg.to_lowercase());
+            // Enforce MAX_GUESTS BEFORE the save: truncating afterwards left
+            // guest #101+ on disk but absent from memory (locked out despite
+            // "Guest added.").
+            if table[i].guests.len() > MAX_GUESTS {
+                table[i].guests.truncate(MAX_GUESTS);
+                table[i].guest_names.truncate(MAX_GUESTS);
+            }
         }
     }
     house_save_control(g);
     if deleted {
         g.send_to_char(ch, "Guest deleted.\r\n");
     } else {
-        // Enforce MAX_GUESTS like C's fixed array would.
-        let mut table = crate::lock_ok::lock(&houses());
-        if table[i].guests.len() > MAX_GUESTS {
-            table[i].guests.truncate(MAX_GUESTS);
-            table[i].guest_names.truncate(MAX_GUESTS);
-        }
-        drop(table);
         g.send_to_char(ch, "Guest added.\r\n");
     }
 }

@@ -494,7 +494,7 @@ pub enum GameMessage {
         id: ConnId,
         host: String,
         raw_fd: RawFd,
-        output_tx: mpsc::Sender<String>,
+        output_tx: mpsc::Sender<Vec<u8>>,
     },
     /// Re-attach a player whose live socket was inherited across a copyover
     /// execv (comm.c copyover_recover). The Game loads the named player straight
@@ -504,7 +504,7 @@ pub enum GameMessage {
         host: String,
         raw_fd: RawFd,
         name: String,
-        output_tx: mpsc::Sender<String>,
+        output_tx: mpsc::Sender<Vec<u8>>,
     },
     Input {
         conn_id: ConnId,
@@ -540,7 +540,7 @@ pub async fn handle_client(
 
     let (mut reader, mut writer) = stream.into_split();
 
-    let (output_tx, mut output_rx) = mpsc::channel::<String>(256);
+    let (output_tx, mut output_rx) = mpsc::channel::<Vec<u8>>(256);
 
     game_tx
         .send(GameMessage::NewConnection {
@@ -557,7 +557,7 @@ pub async fn handle_client(
     // client. select! over both halves: whichever finishes first disconnects.
     let mut write_handle = tokio::spawn(async move {
         while let Some(msg) = output_rx.recv().await {
-            if writer.write_all(msg.as_bytes()).await.is_err() {
+            if writer.write_all(&msg).await.is_err() {
                 break;
             }
             if writer.flush().await.is_err() {
@@ -595,7 +595,7 @@ async fn run_input_loop<R: AsyncReadExt + Unpin>(
     reader: &mut R,
     conn_id: ConnId,
     game_tx: &mpsc::Sender<GameMessage>,
-    output_tx: &mpsc::Sender<String>,
+    output_tx: &mpsc::Sender<Vec<u8>>,
 ) {
     let mut filter = TelnetFilter::new();
     let mut buf = [0u8; 4096];
@@ -613,11 +613,10 @@ async fn run_input_loop<R: AsyncReadExt + Unpin>(
 
         // Send negotiation replies (IAC WONT/DONT for refused options, IAC WILL
         // for the GMCP/MSSP we accept) back to the client so it doesn't block
-        // waiting for a reply. The writer only ever calls `.as_bytes()`, so
-        // wrapping the raw bytes in a String is lossless.
+        // waiting for a reply. The channel carries raw bytes: telnet frames
+        // are NOT valid UTF-8 (IAC = 0xFF), so a String here would be UB.
         if !reply.is_empty() {
-            let msg = unsafe { String::from_utf8_unchecked(reply) };
-            if output_tx.send(msg).await.is_err() {
+            if output_tx.send(std::mem::take(&mut reply)).await.is_err() {
                 break;
             }
         }
@@ -662,7 +661,7 @@ pub async fn handle_recovered(
 ) -> Result<()> {
     let (mut reader, mut writer) = stream.into_split();
 
-    let (output_tx, mut output_rx) = mpsc::channel::<String>(256);
+    let (output_tx, mut output_rx) = mpsc::channel::<Vec<u8>>(256);
 
     game_tx
         .send(GameMessage::Recover {
@@ -676,7 +675,7 @@ pub async fn handle_recovered(
 
     let mut write_handle = tokio::spawn(async move {
         while let Some(msg) = output_rx.recv().await {
-            if writer.write_all(msg.as_bytes()).await.is_err() {
+            if writer.write_all(&msg).await.is_err() {
                 break;
             }
             if writer.flush().await.is_err() {
