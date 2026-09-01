@@ -3045,7 +3045,21 @@ fn print_object_location(g: &mut GameState, num: i32, oid: ObjId, ch: CharId, re
             ));
             g.send_to_char(ch, &buf);
             if recur {
-                print_object_location(g, 0, container, ch, recur);
+                // Containment chains are capped: only do_put rejects cycles,
+                // so any other double-parenting path (DG oput, a future OLC
+                // change) would recurse unboundedly here — same class as the
+                // extract_obj guard in state.rs.
+                thread_local! {
+                    static LOC_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+                }
+                const MAX_LOC_DEPTH: u32 = 16;
+                if LOC_DEPTH.with(|d| d.get()) < MAX_LOC_DEPTH {
+                    LOC_DEPTH.with(|d| d.set(d.get() + 1));
+                    print_object_location(g, 0, container, ch, recur);
+                    LOC_DEPTH.with(|d| d.set(d.get() - 1));
+                } else {
+                    g.send_to_char(ch, "... (containment too deep)\r\n");
+                }
             }
         }
         ObjLoc::Nowhere => {

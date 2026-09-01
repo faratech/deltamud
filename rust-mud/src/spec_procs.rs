@@ -2041,10 +2041,12 @@ pub fn register_room_specs(
     for &rv in death_rooms {
         assign(rv, dump as crate::spec_assign::RoomSpecFn);
     }
-    // Pet shops (ASSIGNROOM 3031 in stock CircleMUD/DeltaMUD). NOT assigned:
-    // zone 30 now owns room 3031 (The Tower Magazine), and the pet-shop proc's
-    // pet_room = in_room + 1 arithmetic assumed Midgaard's room layout.
-    // Registered in COMPATIBILITY.md (spec-assignment collisions).
+    // Pet shops (ASSIGNROOM 3031 in stock CircleMUD/DeltaMUD). NOT assigned
+    // to 3031: zone 30 now owns that room (The Tower Magazine), and the
+    // proc's pet_room = in_room + 1 arithmetic assumed Midgaard's layout.
+    // Registered at vnum 34000 instead -- no shipped room uses it, so
+    // production is inert while tests can still build a pet shop there.
+    assign(34000, pet_shops as crate::spec_assign::RoomSpecFn);
 }
 
 #[cfg(test)]

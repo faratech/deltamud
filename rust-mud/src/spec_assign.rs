@@ -296,6 +296,8 @@ pub fn get_room_spec(vnum: RoomVnum) -> Option<RoomSpecFn> {
     tables().rooms.get(&vnum).copied()
 }
 
+
+
 // ---------------------------------------------------------------------------
 // special() — the central dispatcher (interpreter.c::special).
 // ---------------------------------------------------------------------------
@@ -489,14 +491,16 @@ mod tests {
         let mut cfg = Config::default();
         cfg.no_specials = no_specials;
         let mut g = GameState::new(cfg);
+        // Production no longer assigns pet_shops to 3031 (zone 30 collision,
+        // COMPATIBILITY.md); tests register the proc on their own room vnum.
         let shop = g.add_room(Room::new(
-            3031,
+            34000,
             0,
             "Pet Shop".to_string(),
             "A pet shop.".to_string(),
         ));
         g.add_room(Room::new(
-            3032,
+            34001,
             0,
             "Pet Room".to_string(),
             "Pets wait here.".to_string(),

@@ -250,10 +250,18 @@ pub fn do_zedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     // ResetCmd list if the file is unreadable.
     let all = read_disk_cmds(&path).unwrap_or_else(|| cmds_from_memory(g, zone_index));
     let all_copy = all.clone();
-    let cmds: Vec<RawCmd> = all
-        .into_iter()
-        .filter(|c| belongs_to_room(&all_copy, room_vnum, c))
-        .collect();
+    let cmds: Vec<RawCmd> = {
+        // all_copy is a snapshot of the same list: indices line up 1:1, so
+        // look each element's index up by identity.
+        all.iter()
+            .enumerate()
+            .filter(|(i, c)| {
+                belongs_to_room_at(&all_copy, room_vnum, *i)
+                    && all_copy.get(*i).map(|x| std::ptr::eq(x, *c)).unwrap_or(false)
+            })
+            .map(|(_, c)| c.clone())
+            .collect()
+    };
 
     let st = ZeditState {
         room_vnum,
@@ -344,16 +352,21 @@ fn cmd_room(c: &RawCmd) -> Option<RoomVnum> {
 /// True if `c` belongs to `room` under C's carried-cmd_room semantics: the
 /// room-relevant commands M/O set it from arg3, D/R from arg1, and G/E/P
 /// inherit the room of the command before them.
-fn belongs_to_room(cmds: &[RawCmd], room_vnum: RoomVnum, c: &RawCmd) -> bool {
+fn belongs_to_room_at(cmds: &[RawCmd], room_vnum: RoomVnum, target: usize) -> bool {
+    // Position-based: the OLD implementation matched by pointer identity
+    // (std::ptr::eq(cmd, c)), but every caller passes a CLONE of the list, so
+    // the match never fired -- zedit showed an empty command list and every
+    // save appended a fresh copy of the room's resets instead of replacing
+    // them (double mob loads after reboot).
     let mut cur: Option<RoomVnum> = None;
-    for cmd in cmds {
+    for (i, cmd) in cmds.iter().enumerate() {
         match cmd.command {
             'M' | 'O' => cur = Some(cmd.arg3),
             'D' | 'R' => cur = Some(cmd.arg1),
             'G' | 'E' | 'P' => {}
             _ => log::warn!("SYSERR: OLC: zedit_parse(): invalid command state"),
         }
-        if std::ptr::eq(cmd, c) {
+        if i == target {
             return cur == Some(room_vnum);
         }
     }
@@ -362,8 +375,9 @@ fn belongs_to_room(cmds: &[RawCmd], room_vnum: RoomVnum, c: &RawCmd) -> bool {
 
 fn filter_room_cmds(cmds: &[RawCmd], room_vnum: RoomVnum, keep: bool) -> Vec<RawCmd> {
     cmds.iter()
-        .filter(|c| belongs_to_room(cmds, room_vnum, c) == keep)
-        .cloned()
+        .enumerate()
+        .filter(|(i, _)| belongs_to_room_at(cmds, room_vnum, *i) == keep)
+        .map(|(_, c)| c.clone())
         .collect()
 }
 
@@ -1422,8 +1436,9 @@ fn save_internally(g: &mut GameState, conn: ConnId) {
     let path = zon_file_path(g, st.zone_number);
     let survivors = {
         let mut all = read_disk_cmds(&path).unwrap_or_else(|| cmds_from_memory(g, st.zone_index));
-        let all_copy = all.clone();
-        all.retain(|c| !belongs_to_room(&all_copy, st.room_vnum, c));
+        // Drop every command that belongs to the edited room (the edited
+        // scratch commands are spliced back in at the front by the caller).
+        all = filter_room_cmds(&all, st.room_vnum, false);
         all
     };
     let all = splice_room_cmds(&st.cmds, survivors);
@@ -1456,8 +1471,9 @@ fn save_to_disk(g: &mut GameState, conn: ConnId) {
     // the file matches memory.
     let survivors = {
         let mut all = read_disk_cmds(&path).unwrap_or_else(|| cmds_from_memory(g, st.zone_index));
-        let all_copy = all.clone();
-        all.retain(|c| !belongs_to_room(&all_copy, st.room_vnum, c));
+        // Drop every command that belongs to the edited room (the edited
+        // scratch commands are spliced back in at the front by the caller).
+        all = filter_room_cmds(&all, st.room_vnum, false);
         all
     };
     let all = splice_room_cmds(&st.cmds, survivors);

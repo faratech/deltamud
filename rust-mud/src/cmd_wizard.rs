@@ -2201,8 +2201,17 @@ pub fn do_stat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 // ===========================================================================
 /// utils.c:333 touch(): create an empty control file for the autorun
 /// supervisor (#211/#199).
-fn write_control_file(path: &str) {
-    if let Ok(mut f) = std::fs::File::create(path) {
+fn write_control_file(g: &GameState, name: &str) {
+    // C chdir(DFLT_DIR="lib") at boot then touch("../.fastboot") (db.h):
+    // the marker lands in the DELTAMUD ROOT, where the autorun wrapper
+    // greps it. The old hardcoded "lib/etc/<name>" landed two levels below
+    // the wrapper's search path, so shutdown reboot/die/pause silently
+    // rebooted as plain crashes.
+    let root = std::path::Path::new(&g.config.lib_path)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    if let Ok(mut f) = std::fs::File::create(root.join(name)) {
         use std::io::Write;
         let _ = f.write_all(b"");
     }
@@ -2231,24 +2240,24 @@ pub fn do_shutdown(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
         );
         // C act.wizard.c:1212: touch(FASTBOOT_FILE) - the autorun wrapper
         // distinguishes reboot/stop/pause by these control files (#211).
-        write_control_file("lib/etc/.fastboot");
+        write_control_file(g, ".fastboot");
     } else if option.eq_ignore_ascii_case("now") {
         log_line(g, &format!("(GC) Shutdown NOW by {}.", cname));
         send_to_all(
             g,
             "&m[&YINFO&m]&n Rebooting.. come back in a minute or two.\r\n",
         );
-        write_control_file("lib/etc/.fastboot");
+        write_control_file(g, ".fastboot");
     } else if option.eq_ignore_ascii_case("die") {
         log_line(g, &format!("(GC) Shutdown by {}.", cname));
         send_to_all(g, "&m[&YINFO&m]&n Shutting down for maintenance.\r\n");
         // C act.wizard.c:1230: touch(KILLSCRIPT_FILE).
-        write_control_file("lib/etc/.killscript");
+        write_control_file(g, ".killscript");
     } else if option.eq_ignore_ascii_case("pause") {
         log_line(g, &format!("(GC) Shutdown by {}.", cname));
         send_to_all(g, "&m[&YINFO&m]&n Shutting down for maintenance.\r\n");
         // C act.wizard.c:1238: touch(PAUSE_FILE).
-        write_control_file("lib/etc/pause");
+        write_control_file(g, "pause");
     } else {
         g.shutdown_requested = false; // unknown option: do not halt
         g.send_to_char(ch, "Unknown shutdown option.\r\n");
@@ -6776,7 +6785,11 @@ pub fn do_copyover(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         }
 
         // Serialise: "fd name host" (C fprintf "%d %s %s\n").
-        let _ = writeln!(fp, "{} {} {}", fd, pname, host);
+            use std::io::Write as _;
+        if writeln!(fp, "{} {} {}", fd, pname, host).is_err() {
+            g.send_to_char(ch, "Copyover file not writeable, aborted.\n\r");
+            return;
+        }
 
         // Final synchronous flush to this player: their pending outbuf (rendered
         // + colorised, since the async render path won't run after exec) plus the
@@ -6796,9 +6809,14 @@ pub fn do_copyover(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         inherit_fds.push(fd);
     }
 
-    // Terminator line (C: "-1\n").
-    let _ = writeln!(fp, "-1");
-    let _ = fp.flush();
+    // Terminator line (C: "-1\n"). The recovery parser pairs entries by line
+    // order: a short file MUST abort rather than re-pair sockets with the
+    // wrong players.
+    use std::io::Write as _;
+    if writeln!(fp, "-1").is_err() || fp.flush().is_err() {
+        g.send_to_char(ch, "Copyover file not writeable, aborted.\n\r");
+        return;
+    }
     drop(fp);
     if let Some(mut cfp) = cfp.take() {
         let _ = cfp.flush();
@@ -7390,9 +7408,10 @@ WorldMap:\n",
     #[test]
     fn stat_reports_room_and_object_spec_procs() {
         let mut g = GameState::new(Config::default());
-        // Room 3031 is the stock pet-shop entrance (spec_assign.c ASSIGNROOM).
+        // vnum 34000 is the (production-inert) pet-shop registration; 3031 is
+        // now zone 30's Tower Magazine (COMPATIBILITY.md collisions table).
         let plain = g.add_room(Room::new(100, 0, "Plain".to_string(), "Plain.".to_string()));
-        let petshop = g.add_room(Room::new(3031, 30, "Pets".to_string(), "Pets.".to_string()));
+        let petshop = g.add_room(Room::new(34000, 30, "Pets".to_string(), "Pets.".to_string()));
         let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
         g.char_to_room(imm, petshop);
         do_stat_room(&mut g, imm);
