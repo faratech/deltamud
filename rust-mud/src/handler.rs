@@ -365,6 +365,11 @@ impl GameState {
         // so no master/follower id is left dangling (BUG 22).
         self.die_follower(cid);
 
+        // Arena bookkeeping: clear ARENA_COMBATANT* / observer references so a
+        // dead or purged combatant no longer satisfies is_arena_combatant
+        // (issue #392 -- observers otherwise attach to ghosts forever).
+        crate::arena::forget_char(cid);
+
         // Stop anyone targeting this character.
         let attackers: Vec<CharId> = self
             .chars

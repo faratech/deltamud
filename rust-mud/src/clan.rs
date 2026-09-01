@@ -1154,9 +1154,16 @@ fn clan_expel(g: &mut GameState, ch: CharId, arg: &str) {
         &format!("You have expelled {} from the clan.\r\n", vic_name),
     );
     {
+        // Only FULL members (rank > 0) were counted in `members`; applicants
+        // hold rank -1 and were never added (clan_apply), so expelling one
+        // must not decrement -- the old unconditional decrement drove
+        // Members negative and the value persisted in clans.dat.
+        let was_member = get_clan_rank(g, victim) > 0;
         let mut t = crate::lock_ok::lock(&table());
-        if let Some(c) = t.clans.get_mut(cl as usize) {
-            c.members -= 1;
+        if was_member {
+            if let Some(c) = t.clans.get_mut(cl as usize) {
+                c.members -= 1;
+            }
         }
     }
     save_clans();

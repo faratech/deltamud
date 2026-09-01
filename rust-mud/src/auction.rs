@@ -317,7 +317,21 @@ pub fn auction_update(g: &mut GameState) {
     }
 
     // Seller left the game entirely (not in world, not on a descriptor)?
+    // C (auction.c:57-63) destroys the lot here WITHOUT refunding the high
+    // bidder's debited gold -- real money destruction. Refund first.
     if get_ch_by_id_desc(g, seller_id).is_none() && get_ch_by_id(g, seller_id).is_none() {
+        let (bid, bidder_id) = (bid, bidder_id); // already snapshotted above
+        if bid > 0 {
+            if let Some(b) = get_ch_by_id(g, bidder_id) {
+                if let Some(c) = g.get_char_mut(b) {
+                    c.points.gold = c.points.gold.saturating_add(bid as i32);
+                }
+                g.send_to_char(
+                    b,
+                    "The auction has been cancelled (seller left).  Your bid has been returned.\r\n",
+                );
+            }
+        }
         if let Some(oid) = obj {
             g.extract_obj(oid);
         }

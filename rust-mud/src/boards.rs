@@ -665,7 +665,12 @@ pub fn board_remove(g: &mut GameState, board_type: usize, ch: CharId, arg: &str)
     let level = char_level_i32(g, ch);
 
     // Permission: high enough to remove others' messages, OR it's your own.
-    if level < REMOVE_LVL(board_type) as i32 && !m.heading.contains(&namebuf) {
+    // Author match runs against the FIXED author column (bytes 11..23) only:
+    // the old whole-heading substring match let a player's name inside a
+    // player-typed headline ("I saw (Bob) cheating") bypass the level gate.
+    let author_col = m.heading.get(11..23).unwrap_or("").trim().to_string();
+    let own_message = author_col == namebuf || author_col.starts_with(&namebuf);
+    if level < REMOVE_LVL(board_type) as i32 && !own_message {
         g.send_to_char(
             ch,
             "You are not holy enough to remove other people's messages.\r\n",
