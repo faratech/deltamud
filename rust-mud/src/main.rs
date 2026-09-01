@@ -738,7 +738,9 @@ async fn run_server() -> Result<state::ProcessDisposition> {
     }
 
     // Build the world.
+    let ban_handle = ban::BanHandle::default();
     let mut state = state::GameState::new(config.clone());
+    state.social.ban_handle = ban_handle.clone();
     // Seed the mud clock from the effective lib path before any world/helper
     // reads time_now()/sunlight() (the old static had to self-initialize; the
     // owned clock is seeded explicitly here).
@@ -813,9 +815,9 @@ async fn run_server() -> Result<state::ProcessDisposition> {
         Ok(counts) => clan::recount_member_counts(&mut state, &counts),
         Err(e) => warn!("Could not recount clan members from player_main: {}", e),
     }
-    boards::boot_boards(&config.lib_path);
-    ban::boot_ban(&config.lib_path);
-    mail::boot_mail(&config.lib_path);
+    boards::boot_boards(&mut state, &config.lib_path);
+    ban::boot_ban(&mut state, &config.lib_path);
+    mail::boot_mail(&mut state, &config.lib_path);
     quest::boot_quest(&mut state, &config.lib_path);
     auction::boot_auction(&mut state, &config.lib_path);
     // C boot_db order (db.c:358-365 vs 369-373): the initial zone reset
@@ -872,8 +874,8 @@ async fn run_server() -> Result<state::ProcessDisposition> {
     state.player_table = pt;
     // Mirror the index into the mail subsystem's private name<->id table so
     // offline senders/recipients resolve there too (mail.rs keeps its own copy).
-    for p in &state.player_table {
-        mail::mail_register_player(p.idnum, &p.name);
+    for p in state.player_table.clone() {
+        mail::mail_register_player(&mut state, p.idnum, &p.name);
     }
 
     let lib_path = config.lib_path.clone();
@@ -1181,7 +1183,13 @@ async fn run_server() -> Result<state::ProcessDisposition> {
         // sites their chance to log in an existing PLR_SITEOK char — so at the
         // socket level we only hard-drop BAN_ALL. (New/Select are enforced in
         // the login path where the char's flags are known.)
-        if connection::reject_ban_all(&mut stream, &connection::PeerIdentity::numeric(ip)).await {
+        if connection::reject_ban_all(
+            &mut stream,
+            &connection::PeerIdentity::numeric(ip),
+            &ban_handle,
+        )
+        .await
+        {
             continue;
         }
 
@@ -1228,12 +1236,21 @@ async fn run_server() -> Result<state::ProcessDisposition> {
         next_conn += 1;
         let tx = game_tx.clone();
         let resolver_slots = Arc::clone(&resolver_slots);
+        let ban_handle_for_task = ban_handle.clone();
         client_tasks.spawn(async move {
             // Hold the permit for the lifetime of the connection; dropping it on
             // task exit frees a slot for the next client.
             let _permit = permit;
-            if let Err(e) =
-                connection::handle_client(stream, peer, id, tx, reverse_dns, resolver_slots).await
+            if let Err(e) = connection::handle_client(
+                stream,
+                peer,
+                id,
+                tx,
+                reverse_dns,
+                resolver_slots,
+                ban_handle_for_task,
+            )
+            .await
             {
                 warn!("client {} error: {}", peer, e);
             }

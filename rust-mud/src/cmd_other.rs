@@ -843,9 +843,9 @@ pub fn do_save(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     // Crash_crashsave: rent/crash object file.
     let lib = g.config.lib_path.clone();
     crate::objsave::crash_save(g, ch, &lib);
-    // write_aliases(ch).
+    // write_aliases(g, ch).
     let idnum = g.get_char(ch).map(|c| c.idnum).unwrap_or(0);
-    let _ = crate::alias::write_aliases(&lib, &name, idnum);
+    let _ = crate::alias::write_aliases(g, &lib, &name, idnum);
     // House_crashsave when the room is flagged ROOM_HOUSE_CRASH.
     if let Some(rnum) = in_room {
         // C ROOM_HOUSE_CRASH is bit 12; RoomFlags names that bit NO_RECALL

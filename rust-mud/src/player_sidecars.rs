@@ -79,11 +79,12 @@ fn remove_if_present(label: &str, path: &Path, failures: &mut Vec<String>) {
 /// converge. The caller must retain an authoritative DB tombstone when this
 /// returns an error; a missing sidecar is already-clean success.
 pub fn delete_player_sidecars(
+    g: &mut crate::state::GameState,
     lib_path: &str,
     name: &str,
     idnum: i64,
 ) -> Result<(), PlayerSidecarError> {
-    crate::alias::clear_aliases(idnum);
+    crate::alias::clear_aliases(g, idnum);
     let paths = paths_for(lib_path, name).map_err(|error| PlayerSidecarError::new(vec![error]))?;
     let mut failures = Vec::new();
     for (label, path) in paths {
@@ -157,6 +158,7 @@ fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
 /// alias table with no source file is materialized first so a successful rename
 /// cannot leave those aliases durable only in memory.
 pub fn rename_player_sidecars(
+    g: &mut crate::state::GameState,
     lib_path: &str,
     old_name: &str,
     new_name: &str,
@@ -171,7 +173,7 @@ pub fn rename_player_sidecars(
     // before the transaction. We only call write_aliases after proving the old
     // path is absent, so it cannot unlink a known-good source on write failure.
     let old_alias = &old_paths[1].1;
-    if !crate::alias::get_aliases(idnum).is_empty() {
+    if !crate::alias::get_aliases(g, idnum).is_empty() {
         match std::fs::symlink_metadata(old_alias) {
             Ok(metadata) if metadata.file_type().is_file() => {}
             Ok(_) => {
@@ -181,7 +183,7 @@ pub fn rename_player_sidecars(
                 )]));
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                crate::alias::write_aliases(lib_path, old_name, idnum).map_err(|error| {
+                crate::alias::write_aliases(g, lib_path, old_name, idnum).map_err(|error| {
                     PlayerSidecarError::new(vec![format!(
                         "cannot materialize alias sidecar {}: {error}",
                         old_alias.display()
@@ -277,7 +279,7 @@ pub fn rename_player_sidecars(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::alias::{AliasEntry, clear_aliases, set_aliases};
+    use crate::alias::AliasEntry;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_lib(label: &str) -> PathBuf {
@@ -293,12 +295,18 @@ mod tests {
         path
     }
 
-    fn seed_sidecars(lib: &Path, name: &str, idnum: i64) -> (PathBuf, PathBuf) {
+    fn seed_sidecars(
+        g: &mut crate::state::GameState,
+        lib: &Path,
+        name: &str,
+        idnum: i64,
+    ) -> (PathBuf, PathBuf) {
         let lib = lib.to_str().unwrap();
         let rent = crate::objsave::crash_filename(lib, name).unwrap();
         std::fs::create_dir_all(rent.parent().unwrap()).unwrap();
         std::fs::write(&rent, b"rent").unwrap();
-        set_aliases(
+        crate::alias::set_aliases(
+            g,
             idnum,
             vec![AliasEntry {
                 alias: "greet".into(),
@@ -306,46 +314,57 @@ mod tests {
                 atype: 0,
             }],
         );
-        crate::alias::write_aliases(lib, name, idnum).unwrap();
+        crate::alias::write_aliases(g, lib, name, idnum).unwrap();
         let alias = crate::alias::alias_filename(lib, name).unwrap();
         (rent, alias)
     }
 
     #[test]
     fn rename_moves_both_mixed_case_sidecars_without_clearing_live_aliases() {
+        let mut g = crate::state::GameState::new(crate::config::Config::default());
         let lib = temp_lib("rename");
         let idnum = 9_413_001;
-        let (old_rent, old_alias) = seed_sidecars(&lib, "OlDnAmE", idnum);
+        let (old_rent, old_alias) = seed_sidecars(&mut g, &lib, "OlDnAmE", idnum);
         let new_rent = crate::objsave::crash_filename(lib.to_str().unwrap(), "NeWnAmE").unwrap();
         let new_alias = crate::alias::alias_filename(lib.to_str().unwrap(), "NeWnAmE").unwrap();
 
-        rename_player_sidecars(lib.to_str().unwrap(), "OlDnAmE", "NeWnAmE", idnum).unwrap();
+        rename_player_sidecars(&mut g, lib.to_str().unwrap(), "OlDnAmE", "NeWnAmE", idnum).unwrap();
 
         assert!(!old_rent.exists() && !old_alias.exists());
         assert!(new_rent.is_file() && new_alias.is_file());
-        assert_eq!(crate::alias::get_aliases(idnum).len(), 1);
-        clear_aliases(idnum);
+        assert_eq!(crate::alias::get_aliases(&g, idnum).len(), 1);
+        crate::alias::clear_aliases(&mut g, idnum);
         std::fs::remove_dir_all(lib).unwrap();
     }
 
     #[test]
     fn rename_accepts_missing_sidecars() {
+        let mut g = crate::state::GameState::new(crate::config::Config::default());
         let lib = temp_lib("missing");
-        rename_player_sidecars(lib.to_str().unwrap(), "Oldname", "Newname", 9_413_002).unwrap();
+        rename_player_sidecars(
+            &mut g,
+            lib.to_str().unwrap(),
+            "Oldname",
+            "Newname",
+            9_413_002,
+        )
+        .unwrap();
         std::fs::remove_dir_all(lib).unwrap();
     }
 
     #[test]
     fn blocked_destination_fails_before_moving_either_source() {
+        let mut g = crate::state::GameState::new(crate::config::Config::default());
         let lib = temp_lib("blocked");
         let idnum = 9_413_003;
-        let (old_rent, old_alias) = seed_sidecars(&lib, "Oldname", idnum);
+        let (old_rent, old_alias) = seed_sidecars(&mut g, &lib, "Oldname", idnum);
         let blocked_alias = crate::alias::alias_filename(lib.to_str().unwrap(), "Newname").unwrap();
         std::fs::create_dir_all(blocked_alias.parent().unwrap()).unwrap();
         std::fs::write(&blocked_alias, b"belongs to another identity").unwrap();
 
         let error =
-            rename_player_sidecars(lib.to_str().unwrap(), "Oldname", "Newname", idnum).unwrap_err();
+            rename_player_sidecars(&mut g, lib.to_str().unwrap(), "Oldname", "Newname", idnum)
+                .unwrap_err();
 
         assert!(error.to_string().contains("destination"));
         assert!(old_rent.is_file() && old_alias.is_file());
@@ -353,20 +372,21 @@ mod tests {
             std::fs::read(&blocked_alias).unwrap(),
             b"belongs to another identity"
         );
-        clear_aliases(idnum);
+        crate::alias::clear_aliases(&mut g, idnum);
         std::fs::remove_dir_all(lib).unwrap();
     }
 
     #[test]
     fn delete_attempts_both_files_and_clears_live_aliases() {
+        let mut g = crate::state::GameState::new(crate::config::Config::default());
         let lib = temp_lib("delete");
         let idnum = 9_413_004;
-        let (rent, alias) = seed_sidecars(&lib, "DeleteMe", idnum);
+        let (rent, alias) = seed_sidecars(&mut g, &lib, "DeleteMe", idnum);
 
-        delete_player_sidecars(lib.to_str().unwrap(), "dElEtEmE", idnum).unwrap();
+        delete_player_sidecars(&mut g, lib.to_str().unwrap(), "dElEtEmE", idnum).unwrap();
 
         assert!(!rent.exists() && !alias.exists());
-        assert!(crate::alias::get_aliases(idnum).is_empty());
+        assert!(crate::alias::get_aliases(&g, idnum).is_empty());
         std::fs::remove_dir_all(lib).unwrap();
     }
 }

@@ -28,7 +28,6 @@ use crate::state::GameState;
 use crate::syslog::{NRM, mudlog};
 use crate::types::*;
 use std::net::IpAddr;
-use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
 // db.h constants.
@@ -91,7 +90,7 @@ impl BanType {
 // ban_list_element (db.h). `date` is a unix timestamp (0 == "Unknown").
 // ---------------------------------------------------------------------------
 #[derive(Debug, Clone)]
-struct BanNode {
+pub struct BanNode {
     site: String, // already lowercased, truncated to BANNED_SITE_LENGTH
     name: String, // banner's name, truncated to MAX_NAME_LENGTH
     date: i64,
@@ -101,24 +100,54 @@ struct BanNode {
 /// Process-global tables (C `ban_list` + `invalid_list` file statics). `lib_path`
 /// is captured at boot so `do_ban`/`do_unban` can rewrite badsites without
 /// threading it through the ACMD signature.
-struct BanData {
-    ban_list: Vec<BanNode>,
-    invalid: Vec<String>,
-    lib_path: String,
+#[derive(Clone, Default)]
+pub struct BanData {
+    pub ban_list: Vec<crate::ban::BanNode>,
+    pub invalid: Vec<String>,
+    pub lib_path: String,
 }
 
-static BAN: OnceLock<Mutex<BanData>> = OnceLock::new();
+/// Shared read-side handle for the pre-Game accept path. The Game owns the
+/// authoritative `BanData` on GameState and publishes a fresh snapshot here
+/// after every mutation; the async accept loop reads one Arc clone per probe
+/// and never touches the world thread.
+#[derive(Clone)]
+pub struct BanHandle(std::sync::Arc<std::sync::RwLock<std::sync::Arc<BanData>>>);
 
-fn data() -> &'static Mutex<BanData> {
-    // If boot_ban was never called (e.g. a unit test), install empty tables so
-    // isbanned/valid_name behave like an empty-file install (all allowed).
-    BAN.get_or_init(|| {
-        Mutex::new(BanData {
-            ban_list: Vec::new(),
-            invalid: Vec::new(),
-            lib_path: "lib".to_string(),
-        })
-    })
+impl Default for BanHandle {
+    fn default() -> Self {
+        BanHandle(std::sync::Arc::new(std::sync::RwLock::new(
+            std::sync::Arc::new(BanData::default()),
+        )))
+    }
+}
+
+impl BanHandle {
+    pub fn snapshot(&self) -> std::sync::Arc<BanData> {
+        self.0
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+/// The authoritative in-memory ban tables live on GameState (`social.ban`).
+fn data(g: &GameState) -> &BanData {
+    &g.social.ban
+}
+
+fn data_mut(g: &mut GameState) -> &mut BanData {
+    &mut g.social.ban
+}
+
+/// Publish the authoritative state to the shared accept-path snapshot. Call
+/// after every mutation of `g.social.ban`.
+fn publish(g: &GameState) {
+    *g.social
+        .ban_handle
+        .0
+        .write()
+        .unwrap_or_else(|p| p.into_inner()) = std::sync::Arc::new(g.social.ban.clone());
 }
 
 // ---------------------------------------------------------------------------
@@ -299,20 +328,15 @@ fn canonical_ban_mask(raw: &str) -> Option<String> {
 /// CircleMUD boot_ban(): load_banned() + Read_Invalid_List(). The integrator
 /// calls this once at startup with the configured lib path, e.g.
 /// `ban::boot_ban(&config.lib_path)` (matching the other boot_* hooks).
-pub fn boot_ban(lib_path: &str) {
+pub fn boot_ban(g: &mut GameState, lib_path: &str) {
     let ban_list = load_banned(lib_path);
     let invalid = read_invalid_list(lib_path);
-    let new_data = BanData {
+    g.social.ban = BanData {
         ban_list,
         invalid,
         lib_path: lib_path.to_string(),
     };
-    match BAN.get() {
-        Some(m) => *crate::lock_ok::lock(&m) = new_data,
-        None => {
-            let _ = BAN.set(Mutex::new(new_data));
-        }
-    }
+    publish(g);
 }
 
 /// CircleMUD load_banned(): parse `lib/etc/badsites`. Each record is four
@@ -477,15 +501,26 @@ fn write_ban_list(d: &BanData) {
 /// CircleMUD isbanned(): lowercase the host, wildmatch every ban mask against
 /// it, and return the strongest matching BanType (MAX over matches). An empty
 /// host is never banned.
-pub fn isbanned(host: &str) -> BanType {
-    isbanned_connection(host, None)
+pub fn isbanned(g: &GameState, host: &str) -> BanType {
+    isbanned_connection(g, host, None)
 }
 
 /// Match every connection identity that is safe to trust. `peer_ip` is always
 /// the canonical address captured from the socket and is checked even when a
 /// forward-confirmed reverse-DNS hostname is available. This prevents adding
 /// hostname support from weakening existing exact/glob IP bans.
-pub fn isbanned_connection(peer_ip: &str, verified_hostname: Option<&str>) -> BanType {
+pub fn isbanned_connection(
+    g: &GameState,
+    peer_ip: &str,
+    verified_hostname: Option<&str>,
+) -> BanType {
+    let d = g.social.ban_handle.snapshot();
+    isbanned_snapshot(&d, peer_ip, verified_hostname)
+}
+
+/// Pure matcher over one snapshot: shared by the GameState path and the
+/// pre-Game accept path (which holds a `BanHandle`).
+pub fn isbanned_snapshot(d: &BanData, peer_ip: &str, verified_hostname: Option<&str>) -> BanType {
     let parsed_ip = peer_ip.parse::<IpAddr>().ok();
     let canonical_ip = parsed_ip
         .map(|ip| ip.to_string())
@@ -504,7 +539,6 @@ pub fn isbanned_connection(peer_ip: &str, verified_hostname: Option<&str>) -> Ba
         return BanType::None;
     }
 
-    let d = crate::lock_ok::lock(&data());
     let mut worst = BanType::None;
     for node in &d.ban_list {
         let matches_ip = (!canonical_ip.is_empty() && wildmatch(&node.site, &canonical_ip))
@@ -533,8 +567,8 @@ pub fn isbanned_connection(peer_ip: &str, verified_hostname: Option<&str>) -> Ba
 /// is exposed as `valid_name_in` taking &GameState; this no-world entry point
 /// performs only the substring check (still useful where the world isn't
 /// threaded, and matching C's behaviour when `mob_proto` is empty).
-pub fn valid_name(newname: &str) -> bool {
-    let d = crate::lock_ok::lock(&data());
+pub fn valid_name(g: &GameState, newname: &str) -> bool {
+    let d = g.social.ban_handle.snapshot();
     if d.invalid.is_empty() {
         return true;
     }
@@ -553,7 +587,7 @@ pub fn valid_name(newname: &str) -> bool {
 /// loaded mob prototype.
 pub fn valid_name_in(g: &GameState, newname: &str) -> bool {
     {
-        let d = crate::lock_ok::lock(&data());
+        let d = data(g);
         if d.invalid.is_empty() {
             // C returns valid if the list doesn't exist; the mob check still
             // runs in C, but with no invalid list the substring loop is the only
@@ -614,9 +648,8 @@ pub fn do_ban(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     // ----- No argument: print the ban list. -----
     if argument.is_empty() {
         let rows: Vec<(String, &'static str, String, String)> = {
-            let d = crate::lock_ok::lock(&data());
+            let d = data(g);
             if d.ban_list.is_empty() {
-                drop(d);
                 g.send_to_char(ch, "No sites are banned.\r\n");
                 return;
             }
@@ -680,10 +713,7 @@ pub fn do_ban(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     let now = chrono::Utc::now().timestamp();
 
     // Duplicate check + insert under the lock, then persist a snapshot.
-    let duplicate = {
-        let d = crate::lock_ok::lock(&data());
-        d.ban_list.iter().any(|n| str_cmp(&n.site, &site_lc))
-    };
+    let duplicate = data(g).ban_list.iter().any(|n| str_cmp(&n.site, &site_lc));
     if duplicate {
         g.send_to_char(
             ch,
@@ -693,10 +723,9 @@ pub fn do_ban(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     }
 
     {
-        let mut d = crate::lock_ok::lock(&data());
         let mut banner_t = banner.clone();
         crate::text::truncate_utf8_bytes(&mut banner_t, MAX_NAME_LENGTH);
-        d.ban_list.insert(
+        data_mut(g).ban_list.insert(
             0,
             BanNode {
                 site: site_lc.clone(),
@@ -705,7 +734,8 @@ pub fn do_ban(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
                 ban_type,
             },
         );
-        write_ban_list(&d);
+        write_ban_list(data(g));
+        publish(g);
     }
 
     let log = format!(
@@ -731,16 +761,17 @@ pub fn do_unban(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     // Find + remove the node, capturing its type/site for the log message.
     let lookup = canonical_ban_mask(&site).unwrap_or_else(|| site.to_ascii_lowercase());
     let removed = {
-        let mut d = crate::lock_ok::lock(&data());
+        let d = data_mut(g);
         match d.ban_list.iter().position(|n| str_cmp(&n.site, &lookup)) {
             Some(idx) => {
                 let node = d.ban_list.remove(idx);
-                write_ban_list(&d);
+                write_ban_list(d);
                 Some(node)
             }
             None => None,
         }
     };
+    publish(g);
 
     let node = match removed {
         Some(n) => n,

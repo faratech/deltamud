@@ -109,7 +109,7 @@ pub fn abort_conn(g: &mut GameState, conn_id: ConnId) {
     crate::lock_ok::lock(&pagers()).remove(&conn_id);
     match target {
         Some(EditTarget::Mail) => {
-            crate::mail::abort_mail(conn_id);
+            crate::mail::abort_mail(g, conn_id);
         }
         Some(EditTarget::Board) => {
             crate::boards::board_finish_write(g, conn_id, "", false);
@@ -521,7 +521,7 @@ fn finish_editor(g: &mut GameState, conn: ConnId, terminator: i32) -> bool {
                     );
                 }
             } else {
-                crate::mail::abort_mail(conn);
+                crate::mail::abort_mail(g, conn);
                 send_to_q(g, conn, "Mail aborted.\r\n");
             }
         }
@@ -2204,28 +2204,28 @@ mod tests {
     #[test]
     fn abort_conn_routes_mail_target_cleanup() {
         let (mut g, conn, _ch, _obj) = editor_game();
-        crate::mail::seed_pending_mail_for_test(conn);
+        crate::mail::seed_pending_mail_for_test(&mut g, conn);
         start_mail_editing(&mut g, conn, 1000);
         assert!(editing_any(conn));
-        assert!(crate::mail::has_pending_mail(conn));
+        assert!(crate::mail::has_pending_mail(&g, conn));
 
         abort_conn(&mut g, conn);
 
         assert!(!editing_any(conn));
-        assert!(!crate::mail::has_pending_mail(conn));
+        assert!(!crate::mail::has_pending_mail(&g, conn));
     }
 
     #[test]
     fn abort_conn_routes_board_target_cleanup() {
         let (mut g, conn, _ch, _obj) = editor_game();
-        crate::boards::seed_pending_write_for_test(conn);
+        crate::boards::seed_pending_write_for_test(&mut g, conn);
         start_board_editing(&mut g, conn, 1000);
         assert!(editing_any(conn));
-        assert!(crate::boards::has_pending_write_for_test(conn));
+        assert!(crate::boards::has_pending_write_for_test(&g, conn));
 
         abort_conn(&mut g, conn);
 
         assert!(!editing_any(conn));
-        assert!(!crate::boards::has_pending_write_for_test(conn));
+        assert!(!crate::boards::has_pending_write_for_test(&g, conn));
     }
 }

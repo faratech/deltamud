@@ -7509,7 +7509,8 @@ pub fn perform_copyover(g: &mut GameState, ch: CharId) {
                 character.act_flags |= crate::objsave::PLR_CRASH;
             }
         }
-        if let Err(error) = crate::alias::write_aliases(&g.config.lib_path, &player_name, player_id)
+        if let Err(error) =
+            crate::alias::write_aliases(g, &g.config.lib_path, &player_name, player_id)
         {
             log::warn!("copyover alias save failed: {error}");
             g.send_to_char(ch, "Copyover could not save player aliases; aborted.\n\r");
@@ -9059,11 +9060,15 @@ WorldMap:\n",
         (g, lib, admin, victim)
     }
 
-    fn seed_rename_sidecars(g: &GameState, idnum: i64) -> (std::path::PathBuf, std::path::PathBuf) {
+    fn seed_rename_sidecars(
+        g: &mut GameState,
+        idnum: i64,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
         let rent = crate::objsave::crash_filename(&g.config.lib_path, "Oldname").unwrap();
         std::fs::create_dir_all(rent.parent().unwrap()).unwrap();
         std::fs::write(&rent, b"rent owned by Oldname").unwrap();
         crate::alias::set_aliases(
+            g,
             idnum,
             vec![crate::alias::AliasEntry {
                 alias: "waveall".into(),
@@ -9071,7 +9076,7 @@ WorldMap:\n",
                 atype: 0,
             }],
         );
-        crate::alias::write_aliases(&g.config.lib_path, "Oldname", idnum).unwrap();
+        crate::alias::write_aliases(g, &g.config.lib_path.clone(), "Oldname", idnum).unwrap();
         let alias = crate::alias::alias_filename(&g.config.lib_path, "Oldname").unwrap();
         (rent, alias)
     }
@@ -9080,7 +9085,7 @@ WorldMap:\n",
     fn rename_queues_a_durable_operation_without_publishing_any_identity() {
         let (mut g, lib, admin, victim) = rename_test_state("queue");
         let idnum = g.get_char(victim).unwrap().idnum;
-        let (old_rent, old_alias) = seed_rename_sidecars(&g, idnum);
+        let (old_rent, old_alias) = seed_rename_sidecars(&mut g, idnum);
         let new_rent = crate::objsave::crash_filename(&g.config.lib_path, "Newname").unwrap();
         let new_alias = crate::alias::alias_filename(&g.config.lib_path, "Newname").unwrap();
 
@@ -9102,7 +9107,7 @@ WorldMap:\n",
         assert!(!g.descriptors[&ConnId(1)].outbuf.contains("renamed"));
         assert!(!g.descriptors[&ConnId(2)].outbuf.contains("renamed"));
 
-        crate::alias::clear_aliases(idnum);
+        crate::alias::clear_aliases(&mut g, idnum);
         std::fs::remove_dir_all(lib).unwrap();
     }
 

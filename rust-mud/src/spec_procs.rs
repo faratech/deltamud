@@ -1898,7 +1898,7 @@ pub fn tent(g: &mut GameState, ch: CharId, me: ObjId, cmd: &str, _arg: &str) -> 
         To::Room,
     );
 
-    // write_aliases(ch) — alias persistence is handled by the regular save path;
+    // write_aliases(g, ch) — alias persistence is handled by the regular save path;
     // Crash_rentsave(ch, 0) banks the inventory at zero cost.
     crate::objsave::crash_rentsave(g, ch, 0);
 

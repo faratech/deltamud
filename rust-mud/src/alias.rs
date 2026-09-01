@@ -20,9 +20,7 @@
 
 use crate::state::GameState;
 use crate::types::*;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 
 // C: ALIAS_SIMPLE / ALIAS_COMPLEX (interpreter.h).
 const ALIAS_SIMPLE: i32 = 0;
@@ -61,42 +59,36 @@ pub enum AliasExpansion {
 /// -1 for mobs, which never get here because do_alias/alias_replace short out
 /// on NPCs). The Vec is ordered newest-first, mirroring the C linked list which
 /// prepends new aliases at the head (a->next = GET_ALIASES; GET_ALIASES = a).
-static ALIASES: OnceLock<Mutex<HashMap<i64, Vec<AliasEntry>>>> = OnceLock::new();
-
-fn table() -> &'static Mutex<HashMap<i64, Vec<AliasEntry>>> {
-    ALIASES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 // ---------------------------------------------------------------------------
 // Storage API (also usable by the player-file layer for read/write_aliases).
 // ---------------------------------------------------------------------------
 
 /// Replace a player's entire alias list (C read_aliases load path).
-pub fn set_aliases(idnum: i64, list: Vec<AliasEntry>) {
-    crate::lock_ok::lock(&table()).insert(idnum, list);
+pub fn set_aliases(g: &mut GameState, idnum: i64, list: Vec<AliasEntry>) {
+    g.social.aliases.insert(idnum, list);
 }
 
 /// Snapshot a player's alias list for saving (C write_aliases) — newest-first,
 /// matching the in-memory order the C linked list iterates for output.
-pub fn get_aliases(idnum: i64) -> Vec<AliasEntry> {
-    table()
-        .lock()
-        .unwrap()
-        .get(&idnum)
-        .cloned()
-        .unwrap_or_default()
+pub fn get_aliases(g: &GameState, idnum: i64) -> Vec<AliasEntry> {
+    g.social.aliases.get(&idnum).cloned().unwrap_or_default()
 }
 
 /// Drop a player's aliases from the live table (e.g. on extract). Idempotent.
-pub fn clear_aliases(idnum: i64) {
-    crate::lock_ok::lock(&table()).remove(&idnum);
+pub fn clear_aliases(g: &mut GameState, idnum: i64) {
+    g.social.aliases.remove(&idnum);
 }
 
 /// Remove both the durable alias sidecar and its live cache entry. This is
 /// used by permanent character deletion so recreating the same name cannot
 /// inherit commands owned by the deleted identity.
-pub fn delete_aliases(lib_path: &str, name: &str, idnum: i64) -> std::io::Result<()> {
-    clear_aliases(idnum);
+pub fn delete_aliases(
+    g: &mut GameState,
+    lib_path: &str,
+    name: &str,
+    idnum: i64,
+) -> std::io::Result<()> {
+    clear_aliases(g, idnum);
     let Some(path) = alias_filename(lib_path, name) else {
         return Ok(());
     };
@@ -131,10 +123,15 @@ pub(crate) fn alias_filename(lib_path: &str, name: &str) -> Option<PathBuf> {
     )
 }
 
-/// C read_aliases(): load `plralias/<bucket>/<lowername>.alias` triples into
+/// C read_aliases(g, ): load `plralias/<bucket>/<lowername>.alias` triples into
 /// the live alias table. Missing files mean the character has no aliases.
-pub fn read_aliases(lib_path: &str, name: &str, idnum: i64) -> std::io::Result<()> {
-    clear_aliases(idnum);
+pub fn read_aliases(
+    g: &mut GameState,
+    lib_path: &str,
+    name: &str,
+    idnum: i64,
+) -> std::io::Result<()> {
+    clear_aliases(g, idnum);
     let Some(path) = alias_filename(lib_path, name) else {
         return Ok(());
     };
@@ -177,21 +174,21 @@ pub fn read_aliases(lib_path: &str, name: &str, idnum: i64) -> std::io::Result<(
         });
     }
     if !list.is_empty() {
-        set_aliases(idnum, list);
+        set_aliases(g, idnum, list);
     }
     Ok(())
 }
 
-/// C write_aliases(): rewrite the whole alias sidecar. Empty alias lists remove
+/// C write_aliases(g, ): rewrite the whole alias sidecar. Empty alias lists remove
 /// the old file and leave no replacement (absence is the "no aliases"
 /// representation, and unlink is atomic). Non-empty lists are published by
 /// durable temp-plus-rename, so a crash mid-write can no longer destroy the
 /// previous sidecar (the old remove-then-create window is gone).
-pub fn write_aliases(lib_path: &str, name: &str, idnum: i64) -> std::io::Result<()> {
+pub fn write_aliases(g: &GameState, lib_path: &str, name: &str, idnum: i64) -> std::io::Result<()> {
     let Some(path) = alias_filename(lib_path, name) else {
         return Ok(());
     };
-    let aliases = get_aliases(idnum);
+    let aliases = get_aliases(&g, idnum);
     if aliases.is_empty() {
         return match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
@@ -214,9 +211,9 @@ pub fn write_aliases(lib_path: &str, name: &str, idnum: i64) -> std::io::Result<
     crate::olc::atomic_replace(&path, bytes.as_bytes())
 }
 
-fn persist_aliases(g: &GameState, idnum: i64, name: &str) {
-    if let Err(err) = write_aliases(&g.config.lib_path, name, idnum) {
-        log::warn!("write_aliases({name}) failed: {err}");
+fn persist_aliases(g: &mut GameState, idnum: i64, name: &str) {
+    if let Err(err) = write_aliases(g, &g.config.lib_path.clone(), name, idnum) {
+        log::warn!("write_aliases(g, {name}) failed: {err}");
     }
 }
 
@@ -339,8 +336,7 @@ pub fn alias_expand(g: &GameState, ch: CharId, input: &str) -> Option<AliasExpan
     }
 
     let matched = {
-        let guard = crate::lock_ok::lock(&table());
-        let list = guard.get(&idnum)?;
+        let list = g.social.aliases.get(&idnum)?;
         let idx = find_alias_index(list, first_arg)?;
         list[idx].clone()
     };
@@ -381,7 +377,7 @@ pub fn do_alias(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
     if arg.is_empty() {
         // No argument — list currently defined aliases.
-        let list = get_aliases(idnum);
+        let list = get_aliases(&g, idnum);
         g.send_to_char(ch, "Currently defined aliases:\r\n");
         if list.is_empty() {
             g.send_to_char(ch, " None.\r\n");
@@ -399,8 +395,7 @@ pub fn do_alias(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     // (C: REMOVE_FROM_LIST + free_alias). `existed` tracks whether one was
     // present, to choose the delete-vs-no-such message below.
     let existed = {
-        let mut guard = crate::lock_ok::lock(&table());
-        let list = guard.entry(idnum).or_default();
+        let list = g.social.aliases.entry(idnum).or_default();
         if let Some(idx) = find_alias_index(list, arg) {
             list.remove(idx);
             true
@@ -438,8 +433,7 @@ pub fn do_alias(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     // Prepend (C: a->next = GET_ALIASES(ch); GET_ALIASES(ch) = a) so the list
     // stays newest-first.
     {
-        let mut guard = crate::lock_ok::lock(&table());
-        let list = guard.entry(idnum).or_default();
+        let list = g.social.aliases.entry(idnum).or_default();
         list.insert(
             0,
             AliasEntry {
@@ -489,7 +483,9 @@ mod tests {
     fn alias_sidecar_round_trips_c_triples_and_removes_empty_file() {
         let lib = temp_lib("round_trip");
         let idnum = 42;
+        let mut g = crate::state::GameState::new(crate::config::Config::default());
         set_aliases(
+            &mut g,
             idnum,
             vec![
                 AliasEntry {
@@ -505,17 +501,17 @@ mod tests {
             ],
         );
 
-        write_aliases(lib.to_str().unwrap(), "Tester", idnum).unwrap();
+        write_aliases(&g, lib.to_str().unwrap(), "Tester", idnum).unwrap();
         let path = alias_filename(lib.to_str().unwrap(), "Tester").unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "zz\nsleep\n0\ncombo\nsay $1;wave\n1\n"
         );
 
-        clear_aliases(idnum);
-        read_aliases(lib.to_str().unwrap(), "Tester", idnum).unwrap();
+        clear_aliases(&mut g, idnum);
+        read_aliases(&mut g, lib.to_str().unwrap(), "Tester", idnum).unwrap();
         assert_eq!(
-            get_aliases(idnum),
+            get_aliases(&g, idnum),
             vec![
                 AliasEntry {
                     alias: "zz".to_string(),
@@ -530,8 +526,8 @@ mod tests {
             ]
         );
 
-        set_aliases(idnum, Vec::new());
-        write_aliases(lib.to_str().unwrap(), "Tester", idnum).unwrap();
+        set_aliases(&mut g, idnum, Vec::new());
+        write_aliases(&g, lib.to_str().unwrap(), "Tester", idnum).unwrap();
         assert!(!path.exists());
         let _ = std::fs::remove_dir_all(lib);
     }
@@ -540,7 +536,9 @@ mod tests {
     fn permanent_delete_removes_sidecar_and_live_aliases() {
         let lib = temp_lib("delete");
         let idnum = 43;
+        let mut g = crate::state::GameState::new(crate::config::Config::default());
         set_aliases(
+            &mut g,
             idnum,
             vec![AliasEntry {
                 alias: "x".to_string(),
@@ -548,14 +546,14 @@ mod tests {
                 atype: ALIAS_SIMPLE,
             }],
         );
-        write_aliases(lib.to_str().unwrap(), "Tester", idnum).unwrap();
+        write_aliases(&g, lib.to_str().unwrap(), "Tester", idnum).unwrap();
         let path = alias_filename(lib.to_str().unwrap(), "Tester").unwrap();
         assert!(path.exists());
 
-        delete_aliases(lib.to_str().unwrap(), "Tester", idnum).unwrap();
+        delete_aliases(&mut g, lib.to_str().unwrap(), "Tester", idnum).unwrap();
 
         assert!(!path.exists());
-        assert!(get_aliases(idnum).is_empty());
+        assert!(get_aliases(&g, idnum).is_empty());
         let _ = std::fs::remove_dir_all(lib);
     }
 
@@ -566,9 +564,11 @@ mod tests {
     fn rewrites_publish_atomically_without_stray_temporaries() {
         let lib = temp_lib("atomic_rewrite");
         let idnum = 44;
+        let mut g = crate::state::GameState::new(crate::config::Config::default());
         let bucket_dir = lib.join("plralias").join("P-T");
 
         set_aliases(
+            &mut g,
             idnum,
             vec![AliasEntry {
                 alias: "old".to_string(),
@@ -576,7 +576,7 @@ mod tests {
                 atype: ALIAS_SIMPLE,
             }],
         );
-        write_aliases(lib.to_str().unwrap(), "Tester", idnum).unwrap();
+        write_aliases(&g, lib.to_str().unwrap(), "Tester", idnum).unwrap();
         let path = alias_filename(lib.to_str().unwrap(), "Tester").unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -584,6 +584,7 @@ mod tests {
         );
 
         set_aliases(
+            &mut g,
             idnum,
             vec![AliasEntry {
                 alias: "new".to_string(),
@@ -591,7 +592,7 @@ mod tests {
                 atype: ALIAS_SIMPLE,
             }],
         );
-        write_aliases(lib.to_str().unwrap(), "Tester", idnum).unwrap();
+        write_aliases(&g, lib.to_str().unwrap(), "Tester", idnum).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),

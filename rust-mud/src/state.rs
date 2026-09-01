@@ -526,6 +526,20 @@ pub struct SocialState {
     pub help_table: Vec<crate::hedit::HelpEntry>,
     /// hedit.rs: true once the help table has been loaded this run.
     pub help_loaded: bool,
+    /// alias.rs: per-player alias lists keyed by persistent idnum
+    /// (C GET_ALIASES side lists).
+    pub aliases: HashMap<i64, Vec<crate::alias::AliasEntry>>,
+    /// boards.rs: the board runtime (messages, formats, quarantine, compose
+    /// state).
+    pub boards: crate::boards::BoardRuntime,
+    /// mail.rs: the mail system (plrmail block store + index).
+    pub mail: crate::mail::MailSystem,
+    /// mail.rs: connections currently composing a mail body.
+    pub mail_pending: HashMap<ConnId, crate::mail::PendingMail>,
+    /// ban.rs: the authoritative ban/invalid-name tables.
+    pub ban: crate::ban::BanData,
+    /// ban.rs: shared snapshot handle for the pre-Game accept path.
+    pub ban_handle: crate::ban::BanHandle,
 }
 
 #[derive(Default)]

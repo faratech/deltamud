@@ -1288,11 +1288,14 @@ impl Game {
                 continue;
             };
             report.alias_writes_attempted = report.alias_writes_attempted.saturating_add(1);
-            if let Err(error) =
-                crate::alias::write_aliases(&self.lib_path, snapshot.get_name(), snapshot.idnum)
-            {
+            if let Err(error) = crate::alias::write_aliases(
+                &self.state,
+                &self.lib_path,
+                snapshot.get_name(),
+                snapshot.idnum,
+            ) {
                 warn!(
-                    "shutdown write_aliases({}) failed: {}",
+                    "shutdown write_aliases(g, {}) failed: {}",
                     snapshot.get_name(),
                     error
                 );
@@ -2602,6 +2605,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                         // is explicitly surfaced and audited instead of falsely
                         // claiming that deletion completed.
                         if let Err(cleanup_error) = crate::player_sidecars::delete_player_sidecars(
+                            &mut self.state,
                             &self.lib_path,
                             &name,
                             rec.idnum,
@@ -2698,6 +2702,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             return crate::ban::BanType::None;
         };
         crate::ban::isbanned_connection(
+            &self.state,
             &descriptor.peer_ip,
             descriptor.verified_hostname.as_deref(),
         )
@@ -2911,7 +2916,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                 if let Err(e) = self.db_save_player_with_host(&ch, &host).await {
                     warn!("save new player {} failed: {}", name, e);
                 }
-                crate::alias::clear_aliases(ch.idnum);
+                crate::alias::clear_aliases(&mut self.state, ch.idnum);
                 // Register the new player in the in-memory index immediately (C
                 // create_entry appends to player_table) so name<->idnum lookups
                 // — ignore-by-name, mail, `last` — resolve them at once, before
@@ -2927,7 +2932,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                     ch.last_logon.timestamp(),
                     &host,
                 );
-                crate::mail::mail_register_player(ch.idnum, &name);
+                crate::mail::mail_register_player(&mut self.state, ch.idnum, &name);
                 // C interpreter.c start_player (1637-1653): the new character
                 // gets the MOTD + PRESS RETURN and lands at the MENU; the
                 // actual world-enter happens at menu option 1.
@@ -3305,8 +3310,10 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             }
         }
         let is_new_char = self.just_created.remove(&conn_id);
-        if let Err(e) = crate::alias::read_aliases(&self.lib_path, ch.get_name(), ch.idnum) {
-            warn!("read_aliases({}) failed: {}", ch.get_name(), e);
+        if let Err(e) =
+            crate::alias::read_aliases(&mut self.state, &self.lib_path, ch.get_name(), ch.idnum)
+        {
+            warn!("read_aliases(g, {}) failed: {}", ch.get_name(), e);
         }
         ch.desc = Some(conn_id);
         ch.aff_abils = ch.real_abils;
@@ -3509,7 +3516,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         crate::cmd_informative::look_at_room(&mut self.state, id, true);
         // C 2271-2272: "You have mail waiting."
         let idnum = self.state.get_char(id).map(|c| c.idnum).unwrap_or(0);
-        if crate::mail::has_mail(idnum) {
+        if crate::mail::has_mail(&self.state, idnum) {
             self.state.send_to_char(id, "You have mail waiting.\r\n");
         }
         let rnum = self.state.get_char(id).and_then(|c| c.in_room);
@@ -3620,8 +3627,10 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                 alias_id_to_clear = Some(idnum);
                 self.state
                     .update_player_index_from_character(&snapshot, llogon, "");
-                if let Err(err) = crate::alias::write_aliases(&self.lib_path, &pname, idnum) {
-                    warn!("write_aliases({}) failed: {}", pname, err);
+                if let Err(err) =
+                    crate::alias::write_aliases(&self.state, &self.lib_path, &pname, idnum)
+                {
+                    warn!("write_aliases(g, {}) failed: {}", pname, err);
                 }
                 let host = self
                     .state
@@ -3634,7 +3643,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             crate::objsave::crash_save(&mut self.state, cid, &self.lib_path);
             self.state.extract_char(cid);
             if let Some(idnum) = alias_id_to_clear {
-                crate::alias::clear_aliases(idnum);
+                crate::alias::clear_aliases(&mut self.state, idnum);
             }
         }
         self.state.descriptors.remove(&conn_id);
@@ -4412,6 +4421,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             // window closes, and every recoverable runtime failure below is
             // compensated and audited rather than hidden.
             if let Err(sidecar_error) = crate::player_sidecars::rename_player_sidecars(
+                &mut self.state,
                 &self.lib_path,
                 &request.old_name,
                 &request.new_name,
@@ -4474,6 +4484,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             let Some(requester_name) = player_rename_request_is_current(&self.state, &request)
             else {
                 let sidecar_rollback = crate::player_sidecars::rename_player_sidecars(
+                    &mut self.state,
                     &self.lib_path,
                     &request.new_name,
                     &request.old_name,
@@ -4509,7 +4520,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                     "",
                 );
             }
-            crate::mail::mail_register_player(request.idnum, &request.new_name);
+            crate::mail::mail_register_player(&mut self.state, request.idnum, &request.new_name);
 
             self.state.send_to_char(
                 request.authorization.requester_body,
@@ -4609,6 +4620,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         let mut cleanup_failures = Vec::new();
         for player in &deleted_players {
             if let Err(error) = crate::player_sidecars::delete_player_sidecars(
+                &mut self.state,
                 &self.lib_path,
                 &player.name,
                 player.idnum,
@@ -4707,11 +4719,14 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                 snapshot.last_logon.timestamp(),
                 &host,
             );
-            if let Err(err) =
-                crate::alias::write_aliases(&self.lib_path, snapshot.get_name(), snapshot.idnum)
-            {
+            if let Err(err) = crate::alias::write_aliases(
+                &self.state,
+                &self.lib_path,
+                snapshot.get_name(),
+                snapshot.idnum,
+            ) {
                 warn!(
-                    "queued write_aliases({}) failed: {}",
+                    "queued write_aliases(g, {}) failed: {}",
                     snapshot.get_name(),
                     err
                 );
@@ -5175,7 +5190,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             prompt.push_str(&format!("&R(&n{}&R) ", word));
         }
         let idnum = c.idnum;
-        if crate::mail::has_mail(idnum) {
+        if crate::mail::has_mail(&self.state, idnum) {
             prompt.push_str("&B(&Ymail&B)&n ");
         }
         if c.conditions[DRUNK] > 4 {
@@ -6621,10 +6636,9 @@ mod tests {
         // enabled (the production default). Rust stores SocketAddr's canonical
         // IP string, so boot_ban must migrate the persisted C-style mask.
         let lib = temp_ban_lib("new", "new 010.020.* 0 Root\n");
-        crate::ban::boot_ban(&lib);
-
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db);
+        crate::ban::boot_ban(&mut game.state, &lib);
         let conn = ConnId(5);
         attach_descriptor_at_name(&mut game, conn, "10.20.30.40").await;
 
@@ -6641,17 +6655,19 @@ mod tests {
                 .contains("new characters are not allowed")
         );
         let empty = temp_ban_lib("empty-new", "");
-        crate::ban::boot_ban(&empty);
+        {
+            let mut gtmp = crate::state::GameState::new(crate::config::Config::default());
+            crate::ban::boot_ban(&mut gtmp, &empty);
+        }
     }
 
     #[tokio::test]
     async fn ban_new_blocks_new_character_confirmation_by_verified_hostname() {
         let _guard = ban_test_lock();
         let lib = temp_ban_lib("new-hostname", "new *.blocked.example 0 Root\n");
-        crate::ban::boot_ban(&lib);
-
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db);
+        crate::ban::boot_ban(&mut game.state, &lib);
         let conn = ConnId(51);
         attach_descriptor_identity_at_name(&mut game, conn, "192.0.2.51", "dialup.blocked.example")
             .await;
@@ -6669,14 +6685,21 @@ mod tests {
                 .contains("new characters are not allowed")
         );
         let empty = temp_ban_lib("empty-new-hostname", "");
-        crate::ban::boot_ban(&empty);
+        {
+            let mut gtmp = crate::state::GameState::new(crate::config::Config::default());
+            crate::ban::boot_ban(&mut gtmp, &empty);
+        }
     }
 
     #[tokio::test]
     async fn ban_all_socket_gate_checks_verified_hostname_and_c_numeric_masks() {
         let _guard = ban_test_lock();
         let hostname_lib = temp_ban_lib("all-hostname", "all *.blocked.example 0 Root\n");
-        crate::ban::boot_ban(&hostname_lib);
+        let hostname_handle = {
+            let mut gtmp = crate::state::GameState::new(crate::config::Config::default());
+            crate::ban::boot_ban(&mut gtmp, &hostname_lib);
+            gtmp.social.ban_handle.clone()
+        };
 
         let peer_ip = "192.0.2.52".parse().unwrap();
         let (_client, mut unverified_stream) = tokio::io::duplex(128);
@@ -6684,6 +6707,7 @@ mod tests {
             !crate::connection::reject_ban_all(
                 &mut unverified_stream,
                 &crate::connection::PeerIdentity::numeric(peer_ip),
+                &crate::ban::BanHandle::default(),
             )
             .await,
             "an unverified PTR name must never be trusted"
@@ -6694,7 +6718,7 @@ mod tests {
             verified_hostname: Some("dialup.blocked.example".to_string()),
         };
         let (mut client, mut server) = tokio::io::duplex(128);
-        assert!(crate::connection::reject_ban_all(&mut server, &identity).await);
+        assert!(crate::connection::reject_ban_all(&mut server, &identity, &hostname_handle).await);
         let mut rejection = Vec::new();
         client.read_to_end(&mut rejection).await.unwrap();
         assert_eq!(rejection, b"Your site is BANNED!\r\n");
@@ -6703,24 +6727,37 @@ mod tests {
         // checking that form is required for masks whose wildcard itself spans
         // a padded octet (it cannot be losslessly canonicalized to `10.*`).
         let numeric_lib = temp_ban_lib("all-c-numeric", "all 01?.020.* 0 Root\n");
-        crate::ban::boot_ban(&numeric_lib);
+        let numeric_handle = {
+            let mut gtmp = crate::state::GameState::new(crate::config::Config::default());
+            crate::ban::boot_ban(&mut gtmp, &numeric_lib);
+            gtmp.social.ban_handle.clone()
+        };
         let numeric_identity =
             crate::connection::PeerIdentity::numeric("10.20.30.40".parse().unwrap());
         let (mut client, mut server) = tokio::io::duplex(128);
-        assert!(crate::connection::reject_ban_all(&mut server, &numeric_identity).await);
+        assert!(
+            crate::connection::reject_ban_all(&mut server, &numeric_identity, &numeric_handle)
+                .await
+        );
         let mut rejection = Vec::new();
         client.read_to_end(&mut rejection).await.unwrap();
         assert_eq!(rejection, b"Your site is BANNED!\r\n");
 
         let empty = temp_ban_lib("empty-all-hostname", "");
-        crate::ban::boot_ban(&empty);
+        {
+            let mut gtmp = crate::state::GameState::new(crate::config::Config::default());
+            crate::ban::boot_ban(&mut gtmp, &empty);
+        }
     }
 
     #[tokio::test]
     async fn ban_select_blocks_login_without_siteok_after_password_by_ip() {
         let _guard = ban_test_lock();
         let lib = temp_ban_lib("select", "select 192.0.2.44 0 Root\n");
-        crate::ban::boot_ban(&lib);
+        {
+            let mut gtmp = crate::state::GameState::new(crate::config::Config::default());
+            crate::ban::boot_ban(&mut gtmp, &lib);
+        }
 
         let db = Arc::new(MockDatabase::new());
         let ch = crate::character::Character::new_player(
@@ -6730,6 +6767,7 @@ mod tests {
         );
         db.create_player(&ch, "secret").await.unwrap();
         let mut game = test_game(db);
+        crate::ban::boot_ban(&mut game.state, &lib);
         let conn = ConnId(6);
         attach_descriptor_at_name(&mut game, conn, "192.0.2.44").await;
 
@@ -6747,7 +6785,10 @@ mod tests {
                 .contains("has not been cleared for login")
         );
         let empty = temp_ban_lib("empty-select", "");
-        crate::ban::boot_ban(&empty);
+        {
+            let mut gtmp = crate::state::GameState::new(crate::config::Config::default());
+            crate::ban::boot_ban(&mut gtmp, &empty);
+        }
     }
 
     #[tokio::test]
@@ -6810,6 +6851,7 @@ mod tests {
         let cid = game.state.create_char(ch);
 
         crate::alias::set_aliases(
+            &mut game.state,
             44,
             vec![crate::alias::AliasEntry {
                 alias: "combo".to_string(),
@@ -6840,7 +6882,7 @@ mod tests {
                 .input_queue
                 .is_empty()
         );
-        crate::alias::clear_aliases(44);
+        crate::alias::clear_aliases(&mut game.state, 44);
     }
 
     trait RaceIndexForTest {
@@ -8272,12 +8314,13 @@ mod self_delete_tests {
         (game, db, idnum)
     }
 
-    fn seed_sidecars(game: &Game, name: &str, idnum: i64) -> (PathBuf, PathBuf) {
+    fn seed_sidecars(game: &mut Game, name: &str, idnum: i64) -> (PathBuf, PathBuf) {
         let rent = crate::objsave::crash_filename(&game.lib_path, name).unwrap();
         std::fs::create_dir_all(rent.parent().unwrap()).unwrap();
         std::fs::write(&rent, b"rent evidence").unwrap();
 
         crate::alias::set_aliases(
+            &mut game.state,
             idnum,
             vec![AliasEntry {
                 alias: "stale".to_string(),
@@ -8285,7 +8328,7 @@ mod self_delete_tests {
                 atype: 0,
             }],
         );
-        crate::alias::write_aliases(&game.lib_path, name, idnum).unwrap();
+        crate::alias::write_aliases(&game.state, &game.lib_path, name, idnum).unwrap();
         let alias = crate::alias::alias_filename(&game.lib_path, name).unwrap();
         (rent, alias)
     }
@@ -8295,13 +8338,13 @@ mod self_delete_tests {
         let conn = ConnId(210);
         let name = "MiXeDcase";
         let (mut game, db, idnum) = deletion_session(conn, name, 0).await;
-        let (rent, alias) = seed_sidecars(&game, name, idnum);
+        let (rent, alias) = seed_sidecars(&mut game, name, idnum);
 
         game.nanny(conn, "yes".to_string()).await;
 
         assert!(!rent.exists());
         assert!(!alias.exists());
-        assert!(crate::alias::get_aliases(idnum).is_empty());
+        assert!(crate::alias::get_aliases(&game.state, idnum).is_empty());
         assert_ne!(
             db.load_player(name).await.unwrap().act_flags & crate::flags::PLR_DELETED,
             0
@@ -8313,8 +8356,9 @@ mod self_delete_tests {
         );
 
         let reused_idnum = idnum + 10_000;
-        crate::alias::read_aliases(&game.lib_path, "mixedCASE", reused_idnum).unwrap();
-        assert!(crate::alias::get_aliases(reused_idnum).is_empty());
+        crate::alias::read_aliases(&mut game.state, &game.lib_path, "mixedCASE", reused_idnum)
+            .unwrap();
+        assert!(crate::alias::get_aliases(&game.state, reused_idnum).is_empty());
     }
 
     #[tokio::test]
@@ -8342,6 +8386,7 @@ mod self_delete_tests {
         std::fs::create_dir_all(&rent).unwrap();
         std::fs::create_dir_all(&alias).unwrap();
         crate::alias::set_aliases(
+            &mut game.state,
             idnum,
             vec![AliasEntry {
                 alias: "cached".to_string(),
@@ -8362,7 +8407,7 @@ mod self_delete_tests {
         assert!(!output.contains("Character 'Blockedfiles' deleted!"));
         assert!(rent.is_dir());
         assert!(alias.is_dir());
-        assert!(crate::alias::get_aliases(idnum).is_empty());
+        assert!(crate::alias::get_aliases(&game.state, idnum).is_empty());
 
         std::fs::remove_dir(alias).unwrap();
         std::fs::remove_dir(rent).unwrap();
@@ -8373,7 +8418,7 @@ mod self_delete_tests {
         let frozen_conn = ConnId(213);
         let (mut frozen, frozen_db, frozen_id) =
             deletion_session(frozen_conn, "Frozenone", crate::flags::PLR_FROZEN).await;
-        let (frozen_rent, frozen_alias) = seed_sidecars(&frozen, "Frozenone", frozen_id);
+        let (frozen_rent, frozen_alias) = seed_sidecars(&mut frozen, "Frozenone", frozen_id);
         frozen.nanny(frozen_conn, "yes".to_string()).await;
         assert!(frozen_rent.exists() && frozen_alias.exists());
         assert_eq!(
@@ -8384,7 +8429,7 @@ mod self_delete_tests {
         let aborted_conn = ConnId(214);
         let (mut aborted, aborted_db, aborted_id) =
             deletion_session(aborted_conn, "Abortone", 0).await;
-        let (aborted_rent, aborted_alias) = seed_sidecars(&aborted, "Abortone", aborted_id);
+        let (aborted_rent, aborted_alias) = seed_sidecars(&mut aborted, "Abortone", aborted_id);
         aborted.nanny(aborted_conn, "no".to_string()).await;
         assert!(aborted_rent.exists() && aborted_alias.exists());
         assert_eq!(
@@ -8399,7 +8444,7 @@ mod self_delete_tests {
         let failed_conn = ConnId(215);
         let (mut failed, failed_db, failed_id) =
             deletion_session(failed_conn, "Savefailure", 0).await;
-        let (failed_rent, failed_alias) = seed_sidecars(&failed, "Savefailure", failed_id);
+        let (failed_rent, failed_alias) = seed_sidecars(&mut failed, "Savefailure", failed_id);
         failed_db.fail_next_save();
         failed.nanny(failed_conn, "yes".to_string()).await;
         assert!(failed_rent.exists() && failed_alias.exists());
@@ -8435,7 +8480,7 @@ mod self_delete_tests {
         let conn = ConnId(216);
         let name = "Trustedstaff";
         let (mut game, db, idnum) = deletion_session(conn, name, 0).await;
-        let (rent, alias) = seed_sidecars(&game, name, idnum);
+        let (rent, alias) = seed_sidecars(&mut game, name, idnum);
         let mut durable = db.load_player(name).await.unwrap();
         durable.player.level = 1;
         durable.trust = i32::from(LVL_GRGOD);
@@ -8470,7 +8515,7 @@ mod self_delete_tests {
         db.save_player(&character).await.unwrap();
         let mut game = test_game(db.clone());
         game.lib_path = game.state.config.lib_path.clone();
-        let (rent, alias) = seed_sidecars(&game, "AdminGone", idnum);
+        let (rent, alias) = seed_sidecars(&mut game, "AdminGone", idnum);
         let cleaner = persistent_connected_player(
             &mut game,
             db.as_ref(),
@@ -8485,7 +8530,7 @@ mod self_delete_tests {
 
         assert!(db.load_player("AdminGone").await.is_err());
         assert!(!rent.exists() && !alias.exists());
-        assert!(crate::alias::get_aliases(idnum).is_empty());
+        assert!(crate::alias::get_aliases(&game.state, idnum).is_empty());
     }
 
     #[tokio::test]
@@ -8497,7 +8542,7 @@ mod self_delete_tests {
         let idnum = db.create_player(&deleted, "secret").await.unwrap();
         let mut game = test_game(db.clone());
         game.lib_path = game.state.config.lib_path.clone();
-        let (rent, alias) = seed_sidecars(&game, "CleanRace", idnum);
+        let (rent, alias) = seed_sidecars(&mut game, "CleanRace", idnum);
         let cleaner_conn = ConnId(9_413_303);
         let cleaner = persistent_connected_player(
             &mut game,
@@ -8524,7 +8569,7 @@ mod self_delete_tests {
 
         assert!(db.load_player("CleanRace").await.is_ok());
         assert!(rent.is_file() && alias.is_file());
-        crate::alias::clear_aliases(idnum);
+        crate::alias::clear_aliases(&mut game.state, idnum);
         std::fs::remove_file(rent).unwrap();
         std::fs::remove_file(alias).unwrap();
     }
@@ -8544,6 +8589,7 @@ mod self_delete_tests {
         let rent = crate::objsave::crash_filename(&game.lib_path, "AdminRetry").unwrap();
         std::fs::create_dir_all(&rent).unwrap();
         crate::alias::set_aliases(
+            &mut game.state,
             idnum,
             vec![AliasEntry {
                 alias: "private".into(),
@@ -8551,7 +8597,7 @@ mod self_delete_tests {
                 atype: 0,
             }],
         );
-        crate::alias::write_aliases(&game.lib_path, "AdminRetry", idnum).unwrap();
+        crate::alias::write_aliases(&game.state, &game.lib_path, "AdminRetry", idnum).unwrap();
         let alias = crate::alias::alias_filename(&game.lib_path, "AdminRetry").unwrap();
         let cleaner = persistent_connected_player(
             &mut game,
@@ -8569,7 +8615,7 @@ mod self_delete_tests {
         assert_ne!(retained.act_flags & crate::flags::PLR_DELETED, 0);
         assert!(rent.is_dir());
         assert!(!alias.exists(), "successful cleanup steps still converge");
-        assert!(crate::alias::get_aliases(idnum).is_empty());
+        assert!(crate::alias::get_aliases(&game.state, idnum).is_empty());
 
         std::fs::remove_dir(&rent).unwrap();
         run_authenticated_command(&mut game.state, cleaner, "pfileclean OptimisePfile");
@@ -9124,6 +9170,7 @@ mod shutdown_tests {
         let idnum = game.state.get_char(player).unwrap().idnum;
         game.state.get_char_mut(player).unwrap().act_flags |= crate::objsave::PLR_CRASH;
         crate::alias::set_aliases(
+            &mut game.state,
             idnum,
             vec![AliasEntry {
                 alias: "greet".into(),
@@ -9172,7 +9219,7 @@ mod shutdown_tests {
         );
         assert_ne!(live_after.act_flags & crate::objsave::PLR_CRASH, 0);
 
-        crate::alias::clear_aliases(idnum);
+        crate::alias::clear_aliases(&mut game.state, idnum);
         std::fs::remove_file(lib).unwrap();
     }
 
@@ -10055,6 +10102,7 @@ mod durable_player_rename_tests {
         std::fs::create_dir_all(old_rent.parent().unwrap()).unwrap();
         std::fs::write(&old_rent, b"Oldname rent").unwrap();
         crate::alias::set_aliases(
+            &mut game.state,
             idnum,
             vec![crate::alias::AliasEntry {
                 alias: "greet".into(),
@@ -10062,7 +10110,7 @@ mod durable_player_rename_tests {
                 atype: 0,
             }],
         );
-        crate::alias::write_aliases(&config.lib_path, "Oldname", idnum).unwrap();
+        crate::alias::write_aliases(&game.state, &config.lib_path, "Oldname", idnum).unwrap();
         let old_alias = crate::alias::alias_filename(&config.lib_path, "Oldname").unwrap();
         let new_rent = crate::objsave::crash_filename(&config.lib_path, "Newname").unwrap();
         let new_alias = crate::alias::alias_filename(&config.lib_path, "Newname").unwrap();
@@ -10081,9 +10129,9 @@ mod durable_player_rename_tests {
         }
     }
 
-    fn cleanup(fixture: RenameFixture) {
-        crate::alias::clear_aliases(fixture.idnum);
-        let _ = std::fs::remove_dir_all(fixture.lib);
+    fn cleanup(fixture: &mut RenameFixture) {
+        crate::alias::clear_aliases(&mut fixture.game.state, fixture.idnum);
+        let _ = std::fs::remove_dir_all(&fixture.lib);
     }
 
     fn queue_rename(fixture: &mut RenameFixture) {
@@ -10172,7 +10220,7 @@ mod durable_player_rename_tests {
         );
         assert!(fixture.game.state.player_save_requests.is_empty());
 
-        cleanup(fixture);
+        cleanup(&mut fixture);
     }
 
     #[tokio::test]
@@ -10202,7 +10250,7 @@ mod durable_player_rename_tests {
                 .outbuf
                 .contains("You have renamed Oldname to Newname")
         );
-        cleanup(fixture);
+        cleanup(&mut fixture);
     }
 
     #[tokio::test]
@@ -10227,7 +10275,7 @@ mod durable_player_rename_tests {
         assert!(output.contains("Rename failed"), "output={output:?}");
         assert!(!output.contains("You have renamed"), "output={output:?}");
 
-        cleanup(fixture);
+        cleanup(&mut fixture);
     }
 
     #[tokio::test]
@@ -10254,7 +10302,7 @@ mod durable_player_rename_tests {
         assert!(output.contains("Rename failed"), "output={output:?}");
         assert!(!output.contains("You have renamed"), "output={output:?}");
 
-        cleanup(fixture);
+        cleanup(&mut fixture);
     }
 
     #[tokio::test]
@@ -10284,7 +10332,7 @@ mod durable_player_rename_tests {
         assert!(output.contains("Rename failed"), "output={output:?}");
         assert!(!output.contains("You have renamed"), "output={output:?}");
 
-        cleanup(fixture);
+        cleanup(&mut fixture);
     }
 
     #[tokio::test]
@@ -10317,7 +10365,7 @@ mod durable_player_rename_tests {
         );
         assert!(!output.contains("You have renamed"), "output={output:?}");
 
-        cleanup(fixture);
+        cleanup(&mut fixture);
     }
 
     #[tokio::test]
@@ -10345,7 +10393,7 @@ mod durable_player_rename_tests {
                 .contains("You have renamed")
         );
 
-        cleanup(fixture);
+        cleanup(&mut fixture);
     }
 
     #[tokio::test]
@@ -10368,7 +10416,7 @@ mod durable_player_rename_tests {
         assert!(fixture.db.load_player("Oldname").await.is_ok());
         assert!(fixture.old_rent.is_file() && fixture.old_alias.is_file());
         assert!(!fixture.new_rent.exists() && !fixture.new_alias.exists());
-        cleanup(fixture);
+        cleanup(&mut fixture);
     }
 
     #[tokio::test]
@@ -10406,7 +10454,7 @@ mod durable_player_rename_tests {
                 .contains("You have renamed")
         );
 
-        cleanup(fixture);
+        cleanup(&mut fixture);
     }
 
     #[tokio::test]
@@ -10431,6 +10479,6 @@ mod durable_player_rename_tests {
         assert_eq!(stored.get_name(), "Newname");
         assert_eq!(stored.points.gold, 1234);
 
-        cleanup(fixture);
+        cleanup(&mut fixture);
     }
 }

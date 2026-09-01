@@ -1244,11 +1244,17 @@ pub(crate) async fn resolve_peer_identity(
 /// The actual BAN_ALL socket gate, shared by the immediate numeric-IP check and
 /// the post-FCrDNS check. Returns true after writing the C rejection and closing
 /// the stream.
-pub(crate) async fn reject_ban_all<W>(stream: &mut W, identity: &PeerIdentity) -> bool
+pub(crate) async fn reject_ban_all<W>(
+    stream: &mut W,
+    identity: &PeerIdentity,
+    ban_handle: &crate::ban::BanHandle,
+) -> bool
 where
     W: AsyncWrite + Unpin,
 {
-    let ban_type = crate::ban::isbanned_connection(
+    let snap = ban_handle.snapshot();
+    let ban_type = crate::ban::isbanned_snapshot(
+        &snap,
         &identity.peer_ip.to_string(),
         identity.verified_hostname.as_deref(),
     );
@@ -1278,9 +1284,10 @@ pub async fn handle_client(
     game_tx: mpsc::Sender<GameMessage>,
     reverse_dns: ReverseDnsConfig,
     resolver_slots: Arc<Semaphore>,
+    ban_handle: crate::ban::BanHandle,
 ) -> Result<()> {
     let identity = resolve_peer_identity(addr, reverse_dns, resolver_slots).await;
-    if reject_ban_all(&mut stream, &identity).await {
+    if reject_ban_all(&mut stream, &identity, &ban_handle).await {
         return Ok(());
     }
 
@@ -2123,6 +2130,7 @@ mod output_writer_tests {
             game_tx,
             ReverseDnsConfig::disabled(),
             Arc::new(Semaphore::new(1)),
+            crate::ban::BanHandle::default(),
         ));
 
         let output_tx = match game_rx.recv().await {

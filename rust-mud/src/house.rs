@@ -27,7 +27,7 @@
 //     players (players_by_name + idnum), then the boot-loaded GameState
 //     player_table index, then the on-disk name cache; an unknown id renders as
 //     "<UNDEF>" exactly like C's NAME() macro.
-//   * do_bed's write_aliases() (no alias system ported) is a no-op; the
+//   * do_bed's write_aliases(g, ) (no alias system ported) is a no-op; the
 //     rent-save is performed by serializing carried/worn objects is NOT done
 //     here (do_bed is a quit path — the async loop owns player-file save exactly
 //     as the do_quit port does), so do_bed mirrors really_quit: announce, clear
@@ -1791,7 +1791,7 @@ pub fn do_bed(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
         return;
     }
 
-    // write_aliases(ch): no alias system ported — no-op.
+    // write_aliases(g, ch): no alias system ported — no-op.
     // Clear the AFK lockout pref (C: REMOVE_BIT PRF2_LOCKOUT).
     if let Some(c) = g.get_char_mut(ch) {
         c.prf2_flags &= !PRF2_LOCKOUT;

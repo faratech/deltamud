@@ -7,7 +7,7 @@
 //     blocks, with a FAT-style next-block chain for messages longer than one
 //     block. HEADER / DATA / DELETED block typing and the in-memory recipient
 //     index + free-block list, all 1:1 with mail.c.
-//   * store_mail() / read_delete() / has_mail() — the three public routines
+//   * store_mail() / read_delete(g, ) / has_mail() — the three public routines
 //     every consumer of the mail system calls.
 //   * scan_file() — boot-time indexing (exposed as boot_mail()).
 //   * The postmaster() special proc and its three helpers
@@ -48,7 +48,6 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
 // Tunables (mail.h).
@@ -104,7 +103,7 @@ struct MailIndexEntry {
     positions: Vec<u64>,
 }
 
-struct MailSystem {
+pub struct MailSystem {
     /// Absolute path to `<lib>/etc/plrmail`.
     file: PathBuf,
     /// recipient idnum -> their list of header positions.
@@ -131,6 +130,12 @@ struct MailSystem {
     name_to_id: HashMap<String, i64>,
 }
 
+impl Default for MailSystem {
+    fn default() -> Self {
+        MailSystem::new(PathBuf::from("./lib").join("etc").join("plrmail"))
+    }
+}
+
 impl MailSystem {
     fn new(file: PathBuf) -> Self {
         MailSystem {
@@ -151,15 +156,15 @@ impl MailSystem {
     }
 }
 
-static MAIL: OnceLock<Mutex<MailSystem>> = OnceLock::new();
+// The mail system and the pending-compose table live on GameState as
+// `social.mail` / `social.mail_pending` (phase-1 statics migration). A fresh
+// GameState defaults to "./lib" like the old never-booted static.
+fn sys(g: &GameState) -> &MailSystem {
+    &g.social.mail
+}
 
-fn sys() -> &'static Mutex<MailSystem> {
-    // If boot_mail() was never called (e.g. unit tests), default to "./lib".
-    MAIL.get_or_init(|| {
-        Mutex::new(MailSystem::new(
-            PathBuf::from("./lib").join("etc").join("plrmail"),
-        ))
-    })
+fn sys_mut(g: &mut GameState) -> &mut MailSystem {
+    &mut g.social.mail
 }
 
 // ---------------------------------------------------------------------------
@@ -169,16 +174,10 @@ fn sys() -> &'static Mutex<MailSystem> {
 // the mapping is parked here and consumed by finish_mail()/abort_mail().
 // ---------------------------------------------------------------------------
 
-static PENDING: OnceLock<Mutex<HashMap<ConnId, PendingMail>>> = OnceLock::new();
-
 #[derive(Clone)]
-struct PendingMail {
+pub struct PendingMail {
     to: i64,
     from: i64,
-}
-
-fn pending() -> &'static Mutex<HashMap<ConnId, PendingMail>> {
-    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 // ---------------------------------------------------------------------------
@@ -191,7 +190,7 @@ fn pending() -> &'static Mutex<HashMap<ConnId, PendingMail>> {
 /// the world is loaded (so player ids can be registered) and before any
 /// command runs. Returns true on success (C returns 1), false if the file is
 /// corrupt (mail then disabled, matching `no_mail = 1`).
-pub fn boot_mail(lib_path: &str) -> bool {
+pub fn boot_mail(g: &mut GameState, lib_path: &str) -> bool {
     let file = PathBuf::from(lib_path).join("etc").join("plrmail");
     let mut m = MailSystem::new(file.clone());
 
@@ -215,17 +214,17 @@ pub fn boot_mail(lib_path: &str) -> bool {
                     file.display()
                 );
                 m.no_mail = true;
-                install(m);
+                install(g, m);
                 return false;
             }
             m.file_end_pos = 0;
-            install(m);
+            install(g, m);
             return true;
         }
         Err(error) => {
             log::error!("SYSERR: cannot open mail store {}: {error}", file.display());
             m.no_mail = true;
-            install(m);
+            install(g, m);
             return false;
         }
     };
@@ -243,7 +242,7 @@ pub fn boot_mail(lib_path: &str) -> bool {
                     file.display()
                 );
                 m.no_mail = true;
-                install(m);
+                install(g, m);
                 return false;
             }
         }
@@ -259,7 +258,7 @@ pub fn boot_mail(lib_path: &str) -> bool {
                 file.display()
             );
             m.no_mail = true;
-            install(m);
+            install(g, m);
             return false;
         }
     };
@@ -269,12 +268,12 @@ pub fn boot_mail(lib_path: &str) -> bool {
         // C: "Mail file corrupt! Mail disabled!"
         log::error!("SYSERR: Error booting mail system -- Mail file corrupt! Mail disabled!");
         m.no_mail = true;
-        install(m);
+        install(g, m);
         return false;
     }
 
     if !validate_mail_blocks(&mut m, &blocks) {
-        install(m);
+        install(g, m);
         return false;
     }
 
@@ -286,7 +285,7 @@ pub fn boot_mail(lib_path: &str) -> bool {
             .map(|entry| entry.positions.len())
             .sum::<usize>()
     );
-    install(m);
+    install(g, m);
     true
 }
 
@@ -413,15 +412,16 @@ fn validate_mail_blocks(m: &mut MailSystem, blocks: &[[u8; BLOCK_SIZE as usize]]
     true
 }
 
-fn install(m: MailSystem) {
-    match MAIL.get() {
-        Some(lock) => {
-            *crate::lock_ok::lock(&lock) = m;
-        }
-        None => {
-            let _ = MAIL.set(Mutex::new(m));
-        }
-    }
+fn install(g: &mut GameState, m: MailSystem) {
+    g.social.mail = m;
+}
+
+fn mail_pending(g: &mut GameState) -> &mut std::collections::HashMap<ConnId, PendingMail> {
+    &mut g.social.mail_pending
+}
+
+fn mail_pending_ref(g: &GameState) -> &std::collections::HashMap<ConnId, PendingMail> {
+    &g.social.mail_pending
 }
 
 /// Register a player's idnum<->name so the mail system can address offline
@@ -429,12 +429,12 @@ fn install(m: MailSystem) {
 /// player_table that the Rust port does not yet expose). The integrator should
 /// call this for every player as the player index loads at boot, and again on
 /// new-character creation. Name is matched case-insensitively (lowercased).
-pub fn mail_register_player(idnum: i64, name: &str) {
+pub fn mail_register_player(g: &mut GameState, idnum: i64, name: &str) {
     if idnum < 0 || name.is_empty() {
         return;
     }
     let lname = name.to_lowercase();
-    let mut m = crate::lock_ok::lock(&sys());
+    let m = sys_mut(g);
     // Re-registration is also the rename path.  Drop every stale name which
     // still points at this identity before publishing the new one; otherwise
     // an old renamed name could continue resolving through mail's fallback
@@ -464,7 +464,7 @@ fn get_id_by_name(g: &GameState, name: &str) -> i64 {
     if let Some(id) = g.get_id_by_name(&lname) {
         return id;
     }
-    let m = crate::lock_ok::lock(&sys());
+    let m = sys(g);
     *m.name_to_id.get(&lname).unwrap_or(&-1)
 }
 
@@ -919,8 +919,8 @@ fn read_text_bytes(src: &[u8], cap: usize) -> &[u8] {
 // ===========================================================================
 
 /// has_mail(): does this recipient have any mail waiting? (mail.c has_mail)
-pub fn has_mail(recipient: i64) -> bool {
-    let m = crate::lock_ok::lock(&sys());
+pub fn has_mail(g: &GameState, recipient: i64) -> bool {
+    let m = sys(g);
     !m.no_mail
         && m.index
             .get(&recipient)
@@ -933,8 +933,8 @@ pub fn has_mail(recipient: i64) -> bool {
 /// (deleted) blocks where possible. The data chain is written first and the
 /// header/index are the publication point, so an I/O failure cannot publish a
 /// dangling or incomplete message. (mail.c store_mail)
-pub fn store_mail(to: i64, from: i64, message: &str) -> bool {
-    let mut m = crate::lock_ok::lock(&sys());
+pub fn store_mail(g: &mut GameState, to: i64, from: i64, message: &str) -> bool {
+    let mut m = sys_mut(g);
     if m.no_mail {
         return false;
     }
@@ -1051,13 +1051,16 @@ pub fn store_mail(to: i64, from: i64, message: &str) -> bool {
     true
 }
 
-/// read_delete(): pop the *oldest* message for `recipient` (C walks to the
+/// read_delete(g, ): pop the *oldest* message for `recipient` (C walks to the
 /// tail of the position list), render its formatted "Deltanian Postal Service"
 /// header + body, mark every block of that message DELETED and free it, and
 /// return the full text. Returns None when there is no mail / on error.
 /// (mail.c read_delete)
-pub fn read_delete(g: &GameState, recipient: i64) -> Option<String> {
-    let mut m = crate::lock_ok::lock(&sys());
+pub fn read_delete(g: &mut GameState, recipient: i64) -> Option<String> {
+    // Resolve display names first through the shared borrow; the mutable tail
+    // of this function only needs the mail system itself.
+    let to_name = get_name_by_id(g, sys(g), recipient);
+    let mut m = sys_mut(g);
     if m.no_mail {
         return None;
     }
@@ -1145,20 +1148,10 @@ pub fn read_delete(g: &GameState, recipient: i64) -> Option<String> {
         following = next;
     }
 
-    // Compose the formatted header (matches mail.c sprintf, colour codes and
-    // all). asctime() with the trailing newline stripped.
+    // The formatted header is composed after the destructive phase below so
+    // the sender name can be resolved without overlapping the mutable mail
+    // borrow (the old Mutex version reused its guard here).
     let tmstr = fmt_asctime(mail_time);
-    // Reuse the already-held mail-system guard. Re-locking the same
-    // non-reentrant Mutex here deadlocked every successful receive.
-    let to_name = get_name_by_id(g, &m, recipient);
-    let from_name = get_name_by_id(g, &m, from);
-    let mut message = format!(
-        " &b-&c=&y Deltanian Postal Service&c =&b-&n\r\n\
-         &GD&gate&c:&n {}\r\n\
-         \x20\x20&GT&go&c:&n {}\r\n\
-         &GF&grom&c:&n {}\r\n\r\n",
-        tmstr, to_name, from_name
-    );
 
     // The mutex prevents an in-process race, but assert the exact publication
     // pointer again before the destructive phase so a future refactor cannot
@@ -1214,7 +1207,16 @@ pub fn read_delete(g: &GameState, recipient: i64) -> Option<String> {
     if remove_recipient {
         m.index.remove(&recipient);
     }
+    // mail borrow ends here
 
+    let from_name = get_name_by_id(g, sys(g), from);
+    let mut message = format!(
+        " &b-&c=&y Deltanian Postal Service&c =&b-&n\r\n\
+         &GD&gate&c:&n {}\r\n\
+         \x20\x20&GT&go&c:&n {}\r\n\
+         &GF&grom&c:&n {}\r\n\r\n",
+        tmstr, to_name, from_name
+    );
     message.push_str(&String::from_utf8_lossy(&body));
 
     Some(message)
@@ -1253,7 +1255,7 @@ pub fn postmaster(
         return false;
     }
 
-    if crate::lock_ok::lock(&sys()).no_mail {
+    if sys(g).no_mail {
         g.send_to_char(
             ch,
             "Sorry, the mail system is having technical difficulties.\r\n",
@@ -1277,7 +1279,7 @@ pub fn postmaster(
 
 fn postmaster_check_mail(g: &mut GameState, ch: CharId, mailman: CharId) {
     let idnum = char_idnum(g, ch);
-    let msg = if has_mail(idnum) {
+    let msg = if has_mail(g, idnum) {
         "$n tells you, 'You have mail waiting.'"
     } else {
         "$n tells you, 'Sorry, you don't have any mail waiting.'"
@@ -1287,7 +1289,7 @@ fn postmaster_check_mail(g: &mut GameState, ch: CharId, mailman: CharId) {
 
 fn postmaster_receive_mail(g: &mut GameState, ch: CharId, mailman: CharId) {
     let idnum = char_idnum(g, ch);
-    if !has_mail(idnum) {
+    if !has_mail(g, idnum) {
         act(
             g,
             "$n tells you, 'Sorry, you don't have any mail waiting.'",
@@ -1301,7 +1303,7 @@ fn postmaster_receive_mail(g: &mut GameState, ch: CharId, mailman: CharId) {
     }
 
     // Hand over every waiting message as a separate ITEM_NOTE object.
-    while has_mail(idnum) {
+    while has_mail(g, idnum) {
         let Some(body) = read_delete(g, idnum) else {
             act(
                 g,
@@ -1472,7 +1474,7 @@ pub fn do_mail(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
     if !has_desc {
         return;
     }
-    if crate::lock_ok::lock(&sys()).no_mail {
+    if sys(g).no_mail {
         g.send_to_char(
             ch,
             "Sorry, the mail system is having technical difficulties.\r\n",
@@ -1520,10 +1522,7 @@ fn open_compose_editor(g: &mut GameState, ch: CharId, to: i64, from: i64) {
         Some(c) => c,
         None => return,
     };
-    pending()
-        .lock()
-        .unwrap()
-        .insert(conn, PendingMail { to, from });
+    mail_pending(g).insert(conn, PendingMail { to, from });
     crate::modify::start_mail_editing(g, conn, MAX_MAIL_SIZE);
 }
 
@@ -1531,12 +1530,11 @@ fn open_compose_editor(g: &mut GameState, ch: CharId, to: i64, from: i64) {
 /// editor is saved (the player typed /s). `body` is the gathered text. Stores
 /// the message and clears the pending entry. Returns true if a pending mail
 /// was found for this connection (so the integrator knows it owned this save).
-pub fn finish_mail(g: &GameState, conn_id: ConnId, body: &str) -> bool {
-    let pm = match crate::lock_ok::lock(&pending()).remove(&conn_id) {
+pub fn finish_mail(g: &mut GameState, conn_id: ConnId, body: &str) -> bool {
+    let pm = match mail_pending(g).remove(&conn_id) {
         Some(p) => p,
         None => return false,
     };
-    let _ = g; // body resolution does not need the world; kept for symmetry.
     let text = if body.is_empty() {
         // C parse_action behaviour: an empty note saves a single space so the
         // !*message_pointer guard in store_mail still accepts it.
@@ -1544,24 +1542,24 @@ pub fn finish_mail(g: &GameState, conn_id: ConnId, body: &str) -> bool {
     } else {
         body.to_string()
     };
-    store_mail(pm.to, pm.from, &text)
+    store_mail(g, pm.to, pm.from, &text)
 }
 
 /// abort_mail(): the integrator calls this if a mail-compose editor is aborted
 /// (player disconnects / quits the editor without saving). Drops the pending
 /// entry without storing anything. Returns true if one was pending.
-pub fn abort_mail(conn_id: ConnId) -> bool {
-    crate::lock_ok::lock(&pending()).remove(&conn_id).is_some()
+pub fn abort_mail(g: &mut GameState, conn_id: ConnId) -> bool {
+    mail_pending(g).remove(&conn_id).is_some()
 }
 
 /// has_pending_mail(): whether a connection is mid-compose (PLR_MAILING).
-pub fn has_pending_mail(conn_id: ConnId) -> bool {
-    crate::lock_ok::lock(&pending()).contains_key(&conn_id)
+pub fn has_pending_mail(g: &GameState, conn_id: ConnId) -> bool {
+    mail_pending_ref(g).contains_key(&conn_id)
 }
 
 #[cfg(test)]
-pub(crate) fn seed_pending_mail_for_test(conn_id: ConnId) {
-    crate::lock_ok::lock(&pending()).insert(conn_id, PendingMail { to: 2, from: 1 });
+pub(crate) fn seed_pending_mail_for_test(g: &mut GameState, conn_id: ConnId) {
+    mail_pending(g).insert(conn_id, PendingMail { to: 2, from: 1 });
 }
 
 // ===========================================================================
@@ -1641,11 +1639,10 @@ fn fmt_asctime(secs: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
 
     fn mail_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        crate::lock_ok::lock(LOCK.get_or_init(|| Mutex::new(())))
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        crate::lock_ok::lock(LOCK.get_or_init(|| std::sync::Mutex::new(())))
     }
 
     #[test]
@@ -1657,17 +1654,17 @@ mod tests {
             std::thread::current().id()
         ));
         std::fs::create_dir_all(root.join("etc")).unwrap();
-        assert!(boot_mail(root.to_str().unwrap()));
-        mail_register_player(700_001, "Sender");
-        mail_register_player(700_002, "Recipient");
+        let mut g = GameState::new(crate::config::Config::default());
+        assert!(boot_mail(&mut g, root.to_str().unwrap()));
+        mail_register_player(&mut g, 700_001, "Sender");
+        mail_register_player(&mut g, 700_002, "Recipient");
 
         // The first scalar straddles the 59-byte header seam. The crab near a
         // later 91-byte data seam exercises chained block cursor advancement.
         let body = format!("{}é{}🦀{}", "a".repeat(58), "b".repeat(89), "c".repeat(200));
-        assert!(store_mail(700_002, 700_001, &body));
+        assert!(store_mail(&mut g, 700_002, 700_001, &body));
 
-        let g = GameState::new(Config::default());
-        let rendered = read_delete(&g, 700_002).expect("stored mail is readable");
+        let rendered = read_delete(&mut g, 700_002).expect("stored mail is readable");
         assert!(
             rendered.ends_with(&body),
             "mail body changed across block seams"
@@ -1713,11 +1710,11 @@ mod tests {
         fixture.extend_from_slice(&data);
         std::fs::write(&path, fixture).unwrap();
 
-        assert!(boot_mail(root.to_str().unwrap()));
-        mail_register_player(from, "Sender");
-        mail_register_player(to, "Recipient");
-        let g = GameState::new(Config::default());
-        let rendered = read_delete(&g, to).expect("C split-scalar fixture is readable");
+        let mut g = GameState::new(crate::config::Config::default());
+        assert!(boot_mail(&mut g, root.to_str().unwrap()));
+        mail_register_player(&mut g, from, "Sender");
+        mail_register_player(&mut g, to, "Recipient");
+        let rendered = read_delete(&mut g, to).expect("C split-scalar fixture is readable");
         assert!(rendered.ends_with(&body));
         assert!(!rendered.contains('\u{fffd}'));
 
@@ -1743,7 +1740,8 @@ mod tests {
         fixture.extend_from_slice(&data);
         std::fs::write(&path, fixture).unwrap();
 
-        assert!(boot_mail(root.to_str().unwrap()));
+        let mut g = GameState::new(crate::config::Config::default());
+        assert!(boot_mail(&mut g, root.to_str().unwrap()));
         OpenOptions::new()
             .write(true)
             .open(&path)
@@ -1751,12 +1749,11 @@ mod tests {
             .set_len(BLOCK_SIZE)
             .unwrap();
 
-        let g = GameState::new(Config::default());
-        assert!(read_delete(&g, to).is_none());
-        let state = crate::lock_ok::lock(&sys());
+        assert!(read_delete(&mut g, to).is_none());
+        let state = sys(&g);
         assert!(state.no_mail, "a short chain read must disable mail");
         assert_eq!(state.index.get(&to).unwrap().positions, vec![0]);
-        drop(state);
+        let _ = state; // end the borrow
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(
             i64::from_le_bytes(bytes[0..8].try_into().unwrap()),
@@ -1786,19 +1783,19 @@ mod tests {
         fixture.extend_from_slice(&data);
         std::fs::write(&path, &fixture).unwrap();
 
-        assert!(boot_mail(root.to_str().unwrap()));
+        let mut g = GameState::new(crate::config::Config::default());
+        assert!(boot_mail(&mut g, root.to_str().unwrap()));
         let mut file = OpenOptions::new().write(true).open(&path).unwrap();
         file.seek(SeekFrom::Start(BLOCK_SIZE)).unwrap();
         file.write_all(&(BLOCK_SIZE as i64).to_le_bytes()).unwrap();
         file.sync_data().unwrap();
         fixture[BLOCK_SIZE as usize..BLOCK_SIZE as usize + 8]
             .copy_from_slice(&(BLOCK_SIZE as i64).to_le_bytes());
-        let g = GameState::new(Config::default());
-        assert!(read_delete(&g, to).is_none());
-        let state = crate::lock_ok::lock(&sys());
+        assert!(read_delete(&mut g, to).is_none());
+        let state = sys(&g);
         assert!(state.no_mail, "a cyclic chain must disable mail");
         assert_eq!(state.index.get(&to).unwrap().positions, vec![0]);
-        drop(state);
+        let _ = state; // end the borrow
         assert_eq!(std::fs::read(&path).unwrap(), fixture);
 
         let _ = std::fs::remove_dir_all(root);
@@ -1822,18 +1819,20 @@ mod tests {
         shared_fixture.extend_from_slice(&second);
         shared_fixture.extend_from_slice(&shared);
         std::fs::write(&path, shared_fixture).unwrap();
-        assert!(!boot_mail(root.to_str().unwrap()));
+        let mut g = GameState::new(crate::config::Config::default());
+        assert!(!boot_mail(&mut g, root.to_str().unwrap()));
         {
-            let state = crate::lock_ok::lock(&sys());
+            let state = sys(&g);
             assert!(state.no_mail);
             assert!(state.index.is_empty());
         }
 
         let orphan = make_data_block(LAST_BLOCK, "orphan");
         std::fs::write(&path, orphan).unwrap();
-        assert!(!boot_mail(root.to_str().unwrap()));
+        let mut g = GameState::new(crate::config::Config::default());
+        assert!(!boot_mail(&mut g, root.to_str().unwrap()));
         {
-            let state = crate::lock_ok::lock(&sys());
+            let state = sys(&g);
             assert!(state.no_mail);
             assert!(state.index.is_empty());
         }
@@ -1850,33 +1849,34 @@ mod tests {
             std::thread::current().id()
         ));
         std::fs::create_dir_all(root.join("etc")).unwrap();
-        assert!(boot_mail(root.to_str().unwrap()));
+        let mut g = GameState::new(crate::config::Config::default());
+        assert!(boot_mail(&mut g, root.to_str().unwrap()));
 
         let conn = ConnId(98_765);
-        seed_pending_mail_for_test(conn);
+        seed_pending_mail_for_test(&mut g, conn);
         {
-            let mut state = crate::lock_ok::lock(&sys());
+            let state = sys_mut(&mut g);
             // Two DELETED reservations, one data write, then the header
             // publication write. Fail only that final publication attempt;
             // best-effort cleanup calls are allowed to succeed.
             state.fail_write_on_call = Some(3);
         }
-        let g = GameState::new(Config::default());
-        assert!(!finish_mail(&g, conn, &"x".repeat(100)));
+        assert!(!finish_mail(&mut g, conn, &"x".repeat(100)));
         {
-            let state = crate::lock_ok::lock(&sys());
+            let state = sys(&g);
             assert!(state.no_mail);
             assert!(!state.index.contains_key(&2));
         }
 
         // Cleanup rewrites every unpublished reservation as DELETED, so a
         // clean restart can reclaim them instead of discovering orphan data.
-        assert!(boot_mail(root.to_str().unwrap()));
-        let state = crate::lock_ok::lock(&sys());
+        let mut g = GameState::new(crate::config::Config::default());
+        assert!(boot_mail(&mut g, root.to_str().unwrap()));
+        let state = sys(&g);
         assert!(!state.no_mail);
         assert!(!state.index.contains_key(&2));
         assert_eq!(state.free_list.len(), 2);
-        drop(state);
+        let _ = state; // end the borrow
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1891,7 +1891,8 @@ mod tests {
         ));
         std::fs::create_dir_all(root.join("etc")).unwrap();
         let path = root.join("etc/plrmail");
-        assert!(boot_mail(root.to_str().unwrap()));
+        let mut g = GameState::new(crate::config::Config::default());
+        assert!(boot_mail(&mut g, root.to_str().unwrap()));
 
         let header = make_header_block(LAST_BLOCK, 1, 2, 1_700_000_000, "first");
         let deleted = {
@@ -1900,7 +1901,7 @@ mod tests {
             block
         };
         {
-            let mut state = crate::lock_ok::lock(&sys());
+            let mut state = sys_mut(&mut g);
             assert!(write_to_file(&mut state, &header, 0));
             assert_eq!(state.file_end_pos, BLOCK_SIZE);
             assert!(write_to_file(&mut state, &header, 0));
@@ -1923,22 +1924,22 @@ mod tests {
         ));
         std::fs::create_dir_all(root.join("etc")).unwrap();
         let path = root.join("etc/plrmail");
-        assert!(boot_mail(root.to_str().unwrap()));
+        let mut g = GameState::new(crate::config::Config::default());
+        assert!(boot_mail(&mut g, root.to_str().unwrap()));
         let body = "x".repeat(250);
-        assert!(store_mail(2, 1, &body));
+        assert!(store_mail(&mut g, 2, 1, &body));
         let original = std::fs::read(&path).unwrap();
         assert_eq!(original.len(), 4 * BLOCK_SIZE as usize);
         {
-            let mut state = crate::lock_ok::lock(&sys());
+            let state = sys_mut(&mut g);
             // Write one private replacement block, then fail before its second
             // block. The live multi-block message must remain byte-for-byte.
             state.fail_replace_on_block = Some(1);
         }
 
-        let g = GameState::new(Config::default());
-        assert!(read_delete(&g, 2).is_none());
+        assert!(read_delete(&mut g, 2).is_none());
         {
-            let state = crate::lock_ok::lock(&sys());
+            let state = sys(&g);
             assert!(
                 !state.no_mail,
                 "an unpublished temp-file failure leaves the live store usable"
@@ -1946,17 +1947,19 @@ mod tests {
             assert_eq!(state.index.get(&2).unwrap().positions, vec![0]);
         }
         assert_eq!(std::fs::read(&path).unwrap(), original);
-        assert!(has_mail(2));
+        assert!(has_mail(&g, 2));
 
-        let delivered = read_delete(&g, 2).expect("original mail remains immediately consumable");
+        let delivered =
+            read_delete(&mut g, 2).expect("original mail remains immediately consumable");
         assert!(delivered.ends_with(&body));
 
-        assert!(boot_mail(root.to_str().unwrap()));
-        let rebooted = crate::lock_ok::lock(&sys());
+        let mut g = GameState::new(crate::config::Config::default());
+        assert!(boot_mail(&mut g, root.to_str().unwrap()));
+        let rebooted = sys(&g);
         assert!(!rebooted.no_mail);
         assert!(!rebooted.index.contains_key(&2));
         assert_eq!(rebooted.free_list.len(), 4);
-        drop(rebooted);
+        let _ = rebooted;
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1971,13 +1974,14 @@ mod tests {
         ));
         std::fs::create_dir_all(root.join("etc")).unwrap();
         let path = root.join("etc/plrmail");
-        assert!(boot_mail(root.to_str().unwrap()));
+        let mut g = GameState::new(crate::config::Config::default());
+        assert!(boot_mail(&mut g, root.to_str().unwrap()));
 
-        assert!(!store_mail(2, 1, &"x".repeat(MAX_MAIL_SIZE + 1)));
+        assert!(!store_mail(&mut g, 2, 1, &"x".repeat(MAX_MAIL_SIZE + 1)));
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
 
         {
-            let mut state = crate::lock_ok::lock(&sys());
+            let state = sys_mut(&mut g);
             state.index.insert(
                 2,
                 MailIndexEntry {
@@ -1985,16 +1989,16 @@ mod tests {
                 },
             );
         }
-        assert!(!store_mail(2, 1, "bounded mailbox"));
+        assert!(!store_mail(&mut g, 2, 1, "bounded mailbox"));
 
         {
-            let mut state = crate::lock_ok::lock(&sys());
+            let state = sys_mut(&mut g);
             state.file_end_pos = MAX_MAIL_STORE_BYTES;
         }
-        assert!(!store_mail(3, 1, "bounded store"));
-        let state = crate::lock_ok::lock(&sys());
+        assert!(!store_mail(&mut g, 3, 1, "bounded store"));
+        let state = sys(&g);
         assert!(!state.no_mail, "capacity rejection is not disk corruption");
-        drop(state);
+        let _ = state; // end the borrow
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2028,18 +2032,18 @@ mod tests {
         );
         std::fs::write(&path, fixture).unwrap();
 
-        assert!(boot_mail(root.to_str().unwrap()));
-        mail_register_player(from, "Sender");
-        mail_register_player(to, "Recipient");
-        let g = GameState::new(Config::default());
-        assert!(has_mail(to));
-        let rendered = read_delete(&g, to).expect("C fixture is readable");
+        let mut g = GameState::new(crate::config::Config::default());
+        assert!(boot_mail(&mut g, root.to_str().unwrap()));
+        mail_register_player(&mut g, from, "Sender");
+        mail_register_player(&mut g, to, "Recipient");
+        assert!(has_mail(&g, to));
+        let rendered = read_delete(&mut g, to).expect("C fixture is readable");
         assert!(rendered.ends_with(body));
 
         // The deleted block is reused at the same offset. Apart from the new
         // current timestamp, the public Rust rewrite must reproduce the
         // independently assembled C bytes.
-        assert!(store_mail(to, from, body));
+        assert!(store_mail(&mut g, to, from, body));
         let rewritten = std::fs::read(&path).unwrap();
         assert_eq!(rewritten.len(), BLOCK_SIZE as usize);
         let mut expected = fixture;
@@ -2053,10 +2057,11 @@ mod tests {
     fn re_registering_an_id_for_rename_removes_the_stale_old_name() {
         let _guard = mail_test_lock();
         let idnum = 9_413_777;
-        mail_register_player(idnum, "Oldmailname");
-        mail_register_player(idnum, "Newmailname");
+        let mut g = GameState::new(crate::config::Config::default());
+        mail_register_player(&mut g, idnum, "Oldmailname");
+        mail_register_player(&mut g, idnum, "Newmailname");
 
-        let registry = crate::lock_ok::lock(&sys());
+        let registry = sys(&g);
         assert_eq!(
             registry.id_to_name.get(&idnum).map(String::as_str),
             Some("newmailname")

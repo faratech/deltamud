@@ -50,7 +50,6 @@ use crate::types::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Read;
-use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
 // Constants (boards.h)
@@ -208,7 +207,7 @@ impl BoardMsg {
     }
 }
 
-struct BoardRuntime {
+pub struct BoardRuntime {
     /// Per-board message lists (index 0..NUM_OF_BOARDS). Order matters: message
     /// number shown to players is `index + 1`, newest appended last — exactly
     /// like C's `msg_index[board][0..num_of_msgs]`.
@@ -235,18 +234,29 @@ struct PendingBoardWrite {
     authorization: crate::state::AuthenticatedCommandRequest,
 }
 
-static BOARDS: OnceLock<Mutex<BoardRuntime>> = OnceLock::new();
+/// Owned-runtime accessor (the old Mutex-returning boards() is gone).
+fn boards(g: &mut GameState) -> &mut BoardRuntime {
+    &mut g.social.boards
+}
 
-fn boards() -> &'static Mutex<BoardRuntime> {
-    BOARDS.get_or_init(|| {
-        Mutex::new(BoardRuntime {
+/// Read-only accessor.
+fn boards_ref(g: &GameState) -> &BoardRuntime {
+    &g.social.boards
+}
+
+// The board runtime lives on GameState as `social.boards` (phase-1 statics
+// migration). A fresh GameState starts with empty boards and the default
+// persistence format, matching the old never-booted static.
+impl Default for BoardRuntime {
+    fn default() -> Self {
+        BoardRuntime {
             boards: vec![Vec::new(); NUM_OF_BOARDS],
             formats: vec![crate::cformat::default_persistence_format(); NUM_OF_BOARDS],
             quarantined: vec![false; NUM_OF_BOARDS],
             pending: HashMap::new(),
             lib_path: "./lib".to_string(),
-        })
-    })
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -257,9 +267,8 @@ fn boards() -> &'static Mutex<BoardRuntime> {
 /// Call once at boot (the C `gen_board` lazy-loads on first use; we hoist it
 /// to an explicit boot hook). `lib_path` is the lib root (Config.lib_path);
 /// board files live at `<lib_path>/etc/board/...`.
-pub fn boot_boards(lib_path: &str) {
-    let rt = boards();
-    let mut guard = crate::lock_ok::lock(&rt);
+pub fn boot_boards(g: &mut GameState, lib_path: &str) {
+    let guard = boards(g);
     guard.lib_path = lib_path.trim_end_matches('/').to_string();
     guard.pending.clear();
     for b in 0..NUM_OF_BOARDS {
@@ -410,11 +419,9 @@ pub fn board_write(g: &mut GameState, board_type: usize, ch: CharId, arg: &str) 
         return;
     }
 
+    let guard = boards(g);
     {
-        let rt = boards();
-        let guard = crate::lock_ok::lock(&rt);
         if guard.boards[board_type].len() >= MAX_BOARD_MESSAGES {
-            drop(guard);
             g.send_to_char(ch, "The board is full.\r\n");
             return;
         }
@@ -444,18 +451,19 @@ pub fn board_write(g: &mut GameState, board_type: usize, ch: CharId, arg: &str) 
 
     // Commit the heading + reserve the (empty) body slot, recording its index.
     let msg_index;
+    let guard = boards(g);
     {
-        let rt = boards();
-        let mut guard = crate::lock_ok::lock(&rt);
         guard.boards[board_type].push(BoardMsg {
             heading: heading.into_bytes(),
             message: Vec::new(),
             level,
         });
         msg_index = guard.boards[board_type].len() - 1;
-
-        // Record the pending write keyed by the writer's connection.
-        if let Some(conn) = g.get_char(ch).and_then(|c| c.desc) {
+    }
+    let writer_conn = g.get_char(ch).and_then(|c| c.desc);
+    {
+        let guard = boards(g);
+        if let Some(conn) = writer_conn {
             guard.pending.insert(
                 conn.0,
                 PendingBoardWrite {
@@ -507,8 +515,7 @@ pub fn board_finish_write(
     save: bool,
 ) -> BoardFinishOutcome {
     let pending = {
-        let rt = boards();
-        let mut guard = crate::lock_ok::lock(&rt);
+        let guard = boards(g);
         guard.pending.remove(&conn.0)
     };
     let pending = match pending {
@@ -526,9 +533,7 @@ pub fn board_finish_write(
         }
     }
 
-    let rt = boards();
-    let mut guard = crate::lock_ok::lock(&rt);
-    if board_type >= guard.boards.len() {
+    if board_type >= g.social.boards.boards.len() {
         return BoardFinishOutcome::Finished;
     }
     if save
@@ -537,6 +542,7 @@ pub fn board_finish_write(
             i32::from(WRITE_LVL(board_type)),
         )
     {
+        let guard = boards(g);
         if msg_index < guard.boards[board_type].len()
             && guard.boards[board_type][msg_index].message.is_empty()
         {
@@ -549,25 +555,28 @@ pub fn board_finish_write(
         }
         return BoardFinishOutcome::AuthorizationDenied;
     }
-    if save {
-        if let Some(msg) = guard.boards[board_type].get_mut(msg_index) {
-            msg.message = body.as_bytes().to_vec();
+    let (path, msgs, format, quarantined);
+    {
+        let guard = boards(g);
+        if save {
+            if let Some(msg) = guard.boards[board_type].get_mut(msg_index) {
+                msg.message = body.as_bytes().to_vec();
+            }
+        } else {
+            // C boards.c:270-271 keeps the committed heading + slot on abort:
+            // the board shows the ghost entry and `read` answers 'That message
+            // seems to be empty.' The port deleted the entry instead (#171).
+            if msg_index < guard.boards[board_type].len()
+                && guard.boards[board_type][msg_index].message.is_empty()
+            {
+                // keep the reserved slot, as C does
+            }
         }
-    } else {
-        // C boards.c:270-271 keeps the committed heading + slot on abort:
-        // the board shows the ghost entry and `read` answers 'That message
-        // seems to be empty.' The port deleted the entry instead (#171).
-        if msg_index < guard.boards[board_type].len()
-            && guard.boards[board_type][msg_index].message.is_empty()
-        {
-            // keep the reserved slot, as C does
-        }
+        path = board_file_path(&guard.lib_path, board_type);
+        msgs = guard.boards[board_type].clone();
+        format = guard.formats[board_type];
+        quarantined = guard.quarantined[board_type];
     }
-    let path = board_file_path(&guard.lib_path, board_type);
-    let msgs = guard.boards[board_type].clone();
-    let format = guard.formats[board_type];
-    let quarantined = guard.quarantined[board_type];
-    drop(guard);
     if quarantined {
         log::error!(
             "SYSERR: Board '{}' is quarantined (corrupt save file); write refused to \
@@ -588,15 +597,9 @@ pub fn board_finish_write(
 #[cfg(test)]
 /// Serialize tests that re-boot the process-global board runtime: parallel
 /// `boot_boards` callers interleave mid-reset and see each other's boards.
-/// (Goes away when the runtime becomes GameState-owned.)
-pub(crate) fn test_board_guard() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-}
-
 #[cfg(test)]
-pub(crate) fn seed_pending_write_for_test(conn: ConnId) {
-    crate::lock_ok::lock(&boards()).pending.insert(
+pub(crate) fn seed_pending_write_for_test(g: &mut GameState, conn: ConnId) {
+    boards(g).pending.insert(
         conn.0,
         PendingBoardWrite {
             board_type: usize::MAX,
@@ -612,10 +615,8 @@ pub(crate) fn seed_pending_write_for_test(conn: ConnId) {
 }
 
 #[cfg(test)]
-pub(crate) fn has_pending_write_for_test(conn: ConnId) -> bool {
-    crate::lock_ok::lock(&boards())
-        .pending
-        .contains_key(&conn.0)
+pub(crate) fn has_pending_write_for_test(g: &GameState, conn: ConnId) -> bool {
+    boards_ref(g).pending.contains_key(&conn.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -648,7 +649,7 @@ pub fn board_show(g: &mut GameState, board_type: usize, ch: CharId, arg: &str) -
         To::Room,
     );
 
-    let msgs = board_msgs(board_type);
+    let msgs = board_msgs(g, board_type);
     let mut buf = String::from(
         "This is a bulletin board.  Usage: READ/REMOVE <messg #>, WRITE <header>.\r\n\
          You will need to look at the board to save your message.\r\n",
@@ -724,7 +725,7 @@ pub fn board_display(g: &mut GameState, board_type: usize, ch: CharId, arg: &str
         return true;
     }
 
-    let msgs = board_msgs(board_type);
+    let msgs = board_msgs(g, board_type);
     if msgs.is_empty() {
         g.send_to_char(ch, "The board is empty!\r\n");
         return true;
@@ -794,7 +795,7 @@ pub fn board_remove(g: &mut GameState, board_type: usize, ch: CharId, arg: &str)
         return false;
     }
 
-    let msgs = board_msgs(board_type);
+    let msgs = board_msgs(g, board_type);
     if msgs.is_empty() {
         g.send_to_char(ch, "The board is empty!\r\n");
         return true;
@@ -846,15 +847,14 @@ pub fn board_remove(g: &mut GameState, board_type: usize, ch: CharId, arg: &str)
     // C guards against removing a message whose body is still being authored.
     // We block removal if any connection has a pending write to this exact
     // (board, index).
+    let guard = boards(g);
     {
-        let rt = boards();
-        let guard = crate::lock_ok::lock(&rt);
         let authoring = guard
             .pending
             .values()
             .any(|pending| pending.board_type == board_type && pending.msg_index == ind);
         if authoring {
-            drop(guard);
+            // guard dropped here (end of owned borrow)
             g.send_to_char(
                 ch,
                 "At least wait until the author is finished before removing it!\r\n",
@@ -866,9 +866,8 @@ pub fn board_remove(g: &mut GameState, board_type: usize, ch: CharId, arg: &str)
     // Remove the message and shift indices (Vec::remove does the C shuffle).
     // Any pending writes at a higher index must shift down by one to stay
     // pointing at the right message.
+    let guard = boards(g);
     {
-        let rt = boards();
-        let mut guard = crate::lock_ok::lock(&rt);
         if ind < guard.boards[board_type].len() {
             guard.boards[board_type].remove(ind);
         }
@@ -881,7 +880,7 @@ pub fn board_remove(g: &mut GameState, board_type: usize, ch: CharId, arg: &str)
         let snapshot = guard.boards[board_type].clone();
         let format = guard.formats[board_type];
         let quarantined = guard.quarantined[board_type];
-        drop(guard);
+        // guard dropped here (end of owned borrow)
         if quarantined {
             log::error!(
                 "SYSERR: Board '{}' is quarantined (corrupt save file); write refused to \
@@ -1098,10 +1097,12 @@ fn REMOVE_LVL(b: usize) -> Level {
 
 /// A snapshot copy of one board's messages (so we hold no static lock while
 /// touching GameState for I/O).
-fn board_msgs(board_type: usize) -> Vec<BoardMsg> {
-    let rt = boards();
-    let guard = crate::lock_ok::lock(&rt);
-    guard.boards.get(board_type).cloned().unwrap_or_default()
+fn board_msgs(g: &GameState, board_type: usize) -> Vec<BoardMsg> {
+    boards_ref(g)
+        .boards
+        .get(board_type)
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn char_authority_i32(g: &GameState, ch: CharId) -> Option<i32> {
@@ -1275,7 +1276,6 @@ mod persistence_tests {
     /// saves for that board (C "Resetting." would destroy it on next save).
     #[test]
     fn corrupt_board_file_is_quarantined_and_preserved() {
-        let _guard = test_board_guard();
         let lib = std::path::PathBuf::from(temp_file("corrupt-quarantine"))
             .parent()
             .unwrap()
@@ -1285,7 +1285,8 @@ mod persistence_tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, corrupt).unwrap();
 
-        boot_boards(lib.to_str().unwrap());
+        let mut g = GameState::new(crate::config::Config::default());
+        boot_boards(&mut g, lib.to_str().unwrap());
 
         assert_eq!(
             std::fs::read(&path).unwrap(),
@@ -1293,7 +1294,7 @@ mod persistence_tests {
             "boot must not modify a corrupt board file"
         );
         {
-            let guard = crate::lock_ok::lock(&boards());
+            let guard = boards(&mut g);
             assert!(guard.quarantined[0], "corrupt board must be quarantined");
             assert!(guard.boards[0].is_empty());
         }
@@ -1304,7 +1305,6 @@ mod persistence_tests {
     /// input for the same purpose: quarantined, bytes preserved.
     #[test]
     fn truncated_rust_board_file_is_quarantined_and_preserved() {
-        let _guard = test_board_guard();
         let lib = std::path::PathBuf::from(temp_file("truncated-quarantine"))
             .parent()
             .unwrap()
@@ -1314,11 +1314,12 @@ mod persistence_tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, truncated).unwrap();
 
-        boot_boards(lib.to_str().unwrap());
+        let mut g = GameState::new(crate::config::Config::default());
+        boot_boards(&mut g, lib.to_str().unwrap());
 
         assert_eq!(std::fs::read(&path).unwrap(), truncated);
         {
-            let guard = crate::lock_ok::lock(&boards());
+            let guard = boards_ref(&g);
             assert!(guard.quarantined[0]);
         }
         let _ = std::fs::remove_dir_all(lib);
@@ -1326,15 +1327,14 @@ mod persistence_tests {
 
     #[test]
     fn board_read_write_and_remove_levels_use_persisted_trust() {
-        let _guard = test_board_guard();
         const IMPLEMENTOR_BOARD: usize = 3;
         let root = std::path::PathBuf::from(temp_file("authority"))
             .parent()
             .unwrap()
             .join("lib");
-        boot_boards(root.to_str().unwrap());
-
         let mut g = GameState::new(crate::config::Config::default());
+        boot_boards(&mut g, root.to_str().unwrap());
+
         let display = connected_player(&mut g, ConnId(821), "Display", LVL_IMPL, 1);
         let trusted = connected_player(&mut g, ConnId(822), "Trusted", 1, i32::from(LVL_IMPL));
 
@@ -1360,7 +1360,7 @@ mod persistence_tests {
                 .outbuf
                 .contains("not holy enough to write")
         );
-        assert!(crate::lock_ok::lock(&boards()).boards[IMPLEMENTOR_BOARD].is_empty());
+        assert!(boards(&mut g).boards[IMPLEMENTOR_BOARD].is_empty());
 
         board_write(&mut g, IMPLEMENTOR_BOARD, trusted, "trusted authority");
         assert!(
@@ -1369,12 +1369,12 @@ mod persistence_tests {
                 .contains("Write your message")
         );
         assert_eq!(
-            crate::lock_ok::lock(&boards()).boards[IMPLEMENTOR_BOARD][0].level,
+            boards(&mut g).boards[IMPLEMENTOR_BOARD][0].level,
             i32::from(LVL_IMPL)
         );
 
         {
-            let mut runtime = crate::lock_ok::lock(&boards());
+            let runtime = boards(&mut g);
             runtime.pending.clear();
             runtime.boards[IMPLEMENTOR_BOARD] = vec![BoardMsg {
                 heading: b"           (Other)      :: protected".to_vec(),
@@ -1391,10 +1391,7 @@ mod persistence_tests {
                 .outbuf
                 .contains("not holy enough to remove other people's messages")
         );
-        assert_eq!(
-            crate::lock_ok::lock(&boards()).boards[IMPLEMENTOR_BOARD].len(),
-            1
-        );
+        assert_eq!(boards(&mut g).boards[IMPLEMENTOR_BOARD].len(), 1);
 
         assert!(board_remove(&mut g, IMPLEMENTOR_BOARD, trusted, "1"));
         assert!(
@@ -1402,9 +1399,9 @@ mod persistence_tests {
                 .outbuf
                 .contains("Message removed")
         );
-        assert!(crate::lock_ok::lock(&boards()).boards[IMPLEMENTOR_BOARD].is_empty());
+        assert!(boards(&mut g).boards[IMPLEMENTOR_BOARD].is_empty());
 
-        boot_boards(root.join("empty-reset").to_str().unwrap());
+        boot_boards(&mut g, root.join("empty-reset").to_str().unwrap());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1426,17 +1423,16 @@ mod persistence_tests {
         .into_iter()
         .enumerate()
         {
-            let _guard = test_board_guard();
             let root = std::path::PathBuf::from(temp_file(&format!("write-revalidate-{index}")))
                 .parent()
                 .unwrap()
                 .join("lib");
-            boot_boards(root.to_str().unwrap());
             let mut g = GameState::new(crate::config::Config::default());
+            boot_boards(&mut g, root.to_str().unwrap());
             let conn = ConnId(850 + index as u64);
             let writer = connected_player(&mut g, conn, "Writer", LVL_IMPL, i32::from(LVL_IMPL));
             board_write(&mut g, IMPLEMENTOR_BOARD, writer, "private draft");
-            assert!(has_pending_write_for_test(conn), "case={revocation:?}");
+            assert!(has_pending_write_for_test(&g, conn), "case={revocation:?}");
 
             match revocation {
                 Revocation::Trust => g.get_char_mut(writer).unwrap().trust = 1,
@@ -1462,10 +1458,10 @@ mod persistence_tests {
                 "case={revocation:?}"
             );
             assert!(
-                crate::lock_ok::lock(&boards()).boards[IMPLEMENTOR_BOARD].is_empty(),
+                boards(&mut g).boards[IMPLEMENTOR_BOARD].is_empty(),
                 "case={revocation:?}"
             );
-            assert!(!has_pending_write_for_test(conn), "case={revocation:?}");
+            assert!(!has_pending_write_for_test(&g, conn), "case={revocation:?}");
             let _ = std::fs::remove_dir_all(root);
         }
     }
