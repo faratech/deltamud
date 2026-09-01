@@ -47,10 +47,12 @@
 //     missing_cash2, message_buy, message_sell
 //   We read them in that exact file order.
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::state::GameState;
 use crate::types::*;
 use std::collections::HashMap;
+use std::io::{Error, ErrorKind, Result as IoResult};
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
@@ -305,8 +307,8 @@ fn shops() -> &'static Mutex<Vec<ShopData>> {
 // vnum->SpecFn map (keeper mob vnum -> the captured secondary) lazily the first
 // time shop_keeper() consults it, which is well after both the shop table
 // (boot_shops) and the static mob-spec tables (spec_assign::assign_specs) have
-// been populated. The OnceLock makes the build idempotent and order-independent
-// (get_mob_spec lazily builds its own table if it has not yet).
+// been populated. The cached map is invalidatable because live sedit can
+// change a keeper or insert a shop.
 //
 // In the shipped DeltaMUD world no shop-keeper vnum is also an assign_mobiles()
 // target, so this map ends up empty — byte-for-byte what C produces (every
@@ -314,32 +316,39 @@ fn shops() -> &'static Mutex<Vec<ShopData>> {
 // assigns a spec to a keeper vnum, it is captured and dispatched here.
 type ShopFn = crate::spec_assign::SpecFn;
 
-static SHOP_FUNCS: OnceLock<HashMap<MobVnum, ShopFn>> = OnceLock::new();
+static SHOP_FUNCS: OnceLock<Mutex<Option<HashMap<MobVnum, ShopFn>>>> = OnceLock::new();
+
+fn shop_funcs() -> &'static Mutex<Option<HashMap<MobVnum, ShopFn>>> {
+    SHOP_FUNCS.get_or_init(|| Mutex::new(None))
+}
+
+fn invalidate_shop_funcs() {
+    *crate::lock_ok::lock(shop_funcs()) = None;
+}
 
 /// SHOP_FUNC(shop_nr) lookup, keyed by the shop's keeper mob vnum. Returns the
 /// captured secondary spec, or None when the keeper had no prior spec (the
 /// common case — equivalent to C's SHOP_FUNC == 0).
 fn shop_func(keeper_vnum: MobVnum) -> Option<ShopFn> {
-    SHOP_FUNCS
-        .get_or_init(|| {
-            // assign_the_shopkeepers(): walk every shop, capture the keeper's
-            // existing static spec as its SHOP_FUNC. NOBODY keepers are skipped
-            // exactly as C does (`if (SHOP_KEEPER(index) == NOBODY) continue;`).
-            let mut map: HashMap<MobVnum, ShopFn> = HashMap::new();
-            if let Ok(guard) = shops().lock() {
-                for s in guard.iter() {
-                    if s.keeper == NOBODY {
-                        continue;
-                    }
-                    if let Some(func) = crate::spec_assign::get_mob_spec(s.keeper) {
-                        map.insert(s.keeper, func);
-                    }
-                }
-            }
-            map
-        })
-        .get(&keeper_vnum)
-        .copied()
+    {
+        let cache = crate::lock_ok::lock(shop_funcs());
+        if let Some(map) = cache.as_ref() {
+            return map.get(&keeper_vnum).copied();
+        }
+    }
+
+    let keepers: Vec<MobVnum> = crate::lock_ok::lock(shops())
+        .iter()
+        .map(|shop| shop.keeper)
+        .filter(|keeper| *keeper != NOBODY)
+        .collect();
+    let map: HashMap<MobVnum, ShopFn> = keepers
+        .into_iter()
+        .filter_map(|keeper| crate::spec_assign::get_mob_spec(keeper).map(|func| (keeper, func)))
+        .collect();
+    let found = map.get(&keeper_vnum).copied();
+    *crate::lock_ok::lock(shop_funcs()) = Some(map);
+    found
 }
 
 pub fn is_shop_keeper_vnum(keeper_vnum: MobVnum) -> bool {
@@ -365,6 +374,7 @@ pub fn boot_shops(lib_path: &str) {
         Err(_) => {
             // No index -> no shops (mirrors C with an empty shp dir).
             let _ = shops().lock().map(|mut v| v.clear());
+            invalidate_shop_funcs();
             return;
         }
     };
@@ -384,6 +394,7 @@ pub fn boot_shops(lib_path: &str) {
     if let Ok(mut guard) = shops().lock() {
         *guard = table;
     }
+    invalidate_shop_funcs();
 }
 
 /// A line-oriented cursor over the .shp file body, providing the get_line /
@@ -500,7 +511,21 @@ fn parse_int(t: &str) -> Option<i32> {
     if end == 0 {
         return None;
     }
-    t[..end].parse::<i32>().ok()
+    match t[..end].parse::<i32>() {
+        Ok(value) => Some(value),
+        Err(_) => {
+            let clamped = if t.starts_with('-') {
+                i32::MIN
+            } else {
+                i32::MAX
+            };
+            log::warn!(
+                "SYSERR: shop numeric field overflow; clamped to {clamped}: {}",
+                &t[..end]
+            );
+            Some(clamped)
+        }
+    }
 }
 
 /// read_list (LIST_PRODUCE / LIST_ROOM): read ints until -1. For producing,
@@ -541,11 +566,12 @@ fn read_type_list(r: &mut ShopReader) -> Vec<ShopBuyData> {
         let trimmed = body.trim_start();
         for (idx, name) in ITEM_TYPE_NAMES.iter().enumerate() {
             if !name.is_empty()
-                && trimmed.len() >= name.len()
-                && trimmed[..name.len()].eq_ignore_ascii_case(name)
+                && trimmed
+                    .get(..name.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(name))
             {
                 num = idx as i32;
-                rest = &trimmed[name.len()..];
+                rest = trimmed.get(name.len()..).unwrap_or_default();
                 break;
             }
         }
@@ -658,6 +684,72 @@ fn boot_the_shops(contents: &str, table: &mut Vec<ShopData>) {
 
         table.push(shop);
     }
+}
+
+/// Install one freshly persisted shop into the live table. Runtime bank/sort
+/// state is retained when replacing an existing definition.
+fn upsert_runtime_shop(table: &mut Vec<ShopData>, mut incoming: ShopData) {
+    if let Some(pos) = table.iter().position(|shop| shop.vnum == incoming.vnum) {
+        incoming.bank_account = table[pos].bank_account;
+        incoming.lastsort = table[pos].lastsort;
+        table[pos] = incoming;
+    } else {
+        table.push(incoming);
+    }
+    table.sort_by_key(|shop| shop.vnum);
+}
+
+/// Re-read one shop from the atomically replaced zone file and install it into
+/// the live shop table through the canonical on-disk parser.
+pub(crate) fn upsert_shop_from_zone_file(
+    lib_path: &str,
+    zone: i32,
+    shop_vnum: i32,
+) -> IoResult<()> {
+    let path = Path::new(lib_path)
+        .join("world")
+        .join("shp")
+        .join(format!("{zone}.shp"));
+    let contents = std::fs::read_to_string(&path)?;
+    let mut parsed = Vec::new();
+    boot_the_shops(&contents, &mut parsed);
+    let incoming = parsed
+        .into_iter()
+        .find(|shop| shop.vnum == shop_vnum)
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidData,
+                format!("shop {shop_vnum} missing from {}", path.display()),
+            )
+        })?;
+
+    {
+        let mut table = crate::lock_ok::lock(shops());
+        upsert_runtime_shop(&mut table, incoming);
+    }
+    invalidate_shop_funcs();
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn test_shop_definition(shop_vnum: i32) -> Option<(MobVnum, f32, i32, i32)> {
+    crate::lock_ok::lock(shops())
+        .iter()
+        .find(|shop| shop.vnum == shop_vnum)
+        .map(|shop| {
+            (
+                shop.keeper,
+                shop.profit_buy,
+                shop.bank_account,
+                shop.lastsort,
+            )
+        })
+}
+
+#[cfg(test)]
+pub(crate) fn test_remove_shop(shop_vnum: i32) {
+    crate::lock_ok::lock(shops()).retain(|shop| shop.vnum != shop_vnum);
+    invalidate_shop_funcs();
 }
 
 // ---------------------------------------------------------------------------
@@ -839,11 +931,7 @@ fn numdisplay(val: i32) -> String {
         }
         out.push(*b as char);
     }
-    if neg {
-        format!("-{}", out)
-    } else {
-        out
-    }
+    if neg { format!("-{}", out) } else { out }
 }
 
 /// AN(string): "a"/"an" (utils.h).
@@ -1367,7 +1455,6 @@ fn get_purchase_obj(
             }
         };
         if obj_cost(g, obj) <= 0 {
-            g.obj_from_anywhere(obj);
             g.extract_obj(obj);
             continue;
         }
@@ -1436,7 +1523,7 @@ fn sprintf_name(template: &str, name: &str) -> String {
         .unwrap_or(full)
 }
 
-fn sprintf_name_amt(template: &str, name: &str, amt: i32) -> String {
+fn sprintf_name_amt(template: &str, name: &str, amt: i64) -> String {
     let full = template
         .replacen("%s", name, 1)
         .replacen("%d", &amt.to_string(), 1);
@@ -1451,13 +1538,13 @@ fn sprintf_name_amt(template: &str, name: &str, amt: i32) -> String {
 
 /// Returns (count, remaining-arg). If the first token is a number it is
 /// consumed; otherwise count defaults to 1 and arg is unchanged.
-fn transaction_amt(arg: &str) -> (i32, String) {
+fn transaction_amt(arg: &str) -> Result<(i32, String), crate::text::ParseIntError> {
     let (first, rest) = crate::interpreter::one_argument(arg);
     if !first.is_empty() && is_number(&first) {
-        let num: i32 = first.parse().unwrap_or(0);
-        (num, rest.to_string())
+        let num = crate::text::parse_i32_strict(&first)?;
+        Ok((num, rest.to_string()))
     } else {
-        (1, arg.to_string())
+        Ok((1, arg.to_string()))
     }
 }
 
@@ -1527,6 +1614,19 @@ fn commit_shop(shop_idx: usize, bank: i32, lastsort: i32) {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_PRODUCT_LOAD: std::cell::Cell<Option<ObjVnum>> = const { std::cell::Cell::new(None) };
+}
+
+fn load_shop_product(g: &mut GameState, vnum: ObjVnum) -> Option<ObjId> {
+    #[cfg(test)]
+    if FAIL_PRODUCT_LOAD.with(|failed| failed.get() == Some(vnum)) {
+        return None;
+    }
+    g.load_object(vnum)
+}
+
 fn shopping_buy(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_idx: usize) {
     let mut shop = match shops().lock().ok().and_then(|v| v.get(shop_idx).cloned()) {
         Some(s) => s,
@@ -1546,7 +1646,14 @@ fn shopping_buy(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_i
         shop.lastsort = is_carrying_n(g, keeper);
     }
 
-    let (buynum, arg) = transaction_amt(arg);
+    let (buynum, arg) = match transaction_amt(arg) {
+        Ok(parsed) => parsed,
+        Err(crate::text::ParseIntError::Overflow) => {
+            keeper_tell_named(g, keeper, ch, "That quantity is out of range.");
+            return;
+        }
+        Err(_) => return,
+    };
     if buynum < 0 {
         let body = format!("A negative amount?  Try selling me something.");
         keeper_tell_named(g, keeper, ch, &body);
@@ -1607,7 +1714,7 @@ fn shopping_buy(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_i
         return;
     }
 
-    let mut goldamt = 0;
+    let mut goldamt = 0i64;
     let mut bought = 0;
     let mut cur: Option<ObjId> = Some(obj);
     let mut last_obj: Option<ObjId> = None;
@@ -1621,13 +1728,11 @@ fn shopping_buy(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_i
         {
             break;
         }
-        bought += 1;
-
         // Producing shop: hand over a fresh copy from the prototype. Otherwise
         // move the stock item.
         let given = if shop_producing(g, o, &shop) {
             let vnum = obj_vnum(g, o);
-            match g.load_object(vnum) {
+            match load_shop_product(g, vnum) {
                 Some(fresh) => {
                     crate::dg_triggers::load_otrigger(g, fresh);
                     fresh
@@ -1639,13 +1744,16 @@ fn shopping_buy(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_i
             shop.lastsort -= 1;
             o
         };
+        // Count only an object that was actually created/moved. A stale
+        // producing vnum may fail load_object after persisted inventory loads.
+        bought += 1;
         g.obj_to_char(given, ch);
 
         let price = buy_price(g, given, &shop);
-        goldamt += price;
+        goldamt = goldamt.saturating_add(i64::from(price));
         if !is_god(g, ch) {
             if let Some(c) = g.get_char_mut(ch) {
-                c.points.gold -= price;
+                crate::gold::debit(c, crate::gold::Account::Carried, i64::from(price));
             }
         }
 
@@ -1679,7 +1787,7 @@ fn shopping_buy(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_i
 
     if !is_god(g, ch) {
         if let Some(k) = g.get_char_mut(keeper) {
-            k.points.gold += goldamt;
+            crate::gold::credit(k, crate::gold::Account::Carried, goldamt);
         }
     }
 
@@ -1697,9 +1805,15 @@ fn shopping_buy(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_i
     if shop.bitvector & WILL_BANK_MONEY != 0 {
         let kgold = get_gold(g, keeper);
         if kgold > MAX_OUTSIDE_BANK {
-            shop.bank_account += kgold - MAX_OUTSIDE_BANK;
+            shop.bank_account = crate::gold::normalize(
+                i64::from(shop.bank_account).saturating_add(i64::from(kgold - MAX_OUTSIDE_BANK)),
+            );
             if let Some(k) = g.get_char_mut(keeper) {
-                k.points.gold = MAX_OUTSIDE_BANK;
+                crate::gold::set(
+                    k,
+                    crate::gold::Account::Carried,
+                    i64::from(MAX_OUTSIDE_BANK),
+                );
             }
         }
     }
@@ -1717,7 +1831,14 @@ fn shopping_sell(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_
         return;
     }
 
-    let (sellnum, arg) = transaction_amt(arg);
+    let (sellnum, arg) = match transaction_amt(arg) {
+        Ok(parsed) => parsed,
+        Err(crate::text::ParseIntError::Overflow) => {
+            keeper_tell_named(g, keeper, ch, "That quantity is out of range.");
+            return;
+        }
+        Err(_) => return,
+    };
     if sellnum < 0 {
         keeper_tell_named(g, keeper, ch, "A negative amount?  Try buying something.");
         return;
@@ -1733,39 +1854,43 @@ fn shopping_sell(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_
         None => return,
     };
 
-    if get_gold(g, keeper) + shop.bank_account < sell_price(g, ch, obj, &shop) {
+    if i64::from(get_gold(g, keeper)) + i64::from(shop.bank_account)
+        < i64::from(sell_price(g, ch, obj, &shop))
+    {
         let body = sprintf_name(&shop.missing_cash1, &get_name(g, ch));
         keeper_tell_named(g, keeper, ch, &body);
         return;
     }
 
     let mut sold = 0;
-    let mut goldamt = 0;
+    let mut goldamt = 0i64;
     let mut tempstr = String::new();
     let mut have_obj = true;
 
     loop {
         if !(have_obj
-            && get_gold(g, keeper) + shop.bank_account >= sell_price(g, ch, obj, &shop)
+            && i64::from(get_gold(g, keeper)) + i64::from(shop.bank_account)
+                >= i64::from(sell_price(g, ch, obj, &shop))
             && sold < sellnum)
         {
             break;
         }
         sold += 1;
         let price = sell_price(g, ch, obj, &shop);
-        goldamt += price;
+        goldamt = goldamt.saturating_add(i64::from(price));
         if let Some(k) = g.get_char_mut(keeper) {
             // Draw the shortfall from the shop's bank BEFORE debiting on-hand
             // coin: the old order let keeper gold go negative (and stay there
             // when the deficit exceeded the bank), bricking the shop -- the
             // next sell's affordability check rejected everything.
-            let on_hand = k.points.gold;
-            if on_hand < price {
-                let shortfall = (price - on_hand).min(shop.bank_account.max(0));
-                shop.bank_account -= shortfall;
-                k.points.gold += shortfall;
+            let on_hand = crate::gold::balance(k, crate::gold::Account::Carried);
+            if on_hand < i64::from(price) {
+                let shortfall =
+                    (i64::from(price) - on_hand).min(i64::from(shop.bank_account).max(0));
+                shop.bank_account = (i64::from(shop.bank_account) - shortfall) as i32;
+                crate::gold::credit(k, crate::gold::Account::Carried, shortfall);
             }
-            k.points.gold = (k.points.gold - price).max(0);
+            crate::gold::debit(k, crate::gold::Account::Carried, i64::from(price));
         }
 
         let short = obj_short(g, obj);
@@ -1787,7 +1912,9 @@ fn shopping_sell(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_
     if sold < sellnum {
         let body = if !have_obj {
             format!("You only have {} of those.", sold)
-        } else if get_gold(g, keeper) + shop.bank_account < sell_price(g, ch, obj, &shop) {
+        } else if i64::from(get_gold(g, keeper)) + i64::from(shop.bank_account)
+            < i64::from(sell_price(g, ch, obj, &shop))
+        {
             format!("I can only afford to buy {} of those.", sold)
         } else {
             format!("Something really screwy made me buy {}.", sold)
@@ -1796,7 +1923,7 @@ fn shopping_sell(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_
     }
 
     if let Some(c) = g.get_char_mut(ch) {
-        c.points.gold += goldamt;
+        crate::gold::credit(c, crate::gold::Account::Carried, goldamt);
     }
     if tempstr.is_empty() {
         tempstr = times_message(g, None, &name, sold);
@@ -1810,10 +1937,10 @@ fn shopping_sell(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_
 
     // Replenish keeper coins from the bank when low.
     if get_gold(g, keeper) < MIN_OUTSIDE_BANK {
-        let amt = (MAX_OUTSIDE_BANK - get_gold(g, keeper)).min(shop.bank_account);
+        let amt = (MAX_OUTSIDE_BANK - get_gold(g, keeper)).min(shop.bank_account.max(0));
         shop.bank_account -= amt;
         if let Some(k) = g.get_char_mut(keeper) {
-            k.points.gold += amt;
+            crate::gold::credit(k, crate::gold::Account::Carried, i64::from(amt));
         }
     }
 
@@ -2238,7 +2365,20 @@ pub fn show_shops(g: &mut GameState, ch: CharId, arg: &str) {
             }
         }
     } else if is_number(arg) {
-        arg.parse::<i32>().unwrap_or(0) - 1
+        match crate::text::parse_i32_strict(arg) {
+            Ok(number) => match number.checked_sub(1) {
+                Some(index) => index,
+                None => {
+                    g.send_to_char(ch, "Shop number is out of range.\r\n");
+                    return;
+                }
+            },
+            Err(crate::text::ParseIntError::Overflow) => {
+                g.send_to_char(ch, "Shop number is out of range.\r\n");
+                return;
+            }
+            Err(_) => -1,
+        }
     } else {
         -1
     };
@@ -2328,7 +2468,11 @@ fn list_detailed_shop(g: &mut GameState, ch: CharId, shop: &ShopData, shop_idx: 
                 "Shopkeeper: {} (#{}) Special Function: {}\r\n",
                 kname,
                 shop.keeper,
-                if shop_func(shop.keeper).is_some() { "Yes" } else { "No" }
+                if shop_func(shop.keeper).is_some() {
+                    "Yes"
+                } else {
+                    "No"
+                }
             ),
         );
         // Live coins, if an instance exists.
@@ -2432,10 +2576,50 @@ mod tests {
     use crate::config::Config;
     use crate::connection::Descriptor;
     use crate::dg_db_scripts::TrigProto;
-    use crate::dg_handler::{ScriptKey, DG_TEST_LOCK, OBJ_TRIGGER, OTRIG_LOAD};
+    use crate::dg_handler::{DG_TEST_LOCK, OBJ_TRIGGER, OTRIG_LOAD, ScriptKey};
     use crate::object::{ExtraFlags, ObjectType, WearFlags};
     use crate::room::Room;
     use crate::world::ObjectProto;
+
+    fn dummy_shop_func(
+        _g: &mut GameState,
+        _ch: CharId,
+        _me: CharId,
+        _cmd: &str,
+        _arg: &str,
+    ) -> bool {
+        false
+    }
+
+    #[test]
+    fn runtime_shop_upsert_preserves_state_and_invalidates_keeper_cache() {
+        let mut old = ShopData::new(200);
+        old.keeper = 1001;
+        old.bank_account = 4321;
+        old.lastsort = 17;
+        let mut table = vec![ShopData::new(300), old];
+
+        let mut edited = ShopData::new(200);
+        edited.keeper = 1002;
+        edited.profit_buy = 1.75;
+        upsert_runtime_shop(&mut table, edited);
+
+        assert_eq!(
+            table.iter().map(|shop| shop.vnum).collect::<Vec<_>>(),
+            vec![200, 300]
+        );
+        let installed = table.iter().find(|shop| shop.vnum == 200).unwrap();
+        assert_eq!(installed.keeper, 1002);
+        assert_eq!(installed.profit_buy, 1.75);
+        assert_eq!(installed.bank_account, 4321);
+        assert_eq!(installed.lastsort, 17);
+
+        let mut stale = HashMap::new();
+        stale.insert(1001, dummy_shop_func as ShopFn);
+        *crate::lock_ok::lock(shop_funcs()) = Some(stale);
+        invalidate_shop_funcs();
+        assert!(crate::lock_ok::lock(shop_funcs()).is_none());
+    }
 
     fn add_player(g: &mut GameState, name: &str, level: Level) -> CharId {
         let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
@@ -2450,6 +2634,27 @@ mod tests {
         ch.desc = Some(conn);
         ch.player.level = level;
         g.create_char(ch)
+    }
+
+    #[test]
+    fn shop_number_entry_rejects_i32_overflow_instead_of_selecting_zero() {
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(65);
+        let ch = connected_player(&mut g, conn, "Imm", LVL_IMPL);
+
+        show_shops(&mut g, ch, "2147483648");
+
+        assert!(
+            g.descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("Shop number is out of range.")
+        );
+        assert_eq!(
+            transaction_amt("2147483648 sword"),
+            Err(crate::text::ParseIntError::Overflow)
+        );
     }
 
     fn object_proto(vnum: ObjVnum, short: &str, cost: i32) -> ObjectProto {
@@ -2565,12 +2770,13 @@ mod tests {
 
         assert_eq!(g.get_char(keeper).unwrap().points.hit, 50);
         assert_eq!(g.get_char(attacker).unwrap().fighting, None);
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains(MSG_CANT_KILL_KEEPER));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains(MSG_CANT_KILL_KEEPER)
+        );
 
         crate::lock_ok::lock(&shops()).clear();
     }
@@ -2590,7 +2796,11 @@ mod tests {
         let keeper = g.create_char(Character::new_npc(9000));
         g.char_to_room(buyer, room);
         g.char_to_room(keeper, room);
-        g.get_char_mut(buyer).unwrap().points.gold = 1000;
+        crate::gold::set(
+            g.get_char_mut(buyer).unwrap(),
+            crate::gold::Account::Carried,
+            1000,
+        );
         g.obj_protos
             .insert(5100, object_proto(5100, "triggered amulet", 10));
 
@@ -2641,6 +2851,52 @@ mod tests {
         );
         crate::lock_ok::lock(&shops()).clear();
     }
+
+    #[test]
+    fn failed_producing_prototype_load_does_not_increment_bought_count() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Shop".into(), String::new()));
+        let buyer = connected_player(&mut g, ConnId(22), "Buyer", 20);
+        let keeper = g.create_char(Character::new_npc(9001));
+        g.char_to_room(buyer, room);
+        g.char_to_room(keeper, room);
+        crate::gold::set(
+            g.get_char_mut(buyer).unwrap(),
+            crate::gold::Account::Carried,
+            1_000,
+        );
+        g.obj_protos
+            .insert(5101, object_proto(5101, "stale amulet", 10));
+        let stock = g.load_object(5101).unwrap();
+        g.obj_to_char(stock, keeper);
+        FAIL_PRODUCT_LOAD.with(|failed| failed.set(Some(5101)));
+
+        {
+            let mut guard = crate::lock_ok::lock(&shops());
+            guard.clear();
+            let mut shop = ShopData::new(2);
+            shop.producing.push(5101);
+            shop.keeper = 9001;
+            shop.close1 = 28;
+            shop.close2 = 28;
+            shop.message_buy = "%s bought for %d.".to_string();
+            guard.push(shop);
+        }
+
+        shopping_buy(&mut g, "amulet", buyer, keeper, 0);
+        FAIL_PRODUCT_LOAD.with(|failed| failed.set(None));
+
+        assert!(g.get_char(buyer).unwrap().carrying.is_empty());
+        assert_eq!(g.get_char(buyer).unwrap().points.gold, 1_000);
+        assert!(
+            g.descriptors
+                .get(&ConnId(22))
+                .unwrap()
+                .outbuf
+                .contains("I only have 0 to sell you.")
+        );
+        crate::lock_ok::lock(&shops()).clear();
+    }
 }
 
 #[cfg(test)]
@@ -2660,7 +2916,10 @@ mod shop_hours_tests {
         // set_hour mutates the process-global CLOCK: serialize with the other
         // hour-gated tests (town_life).
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        let _guard = LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap();
+        let _guard = LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
         let mut g = GameState::new(Config::default());
         let room = g.add_room(Room::new(100, 1, "Shop".into(), String::new()));
         let mut keeper = Character::new_npc(206);
@@ -2671,9 +2930,12 @@ mod shop_hours_tests {
         // keeper_say broadcasts to the ROOM: observe via a customer in the
         // room rather than the keeper's own descriptor.
         let conn = ConnId(902);
-        g.descriptors
-            .insert(conn, crate::connection::Descriptor::new(conn, "test".into()));
-        let mut customer = Character::new_player("Shopper".to_string(), Class::Warrior, Race::Human);
+        g.descriptors.insert(
+            conn,
+            crate::connection::Descriptor::new(conn, "test".into()),
+        );
+        let mut customer =
+            Character::new_player("Shopper".to_string(), Class::Warrior, Race::Human);
         customer.player.level = 5;
         let customer = g.create_char(customer);
         g.char_to_room(customer, room);
@@ -2694,11 +2956,11 @@ mod shop_hours_tests {
         // the hour after; with a single window the after-close refusal is
         // "closed for the day".
         for (hour, want) in [
-            (4, Some(MSG_NOT_OPEN_YET)),     // before open1
+            (4, Some(MSG_NOT_OPEN_YET)), // before open1
             (8, Some(MSG_NOT_OPEN_YET)),
-            (9, None),                       // open on the hour
+            (9, None), // open on the hour
             (12, None),
-            (17, None),                      // still open at close1 (strict <)
+            (17, None), // still open at close1 (strict <)
             (18, Some(MSG_CLOSED_FOR_DAY)),
             (23, Some(MSG_CLOSED_FOR_DAY)),
         ] {
@@ -2713,10 +2975,7 @@ mod shop_hours_tests {
                 }
                 Some(msg) => {
                     assert!(!open, "hour {hour}: shop must be closed");
-                    assert!(
-                        out.contains(msg),
-                        "hour {hour}: got {out:?}, want {msg:?}"
-                    );
+                    assert!(out.contains(msg), "hour {hour}: got {out:?}, want {msg:?}");
                 }
             }
         }
@@ -2741,10 +3000,7 @@ mod shop_hours_tests {
                 None => assert!(open, "hour {hour}: shop must be open"),
                 Some(msg) => {
                     assert!(!open, "hour {hour}: shop must be closed");
-                    assert!(
-                        out.contains(msg),
-                        "hour {hour}: got {out:?}, want {msg:?}"
-                    );
+                    assert!(out.contains(msg), "hour {hour}: got {out:?}, want {msg:?}");
                 }
             }
         }

@@ -24,8 +24,8 @@
 // Borrow discipline: handlers take `&mut GameState` + the RoomRnum; all entity
 // access is through GameState's id-indexed finders.
 
-use crate::act::{act, ActArg, To};
-use crate::dg_comm::{send_to_zone, sub_write, TO_CHAR, TO_ROOM};
+use crate::act::{ActArg, To, act};
+use crate::dg_comm::{TO_CHAR, TO_ROOM, send_to_zone, sub_write};
 use crate::dg_handler::ROOM_ID_BASE;
 use crate::interpreter::{command_interpreter, is_abbrev, search_block};
 use crate::object::ObjLoc;
@@ -61,30 +61,13 @@ fn two_args(argument: &str) -> (String, String, &str) {
 }
 
 fn is_number(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
+    !s.is_empty()
+        && s.chars().all(|c| c.is_ascii_digit())
+        && crate::text::parse_i32_strict(s).is_ok()
 }
 
-fn atoi(s: &str) -> i32 {
-    let s = s.trim_start();
-    let mut chars = s.chars().peekable();
-    let mut sign = 1i64;
-    if let Some(&c) = chars.peek() {
-        if c == '-' {
-            sign = -1;
-            chars.next();
-        } else if c == '+' {
-            chars.next();
-        }
-    }
-    let mut val: i64 = 0;
-    for c in chars {
-        if let Some(d) = c.to_digit(10) {
-            val = val * 10 + d as i64;
-        } else {
-            break;
-        }
-    }
-    (sign * val) as i32
+fn atoi(s: &str) -> Result<i32, crate::text::ParseIntError> {
+    crate::text::parse_i32_atoi(s)
 }
 
 fn parse_uid(name: &str) -> Option<i64> {
@@ -109,11 +92,7 @@ fn find_char_by_id(g: &GameState, id: i64) -> Option<CharId> {
         return None;
     }
     let cid = CharId(id as u64);
-    if g.char_exists(cid) {
-        Some(cid)
-    } else {
-        None
-    }
+    if g.char_exists(cid) { Some(cid) } else { None }
 }
 
 fn find_obj_by_id(g: &GameState, id: i64) -> Option<ObjId> {
@@ -206,7 +185,7 @@ fn get_room(g: &GameState, name: &str) -> Option<RoomRnum> {
     if let Some(id) = parse_uid(name) {
         return find_room_by_id(g, id);
     }
-    g.real_room(atoi(name))
+    g.real_room(atoi(name).ok()?)
 }
 
 /// C get_room()/find_room(): a room UID is ROOM_ID_BASE + vnum (tolerating a
@@ -239,7 +218,7 @@ pub(crate) fn cdsr(g: &GameState, string: &str) -> Option<RoomRnum> {
                 return None; // No X coordinate supplied.
             }
             xf = true;
-            x = atoi(&tmp);
+            x = crate::text::parse_i32_strict(&tmp).ok()?;
             tmp.clear();
         } else {
             return None;
@@ -250,9 +229,9 @@ pub(crate) fn cdsr(g: &GameState, string: &str) -> Option<RoomRnum> {
     }
     if !xf {
         // Argument was entirely a number -> assume a vnum, return the rnum.
-        return g.real_room(atoi(&tmp) as RoomVnum);
+        return g.real_room(crate::text::parse_i32_strict(&tmp).ok()? as RoomVnum);
     }
-    let y = atoi(&tmp);
+    let y = crate::text::parse_i32_strict(&tmp).ok()?;
     if x < 1 || x > g.max_map_x || y < 1 || y > g.max_map_y {
         return None;
     }
@@ -290,11 +269,11 @@ fn get_obj_vis_world(g: &GameState, name: &str) -> Option<ObjId> {
 // asciiflag_conv (db.c): a flag field is either a plain integer or a letter
 // string (a=1, b=2, …, z=2^25, A=2^26, …). Used by wdoor for exit flags.
 // ---------------------------------------------------------------------------
-fn asciiflag_conv(flag: &str) -> i64 {
+fn asciiflag_conv(flag: &str) -> Result<i32, crate::text::ParseIntError> {
     let flag = flag.trim();
     // Plain integer form?
     if !flag.is_empty() && flag.chars().all(|c| c.is_ascii_digit()) {
-        return flag.parse::<i64>().unwrap_or(0);
+        return crate::text::parse_i32_strict(flag);
     }
     let mut value: i64 = 0;
     for c in flag.chars() {
@@ -304,7 +283,7 @@ fn asciiflag_conv(flag: &str) -> i64 {
             value |= 1i64 << (26 + (c as u8 - b'A'));
         }
     }
-    value
+    i32::try_from(value).map_err(|_| crate::text::ParseIntError::Overflow)
 }
 
 // ---------------------------------------------------------------------------
@@ -313,7 +292,7 @@ fn asciiflag_conv(flag: &str) -> i64 {
 // ---------------------------------------------------------------------------
 fn real_zone(g: &GameState, number: i32) -> Option<i32> {
     for (idx, z) in g.zones.iter().enumerate() {
-        if number >= z.number * 100 && number <= z.top {
+        if z.contains_vnum(number) {
             return Some(idx as i32);
         }
     }
@@ -406,7 +385,14 @@ fn do_wzoneecho(g: &mut GameState, room: RoomRnum, argument: &str) {
         wld_log(g, room, "wzoneecho called with too few args");
         return;
     }
-    match real_zone(g, atoi(&zone_name)) {
+    let zone_number = match atoi(&zone_name) {
+        Ok(number) => number,
+        Err(_) => {
+            wld_log(g, room, "wzoneecho zone outside supported range");
+            return;
+        }
+    };
+    match real_zone(g, zone_number) {
         None => wld_log(g, room, "wzoneecho called for nonexistant zone"),
         Some(zone) => {
             let line = format!("{}\r\n", msg);
@@ -486,13 +472,25 @@ fn do_wdoor(g: &mut GameState, room: RoomRnum, argument: &str) {
             }
         }
         2 => {
-            let flags = asciiflag_conv(value) as i32;
+            let flags = match asciiflag_conv(value) {
+                Ok(flags) => flags,
+                Err(_) => {
+                    wld_log(g, room, "wdoor: flags outside supported range");
+                    return;
+                }
+            };
             if let Some(ex) = exit_mut(g, rm, dir) {
                 ex.exit_info = flags;
             }
         }
         3 => {
-            let key = atoi(value);
+            let key = match atoi(value) {
+                Ok(key) => key,
+                Err(_) => {
+                    wld_log(g, room, "wdoor: key outside supported range");
+                    return;
+                }
+            };
             if let Some(ex) = exit_mut(g, rm, dir) {
                 ex.key = key;
             }
@@ -505,7 +503,13 @@ fn do_wdoor(g: &mut GameState, room: RoomRnum, argument: &str) {
         }
         5 => {
             // room: set destination vnum if it resolves (or explicit NOWHERE).
-            let vnum = atoi(value);
+            let vnum = match atoi(value) {
+                Ok(vnum) => vnum,
+                Err(_) => {
+                    wld_log(g, room, "wdoor: room outside supported range");
+                    return;
+                }
+            };
             if g.real_room(vnum).is_some() || vnum == NOWHERE {
                 if let Some(ex) = exit_mut(g, rm, dir) {
                     ex.to_room = vnum;
@@ -544,7 +548,7 @@ fn do_wteleport(g: &mut GameState, room: RoomRnum, argument: &str) {
             _ => None,
         }
     } else {
-        g.real_room(atoi(&arg2))
+        atoi(&arg2).ok().and_then(|vnum| g.real_room(vnum))
     };
 
     let target = match target {
@@ -612,7 +616,14 @@ fn do_wexp(g: &mut GameState, room: RoomRnum, argument: &str) {
         return;
     }
     if let Some(ch) = get_char_by_room(g, room, &name) {
-        crate::limits::gain_exp(g, ch, atoi(&amount) as i64);
+        let amount = match atoi(&amount) {
+            Ok(amount) => amount,
+            Err(_) => {
+                wld_log(g, room, "wexp amount outside supported range");
+                return;
+            }
+        };
+        crate::limits::gain_exp(g, ch, amount as i64);
     } else {
         wld_log(g, room, "wexp: target not found");
     }
@@ -639,7 +650,6 @@ fn do_wpurge(g: &mut GameState, room: RoomRnum, argument: &str) {
             .unwrap_or_default();
         for o in contents {
             crate::dg_handler::on_obj_extracted(g, o);
-            g.obj_from_anywhere(o);
             g.extract_obj(o);
         }
         return;
@@ -654,7 +664,6 @@ fn do_wpurge(g: &mut GameState, room: RoomRnum, argument: &str) {
         g.extract_char(ch);
     } else if let Some(o) = get_obj_by_room(g, room, &arg) {
         crate::dg_handler::on_obj_extracted(g, o);
-        g.obj_from_anywhere(o);
         g.extract_obj(o);
     } else {
         wld_log(g, room, "wpurge: bad argument");
@@ -664,11 +673,17 @@ fn do_wpurge(g: &mut GameState, room: RoomRnum, argument: &str) {
 /// wload: load a mob or object into the room (fires the LOAD trigger).
 fn do_wload(g: &mut GameState, room: RoomRnum, argument: &str) {
     let (arg1, arg2, _) = two_args(argument);
-    if arg1.is_empty() || arg2.is_empty() || !is_number(&arg2) || atoi(&arg2) < 0 {
+    if arg1.is_empty() || arg2.is_empty() || !is_number(&arg2) {
         wld_log(g, room, "wload: bad syntax");
         return;
     }
-    let number = atoi(&arg2);
+    let number = match crate::text::parse_i32_strict(&arg2) {
+        Ok(number) if number >= 0 => number,
+        _ => {
+            wld_log(g, room, "wload: bad syntax");
+            return;
+        }
+    };
 
     if is_abbrev(&arg1, "mob") {
         match g.load_mobile(number) {
@@ -706,7 +721,13 @@ fn do_wdamage(g: &mut GameState, room: RoomRnum, argument: &str) {
         wld_log(g, room, "wdamage: bad syntax");
         return;
     }
-    let dam = atoi(&amount);
+    let dam = match atoi(&amount) {
+        Ok(dam) => dam,
+        Err(_) => {
+            wld_log(g, room, "wdamage amount outside supported range");
+            return;
+        }
+    };
 
     let all = name.eq_ignore_ascii_case("all");
     let targets: Vec<CharId> = if all {
@@ -771,7 +792,13 @@ fn do_wat(g: &mut GameState, room: RoomRnum, argument: &str) {
         wld_log(g, room, "wat: bad syntax");
         return;
     }
-    let vnum = atoi(&location);
+    let vnum = match atoi(&location) {
+        Ok(vnum) => vnum,
+        Err(_) => {
+            wld_log(g, room, "wat location outside supported range");
+            return;
+        }
+    };
     match g.real_room(vnum) {
         None => wld_log(g, room, "wat: location not found"),
         Some(r2) => {
@@ -837,4 +864,43 @@ fn is_immortal(g: &GameState, ch: CharId) -> bool {
     g.get_char(ch)
         .map(|c| c.player.level >= LVL_IMMORT)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::room::Room;
+
+    #[test]
+    fn wteleport_uses_forced_arena_departure_cleanup() {
+        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
+        crate::arena::reset_for_tests();
+        let mut g = GameState::new(Config::default());
+        let arena_room = g.add_room(Room::new(4801, 48, "Arena".into(), String::new()));
+        let outside = g.add_room(Room::new(3001, 30, "Temple".into(), String::new()));
+        let mut player = Character::new_player("Scriptee".into(), Class::Warrior, Race::Human);
+        player.wimp_level = 12;
+        player.recall_level = 34;
+        player.affect_flags = crate::flags::AFF_INVISIBLE;
+        crate::gold::set(&mut player, crate::gold::Account::Carried, 8_765);
+        let player = g.create_char(player);
+        g.char_to_room(player, arena_room);
+        crate::arena::set_stat_for_test(player, crate::arena::ARENA_COMBATANT1);
+        crate::arena::bup_affects(&mut g, player);
+        g.get_char_mut(player).unwrap().affect_flags = crate::flags::AFF_BLIND;
+
+        do_wteleport(&mut g, arena_room, "Scriptee 3001");
+
+        let state = g.get_char(player).unwrap();
+        assert_eq!(state.in_room, Some(outside));
+        assert_eq!(state.affect_flags, crate::flags::AFF_INVISIBLE);
+        assert_eq!(state.wimp_level, 12);
+        assert_eq!(state.recall_level, 34);
+        assert_eq!(state.points.gold, 8_765);
+        assert_eq!(crate::arena::arena_stat(player), crate::arena::ARENA_NOT);
+        assert_eq!(g.player_save_requests, vec![player]);
+        crate::arena::reset_for_tests();
+    }
 }

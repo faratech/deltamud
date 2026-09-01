@@ -6,7 +6,7 @@
 use crate::character::Character;
 use crate::config::Config;
 use crate::connection::Descriptor;
-use crate::object::{ObjLoc, Object};
+use crate::object::{ObjLoc, Object, ObjectGraphOrder, walk_object_graph};
 use crate::rng::Rng;
 use crate::room::Room;
 use crate::types::*;
@@ -25,6 +25,161 @@ static LISTENER_FD: AtomicI32 = AtomicI32::new(-1);
 /// `mother_desc` before init_game so copyover can inherit it.
 pub fn set_listener_fd(fd: std::os::unix::io::RawFd) {
     LISTENER_FD.store(fd, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+mod object_extraction_tests {
+    use super::*;
+
+    #[test]
+    fn extract_obj_refuses_an_attached_cyclic_graph_without_partial_mutation() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(
+            100,
+            0,
+            "Extraction test".to_string(),
+            "A test room.".to_string(),
+        ));
+        let a = g.create_obj(Object::new(100, "a".to_string(), "object a".to_string()));
+        let b = g.create_obj(Object::new(101, "b".to_string(), "object b".to_string()));
+        g.obj_to_room(a, room);
+        g.get_obj_mut(a).unwrap().contains.push(b);
+        g.get_obj_mut(b).unwrap().contains.push(a);
+
+        assert!(!g.extract_obj(a));
+
+        assert_eq!(g.room(room).contents, vec![a]);
+        assert_eq!(g.get_obj(a).unwrap().loc, ObjLoc::Room(room));
+        assert_eq!(g.get_obj(a).unwrap().contains, vec![b]);
+        assert_eq!(g.get_obj(b).unwrap().contains, vec![a]);
+    }
+
+    #[test]
+    fn extract_obj_detaches_an_attached_valid_graph_only_after_preflight() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(
+            101,
+            0,
+            "Extraction test".to_string(),
+            "A test room.".to_string(),
+        ));
+        let root = g.create_obj(Object::new(
+            200,
+            "root".to_string(),
+            "root object".to_string(),
+        ));
+        let child = g.create_obj(Object::new(
+            201,
+            "child".to_string(),
+            "child object".to_string(),
+        ));
+        g.obj_to_room(root, room);
+        g.obj_to_obj(child, root);
+
+        assert!(g.extract_obj(root));
+
+        assert!(g.room(room).contents.is_empty());
+        assert!(g.get_obj(root).is_none());
+        assert!(g.get_obj(child).is_none());
+    }
+
+    #[test]
+    fn extract_obj_refuses_an_attached_overdeep_graph_without_detaching_it() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(
+            102,
+            0,
+            "Extraction test".to_string(),
+            "A test room.".to_string(),
+        ));
+        let objects: Vec<ObjId> = (0..=crate::object::MAX_OBJECT_GRAPH_DEPTH)
+            .map(|index| {
+                g.create_obj(Object::new(
+                    300 + index as i32,
+                    format!("object-{index}"),
+                    format!("object {index}"),
+                ))
+            })
+            .collect();
+        g.obj_to_room(objects[0], room);
+        for pair in objects.windows(2) {
+            g.obj_to_obj(pair[1], pair[0]);
+        }
+
+        assert!(!g.extract_obj(objects[0]));
+
+        assert_eq!(g.room(room).contents, vec![objects[0]]);
+        assert_eq!(g.get_obj(objects[0]).unwrap().loc, ObjLoc::Room(room));
+        assert!(objects.iter().all(|id| g.get_obj(*id).is_some()));
+    }
+
+    #[test]
+    fn extract_objs_preflights_the_entire_batch_before_detaching_any_root() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(
+            103,
+            0,
+            "Extraction test".to_string(),
+            "A test room.".to_string(),
+        ));
+        let valid = g.create_obj(Object::new(
+            400,
+            "valid".to_string(),
+            "valid object".to_string(),
+        ));
+        let corrupt = g.create_obj(Object::new(
+            401,
+            "corrupt".to_string(),
+            "corrupt object".to_string(),
+        ));
+        let child = g.create_obj(Object::new(
+            402,
+            "child".to_string(),
+            "child object".to_string(),
+        ));
+        g.obj_to_room(valid, room);
+        g.obj_to_room(corrupt, room);
+        g.get_obj_mut(corrupt).unwrap().contains.push(child);
+        g.get_obj_mut(child).unwrap().contains.push(corrupt);
+
+        assert!(!g.extract_objs([valid, corrupt]));
+
+        assert!(g.room(room).contents.contains(&valid));
+        assert!(g.room(room).contents.contains(&corrupt));
+        assert_eq!(g.get_obj(valid).unwrap().loc, ObjLoc::Room(room));
+        assert_eq!(g.get_obj(corrupt).unwrap().loc, ObjLoc::Room(room));
+        assert!(g.get_obj(child).is_some());
+    }
+
+    #[test]
+    fn extract_obj_refuses_non_reciprocal_containment_without_detaching_root() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(
+            104,
+            0,
+            "Extraction test".to_string(),
+            "A test room.".to_string(),
+        ));
+        let root = g.create_obj(Object::new(
+            500,
+            "root".to_string(),
+            "root object".to_string(),
+        ));
+        let child = g.create_obj(Object::new(
+            501,
+            "child".to_string(),
+            "child object".to_string(),
+        ));
+        g.obj_to_room(root, room);
+        g.get_obj_mut(root).unwrap().contains.push(child);
+
+        assert!(!g.extract_obj(root));
+
+        assert_eq!(g.room(room).contents, vec![root]);
+        assert_eq!(g.get_obj(root).unwrap().loc, ObjLoc::Room(room));
+        assert_eq!(g.get_obj(root).unwrap().contains, vec![child]);
+        assert_eq!(g.get_obj(child).unwrap().loc, ObjLoc::Nowhere);
+    }
 }
 
 /// Read the published listener fd (do_copyover). -1 if not yet bound.
@@ -69,7 +224,34 @@ pub struct OfflineOp {
     pub requester: CharId,
     pub target: String,
     pub command: String,
+    pub authority: OfflineOpAuthority,
 }
+
+/// A live-player rename which must cross the synchronous command/async SQL
+/// boundary before any success is published.  The async Game shell rechecks
+/// every identity and authority field, moves the name-keyed sidecars, performs
+/// one conditional database rename, and only then updates the live indexes.
+#[derive(Debug, Clone)]
+pub struct PlayerRenameRequest {
+    pub requester: CharId,
+    pub victim: CharId,
+    pub idnum: i64,
+    pub old_name: String,
+    pub new_name: String,
+}
+
+/// Authorization contract carried across the synchronous-command/async-DB
+/// bridge. Most deferred commands rely on their replayed handler's own gates;
+/// player inspection additionally has to be checked against the indexed level
+/// before queueing and the freshly loaded/live level before replay (#409).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OfflineOpAuthority {
+    ReplayHandler,
+    InspectPlayer,
+}
+
+/// C's `stat file` denial, shared by every online/offline inspection route.
+pub const PLAYER_INSPECTION_DENIED: &str = "Sorry, you can't do that.\r\n";
 
 /// Deferred async DB work queued from synchronous command handlers.
 #[derive(Debug, Clone)]
@@ -83,6 +265,13 @@ pub struct GameState {
     // Static world (loaded at boot; mutated by resets / OLC).
     pub rooms: Vec<Room>,
     pub room_index: HashMap<RoomVnum, RoomRnum>,
+    /// Append-only rnum index for ordinary world rooms. Surface-map cells are
+    /// deliberately absent: their `map_x`/`map_y` coordinates identify them
+    /// when `add_room` splices them in. Keeping this index alongside `rooms`
+    /// lets hot paths visit the roughly hundreds of real rooms without walking
+    /// every generated map cell, while OLC-created rooms appended after the map
+    /// are included automatically.
+    non_map_room_rnums: Vec<RoomRnum>,
     pub zones: Vec<Zone>,
     pub mob_protos: HashMap<MobVnum, MobileProto>,
     pub obj_protos: HashMap<ObjVnum, ObjectProto>,
@@ -124,6 +313,11 @@ pub struct GameState {
     // command, then saves + extracts. Empty in steady state.
     pub offline_ops: Vec<OfflineOp>,
 
+    /// Deferred durable live-player renames.  `do_rename` cannot await SQL, so
+    /// it queues the fully resolved identities here without changing names or
+    /// files; `Game::drain_player_rename_requests` owns the commit protocol.
+    pub player_rename_requests: Vec<PlayerRenameRequest>,
+
     /// Deferred async DB operations queued from sync command paths - e.g.
     /// clan destroy/rank-lower SQL that must also cover OFFLINE players'
     /// rows (C runs the UPDATEs synchronously; #165).
@@ -164,6 +358,9 @@ pub struct GameState {
     /// the `shutdown` immortal command actually halts the server (it previously
     /// only broadcast a message and logged — the process never stopped).
     pub shutdown_requested: bool,
+    /// Immortal copyover command request. The async Game shell consumes this
+    /// so it can durably await database saves before the synchronous exec.
+    pub copyover_requested: Option<CharId>,
     /// C `pk_allowed` (config.c:53, `int pk_allowed = NO`). The live PvP gate
     /// read by do_hit/do_kill/murder, the killer-flagging path in fight.c and
     /// the PvP spell guards; toggled by `set Legal_PKS ON|OFF`
@@ -190,6 +387,7 @@ impl GameState {
         GameState {
             rooms: Vec::new(),
             room_index: HashMap::new(),
+            non_map_room_rnums: Vec::new(),
             zones: Vec::new(),
             mob_protos: HashMap::new(),
             obj_protos: HashMap::new(),
@@ -200,6 +398,7 @@ impl GameState {
             players_by_name: HashMap::new(),
             player_table: Vec::new(),
             offline_ops: Vec::new(),
+            player_rename_requests: Vec::new(),
             deferred_db_ops: Vec::new(),
             pfileclean_requested: false,
             player_save_requests: Vec::new(),
@@ -208,6 +407,7 @@ impl GameState {
             next_obj_id: 1,
             rng: Rng::default(),
             shutdown_requested: false,
+            copyover_requested: None,
             pk_allowed: false,
             // config.c:254 `int nameserver_is_slow = YES;`
             nameserver_is_slow: true,
@@ -291,10 +491,24 @@ impl GameState {
     pub fn room_opt(&self, rnum: RoomRnum) -> Option<&Room> {
         self.rooms.get(rnum)
     }
+
+    /// Rnums of ordinary world rooms, in insertion order. The room arena is
+    /// append-only, so entries remain stable for the lifetime of the process.
+    pub(crate) fn non_map_room_rnums(&self) -> &[RoomRnum] {
+        &self.non_map_room_rnums
+    }
+
     pub fn add_room(&mut self, room: Room) -> RoomRnum {
+        // integrate_map_rooms assigns both coordinates before calling us. All
+        // file-loaded and OLC-created rooms leave them unset, including rooms
+        // appended after the contiguous surface-map block.
+        let is_surface_map_cell = room.map_x.is_some() && room.map_y.is_some();
         let vnum = room.number;
         let rnum = self.rooms.len();
         self.rooms.push(room);
+        if !is_surface_map_cell {
+            self.non_map_room_rnums.push(rnum);
+        }
         // C db.c:2729 real_room scans forward and keeps the FIRST match;
         // insert() overwrote, so duplicate vnums resolved to the LAST room
         // (#241). C also stops loading a file at vnum >= MAX_ROOM_VNUM
@@ -437,12 +651,50 @@ impl GameState {
     /// when the target is offline-but-indexed; drained next heartbeat by game.rs.
     /// `command` must be the immortal's ORIGINAL command verbatim so the replay
     /// re-parses the identical field/value.
-    pub fn queue_offline_op(&mut self, requester: CharId, target: &str, command: &str) {
+    pub fn queue_offline_op(
+        &mut self,
+        requester: CharId,
+        target: &str,
+        command: &str,
+        authority: OfflineOpAuthority,
+    ) {
         self.offline_ops.push(OfflineOp {
             requester,
             target: target.to_string(),
             command: command.to_string(),
+            authority,
         });
+    }
+
+    pub fn queue_player_rename(
+        &mut self,
+        requester: CharId,
+        victim: CharId,
+        idnum: i64,
+        old_name: &str,
+        new_name: &str,
+    ) {
+        self.player_rename_requests.push(PlayerRenameRequest {
+            requester,
+            victim,
+            idnum,
+            old_name: old_name.to_string(),
+            new_name: new_name.to_string(),
+        });
+    }
+
+    pub fn take_player_rename_requests(&mut self) -> Vec<PlayerRenameRequest> {
+        std::mem::take(&mut self.player_rename_requests)
+    }
+
+    /// One target-authority predicate for `stat player`, `stat file`, and
+    /// `show player`, whether the target is online, indexed, freshly loaded,
+    /// or raced online while a deferred operation was waiting. DeltaMUD's C
+    /// `stat file` rule denies only a target *above* the requester, so equal
+    /// levels remain inspectable.
+    pub fn can_inspect_player_level(&self, requester: CharId, target_level: u8) -> bool {
+        self.get_char(requester)
+            .is_some_and(|character| character.player.level >= target_level)
     }
 
     /// Queue `pfileclean`'s async DB cleanup. The command path is synchronous,
@@ -484,40 +736,153 @@ impl GameState {
         id
     }
 
-    /// Remove an object from the world entirely (recursively extracts any
-    /// contents). Caller must have already detached it from its location.
-    pub fn extract_obj(&mut self, id: ObjId) {
-        // Depth guard: extraction recurses over the containment graph. The
-        // only C-parity cycle guard lives in do_put, so any OTHER path that
-        // ever double-parents a container (DG oput, corpse sweeps) would
-        // recurse unboundedly on the Game task. Cap and log instead.
-        thread_local! {
-            static EXTRACT_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-        }
-        const MAX_EXTRACT_DEPTH: u32 = 32;
-        if EXTRACT_DEPTH.with(|d| d.get()) >= MAX_EXTRACT_DEPTH {
+    /// Remove an object from the world entirely, including its contents.
+    ///
+    /// The complete containment graph is validated before the root is
+    /// detached.  This ordering is load-bearing: a corrupt cycle, duplicate
+    /// parent, missing identity, or excessive depth must leave both the arena
+    /// and the root's room/character/container attachment unchanged.
+    /// Returns `true` only when the whole extraction completed.
+    pub fn extract_obj(&mut self, id: ObjId) -> bool {
+        self.extract_objs([id])
+    }
+
+    /// Atomically extract multiple independent roots. All graphs and worn
+    /// attachments pass preflight before any root is detached, so batch
+    /// cleanup cannot remove an early root and then fail on a later one.
+    pub fn extract_objs<I>(&mut self, roots: I) -> bool
+    where
+        I: IntoIterator<Item = ObjId>,
+    {
+        let roots: Vec<ObjId> = roots.into_iter().collect();
+        let walk = walk_object_graph(
+            roots.iter().copied(),
+            ObjectGraphOrder::Postorder,
+            "extract_objs",
+            |oid| self.objs.get(&oid).map(|o| o.contains.clone()),
+        );
+        if walk.malformed() {
             log::warn!(
-                "SYSERR: extract_obj nesting exceeded {} (obj {}); aborting nested sweep",
-                MAX_EXTRACT_DEPTH,
-                self.objs.get(&id).map(|o| o.item_number).unwrap_or(-1)
+                "SYSERR: extract_objs({:?}) left the object graph unchanged because containment was malformed",
+                roots
             );
-            return;
+            return false;
         }
-        EXTRACT_DEPTH.with(|d| d.set(d.get() + 1));
-        let contents = self
-            .objs
-            .get(&id)
-            .map(|o| o.contains.clone())
-            .unwrap_or_default();
-        for c in contents {
-            self.extract_obj(c);
+
+        // A valid forward walk is not enough if a child's reciprocal location
+        // points somewhere else. Refuse that inconsistency before deleting
+        // either identity and leaving the other side dangling.
+        for visit in &walk.visits {
+            let Some(parent) = self.objs.get(&visit.id) else {
+                unreachable!("object extraction walk emitted a missing identity");
+            };
+            for &child in &parent.contains {
+                let child_location = self.objs.get(&child).map(|object| object.loc);
+                if child_location != Some(ObjLoc::Contained(visit.id)) {
+                    log::warn!(
+                        "SYSERR: extract_objs rejected non-reciprocal containment: parent {:?} vnum {} lists child {:?} vnum {:?}, whose location is {:?}; graph unchanged",
+                        visit.id,
+                        parent.item_number,
+                        child,
+                        self.objs.get(&child).map(|object| object.item_number),
+                        child_location,
+                    );
+                    return false;
+                }
+            }
         }
-        EXTRACT_DEPTH.with(|d| d.set(d.get() - 1));
-        // shift_remove (NOT swap_remove): swap_remove moves the last-inserted
-        // entry into the vacated slot while its .id keeps the OLD value, so a
-        // stale id held across an extraction would resolve to a DIFFERENT
-        // object instead of None. Extraction is rare; O(n) is fine.
-        self.objs.shift_remove(&id);
+
+        // Validate every declared root attachment before detaching the first.
+        // Contained roots also validate the bounded upward ancestry used for
+        // weight propagation. This remains proportional to the target graph
+        // and its declared attachment lists, never to the synthetic world.
+        for &root in &roots {
+            let Some(location) = self.objs.get(&root).map(|object| object.loc) else {
+                unreachable!("object extraction preflight accepted a missing root");
+            };
+            let attachment_valid = match location {
+                ObjLoc::Room(room) => self.rooms.get(room).is_some_and(|room| {
+                    room.contents.iter().filter(|&&id| id == root).count() == 1
+                }),
+                ObjLoc::Carried(character) => self
+                    .chars
+                    .get(&character)
+                    .is_some_and(|ch| ch.carrying.iter().filter(|&&id| id == root).count() == 1),
+                ObjLoc::Worn(character, position) => {
+                    self.chars
+                        .get(&character)
+                        .and_then(|ch| ch.equipment.get(position))
+                        .copied()
+                        .flatten()
+                        == Some(root)
+                }
+                ObjLoc::Contained(parent) => {
+                    let direct_parent_valid = self.objs.get(&parent).is_some_and(|object| {
+                        object.contains.iter().filter(|&&id| id == root).count() == 1
+                    });
+                    let mut current = parent;
+                    let mut ancestors = std::collections::HashSet::new();
+                    let mut ancestry_valid = direct_parent_valid;
+                    while ancestry_valid {
+                        if current == root
+                            || !ancestors.insert(current)
+                            || ancestors.len() >= crate::object::MAX_OBJECT_GRAPH_DEPTH
+                        {
+                            ancestry_valid = false;
+                            break;
+                        }
+                        let Some(object) = self.objs.get(&current) else {
+                            ancestry_valid = false;
+                            break;
+                        };
+                        match object.loc {
+                            ObjLoc::Contained(next) => {
+                                ancestry_valid = self.objs.get(&next).is_some_and(|parent| {
+                                    parent.contains.iter().filter(|&&id| id == current).count() == 1
+                                });
+                                current = next;
+                            }
+                            _ => break,
+                        }
+                    }
+                    ancestry_valid
+                }
+                ObjLoc::Nowhere => true,
+            };
+            if !attachment_valid {
+                let vnum = self.objs.get(&root).map(|object| object.item_number);
+                log::warn!(
+                    "SYSERR: extract_objs rejected inconsistent root attachment: object {:?} vnum {:?}, location {:?}; graph unchanged",
+                    root,
+                    vnum,
+                    location,
+                );
+                return false;
+            }
+        }
+
+        // Match C extract_obj(): unlink each root from wherever it lives, but
+        // only after every recursive operation is guaranteed to succeed. The
+        // descendants need no individual detach because their sole parent is
+        // part of the same validated postorder removal.
+        for root in roots {
+            match self.objs.get(&root).map(|object| object.loc) {
+                Some(ObjLoc::Worn(character, position)) => {
+                    let _ = self.unequip_char(character, position);
+                }
+                Some(_) => self.obj_from_anywhere(root),
+                None => unreachable!("object extraction preflight accepted a missing root"),
+            }
+        }
+        for visit in walk.visits {
+            // shift_remove (NOT swap_remove): swap_remove moves the
+            // last-inserted entry into the vacated slot while its .id keeps
+            // the OLD value, so a stale id held across an extraction would
+            // resolve to a DIFFERENT object instead of None. Extraction is
+            // rare; O(n) is fine.
+            self.objs.shift_remove(&visit.id);
+        }
+        true
     }
 
     /// WAIT_STATE(ch, cycles) (utils.h): impose `cycles` pulses of command lag.
@@ -548,16 +913,16 @@ impl GameState {
             None => return,
         };
         if let Some(d) = self.descriptors.get_mut(&conn) {
-            d.outbuf.push_str(msg);
+            d.write(msg);
         }
         // Snoop relay (comm.c process_output): if this character is being
         // snooped, tee its output to the snooper, prefixed "% " / suffixed "%%".
         if let Some(snooper) = self.chars.get(&id).and_then(|c| c.snoop_by) {
             if let Some(sconn) = self.chars.get(&snooper).and_then(|c| c.desc) {
                 if let Some(sd) = self.descriptors.get_mut(&sconn) {
-                    sd.outbuf.push_str("% ");
-                    sd.outbuf.push_str(msg);
-                    sd.outbuf.push_str("%%");
+                    sd.write("% ");
+                    sd.write(msg);
+                    sd.write("%%");
                 }
             }
         }
@@ -571,8 +936,8 @@ impl GameState {
             None => return,
         };
         if let Some(d) = self.descriptors.get_mut(&conn) {
-            d.outbuf.push_str(msg);
-            d.outbuf.push_str("\r\n");
+            d.write(msg);
+            d.write("\r\n");
         }
     }
 

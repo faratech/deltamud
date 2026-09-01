@@ -38,11 +38,7 @@ pub fn knows_tongue(talks: &[bool; MAX_TONGUE], tongue: usize) -> bool {
 /// speaker knows the tongue and 0 otherwise — the natural numeric reading of
 /// the boolean slot for callers that want a percentage.
 pub fn skill_of_tongue(talks: &[bool; MAX_TONGUE], tongue: usize) -> i32 {
-    if knows_tongue(talks, tongue) {
-        100
-    } else {
-        0
-    }
+    if knows_tongue(talks, tongue) { 100 } else { 0 }
 }
 
 // ---------------------------------------------------------------------------

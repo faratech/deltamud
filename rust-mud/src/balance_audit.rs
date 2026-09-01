@@ -256,7 +256,10 @@ mod tests {
         (vnum, o)
     }
 
-    fn state_with(mobs: Vec<(i32, MobileProto)>, objs: Vec<(i32, crate::world::ObjectProto)>) -> GameState {
+    fn state_with(
+        mobs: Vec<(i32, MobileProto)>,
+        objs: Vec<(i32, crate::world::ObjectProto)>,
+    ) -> GameState {
         let mut g = GameState::new(Config::default());
         for (vnum, m) in mobs {
             g.mob_protos.insert(vnum, m);
@@ -270,11 +273,7 @@ mod tests {
     #[test]
     fn counts_mobs_gear_and_quest_window() {
         let g = state_with(
-            vec![
-                mob(100, 5, false),
-                mob(101, 10, true),
-                mob(102, 40, true),
-            ],
+            vec![mob(100, 5, false), mob(101, 10, true), mob(102, 40, true)],
             vec![obj(500, 10), obj(501, 0)], // min_level 0 = unrestricted, not gear
         );
         let report = audit(&g);
@@ -302,10 +301,12 @@ mod tests {
         // Breaking the run at L50 splits it.
         let g2 = state_with(vec![mob(1, 1, false), mob(2, 50, false)], vec![]);
         let report2 = audit(&g2);
-        assert!(report2
-            .mob_bands
-            .iter()
-            .all(|(f, l)| !(*f..=*l).contains(&50)));
+        assert!(
+            report2
+                .mob_bands
+                .iter()
+                .all(|(f, l)| !(*f..=*l).contains(&50))
+        );
     }
 
     #[test]

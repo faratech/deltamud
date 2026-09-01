@@ -129,17 +129,15 @@ pub fn abort(conn: ConnId) {
 // Small helpers
 // ---------------------------------------------------------------------------
 
-fn atoi(s: &str) -> i32 {
-    let s = s.trim_start();
-    let mut end = 0;
-    let bytes = s.as_bytes();
-    if end < bytes.len() && (bytes[end] == b'-' || bytes[end] == b'+') {
-        end += 1;
+fn olc_atoi(g: &mut GameState, conn: ConnId, s: &str) -> Option<i32> {
+    match crate::text::parse_i32_atoi(s) {
+        Ok(value) => Some(value),
+        Err(crate::text::ParseIntError::Overflow) => {
+            send(g, conn, "That number is outside the supported range.\r\n");
+            None
+        }
+        Err(_) => unreachable!("parse_i32_atoi maps nonnumeric input to zero"),
     }
-    while end < bytes.len() && bytes[end].is_ascii_digit() {
-        end += 1;
-    }
-    s[..end].parse().unwrap_or(0)
 }
 
 fn conn_char(g: &GameState, conn: ConnId) -> Option<CharId> {
@@ -157,7 +155,7 @@ fn send(g: &mut GameState, conn: ConnId, msg: &str) {
 /// given vnum. Mirrors db.c real_zone.
 fn real_zone(g: &GameState, number: i32) -> Option<usize> {
     for (idx, z) in g.zones.iter().enumerate() {
-        if number >= z.number * 100 && number <= z.top {
+        if z.contains_vnum(number) {
             return Some(idx);
         }
     }
@@ -248,7 +246,10 @@ pub fn do_trigedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         // C: only "save" is special for a non-digit arg (strn_cmp("save",buf1,4)).
         // Triggers autosave, so the save path just tells the builder there's
         // nothing to do; anything else is the "Yikes!" rejection.
-        if buf1.len() >= 4 && buf1[..4].eq_ignore_ascii_case("save") {
+        if buf1
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("save"))
+        {
             send(
                 g,
                 conn,
@@ -259,7 +260,10 @@ pub fn do_trigedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
         return;
     } else {
-        number = atoi(buf1);
+        let Some(parsed) = olc_atoi(g, conn, buf1) else {
+            return;
+        };
+        number = parsed;
     }
 
     // Find the zone for this trigger vnum.
@@ -536,7 +540,9 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             }
         }
         Mode::Intended => {
-            let v = atoi(line);
+            let Some(v) = olc_atoi(g, conn, line) else {
+                return;
+            };
             if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
                 // C: ((atoi>=MOB_TRIGGER) || (atoi<=WLD_TRIGGER)) — that guard is
                 // always true in C, so any value is accepted, stored as
@@ -546,7 +552,9 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             }
         }
         Mode::Narg => {
-            let v = atoi(line);
+            let Some(v) = olc_atoi(g, conn, line) else {
+                return;
+            };
             if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
                 st.narg = v;
                 st.val += 1;
@@ -561,7 +569,9 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             }
         }
         Mode::Types => {
-            let i = atoi(line);
+            let Some(i) = olc_atoi(g, conn, line) else {
+                return;
+            };
             if i == 0 {
                 // fall through to main menu
             } else {
@@ -706,7 +716,6 @@ fn commands_input(g: &mut GameState, conn: ConnId, line: &str) {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // trigedit_save (dg_olc.c): rewrite the whole zone's .trg file byte-faithfully
 // and refresh the live trig_index by reloading prototypes from disk.
@@ -757,8 +766,11 @@ fn save(g: &mut GameState, conn: ConnId) {
     dg_db_scripts::upsert_proto_trigger(edited.clone());
 
     // Resolve the zone range to rewrite.
-    let (zone_number, zone_top) = match g.zones.get(znum) {
-        Some(z) => (z.number, z.top),
+    let (zone_number, zone_start, zone_top) = match g.zones.get(znum) {
+        Some(z) => match z.vnum_start() {
+            Some(zone_start) => (z.number, zone_start, z.top),
+            None => return,
+        },
         None => return,
     };
     let lib_path = g.config.lib_path.clone();
@@ -769,7 +781,7 @@ fn save(g: &mut GameState, conn: ConnId) {
     // its own vnum. We read existing protos from the live index (dg_db_scripts).
     let mut zone_protos: Vec<TrigProto> = Vec::new();
     let mut inserted = false;
-    for i in (zone_number * 100)..=zone_top {
+    for i in zone_start..=zone_top {
         if i == vnum {
             zone_protos.push(edited.clone());
             inserted = true;
@@ -841,7 +853,6 @@ fn save(g: &mut GameState, conn: ConnId) {
             return;
         }
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -872,5 +883,110 @@ fn mudlog(g: &mut GameState, line: &str) {
         .collect();
     for id in imms {
         g.send_to_char(id, &formatted);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::Descriptor;
+    use crate::world::{Zone, zone_vnum_bounds};
+
+    fn editor_game(conn: ConnId) -> (GameState, CharId, i32) {
+        let mut g = GameState::new(Config::default());
+        let zone_number = 40_401;
+        let (vnum, top) = zone_vnum_bounds(zone_number).expect("valid test zone");
+        g.zones.push(Zone {
+            number: zone_number,
+            name: "Overflow test zone".into(),
+            builders: "Root".into(),
+            lifespan: 30,
+            age: 0,
+            top,
+            reset_mode: 2,
+            min_level: 0,
+            max_level: 60,
+            status_mode: 0,
+            map_x: None,
+            map_y: None,
+            reset_commands: Vec::new(),
+        });
+
+        let mut ch = Character::new_player("Root".into(), Class::Cleric, Race::Human);
+        ch.player.level = LVL_IMPL;
+        let ch = g.create_char(ch);
+        g.get_char_mut(ch).unwrap().desc = Some(conn);
+        let mut descriptor = Descriptor::new(conn, "example.test".into());
+        descriptor.character = Some(ch);
+        g.descriptors.insert(conn, descriptor);
+        (g, ch, vnum)
+    }
+
+    fn narg_and_mode(conn: ConnId) -> (i32, Mode) {
+        let map = crate::lock_ok::lock(&states());
+        let state = map.get(&conn).expect("active trigedit state");
+        (state.narg, state.mode)
+    }
+
+    #[test]
+    fn trigedit_entry_accepts_i32_edges_and_rejects_adjacent_overflow() {
+        let conn = ConnId(4_040_002);
+        crate::olc::abort_editor(conn);
+        let (mut g, ch, vnum) = editor_game(conn);
+
+        do_trigedit(&mut g, ch, "2147483648", 0);
+        assert_eq!(
+            g.descriptors[&conn].outbuf,
+            "That number is outside the supported range.\r\n"
+        );
+        assert!(!crate::olc::in_olc(conn));
+
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        do_trigedit(&mut g, ch, &vnum.to_string(), 0);
+        assert_eq!(crate::olc::active_editor(conn), Some(EditorKind::Trigedit));
+
+        for (input, expected) in [
+            ("2147483647", Some(i32::MAX)),
+            ("-2147483648", Some(i32::MIN)),
+            ("2147483648", None),
+            ("-2147483649", None),
+        ] {
+            set_mode(conn, Mode::MainMenu);
+            trigedit_parse(&mut g, conn, "4");
+            assert_eq!(get_mode(conn), Some(Mode::Narg));
+            let before = narg_and_mode(conn).0;
+            g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+
+            trigedit_parse(&mut g, conn, input);
+            let (narg, mode) = narg_and_mode(conn);
+            match expected {
+                Some(value) => {
+                    assert_eq!(narg, value, "input={input:?}");
+                    assert_eq!(mode, Mode::MainMenu, "input={input:?}");
+                    assert!(
+                        !g.descriptors[&conn]
+                            .outbuf
+                            .contains("outside the supported range"),
+                        "input={input:?}"
+                    );
+                }
+                None => {
+                    assert_eq!(narg, before, "input={input:?}");
+                    assert_eq!(mode, Mode::Narg, "input={input:?}");
+                    assert_eq!(
+                        g.descriptors[&conn].outbuf,
+                        "That number is outside the supported range.\r\n",
+                        "input={input:?}"
+                    );
+                }
+            }
+        }
+
+        set_mode(conn, Mode::MainMenu);
+        trigedit_parse(&mut g, conn, "q");
+        trigedit_parse(&mut g, conn, "n");
+        assert!(!crate::olc::in_olc(conn));
     }
 }

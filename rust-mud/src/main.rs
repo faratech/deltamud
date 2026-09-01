@@ -7,14 +7,15 @@
 
 mod act;
 mod aedit;
-mod balance_audit;
 mod alias;
 mod arena;
 mod auction;
 mod autowiz;
+mod balance_audit;
 mod ban;
 mod boards;
 mod castle;
+mod cformat;
 mod character;
 mod clan;
 mod class;
@@ -29,13 +30,14 @@ mod cmd_social;
 mod cmd_wizard;
 mod combat;
 mod command_table;
-mod cformat;
 mod commands;
 mod config;
 mod connection;
 mod constants;
+mod copyover;
 mod database;
 mod database_compat;
+mod database_timeout;
 mod deity;
 mod dg_comm;
 mod dg_db_scripts;
@@ -51,6 +53,7 @@ mod file_loader;
 mod flags;
 mod game;
 mod gcmd;
+mod gold;
 mod graph;
 mod handler;
 mod hedit;
@@ -73,6 +76,7 @@ mod objsave;
 mod oedit;
 mod olc;
 mod password;
+mod player_sidecars;
 mod quest;
 mod races;
 mod redit;
@@ -86,15 +90,16 @@ mod spell_parser;
 mod spells;
 mod state;
 mod syslog;
+mod text;
 mod town_life;
-mod whohtml;
 mod trigedit;
 mod types;
 mod weather;
+mod whohtml;
 mod world;
 mod zedit;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use config::Config;
 use log::{info, warn};
 use std::collections::HashMap;
@@ -102,11 +107,11 @@ use std::net::IpAddr;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
 use tokio::sync::Semaphore;
-use tokio::time::Instant;
+use tokio::sync::mpsc;
+use tokio::time::{Instant, timeout};
 use types::ConnId;
 
 /// Maximum number of simultaneous connections (descriptors). Overridable via the
@@ -123,140 +128,155 @@ const DEFAULT_MAX_CONN: usize = 256;
 const DEFAULT_CONN_BURST: u32 = 10;
 const DEFAULT_CONN_WINDOW_MS: u64 = 1000;
 
-/// One recovered playing connection inherited across a copyover exec
-/// (comm.c copyover_recover, per-line `fd name host`).
-struct CopyoverEntry {
-    fd: RawFd,
-    name: String,
-    host: String,
-}
+/// The metrics listener is intentionally much smaller than the game listener:
+/// Prometheus and health probes use short-lived connections, so 32 concurrent
+/// exchanges leave ample headroom while bounding slowloris resource use.
+const METRICS_MAX_CONNECTIONS: usize = 32;
+const METRICS_IO_TIMEOUT: Duration = Duration::from_secs(2);
+const METRICS_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+const PROCESS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Parse the `--copyover <port> <listener_fd>` argv tail produced by
-/// do_copyover. Returns the inherited listener fd when present.
-fn parse_copyover_args() -> Option<RawFd> {
-    let args: Vec<String> = std::env::args().collect();
-    let pos = args.iter().position(|a| a == "--copyover")?;
-    // args[pos+1] = port (already in Config via env/default), args[pos+2] = fd.
-    args.get(pos + 2).and_then(|s| s.parse::<RawFd>().ok())
-}
-
-/// Re-seed the player DB from the copyover char snapshot (cmd_wizard.rs writes
-/// `copyover_chars.dat`). Only needed when the DB does not itself persist across
-/// the exec (the in-memory MockDatabase): for each snapshot line we reconstruct
-/// the score-relevant Character and create it in the DB *iff* it isn't already
-/// there, so the real-MySQL path (player already persisted) is a no-op. Then the
-/// per-socket recovery's enter_game load_player succeeds. The file is consumed
-/// (deleted) here so it can't leak into a later boot.
-async fn reseed_copyover_chars(db: &Arc<dyn DatabaseInterface>, lib_path: &str) {
-    let path = std::path::Path::new(lib_path).join("copyover_chars.dat");
-    let contents = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let _ = std::fs::remove_file(&path);
-    for line in contents.lines() {
-        let f: Vec<&str> = line.split('|').collect();
-        if f.len() < 27 {
-            continue;
-        }
-        let name = f[1].to_string();
-        if name.is_empty() {
-            continue;
-        }
-        // Don't clobber a DB that already holds the player (real MySQL path).
-        if db.player_exists(&name).await.unwrap_or(false) {
-            continue;
-        }
-        let pi = |i: usize| f.get(i).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
-        let class = types::Class::from_u8(pi(3) as u8);
-        let race = types::Race::from_u8(pi(4) as u8);
-        let mut ch = character::Character::new_player(name.clone(), class, race);
-        ch.idnum = pi(0);
-        ch.player.level = pi(2) as types::Level;
-        ch.player.sex = types::Gender::from_u8(pi(5) as u8);
-        ch.alignment = pi(6) as i32;
-        ch.player.hometown = pi(7) as types::RoomVnum;
-        ch.points.gold = pi(8) as types::Gold;
-        ch.points.bank_gold = pi(9) as types::Gold;
-        ch.points.exp = pi(10) as types::Experience;
-        ch.points.hit = pi(11) as i32;
-        ch.points.max_hit = pi(12) as i32;
-        ch.points.mana = pi(13) as i32;
-        ch.points.max_mana = pi(14) as i32;
-        ch.points.move_points = pi(15) as i32;
-        ch.points.max_move = pi(16) as i32;
-        ch.points.armor = pi(17) as types::ArmorClass;
-        ch.points.hitroll = pi(18) as types::Hitroll;
-        ch.points.damroll = pi(19) as types::Damroll;
-        ch.real_abils.str = pi(20) as i8;
-        ch.real_abils.str_add = pi(21) as i8;
-        ch.real_abils.intel = pi(22) as i8;
-        ch.real_abils.wis = pi(23) as i8;
-        ch.real_abils.dex = pi(24) as i8;
-        ch.real_abils.con = pi(25) as i8;
-        ch.real_abils.cha = pi(26) as i8;
-        let title = f.get(27).map(|s| s.to_string()).unwrap_or_default();
-        if !title.is_empty() {
-            ch.player.title = Some(title);
-        }
-        // BUG #15: restore the room stamp written by do_copyover (fields 28..30)
-        // so enter_game drops the player where they stood, not at the temple.
-        // Absent on older snapshots -> default (NOWHERE/-1), harmless.
-        if let Some(t) = f.get(28).and_then(|s| s.parse::<i64>().ok()) {
-            ch.tloadroom = t;
-        }
-        if let Some(mx) = f.get(29).and_then(|s| s.parse::<i64>().ok()) {
-            ch.mapx = mx;
-        }
-        if let Some(my) = f.get(30).and_then(|s| s.parse::<i64>().ok()) {
-            ch.mapy = my;
-        }
-        ch.aff_abils = ch.real_abils;
-        // create_player assigns a fresh idnum; immediately save_player to persist
-        // the reconstructed stats under that row so load_player returns them.
-        if db.create_player(&ch, "!copyover!").await.is_ok() {
-            let _ = db.save_player(&ch).await;
+async fn await_game_shutdown(
+    game_handle: &mut tokio::task::JoinHandle<Result<()>>,
+    deadline: Duration,
+) -> Result<()> {
+    match timeout(deadline, &mut *game_handle).await {
+        Ok(joined) => joined.context("game task failed to join")?,
+        Err(_) => {
+            game_handle.abort();
+            let _ = (&mut *game_handle).await;
+            bail!(
+                "game task exceeded the {} second shutdown deadline and was aborted",
+                deadline.as_secs_f64()
+            )
         }
     }
 }
 
-/// Read + unlink the copyover state file (comm.c copyover_recover: fopen, then
-/// unlink immediately so a crash can't loop on it). First line is the listener
-/// fd (already known from argv); subsequent lines are `fd name host`; a line of
-/// `-1` terminates.
-fn read_copyover_state(lib_path: &str) -> Vec<CopyoverEntry> {
+#[derive(Clone, Copy)]
+struct MetricsHttpTimeouts {
+    io: Duration,
+    request: Duration,
+}
+
+const METRICS_TIMEOUTS: MetricsHttpTimeouts = MetricsHttpTimeouts {
+    io: METRICS_IO_TIMEOUT,
+    request: METRICS_REQUEST_TIMEOUT,
+};
+
+#[derive(Debug, PartialEq, Eq)]
+enum MetricsConnectionOutcome {
+    Complete,
+    IoTimedOut,
+    RequestTimedOut,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CopyoverArgs {
+    port: u16,
+    listener_fd: RawFd,
+}
+
+/// Strictly parse the `--copyover <port> <listener_fd>` argv tail produced by
+/// do_copyover. Once the flag is present, missing/junk/unsafe numeric fields are
+/// fatal rather than silently turning recovery into a fresh boot.
+fn parse_copyover_args_from(args: &[String]) -> Result<Option<CopyoverArgs>> {
+    let positions: Vec<usize> = args
+        .iter()
+        .enumerate()
+        .filter_map(|(index, arg)| (arg == "--copyover").then_some(index))
+        .collect();
+    let Some(&position) = positions.first() else {
+        return Ok(None);
+    };
+    if positions.len() != 1 {
+        bail!("copyover arguments contain duplicate --copyover flags");
+    }
+    let port = args
+        .get(position + 1)
+        .ok_or_else(|| anyhow::anyhow!("copyover arguments are missing the port"))?
+        .parse::<u16>()
+        .context("copyover port is not a valid u16")?;
+    if port == 0 {
+        bail!("copyover port must be nonzero");
+    }
+    let listener_fd = args
+        .get(position + 2)
+        .ok_or_else(|| anyhow::anyhow!("copyover arguments are missing the listener fd"))?
+        .parse::<RawFd>()
+        .context("copyover listener fd is not a valid integer")?;
+    if listener_fd < 3 {
+        bail!("copyover listener fd is reserved or invalid");
+    }
+    Ok(Some(CopyoverArgs { port, listener_fd }))
+}
+
+fn parse_copyover_args() -> Result<Option<CopyoverArgs>> {
+    parse_copyover_args_from(&std::env::args().collect::<Vec<_>>())
+}
+
+/// Verify every durable player row before socket adoption. Only an explicitly
+/// ephemeral mock database may be rebuilt from the checked snapshot; a missing
+/// production row is a recovery failure and is never silently created with the
+/// mock copyover password.
+async fn prepare_copyover_database(
+    db: &Arc<dyn DatabaseInterface>,
+    snapshot: &copyover::SnapshotPayload,
+    allow_ephemeral_reseed: bool,
+) -> Result<()> {
+    for entry in &snapshot.entries {
+        let name = &entry.character.name;
+        if db.player_exists(name).await? {
+            let durable = db.load_player(name).await?;
+            if durable.idnum != entry.character.idnum {
+                bail!("copyover durable player id mismatch for {name}");
+            }
+            continue;
+        }
+        if !allow_ephemeral_reseed {
+            bail!("copyover durable player row is missing for {name}");
+        }
+        let character = entry.character.to_character();
+        db.create_player(&character, "!copyover!").await?;
+        db.save_player(&character).await?;
+    }
+    Ok(())
+}
+
+/// Validate the complete versioned/checksummed recovery set before unlinking
+/// it or wrapping any inherited client socket.
+fn read_copyover_state(lib_path: &str, listener_fd: RawFd) -> Result<copyover::RecoverySnapshot> {
     let path = std::path::Path::new(lib_path).join("copyover.dat");
-    let contents = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    let _ = std::fs::remove_file(&path); // C unlinks immediately.
-    parse_copyover_entries(&contents)
+    copyover::RecoverySnapshot::open(&path, listener_fd)
 }
 
-/// The parsing half of copyover recovery, split out so hostile/truncated
-/// `copyover.dat` content (written by the previous exec, but still untrusted)
-/// has unit coverage. Skips the leading listener-fd line, stops at `-1` or a
-/// blank line, and drops lines without a numeric fd + name.
-fn parse_copyover_entries(contents: &str) -> Vec<CopyoverEntry> {
-    let mut out = Vec::new();
-    for (i, line) in contents.lines().enumerate() {
-        if i == 0 {
-            continue; // listener fd line; handled from argv.
-        }
-        let line = line.trim();
-        if line == "-1" || line.is_empty() {
-            break;
-        }
-        let mut it = line.split_whitespace();
-        let fd = it.next().and_then(|s| s.parse::<RawFd>().ok());
-        let name = it.next().map(|s| s.to_string());
-        let host = it.next().map(|s| s.to_string()).unwrap_or_default();
-        if let (Some(fd), Some(name)) = (fd, name) {
-            out.push(CopyoverEntry { fd, name, host });
-        }
+struct PreparedRecoveredConnection {
+    snapshot: copyover::ConnectionSnapshot,
+    stream: tokio::net::TcpStream,
+}
+
+/// Take ownership only after `validate_inherited_fds` has accepted the entire
+/// set. Any conversion failure drops already-prepared streams, returns an error,
+/// and leaves the RecoverySnapshot uncommitted on disk.
+fn prepare_recovered_connections(
+    snapshot: &copyover::SnapshotPayload,
+) -> Result<Vec<PreparedRecoveredConnection>> {
+    let mut prepared = Vec::with_capacity(snapshot.entries.len());
+    for entry in &snapshot.entries {
+        // SAFETY: the complete set was checked with non-owning fcntl/getsockopt
+        // calls, and each structurally unique client fd is adopted exactly once.
+        let std_stream = unsafe { std::net::TcpStream::from_raw_fd(entry.fd) };
+        std_stream
+            .set_nonblocking(true)
+            .with_context(|| format!("set copyover client fd {} nonblocking", entry.fd))?;
+        let stream = tokio::net::TcpStream::from_std(std_stream)
+            .with_context(|| format!("adopt copyover client fd {}", entry.fd))?;
+        prepared.push(PreparedRecoveredConnection {
+            snapshot: entry.clone(),
+            stream,
+        });
     }
-    out
+    Ok(prepared)
 }
 
 fn apply_cli_flags(config: &mut Config, args: impl IntoIterator<Item = String>) {
@@ -273,64 +293,162 @@ fn apply_cli_flags(config: &mut Config, args: impl IntoIterator<Item = String>) 
 /// at the path, and write a fixed HTTP/1.1 response, one request per connection
 /// (Connection: close). This keeps the dependency surface at zero new crates and
 /// is plenty for a Prometheus scrape / liveness probe.
+async fn handle_metrics_connection<S>(
+    mut sock: S,
+    metrics: Arc<metrics::Metrics>,
+    who_snapshot: Arc<std::sync::RwLock<String>>,
+    timeouts: MetricsHttpTimeouts,
+) -> MetricsConnectionOutcome
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let exchange = async {
+        // Read just enough to see the request line. A real scrape sends a short
+        // request; cap the read and its duration so a slow client cannot pin us.
+        let mut buf = [0u8; 1024];
+        let n = match timeout(timeouts.io, sock.read(&mut buf)).await {
+            Err(_) => return MetricsConnectionOutcome::IoTimedOut,
+            Ok(Ok(0)) | Ok(Err(_)) => return MetricsConnectionOutcome::Complete,
+            Ok(Ok(n)) => n,
+        };
+        let req = String::from_utf8_lossy(&buf[..n]);
+        let request_line = req.lines().next().unwrap_or_default();
+        let mut fields = request_line.split_whitespace();
+        let method = fields.next();
+        let path = fields.next();
+        let version = fields.next();
+        let valid_version = matches!(version, Some("HTTP/1.0" | "HTTP/1.1"));
+        let valid_shape = method.is_some()
+            && path.is_some()
+            && valid_version
+            && fields.next().is_none()
+            && (n < buf.len() || request_line.ends_with('\n'));
+
+        let (status, ctype, body) = if !valid_shape {
+            (
+                "400 Bad Request",
+                "text/plain; version=0.0.4",
+                "bad request\n".to_string(),
+            )
+        } else if method != Some("GET") {
+            (
+                "405 Method Not Allowed",
+                "text/plain; version=0.0.4",
+                "method not allowed\n".to_string(),
+            )
+        } else if path == Some("/metrics") || path.is_some_and(|path| path.starts_with("/metrics?"))
+        {
+            (
+                "200 OK",
+                "text/plain; version=0.0.4",
+                metrics.render_prometheus(),
+            )
+        } else if path == Some("/health") || path.is_some_and(|path| path.starts_with("/health?")) {
+            (
+                "200 OK",
+                "text/plain; version=0.0.4",
+                format!("ok\nplayers {}\n", metrics.players_now()),
+            )
+        } else if path == Some("/api/who") || path.is_some_and(|path| path.starts_with("/api/who?"))
+        {
+            let snapshot = who_snapshot.read().map(|s| s.clone()).unwrap_or_default();
+            let body = if snapshot.is_empty() {
+                "{\"count\":0,\"players\":[]}".to_string()
+            } else {
+                snapshot
+            };
+            ("200 OK", "application/json", body)
+        } else {
+            (
+                "404 Not Found",
+                "text/plain; version=0.0.4",
+                "not found\n".to_string(),
+            )
+        };
+
+        let resp = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+            status = status,
+            ctype = ctype,
+            len = body.len(),
+            body = body
+        );
+        match timeout(timeouts.io, sock.write_all(resp.as_bytes())).await {
+            Err(_) => return MetricsConnectionOutcome::IoTimedOut,
+            Ok(Err(_)) => return MetricsConnectionOutcome::Complete,
+            Ok(Ok(())) => {}
+        }
+        match timeout(timeouts.io, sock.shutdown()).await {
+            Err(_) => MetricsConnectionOutcome::IoTimedOut,
+            Ok(_) => MetricsConnectionOutcome::Complete,
+        }
+    };
+
+    match timeout(timeouts.request, exchange).await {
+        Ok(outcome) => outcome,
+        Err(_) => MetricsConnectionOutcome::RequestTimedOut,
+    }
+}
+
+fn try_spawn_metrics_connection<S>(
+    sock: S,
+    metrics: Arc<metrics::Metrics>,
+    who_snapshot: Arc<std::sync::RwLock<String>>,
+    permits: &Arc<Semaphore>,
+    timeouts: MetricsHttpTimeouts,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let permit = match Arc::clone(permits).try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            metrics.inc_metrics_rejected();
+            return false;
+        }
+    };
+
+    tokio::spawn(async move {
+        let _permit = permit;
+        let outcome =
+            handle_metrics_connection(sock, metrics.clone(), who_snapshot, timeouts).await;
+        if matches!(
+            outcome,
+            MetricsConnectionOutcome::IoTimedOut | MetricsConnectionOutcome::RequestTimedOut
+        ) {
+            metrics.inc_metrics_timeout();
+        }
+    });
+    true
+}
+
 async fn serve_metrics(
     listener: TcpListener,
     metrics: Arc<metrics::Metrics>,
     who_snapshot: Arc<std::sync::RwLock<String>>,
 ) {
+    let permits = Arc::new(Semaphore::new(METRICS_MAX_CONNECTIONS));
     loop {
-        let (mut sock, _peer) = match listener.accept().await {
+        let (sock, peer) = match listener.accept().await {
             Ok(p) => p,
             Err(e) => {
                 warn!("metrics accept() error: {}", e);
+                tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
         };
-        let metrics = metrics.clone();
-        let who_snapshot = who_snapshot.clone();
-        tokio::spawn(async move {
-            // Read just enough to see the request line. A real scrape sends a
-            // short request; cap the read so a slow/hostile client can't pin us.
-            let mut buf = [0u8; 1024];
-            let n = match sock.read(&mut buf).await {
-                Ok(0) => return,
-                Ok(n) => n,
-                Err(_) => return,
-            };
-            let req = String::from_utf8_lossy(&buf[..n]);
-            let path = req
-                .split_whitespace()
-                .nth(1) // METHOD <path> HTTP/1.1
-                .unwrap_or("/");
-
-            let (status, ctype, body) =
-                if path == "/metrics" || path.starts_with("/metrics?") {
-                    ("200 OK", "text/plain; version=0.0.4", metrics.render_prometheus())
-                } else if path == "/health" || path.starts_with("/health?") {
-                    (
-                        "200 OK",
-                        "text/plain; version=0.0.4",
-                        format!("ok\nplayers {}\n", metrics.players_now()),
-                    )
-                } else if path == "/api/who" || path.starts_with("/api/who?") {
-                    let snapshot = who_snapshot.read().map(|s| s.clone()).unwrap_or_default();
-                    let body =
-                        if snapshot.is_empty() { "{\"count\":0,\"players\":[]}".to_string() } else { snapshot };
-                    ("200 OK", "application/json", body)
-                } else {
-                    ("404 Not Found", "text/plain; version=0.0.4", "not found\n".to_string())
-                };
-
-            let resp = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
-                status = status,
-                ctype = ctype,
-                len = body.len(),
-                body = body
+        if !try_spawn_metrics_connection(
+            sock,
+            metrics.clone(),
+            who_snapshot.clone(),
+            &permits,
+            METRICS_TIMEOUTS,
+        ) {
+            warn!(
+                "Metrics connection limit ({}) reached; rejecting {}",
+                METRICS_MAX_CONNECTIONS, peer
             );
-            let _ = sock.write_all(resp.as_bytes()).await;
-            let _ = sock.shutdown().await;
-        });
+        }
     }
 }
 
@@ -401,11 +519,27 @@ pub trait DatabaseInterface: Send + Sync {
         let _ = host;
         self.save_player(character).await
     }
+    /// Atomically change only `player_main.name` when `idnum` still owns the
+    /// expected old name and the destination remains unclaimed.  `false`
+    /// means the identity/collision precondition changed; no row was changed.
+    async fn rename_player_if_current(
+        &self,
+        idnum: i64,
+        expected_old_name: &str,
+        new_name: &str,
+    ) -> Result<bool>;
+    /// Narrow identity read used to resolve an indeterminate rename/rollback
+    /// error without loading the player's child rows.
+    async fn player_name_by_id(&self, idnum: i64) -> Result<Option<String>>;
     async fn verify_password(&self, name: &str, password: &str) -> Result<bool>;
     /// The stored password hash, for the automatic legacy-hash upgrade at
     /// login (C interpreter.c:1914-1952 password_needs_upgrade path) (#219).
     async fn get_password_hash(&self, name: &str) -> Result<Option<String>>;
     async fn delete_deleted_players(&self) -> Result<u64>;
+    /// Delete only the already-audited/tombstoned identities supplied by
+    /// pfileclean. The explicit ids prevent a row flagged after sidecar
+    /// discovery from being swept without its own cleanup (#413).
+    async fn delete_deleted_players_by_idnums(&self, idnums: Vec<i64>) -> Result<u64>;
     async fn clan_member_counts(&self) -> Result<Vec<(i32, i32)>>;
     /// C clan.c:242-255 clan_destroy: shift every player row's clan past the
     /// destroyed one and clear the destroyed clan's members (offline rows
@@ -439,6 +573,18 @@ impl DatabaseInterface for database::Database {
     async fn save_player_with_host(&self, c: &character::Character, host: &str) -> Result<()> {
         self.save_player_with_host(c, host).await
     }
+    async fn rename_player_if_current(
+        &self,
+        idnum: i64,
+        expected_old_name: &str,
+        new_name: &str,
+    ) -> Result<bool> {
+        self.rename_player_if_current(idnum, expected_old_name, new_name)
+            .await
+    }
+    async fn player_name_by_id(&self, idnum: i64) -> Result<Option<String>> {
+        self.player_name_by_id(idnum).await
+    }
     async fn verify_password(&self, name: &str, p: &str) -> Result<bool> {
         self.verify_password(name, p).await
     }
@@ -447,6 +593,9 @@ impl DatabaseInterface for database::Database {
     }
     async fn delete_deleted_players(&self) -> Result<u64> {
         self.delete_deleted_players().await
+    }
+    async fn delete_deleted_players_by_idnums(&self, idnums: Vec<i64>) -> Result<u64> {
+        self.delete_deleted_players_by_idnums(idnums).await
     }
     async fn clan_member_counts(&self) -> Result<Vec<(i32, i32)>> {
         self.clan_member_counts().await
@@ -495,15 +644,37 @@ async fn main() -> Result<()> {
     // `-q` is quickboot in C and must not suppress specials.
     apply_cli_flags(&mut config, std::env::args().skip(1));
 
-    let db: Arc<dyn DatabaseInterface> = if config.use_mock_db {
+    // Parse and validate recovery evidence before database/world startup opens
+    // more descriptors that a stale numeric fd could otherwise be confused
+    // with. The inherited port is authoritative across the exec.
+    let copyover_args = parse_copyover_args()?;
+    if let Some(args) = copyover_args {
+        config.port = args.port;
+    }
+    let copyover_recovery = if let Some(args) = copyover_args {
+        let recovery = read_copyover_state(&config.lib_path, args.listener_fd)?;
+        copyover::validate_inherited_fds(recovery.payload())?;
+        Some(recovery)
+    } else {
+        None
+    };
+
+    // Seed the mud clock from the effective lib path before any world/helper
+    // can call time_now()/sunlight() and lock in Config::default().lib_path.
+    weather::initialize_clock(&config.lib_path);
+
+    let raw_db: Arc<dyn DatabaseInterface> = if config.use_mock_db {
         info!("Using in-memory mock database");
         Arc::new(mock_database::MockDatabase::new())
     } else {
         info!("Using MySQL database");
-        let d = database::Database::new(&config.database_url)?;
-        d.init_tables().await?;
-        Arc::new(d)
+        Arc::new(database::Database::new(&config.database_url)?)
     };
+    let db: Arc<dyn DatabaseInterface> = Arc::new(database_timeout::TimedDatabase::new(
+        raw_db,
+        Duration::from_secs(config.db_timeout_secs),
+    ));
+    db.init_tables().await?;
 
     // Build the world.
     let mut state = state::GameState::new(config.clone());
@@ -589,9 +760,7 @@ async fn main() -> Result<()> {
     let death_rooms: Vec<types::RoomVnum> = state
         .rooms
         .iter()
-        .filter(|r| {
-            r.room_flags.contains(room::RoomFlags::DEATH) && r.map_x.is_none()
-        })
+        .filter(|r| r.room_flags.contains(room::RoomFlags::DEATH) && r.map_x.is_none())
         .map(|r| r.number)
         .collect();
     spec_assign::set_death_trap_rooms(death_rooms);
@@ -611,7 +780,13 @@ async fn main() -> Result<()> {
     // for `last`, ignore-by-name, mail, and name<->id lookups without an async
     // DB hit. Empty on a brand-new DB; kept fresh by update_player_index as
     // players are created / enter / save.
-    let pt = db.list_players().await.unwrap_or_default();
+    // An empty index is valid only when the database successfully reports no
+    // players. Treating a timeout/error as empty would disable offline-name
+    // collision and authority checks for the whole process lifetime (#411).
+    let pt = db
+        .list_players()
+        .await
+        .context("load authoritative player name index")?;
     info!("Loaded {} player(s) into the name index.", pt.len());
     state.player_table = pt;
     // Mirror the index into the mail subsystem's private name<->id table so
@@ -637,16 +812,31 @@ async fn main() -> Result<()> {
     if let Ok(mport) = std::env::var("MUD_METRICS_PORT") {
         match mport.parse::<u16>() {
             Ok(port) if port > 0 => {
-                let addr = format!("0.0.0.0:{}", port);
-                match TcpListener::bind(&addr).await {
-                    Ok(mlistener) => {
-                        info!("Metrics endpoint listening on {} (/metrics, /health)", addr);
-                        let m = metrics.clone();
-                        let who = who_snapshot.clone();
-                        info!("  (also serving /api/who)");
-                        tokio::spawn(async move { serve_metrics(mlistener, m, who).await });
+                // Loopback is the fail-safe default. Operators who explicitly
+                // expose metrics must choose a concrete IP and enforce access
+                // at the host/network boundary; hostnames and wildcard text
+                // are deliberately not accepted here.
+                let bind =
+                    std::env::var("MUD_METRICS_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
+                match bind.parse::<std::net::IpAddr>() {
+                    Ok(ip) => {
+                        let addr = std::net::SocketAddr::new(ip, port);
+                        match TcpListener::bind(&addr).await {
+                            Ok(mlistener) => {
+                                info!("Metrics endpoint listening on {} (/metrics, /health)", addr);
+                                let m = metrics.clone();
+                                let who = who_snapshot.clone();
+                                info!("  (also serving /api/who)");
+                                tokio::spawn(async move { serve_metrics(mlistener, m, who).await });
+                            }
+                            Err(e) => warn!("Could not bind metrics address {}: {}", addr, e),
+                        }
                     }
-                    Err(e) => warn!("Could not bind metrics port {}: {}", port, e),
+                    Err(error) => {
+                        warn!(
+                            "MUD_METRICS_BIND={bind:?} is not a valid IP ({error}); metrics disabled"
+                        );
+                    }
                 }
             }
             _ => warn!(
@@ -656,28 +846,30 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Keep a handle to the shared DB for copyover re-seeding (same Arc the game
-    // task uses, so re-seeds land in the live MockDatabase before recovery).
+    // Keep a handle to the shared DB for checked copyover preparation. Only an
+    // explicitly configured in-memory mock may be re-seeded after exec.
     let db_for_recovery = db.clone();
 
     let game_metrics = metrics.clone();
     let game_who = who_snapshot.clone();
-    let game_handle = tokio::spawn(async move {
+    let mut game_handle = tokio::spawn(async move {
         let mut game = game::Game::new(state, db);
         game.set_metrics(game_metrics);
         game.set_who_snapshot(game_who);
         game.load_text_files(&lib_path).await;
         game.prime_zones();
-        if let Err(e) = game.run(game_rx).await {
-            eprintln!("Game loop error: {}", e);
-        }
-        // game.run() returns only on graceful shutdown (SIGTERM/Ctrl-C).
+        // `run` returns only after its graceful shutdown path, or with a real
+        // failure that the process supervisor must propagate rather than
+        // misclassifying as a clean exit.
+        game.run(game_rx).await
     });
 
     // Copyover detection (comm.c init_game: `if (!fCopyOver) init_socket(port)`).
     // When re-exec'd by do_copyover, the listener fd was inherited (FD_CLOEXEC
     // cleared before exec); rebuild the tokio listener from it instead of bind().
-    let copyover_listener_fd = parse_copyover_args();
+    let copyover_listener_fd = copyover_recovery
+        .as_ref()
+        .map(|recovery| recovery.payload().listener_fd);
     let listener = if let Some(lfd) = copyover_listener_fd {
         info!("Copyover recovery: inheriting listener fd {}", lfd);
         // SAFETY: lfd was a live listening socket in the previous image; execv
@@ -700,39 +892,37 @@ async fn main() -> Result<()> {
     }
 
     let mut next_conn: u64 = 1;
+    let mut client_tasks = tokio::task::JoinSet::new();
 
     // If we came up via copyover, re-attach every previously-playing socket.
-    if copyover_listener_fd.is_some() {
-        // Re-seed the DB from the char snapshot first (no-op if the DB already
-        // persists the players, e.g. real MySQL), so enter_game can load them.
-        reseed_copyover_chars(&db_for_recovery, &config.lib_path).await;
-        let entries = read_copyover_state(&config.lib_path);
+    if let Some(recovery) = copyover_recovery {
+        prepare_copyover_database(&db_for_recovery, recovery.payload(), config.use_mock_db).await?;
+        let prepared = prepare_recovered_connections(recovery.payload())?;
         info!(
             "Copyover recovery: {} player socket(s) to restore",
-            entries.len()
+            prepared.len()
         );
-        for e in entries {
+        // All validation, DB work, nonblocking conversion, and Tokio wrapping
+        // succeeded for the complete set. This is the sole evidence-unlink.
+        recovery.commit()?;
+        for recovered in prepared {
+            let e = recovered.snapshot;
             let id = ConnId(next_conn);
             next_conn += 1;
-            // SAFETY: e.fd is a live connected socket inherited across exec.
-            let std_stream = unsafe { std::net::TcpStream::from_raw_fd(e.fd) };
-            if std_stream.set_nonblocking(true).is_err() {
-                warn!("copyover: fd {} for {} not usable, dropping", e.fd, e.name);
-                continue;
-            }
-            let stream = match tokio::net::TcpStream::from_std(std_stream) {
-                Ok(s) => s,
-                Err(err) => {
-                    warn!("copyover: from_std failed for {}: {}", e.name, err);
-                    continue;
-                }
-            };
+            let name = e.character.name;
             let tx = game_tx.clone();
-            tokio::spawn(async move {
-                if let Err(err) =
-                    connection::handle_recovered(stream, id, e.fd, e.name.clone(), e.host, tx).await
+            client_tasks.spawn(async move {
+                if let Err(err) = connection::handle_recovered(
+                    recovered.stream,
+                    id,
+                    e.fd,
+                    name.clone(),
+                    e.host,
+                    tx,
+                )
+                .await
                 {
-                    warn!("recovered client {} error: {}", e.name, err);
+                    warn!("recovered client {} error: {}", name, err);
                 }
             });
         }
@@ -762,6 +952,21 @@ async fn main() -> Result<()> {
         conn_window.as_millis()
     );
     let conn_sem = Arc::new(Semaphore::new(max_conn));
+    let reverse_dns = connection::ReverseDnsConfig {
+        enabled: config.reverse_dns,
+        timeout: Duration::from_millis(config.reverse_dns_timeout_ms),
+    };
+    let resolver_slots = Arc::new(Semaphore::new(config.reverse_dns_max_inflight));
+    info!(
+        "Reverse DNS: {}, timeout={}ms, max_inflight={}",
+        if reverse_dns.enabled {
+            "FCrDNS enabled"
+        } else {
+            "disabled"
+        },
+        reverse_dns.timeout.as_millis(),
+        config.reverse_dns_max_inflight
+    );
     // Per-IP recent-connection timestamps for the sliding-window rate limit.
     // Pruned lazily so the map can't grow without bound.
     let mut recent_connects: HashMap<IpAddr, Vec<Instant>> = HashMap::new();
@@ -772,6 +977,7 @@ async fn main() -> Result<()> {
     // graceful shutdown) — break the accept loop and exit the process cleanly.
     let mut sigterm =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+    let mut shutdown_error = None;
 
     loop {
         let sigterm_fut = async {
@@ -783,7 +989,7 @@ async fn main() -> Result<()> {
             }
         };
 
-        let (stream, peer) = tokio::select! {
+        let (mut stream, peer) = tokio::select! {
             res = listener.accept() => match res {
                 Ok(pair) => pair,
                 Err(e) => {
@@ -793,13 +999,45 @@ async fn main() -> Result<()> {
             },
             _ = tokio::signal::ctrl_c() => {
                 info!("main: received Ctrl-C; waiting for game task to finish saving.");
-                let _ = game_handle.await;
+                if let Err(error) = await_game_shutdown(
+                    &mut game_handle,
+                    PROCESS_SHUTDOWN_TIMEOUT,
+                ).await {
+                    warn!("graceful shutdown failed: {error:#}");
+                    shutdown_error = Some(error);
+                }
                 break;
             }
             _ = sigterm_fut => {
                 info!("main: received SIGTERM; waiting for game task to finish saving.");
-                let _ = game_handle.await;
+                if let Err(error) = await_game_shutdown(
+                    &mut game_handle,
+                    PROCESS_SHUTDOWN_TIMEOUT,
+                ).await {
+                    warn!("graceful shutdown failed: {error:#}");
+                    shutdown_error = Some(error);
+                }
                 break;
+            }
+            result = &mut game_handle => {
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        warn!("game task ended with an error: {error:#}");
+                        shutdown_error = Some(error);
+                    }
+                    Err(error) => {
+                        warn!("game task ended unexpectedly: {error}");
+                        shutdown_error = Some(anyhow::anyhow!("game task failed to join: {error}"));
+                    }
+                }
+                break;
+            }
+            result = client_tasks.join_next(), if !client_tasks.is_empty() => {
+                if let Some(Err(error)) = result {
+                    warn!("client task failed: {}", error);
+                }
+                continue;
             }
         };
 
@@ -812,11 +1050,7 @@ async fn main() -> Result<()> {
         // sites their chance to log in an existing PLR_SITEOK char — so at the
         // socket level we only hard-drop BAN_ALL. (New/Select are enforced in
         // the login path where the char's flags are known.)
-        if ban::isbanned(&ip.to_string()) == ban::BanType::All {
-            warn!("Rejected banned host {}", ip);
-            let mut s = stream;
-            let _ = s.write_all(b"You are banned from this server.\r\n").await;
-            let _ = s.shutdown().await;
+        if connection::reject_ban_all(&mut stream, &connection::PeerIdentity::numeric(ip)).await {
             continue;
         }
 
@@ -862,87 +1096,329 @@ async fn main() -> Result<()> {
         let id = ConnId(next_conn);
         next_conn += 1;
         let tx = game_tx.clone();
-        tokio::spawn(async move {
+        let resolver_slots = Arc::clone(&resolver_slots);
+        client_tasks.spawn(async move {
             // Hold the permit for the lifetime of the connection; dropping it on
             // task exit frees a slot for the next client.
             let _permit = permit;
-            if let Err(e) = connection::handle_client(stream, peer, id, tx).await {
+            if let Err(e) =
+                connection::handle_client(stream, peer, id, tx, reverse_dns, resolver_slots).await
+            {
                 warn!("client {} error: {}", peer, e);
             }
         });
     }
 
+    client_tasks.abort_all();
+    while let Some(result) = client_tasks.join_next().await {
+        if let Err(error) = result {
+            if !error.is_cancelled() {
+                warn!("client task failed during shutdown: {}", error);
+            }
+        }
+    }
     info!("Server exiting.");
-    Ok(())
+    match shutdown_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // -- copyover state parsing (W6 live-ops: the recovery file is untrusted
-    //    input written by the previous exec) -------------------------------
+    #[tokio::test]
+    async fn stalled_game_shutdown_is_aborted_at_the_global_deadline() {
+        let mut handle = tokio::spawn(async {
+            std::future::pending::<()>().await;
+            Ok::<(), anyhow::Error>(())
+        });
 
-    #[test]
-    fn copyover_parse_reads_fd_name_host_lines() {
-        let text = "7\n10 Mulder 10.0.0.1\n11 Belgarion host.example\n-1\n";
-        let entries = parse_copyover_entries(text);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].fd, 10);
-        assert_eq!(entries[0].name, "Mulder");
-        assert_eq!(entries[0].host, "10.0.0.1");
-        assert_eq!(entries[1].fd, 11);
-        assert_eq!(entries[1].host, "host.example");
+        let error = await_game_shutdown(&mut handle, Duration::from_millis(20))
+            .await
+            .expect_err("a stalled game task must fail shutdown");
+
+        assert!(error.to_string().contains("shutdown deadline"));
+        assert!(handle.is_finished(), "aborted game task must be joined");
     }
 
-    #[test]
-    fn copyover_parse_stops_at_minus_one_and_blank() {
-        // Garbage after the -1 terminator must be ignored.
-        let text = "3\n8 A a.host\n-1\n999 Z z.h\n";
-        assert_eq!(parse_copyover_entries(text).len(), 1);
-        // A blank line terminates too.
-        let text2 = "3\n8 A a.host\n\n9 B b.h\n";
-        assert_eq!(parse_copyover_entries(text2).len(), 1);
+    #[tokio::test]
+    async fn game_task_error_is_not_reported_as_a_graceful_exit() {
+        let mut handle = tokio::spawn(async { anyhow::bail!("synthetic game failure") });
+
+        let error = await_game_shutdown(&mut handle, Duration::from_secs(1))
+            .await
+            .expect_err("game error must propagate");
+
+        assert!(error.to_string().contains("synthetic game failure"));
     }
 
-    #[test]
-    fn copyover_parse_drops_bad_lines_and_defaults_host() {
-        // Non-numeric fd: dropped. Missing host: empty. Extra fields: host
-        // keeps the third token only.
-        let text = "0\nnope A a.h\n12 Hostless\n13 Trunc a.h extra junk\n-1\n";
-        let entries = parse_copyover_entries(text);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].fd, 12);
-        assert_eq!(entries[0].host, "");
-        assert_eq!(entries[1].fd, 13);
-        assert_eq!(entries[1].host, "a.h");
-    }
+    #[tokio::test]
+    async fn metrics_connection_limit_rejects_excess_and_reclaims_permits() {
+        const TEST_LIMIT: usize = METRICS_MAX_CONNECTIONS;
+        const TEST_TIMEOUTS: MetricsHttpTimeouts = MetricsHttpTimeouts {
+            io: Duration::from_secs(5),
+            request: Duration::from_secs(5),
+        };
+        assert_eq!(METRICS_MAX_CONNECTIONS, 32);
+        assert_eq!(METRICS_IO_TIMEOUT, Duration::from_secs(2));
+        assert_eq!(METRICS_REQUEST_TIMEOUT, Duration::from_secs(2));
 
-    #[test]
-    fn copyover_parse_survives_empty_and_listener_only_files() {
-        assert!(parse_copyover_entries("").is_empty());
-        assert!(parse_copyover_entries("5\n").is_empty());
-        assert!(parse_copyover_entries("5\n-1\n").is_empty());
-    }
-
-    #[test]
-    fn copyover_writer_reader_round_trip() {
-        // The exact lines do_copyover emits: listener fd, one `fd name host`
-        // per playing descriptor, then -1.
-        let listener_fd = 9;
-        let players = [
-            (10, "Mulder", "1.2.3.4"),
-            (11, "Skinner", "corp.example.test"),
-        ];
-        let mut text = format!("{listener_fd}\n");
-        for (fd, name, host) in players {
-            text.push_str(&format!("{fd} {name} {host}\n"));
+        let permits = Arc::new(Semaphore::new(TEST_LIMIT));
+        let metrics = Arc::new(metrics::Metrics::new());
+        let who_snapshot = Arc::new(std::sync::RwLock::new(String::new()));
+        let mut clients = Vec::with_capacity(TEST_LIMIT);
+        for _ in 0..TEST_LIMIT {
+            let (client, server) = tokio::io::duplex(64);
+            assert!(try_spawn_metrics_connection(
+                server,
+                metrics.clone(),
+                who_snapshot.clone(),
+                &permits,
+                TEST_TIMEOUTS,
+            ));
+            clients.push(client);
         }
-        text.push_str("-1\n");
-        let entries = parse_copyover_entries(&text);
-        assert_eq!(entries.len(), 2);
-        assert_eq!((entries[0].fd, entries[0].name.as_str()), (10, "Mulder"));
-        assert_eq!(entries[1].host, "corp.example.test");
+        let (mut excess_client, excess_server) = tokio::io::duplex(64);
+        assert_eq!(permits.available_permits(), 0);
+        assert!(!try_spawn_metrics_connection(
+            excess_server,
+            metrics.clone(),
+            who_snapshot.clone(),
+            &permits,
+            TEST_TIMEOUTS,
+        ));
+        assert_eq!(
+            metrics
+                .metrics_rejected_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+
+        let mut byte = [0u8; 1];
+        let rejected_read = timeout(Duration::from_secs(1), excess_client.read(&mut byte))
+            .await
+            .expect("rejected metrics stream did not close");
+        assert_eq!(rejected_read.expect("rejected stream read failed"), 0);
+
+        drop(clients);
+        let all_permits = timeout(
+            Duration::from_secs(2),
+            Arc::clone(&permits).acquire_many_owned(TEST_LIMIT as u32),
+        )
+        .await
+        .expect("metrics permits were not reclaimed")
+        .expect("metrics semaphore unexpectedly closed");
+        drop(all_permits);
+        assert_eq!(permits.available_permits(), TEST_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn metrics_connection_enforces_read_write_and_request_timeouts() {
+        const SHORT_IO: MetricsHttpTimeouts = MetricsHttpTimeouts {
+            io: Duration::from_millis(20),
+            request: Duration::from_millis(250),
+        };
+        const SHORT_REQUEST: MetricsHttpTimeouts = MetricsHttpTimeouts {
+            io: Duration::from_millis(250),
+            request: Duration::from_millis(20),
+        };
+        let metrics = Arc::new(metrics::Metrics::new());
+        let who_snapshot = Arc::new(std::sync::RwLock::new(String::new()));
+
+        let permits = Arc::new(Semaphore::new(1));
+        let (_idle_client, idle_server) = tokio::io::duplex(64);
+        assert!(try_spawn_metrics_connection(
+            idle_server,
+            metrics.clone(),
+            who_snapshot.clone(),
+            &permits,
+            SHORT_IO,
+        ));
+        let reclaimed_permit =
+            timeout(Duration::from_secs(1), Arc::clone(&permits).acquire_owned())
+                .await
+                .expect("idle metrics connection retained its permit past the timeout")
+                .expect("metrics semaphore unexpectedly closed");
+        drop(reclaimed_permit);
+        assert_eq!(
+            metrics
+                .metrics_timeouts_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+
+        let (_idle_client, idle_server) = tokio::io::duplex(64);
+        let read_outcome = timeout(
+            Duration::from_secs(1),
+            handle_metrics_connection(idle_server, metrics.clone(), who_snapshot.clone(), SHORT_IO),
+        )
+        .await
+        .expect("idle metrics read exceeded its outer test deadline");
+        assert_eq!(read_outcome, MetricsConnectionOutcome::IoTimedOut);
+
+        let (mut blocked_client, blocked_server) = tokio::io::duplex(64);
+        blocked_client
+            .write_all(b"GET /metrics HTTP/1.1\r\n\r\n")
+            .await
+            .expect("could not seed metrics request");
+        let write_outcome = timeout(
+            Duration::from_secs(1),
+            handle_metrics_connection(
+                blocked_server,
+                metrics.clone(),
+                who_snapshot.clone(),
+                SHORT_IO,
+            ),
+        )
+        .await
+        .expect("blocked metrics write exceeded its outer test deadline");
+        assert_eq!(write_outcome, MetricsConnectionOutcome::IoTimedOut);
+
+        let (_idle_client, idle_server) = tokio::io::duplex(64);
+        let request_outcome = timeout(
+            Duration::from_secs(1),
+            handle_metrics_connection(idle_server, metrics, who_snapshot, SHORT_REQUEST),
+        )
+        .await
+        .expect("metrics exchange exceeded its outer test deadline");
+        assert_eq!(request_outcome, MetricsConnectionOutcome::RequestTimedOut);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn saturated_metrics_clients_do_not_stall_game_pulses_or_the_next_scrape() {
+        const TEST_LIMIT: usize = METRICS_MAX_CONNECTIONS;
+        const SATURATION_TIMEOUTS: MetricsHttpTimeouts = MetricsHttpTimeouts {
+            io: Duration::from_millis(750),
+            request: Duration::from_secs(1),
+        };
+
+        let permits = Arc::new(Semaphore::new(TEST_LIMIT));
+        let metrics = Arc::new(metrics::Metrics::new());
+        let who_snapshot = Arc::new(std::sync::RwLock::new(String::new()));
+
+        let db: Arc<dyn DatabaseInterface> = Arc::new(mock_database::MockDatabase::new());
+        let mut game = game::Game::new(state::GameState::new(Config::default()), db);
+        game.set_metrics(metrics.clone());
+        let (_game_tx, game_rx) = mpsc::channel(1);
+        let game_task = tokio::spawn(async move { game.run(game_rx).await });
+
+        // Half of the clients never send a request (slowloris); the other half
+        // send a valid request but never read the response. Keeping every peer
+        // open forces the server-side read/write deadlines to reclaim capacity.
+        let mut stalled_clients = Vec::with_capacity(TEST_LIMIT);
+        for index in 0..TEST_LIMIT {
+            let (mut client, server) = tokio::io::duplex(64);
+            if index % 2 == 1 {
+                client
+                    .write_all(b"GET /metrics HTTP/1.1\r\n\r\n")
+                    .await
+                    .expect("could not seed non-reading metrics client");
+            }
+            assert!(try_spawn_metrics_connection(
+                server,
+                metrics.clone(),
+                who_snapshot.clone(),
+                &permits,
+                SATURATION_TIMEOUTS,
+            ));
+            stalled_clients.push(client);
+        }
+        assert_eq!(permits.available_permits(), 0);
+
+        let pulse_while_saturated = timeout(Duration::from_millis(500), async {
+            loop {
+                let pulse = metrics.pulse.load(std::sync::atomic::Ordering::Relaxed);
+                if pulse >= 3 {
+                    break pulse;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("saturated metrics tasks stalled the game heartbeat");
+        assert_eq!(
+            permits.available_permits(),
+            0,
+            "the heartbeat proof must complete while metrics capacity is saturated"
+        );
+
+        let all_permits = timeout(
+            Duration::from_secs(2),
+            Arc::clone(&permits).acquire_many_owned(TEST_LIMIT as u32),
+        )
+        .await
+        .expect("metrics deadlines did not reclaim all saturated permits")
+        .expect("metrics semaphore unexpectedly closed");
+        drop(all_permits);
+        assert_eq!(
+            metrics
+                .metrics_timeouts_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            TEST_LIMIT as u64
+        );
+
+        let (mut scrape_client, scrape_server) = tokio::io::duplex(16 * 1024);
+        assert!(try_spawn_metrics_connection(
+            scrape_server,
+            metrics.clone(),
+            who_snapshot,
+            &permits,
+            SATURATION_TIMEOUTS,
+        ));
+        scrape_client
+            .write_all(b"GET /metrics HTTP/1.1\r\n\r\n")
+            .await
+            .expect("could not send the recovery scrape");
+        let mut response = Vec::new();
+        timeout(
+            Duration::from_secs(1),
+            scrape_client.read_to_end(&mut response),
+        )
+        .await
+        .expect("valid scrape did not complete after permit reclamation")
+        .expect("valid scrape read failed");
+        let response = String::from_utf8(response).expect("metrics response was not UTF-8");
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        let exposed_pulse = response
+            .lines()
+            .find_map(|line| line.strip_prefix("deltamud_pulse "))
+            .expect("metrics response omitted the pulse counter")
+            .parse::<u64>()
+            .expect("metrics pulse was not numeric");
+        assert!(exposed_pulse >= pulse_while_saturated);
+
+        game_task.abort();
+        let _ = game_task.await;
+        drop(stalled_clients);
+    }
+
+    async fn metrics_response(request: &[u8]) -> String {
+        let metrics = Arc::new(metrics::Metrics::new());
+        let who_snapshot = Arc::new(std::sync::RwLock::new(String::new()));
+        let (mut client, server) = tokio::io::duplex(4096);
+        client.write_all(request).await.unwrap();
+        handle_metrics_connection(server, metrics, who_snapshot, METRICS_TIMEOUTS).await;
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        String::from_utf8(response).unwrap()
+    }
+
+    #[tokio::test]
+    async fn metrics_http_rejects_bad_shape_and_unsupported_methods() {
+        let malformed = metrics_response(b"GET /health\r\n\r\n").await;
+        assert!(malformed.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+
+        let post = metrics_response(b"POST /metrics HTTP/1.1\r\n\r\n").await;
+        assert!(post.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"));
+
+        let missing = metrics_response(b"GET /missing HTTP/1.1\r\n\r\n").await;
+        assert!(missing.starts_with("HTTP/1.1 404 Not Found\r\n"));
+
+        let healthy = metrics_response(b"GET /health HTTP/1.1\r\n\r\n").await;
+        assert!(healthy.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(healthy.ends_with("ok\nplayers 0\n"));
     }
 
     #[test]
@@ -954,5 +1430,75 @@ mod tests {
         let mut s_config = Config::default();
         apply_cli_flags(&mut s_config, ["-s".to_string()]);
         assert!(s_config.no_specials);
+    }
+
+    #[test]
+    fn copyover_arguments_are_strict_once_recovery_is_requested() {
+        let strings = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(parse_copyover_args_from(&strings(&["mud"])).unwrap(), None);
+        assert_eq!(
+            parse_copyover_args_from(&strings(&["mud", "--copyover", "4000", "7"])).unwrap(),
+            Some(CopyoverArgs {
+                port: 4000,
+                listener_fd: 7,
+            })
+        );
+        assert!(parse_copyover_args_from(&strings(&["mud", "--copyover"])).is_err());
+        assert!(parse_copyover_args_from(&strings(&["mud", "--copyover", "junk", "7"])).is_err());
+        assert!(parse_copyover_args_from(&strings(&["mud", "--copyover", "4000", "0"])).is_err());
+        assert!(
+            parse_copyover_args_from(&strings(&[
+                "mud",
+                "--copyover",
+                "4000",
+                "7",
+                "--copyover",
+                "4000",
+                "8",
+            ]))
+            .is_err()
+        );
+    }
+
+    fn recovery_payload() -> copyover::SnapshotPayload {
+        let mut character = character::Character::new_player(
+            "Recovery".to_string(),
+            types::Class::Warrior,
+            types::Race::Human,
+        );
+        character.idnum = 42;
+        copyover::SnapshotPayload {
+            listener_fd: 7,
+            entries: vec![copyover::ConnectionSnapshot {
+                fd: 8,
+                host: "example.test".to_string(),
+                character: copyover::CharacterSnapshot::from_character(&character),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn production_copyover_never_reseeds_a_missing_player_row() {
+        let mock = Arc::new(mock_database::MockDatabase::new());
+        let db: Arc<dyn DatabaseInterface> = mock.clone();
+
+        assert!(
+            prepare_copyover_database(&db, &recovery_payload(), false)
+                .await
+                .is_err()
+        );
+        assert!(!mock.player_exists("Recovery").await.unwrap());
+
+        prepare_copyover_database(&db, &recovery_payload(), true)
+            .await
+            .unwrap();
+        let recovered = mock.load_player("Recovery").await.unwrap();
+        assert_eq!(recovered.idnum, 42);
     }
 }

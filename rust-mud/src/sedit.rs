@@ -24,16 +24,15 @@
 //     <open1>\n <close1>\n <open2>\n <close2>\n
 //   ...repeats... then "$~\n".
 //
-// OWNERSHIP NOTE: the live shop table in shop.rs is a private static loaded at
-// boot; this editor can't mutate it in place. So sedit owns its own editable
-// copy of a zone's shops (lazily loaded per-zone from the same .shp file),
-// edits it, and rewrites the whole <zone>.shp — exactly as C sedit_save_to_disk
-// rewrites the zone file from shop_index. (A reboot re-primes shop.rs.)
+// OWNERSHIP NOTE: sedit owns an editable copy of a zone's shops. On save it
+// atomically replaces the zone file, then asks shop.rs to parse that persisted
+// record and upsert it into the live table.
 
 use crate::constants::ITEM_TYPES;
 use crate::olc::{self, EditorKind};
 use crate::state::GameState;
 use crate::types::*;
+use std::io::Result as IoResult;
 use std::sync::{Mutex, OnceLock};
 
 // olc.h.
@@ -377,7 +376,21 @@ fn parse_int_lead(t: &str) -> Option<i32> {
     if end == 0 {
         return None;
     }
-    t[..end].parse::<i32>().ok()
+    match t[..end].parse::<i32>() {
+        Ok(value) => Some(value),
+        Err(_) => {
+            let clamped = if t.starts_with('-') {
+                i32::MIN
+            } else {
+                i32::MAX
+            };
+            log::warn!(
+                "SYSERR: shop numeric field overflow; clamped to {clamped}: {}",
+                &t[..end]
+            );
+            Some(clamped)
+        }
+    }
 }
 
 fn r_int(r: &mut Reader) -> i32 {
@@ -427,11 +440,12 @@ fn r_type_list(r: &mut Reader) -> Vec<ShopBuyData> {
                 continue;
             }
             if !name.is_empty()
-                && trimmed.len() >= name.len()
-                && trimmed[..name.len()].eq_ignore_ascii_case(name)
+                && trimmed
+                    .get(..name.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(name))
             {
                 num = idx as i32;
-                rest = &trimmed[name.len()..];
+                rest = trimmed.get(name.len()..).unwrap_or_default();
                 break;
             }
         }
@@ -520,7 +534,7 @@ fn parse_shop_file(contents: &str) -> Vec<Shop> {
 /// Write a zone's shop table back to <zone>.shp, byte-faithful with C
 /// sedit_save_to_disk: shops are emitted in ascending vnum order over the
 /// zone's vnum range.
-fn sedit_save_to_disk(lib_path: &str, zone: i32, shops: &[Shop]) {
+fn sedit_save_to_disk(lib_path: &str, zone: i32, shops: &[Shop]) -> IoResult<()> {
     let dir = format!("{}/{}", lib_path.trim_end_matches('/'), SHP_REL_DIR);
     let tmp = format!("{}/{}.new", dir, zone);
     let final_path = shp_path(lib_path, zone);
@@ -595,12 +609,12 @@ fn sedit_save_to_disk(lib_path: &str, zone: i32, shops: &[Shop]) {
 
     out.push_str("$~\n");
 
-    if std::fs::write(&tmp, &out).is_err() {
-        log::warn!("SYSERR: OLC: Cannot open shop file!");
-        return;
-    }
-    let _ = std::fs::remove_file(&final_path);
-    let _ = std::fs::rename(&tmp, &final_path);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(&tmp, &out)?;
+    // rename replaces the existing file atomically on this Unix host. Do not
+    // unlink first: that creates a missing-file window if rename fails.
+    std::fs::rename(&tmp, &final_path)?;
+    Ok(())
 }
 
 /// Central OLC save dispatcher entry. The live shop table is private to
@@ -617,8 +631,10 @@ pub fn sedit_save_zone_to_disk(g: &mut GameState, zone_rnum: usize) {
     };
     let lib_path = g.config.lib_path.clone();
     let shops = load_zone_shops(&lib_path, zone);
-    sedit_save_to_disk(&lib_path, zone, &shops);
-    crate::olc::olc_remove_from_save_list(zone, crate::olc::OLC_SAVE_SHOP);
+    match sedit_save_to_disk(&lib_path, zone, &shops) {
+        Ok(()) => crate::olc::olc_remove_from_save_list(zone, crate::olc::OLC_SAVE_SHOP),
+        Err(err) => log::warn!("SYSERR: OLC: Cannot save shop zone {}: {}", zone, err),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -656,7 +672,9 @@ pub fn do_sedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 send(g, ch, "Save which zone?\r\n");
                 return;
             }
-            let zone = buf2.parse::<i32>().unwrap_or(-1);
+            let Some(zone) = olc::parse_i32_input(g, conn, &buf2, -1) else {
+                return;
+            };
             if zone < 0 {
                 send(g, ch, "Save which zone?\r\n");
                 return;
@@ -668,14 +686,19 @@ pub fn do_sedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 .unwrap_or_default();
             log::info!("OLC: {} saves shop info for zone {}.", name, zone);
             let shops = load_zone_shops(&lib_path, zone);
-            sedit_save_to_disk(&lib_path, zone, &shops);
+            if let Err(err) = sedit_save_to_disk(&lib_path, zone, &shops) {
+                log::warn!("SYSERR: OLC: Cannot save shop zone {}: {}", zone, err);
+                send(g, ch, "Could not save that shop zone.\r\n");
+            }
             return;
         }
         send(g, ch, "Yikes!  Stop that, someone will get hurt!\r\n");
         return;
     }
 
-    let vnum = buf1.parse::<i32>().unwrap_or(-1);
+    let Some(vnum) = olc::parse_i32_input(g, conn, &buf1, -1) else {
+        return;
+    };
     if vnum < 0 {
         send(g, ch, "Yikes!  Stop that, someone will get hurt!\r\n");
         return;
@@ -1088,18 +1111,27 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
     match mode {
         SeditMode::ConfirmSave => {
             match trimmed.chars().next() {
-                Some('y') | Some('Y') => {
-                    send(g, ch, "Saving shop to memory.\r\n");
-                    sedit_save_internally(g, conn);
-                    let (name, vnum) = (
-                        g.get_char(ch)
-                            .map(|c| c.player.name.clone())
-                            .unwrap_or_default(),
-                        with_state(conn, |st| st.vnum).unwrap_or(0),
-                    );
-                    log::info!("OLC: {} edits shop {}", name, vnum);
-                    cleanup(conn);
-                }
+                Some('y') | Some('Y') => match sedit_save_internally(g, conn) {
+                    Ok(()) => {
+                        send(g, ch, "Saving shop to memory.\r\n");
+                        let (name, vnum) = (
+                            g.get_char(ch)
+                                .map(|c| c.player.name.clone())
+                                .unwrap_or_default(),
+                            with_state(conn, |st| st.vnum).unwrap_or(0),
+                        );
+                        log::info!("OLC: {} edits shop {}", name, vnum);
+                        cleanup(conn);
+                    }
+                    Err(err) => {
+                        log::warn!("SYSERR: OLC: Cannot save edited shop: {}", err);
+                        send(
+                            g,
+                            ch,
+                            "Could not save the shop; your editor remains open. Try again? (y/n) : ",
+                        );
+                    }
+                },
                 Some('n') | Some('N') => cleanup(conn),
                 _ => send(g, ch, "Invalid choice!\r\nDo you wish to save the shop? : "),
             }
@@ -1113,7 +1145,11 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 Some('q') | Some('Q') => {
                     let changed = with_state(conn, |st| st.changed).unwrap_or(false);
                     if changed {
-                        send(g, ch, "Do you wish to save the changes to the shop? (y/n) : ");
+                        send(
+                            g,
+                            ch,
+                            "Do you wish to save the changes to the shop? (y/n) : ",
+                        );
                         with_state(conn, |st| st.mode = SeditMode::ConfirmSave);
                     } else {
                         cleanup(conn);
@@ -1313,7 +1349,9 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
 
         // ---- Numerical responses -----------------------------------------
         SeditMode::Keeper => {
-            let i = trimmed.parse::<i32>().unwrap_or(-1);
+            let Some(i) = olc::parse_i32_input(g, conn, trimmed, -1) else {
+                return;
+            };
             if i == -1 {
                 with_state(conn, |st| st.shop.keeper = NOBODY);
             } else if !mob_exists(g, i) {
@@ -1327,26 +1365,42 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     .map(|c| c.player.level)
                     .unwrap_or(LVL_IMPL);
                 if level < LVL_IMMORT && !crate::olc::can_edit_zone(g, ch, zone_rnum_of(g, i)) {
-                    send(g, ch, "You don't have permissions to that zone, try again : ");
+                    send(
+                        g,
+                        ch,
+                        "You don't have permissions to that zone, try again : ",
+                    );
                     return;
                 }
                 with_state(conn, |st| st.shop.keeper = i);
             }
         }
         SeditMode::Open1 => {
-            let v = trimmed.parse::<i32>().unwrap_or(0).clamp(0, 28);
+            let Some(v) = olc::parse_i32_input(g, conn, trimmed, 0) else {
+                return;
+            };
+            let v = v.clamp(0, 28);
             with_state(conn, |st| st.shop.open1 = v);
         }
         SeditMode::Open2 => {
-            let v = trimmed.parse::<i32>().unwrap_or(0).clamp(0, 28);
+            let Some(v) = olc::parse_i32_input(g, conn, trimmed, 0) else {
+                return;
+            };
+            let v = v.clamp(0, 28);
             with_state(conn, |st| st.shop.open2 = v);
         }
         SeditMode::Close1 => {
-            let v = trimmed.parse::<i32>().unwrap_or(0).clamp(0, 28);
+            let Some(v) = olc::parse_i32_input(g, conn, trimmed, 0) else {
+                return;
+            };
+            let v = v.clamp(0, 28);
             with_state(conn, |st| st.shop.close1 = v);
         }
         SeditMode::Close2 => {
-            let v = trimmed.parse::<i32>().unwrap_or(0).clamp(0, 28);
+            let Some(v) = olc::parse_i32_input(g, conn, trimmed, 0) else {
+                return;
+            };
+            let v = v.clamp(0, 28);
             with_state(conn, |st| st.shop.close2 = v);
         }
         SeditMode::BuyProfit => {
@@ -1362,10 +1416,10 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             }
         }
         SeditMode::TypeMenu => {
-            let v = trimmed
-                .parse::<i32>()
-                .unwrap_or(0)
-                .clamp(0, NUM_ITEM_TYPES as i32 - 1);
+            let Some(v) = olc::parse_i32_input(g, conn, trimmed, 0) else {
+                return;
+            };
+            let v = v.clamp(0, NUM_ITEM_TYPES as i32 - 1);
             with_state(conn, |st| {
                 st.pending_type = v;
                 st.mode = SeditMode::Namelist;
@@ -1374,7 +1428,9 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             return;
         }
         SeditMode::DeleteType => {
-            let n = trimmed.parse::<i32>().unwrap_or(-1);
+            let Some(n) = olc::parse_i32_input(g, conn, trimmed, -1) else {
+                return;
+            };
             with_state(conn, |st| {
                 if n >= 0 && (n as usize) < st.shop.type_.len() {
                     st.shop.type_.remove(n as usize);
@@ -1384,7 +1440,9 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             return;
         }
         SeditMode::NewProduct => {
-            let i = trimmed.parse::<i32>().unwrap_or(-1);
+            let Some(i) = olc::parse_i32_input(g, conn, trimmed, -1) else {
+                return;
+            };
             if i == -1 {
                 sedit_products_menu(g, conn);
                 return;
@@ -1399,10 +1457,12 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 .and_then(|c| g.get_char(c))
                 .map(|c| c.player.level)
                 .unwrap_or(LVL_IMPL);
-            if level < LVL_GRGOD
-                && !crate::olc::obj_proto_in_owned_zone(g, ch, i)
-            {
-                send(g, ch, "You don't have permissions to that zone, try again : ");
+            if level < LVL_GRGOD && !crate::olc::obj_proto_in_owned_zone(g, ch, i) {
+                send(
+                    g,
+                    ch,
+                    "You don't have permissions to that zone, try again : ",
+                );
                 return;
             }
             with_state(conn, |st| st.shop.producing.push(i));
@@ -1410,7 +1470,9 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             return;
         }
         SeditMode::DeleteProduct => {
-            let n = trimmed.parse::<i32>().unwrap_or(-1);
+            let Some(n) = olc::parse_i32_input(g, conn, trimmed, -1) else {
+                return;
+            };
             with_state(conn, |st| {
                 if n >= 0 && (n as usize) < st.shop.producing.len() {
                     st.shop.producing.remove(n as usize);
@@ -1420,7 +1482,9 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             return;
         }
         SeditMode::NewRoom => {
-            let i = trimmed.parse::<i32>().unwrap_or(-1);
+            let Some(i) = olc::parse_i32_input(g, conn, trimmed, -1) else {
+                return;
+            };
             if i == -1 {
                 sedit_rooms_menu(g, conn);
                 return;
@@ -1442,7 +1506,11 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 .map(|zr| crate::olc::can_edit_zone(g, ch, zr))
                 .unwrap_or(false);
             if level < LVL_IMMORT && !owned {
-                send(g, ch, "You don't have permissions to that zone, try again : ");
+                send(
+                    g,
+                    ch,
+                    "You don't have permissions to that zone, try again : ",
+                );
                 return;
             }
             with_state(conn, |st| st.shop.in_room.push(i));
@@ -1450,7 +1518,9 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             return;
         }
         SeditMode::DeleteRoom => {
-            let n = trimmed.parse::<i32>().unwrap_or(-1);
+            let Some(n) = olc::parse_i32_input(g, conn, trimmed, -1) else {
+                return;
+            };
             with_state(conn, |st| {
                 if n >= 0 && (n as usize) < st.shop.in_room.len() {
                     st.shop.in_room.remove(n as usize);
@@ -1460,10 +1530,10 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             return;
         }
         SeditMode::ShopFlags => {
-            let i = trimmed
-                .parse::<i32>()
-                .unwrap_or(0)
-                .clamp(0, NUM_SHOP_FLAGS as i32);
+            let Some(i) = olc::parse_i32_input(g, conn, trimmed, 0) else {
+                return;
+            };
+            let i = i.clamp(0, NUM_SHOP_FLAGS as i32);
             if i > 0 {
                 with_state(conn, |st| st.shop.bitvector ^= 1 << (i - 1));
                 sedit_shop_flags_menu(g, conn);
@@ -1471,10 +1541,10 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             }
         }
         SeditMode::NoTrade => {
-            let i = trimmed
-                .parse::<i32>()
-                .unwrap_or(0)
-                .clamp(0, NUM_TRADERS as i32);
+            let Some(i) = olc::parse_i32_input(g, conn, trimmed, 0) else {
+                return;
+            };
+            let i = i.clamp(0, NUM_TRADERS as i32);
             if i > 0 {
                 with_state(conn, |st| st.shop.with_who ^= 1 << (i - 1));
                 sedit_no_trade_menu(g, conn);
@@ -1503,10 +1573,10 @@ fn modify_string(conn: ConnId, new: &str, apply: impl FnOnce(&mut Shop, String))
 // Internal + disk save (sedit_save_internally writes back into the zone file).
 // ---------------------------------------------------------------------------
 
-fn sedit_save_internally(g: &mut GameState, conn: ConnId) {
+fn sedit_save_internally(g: &mut GameState, conn: ConnId) -> IoResult<()> {
     let (shop, vnum, zone) = match with_state(conn, |st| (st.shop.clone(), st.vnum, st.zone)) {
         Some(v) => v,
-        None => return,
+        None => return Ok(()),
     };
     let lib_path = g.config.lib_path.clone();
 
@@ -1519,7 +1589,8 @@ fn sedit_save_internally(g: &mut GameState, conn: ConnId) {
     } else {
         shops.push(this);
     }
-    sedit_save_to_disk(&lib_path, zone, &shops);
+    sedit_save_to_disk(&lib_path, zone, &shops)?;
+    crate::shop::upsert_shop_from_zone_file(&lib_path, zone, vnum)
 }
 
 // ---------------------------------------------------------------------------
@@ -1556,7 +1627,276 @@ mod tests {
     use crate::character::Character;
     use crate::config::Config;
     use crate::connection::Descriptor;
+    use crate::object::Object;
+    use crate::room::Room;
     use crate::world::Zone;
+
+    fn temp_shop_lib(label: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "deltamud-sedit-{label}-{}-{unique}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn internal_save_atomically_replaces_disk_then_refreshes_live_shop() {
+        let mut dir = std::env::temp_dir();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        dir.push(format!(
+            "deltamud-sedit-live-{}-{}",
+            std::process::id(),
+            unique
+        ));
+
+        let zone = 9876;
+        let vnum = 987600;
+        let old_keeper = 987601;
+        let new_keeper = 987602;
+        let mut original = Shop::new(vnum);
+        original.keeper = old_keeper;
+        original.profit_buy = 1.10;
+        sedit_save_to_disk(dir.to_str().unwrap(), zone, &[original]).unwrap();
+        crate::shop::upsert_shop_from_zone_file(dir.to_str().unwrap(), zone, vnum).unwrap();
+
+        let mut config = Config::default();
+        config.lib_path = dir.to_string_lossy().into_owned();
+        let mut g = GameState::new(config);
+        let ch = g.create_char(Character::new_player(
+            "Root".into(),
+            Class::Cleric,
+            Race::Human,
+        ));
+        let conn = ConnId(9876);
+        let mut edited = Shop::new(vnum);
+        edited.keeper = new_keeper;
+        edited.profit_buy = 1.75;
+        set_state(
+            conn,
+            SeditState {
+                ch,
+                vnum,
+                zone,
+                shop: edited,
+                changed: true,
+                mode: SeditMode::ConfirmSave,
+                pending_type: 0,
+            },
+        );
+
+        sedit_save_internally(&mut g, conn).unwrap();
+
+        let persisted = load_zone_shops(dir.to_str().unwrap(), zone);
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].keeper, new_keeper);
+        assert_eq!(persisted[0].profit_buy, 1.75);
+        assert!(!dir.join("world/shp/9876.new").exists());
+        let live = crate::shop::test_shop_definition(vnum).unwrap();
+        assert_eq!(live.0, new_keeper);
+        assert_eq!(live.1, 1.75);
+        assert!(!crate::shop::is_shop_keeper_vnum(old_keeper));
+        assert!(crate::shop::is_shop_keeper_vnum(new_keeper));
+
+        take_state(conn);
+        crate::shop::test_remove_shop(vnum);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn new_shop_is_immediately_live_for_room_hours_list_buy_and_messages() {
+        let dir = temp_shop_lib("new-live");
+        let zone = 9877;
+        let vnum = 987_700;
+        let keeper_vnum = 987_701;
+        let old_room_vnum = 987_710;
+        let new_room_vnum = 987_711;
+        let conn = ConnId(9877);
+
+        let mut config = Config::default();
+        config.lib_path = dir.to_string_lossy().into_owned();
+        let mut g = GameState::new(config);
+        let old_room = g.add_room(Room::new(
+            old_room_vnum,
+            zone,
+            "Old room".into(),
+            String::new(),
+        ));
+        let new_room = g.add_room(Room::new(
+            new_room_vnum,
+            zone,
+            "New shop".into(),
+            String::new(),
+        ));
+        let mut buyer = Character::new_player("Buyer".into(), Class::Warrior, Race::Human);
+        buyer.desc = Some(conn);
+        let buyer = g.create_char(buyer);
+        let mut keeper_character = Character::new_npc(keeper_vnum);
+        keeper_character.points.hit = 100;
+        keeper_character.points.max_hit = 100;
+        keeper_character.position = Position::Standing;
+        let keeper = g.create_char(keeper_character);
+        let mut descriptor = Descriptor::new(conn, "example.test".into());
+        descriptor.character = Some(buyer);
+        g.descriptors.insert(conn, descriptor);
+        g.char_to_room(buyer, old_room);
+        g.char_to_room(keeper, old_room);
+
+        let mut closed = Shop::new(vnum);
+        closed.keeper = keeper_vnum;
+        closed.in_room = vec![new_room_vnum];
+        closed.open1 = 24;
+        closed.close1 = 24;
+        closed.open2 = 24;
+        closed.close2 = 24;
+        set_state(
+            conn,
+            SeditState {
+                ch: buyer,
+                vnum,
+                zone,
+                shop: closed,
+                changed: true,
+                mode: SeditMode::ConfirmSave,
+                pending_type: 0,
+            },
+        );
+        sedit_save_internally(&mut g, conn).unwrap();
+
+        // The newly created live definition binds only the edited room.
+        assert!(!crate::shop::shop_keeper(&mut g, buyer, keeper, "list", ""));
+        g.char_from_room(buyer);
+        g.char_from_room(keeper);
+        g.char_to_room(buyer, new_room);
+        g.char_to_room(keeper, new_room);
+        assert_eq!(
+            crate::shop::test_shop_definition(vnum).unwrap().0,
+            keeper_vnum
+        );
+        assert_eq!(g.get_char(keeper).unwrap().nr, keeper_vnum);
+        assert_eq!(g.get_char(keeper).unwrap().position, Position::Standing);
+        assert_eq!(g.get_char(buyer).unwrap().in_room, Some(new_room));
+        assert_eq!(g.room(new_room).number, new_room_vnum);
+        assert!(crate::shop::shop_keeper(&mut g, buyer, keeper, "list", ""));
+        assert!(g.descriptors[&conn].outbuf.contains("Come back later!"));
+
+        let mut open = Shop::new(vnum);
+        open.keeper = keeper_vnum;
+        open.in_room = vec![new_room_vnum];
+        open.open1 = 0;
+        open.close1 = 28;
+        open.open2 = 0;
+        open.close2 = 28;
+        open.no_such_item1 = "%s LIVE NO STOCK.".into();
+        open.message_buy = "%s LIVE PURCHASE %d.".into();
+        set_state(
+            conn,
+            SeditState {
+                ch: buyer,
+                vnum,
+                zone,
+                shop: open,
+                changed: true,
+                mode: SeditMode::ConfirmSave,
+                pending_type: 0,
+            },
+        );
+        sedit_save_internally(&mut g, conn).unwrap();
+
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        assert!(crate::shop::shop_keeper(
+            &mut g, buyer, keeper, "buy", "missing"
+        ));
+        assert!(g.descriptors[&conn].outbuf.contains("LIVE NO STOCK."));
+
+        let mut widget = Object::new(987_799, "fresh widget".into(), "a fresh widget".into());
+        widget.cost = 50;
+        let widget = g.create_obj(widget);
+        g.obj_to_char(widget, keeper);
+        crate::gold::set(
+            g.get_char_mut(buyer).unwrap(),
+            crate::gold::Account::Carried,
+            500,
+        );
+
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        assert!(crate::shop::shop_keeper(&mut g, buyer, keeper, "list", ""));
+        assert!(
+            g.descriptors[&conn]
+                .outbuf
+                .to_ascii_lowercase()
+                .contains("a fresh widget"),
+            "live list output: {:?}",
+            g.descriptors[&conn].outbuf
+        );
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        assert!(crate::shop::shop_keeper(
+            &mut g, buyer, keeper, "buy", "widget"
+        ));
+        assert!(g.get_char(buyer).unwrap().carrying.contains(&widget));
+        assert!(g.descriptors[&conn].outbuf.contains("LIVE PURCHASE 50."));
+
+        take_state(conn);
+        crate::shop::test_remove_shop(vnum);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn failed_shop_disk_write_does_not_publish_or_report_a_live_edit() {
+        let dir = temp_shop_lib("disk-failure");
+        let zone = 9878;
+        let vnum = 987_800;
+        let conn = ConnId(9878);
+        let mut original = Shop::new(vnum);
+        original.keeper = 987_801;
+        original.profit_buy = 1.25;
+        sedit_save_to_disk(dir.to_str().unwrap(), zone, &[original]).unwrap();
+        crate::shop::upsert_shop_from_zone_file(dir.to_str().unwrap(), zone, vnum).unwrap();
+
+        // Force the atomic temporary-file write itself to fail while leaving
+        // the prior durable zone file intact.
+        std::fs::create_dir(dir.join(format!("world/shp/{zone}.new"))).unwrap();
+        let mut config = Config::default();
+        config.lib_path = dir.to_string_lossy().into_owned();
+        let mut g = GameState::new(config);
+        let ch = g.create_char(Character::new_player(
+            "Root".into(),
+            Class::Cleric,
+            Race::Human,
+        ));
+        let mut edited = Shop::new(vnum);
+        edited.keeper = 987_802;
+        edited.profit_buy = 9.75;
+        set_state(
+            conn,
+            SeditState {
+                ch,
+                vnum,
+                zone,
+                shop: edited,
+                changed: true,
+                mode: SeditMode::ConfirmSave,
+                pending_type: 0,
+            },
+        );
+
+        assert!(sedit_save_internally(&mut g, conn).is_err());
+        let persisted = load_zone_shops(dir.to_str().unwrap(), zone);
+        assert_eq!(persisted[0].keeper, 987_801);
+        assert_eq!(persisted[0].profit_buy, 1.25);
+        let live = crate::shop::test_shop_definition(vnum).unwrap();
+        assert_eq!(live.0, 987_801);
+        assert_eq!(live.1, 1.25);
+
+        take_state(conn);
+        crate::shop::test_remove_shop(vnum);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn profit_parse_keeps_previous_value_on_garbage() {

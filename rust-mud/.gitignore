@@ -48,6 +48,9 @@ core.*
 
 # Development/testing files
 test_*
+# The parity protocol regression suite is repository infrastructure, not a
+# local scratch test.
+!scripts/parity/test_driver.py
 debug_*
 *.tmp
 *.temp

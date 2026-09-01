@@ -40,7 +40,7 @@
 // load toggle and the live storm list, behind a Mutex/OnceLock like the other
 // runtime tables.
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::flags::AFF_SANCTUARY;
 use crate::room::{Room, SectorType};
 use crate::spell_parser::SPELL_REDIRECT_CHARGE;
@@ -872,7 +872,13 @@ fn parse_worldmap(lib_path: &str) -> MapData {
             continue;
         }
         if compare(&arg1, "SectMove:") {
-            cur_move = atoi(&get_arg(line, 2));
+            match crate::text::parse_i32_atoi(&get_arg(line, 2)) {
+                Ok(value) => cur_move = value,
+                Err(crate::text::ParseIntError::Overflow) => {
+                    log::warn!("SYSERR: WorldMap SectMove overflow; directive ignored: {line}");
+                }
+                Err(_) => unreachable!("parse_i32_atoi maps nonnumeric input to zero"),
+            }
             continue;
         }
         if compare(&arg1, "SectDesc:") {
@@ -895,9 +901,13 @@ fn parse_worldmap(lib_path: &str) -> MapData {
         }
         if compare(&arg1, "EntryPoint:") {
             // EntryPoint: <x> <y> <interior_vnum> [DIR]
-            let x = atoi(&get_arg(line, 2));
-            let y = atoi(&get_arg(line, 3));
-            let vnum = atoi(&get_arg(line, 4));
+            let parsed = [2, 3, 4].map(|index| crate::text::parse_i32_atoi(&get_arg(line, index)));
+            let [Ok(x), Ok(y), Ok(vnum)] = parsed else {
+                log::warn!(
+                    "SYSERR: WorldMap EntryPoint numeric overflow; directive ignored: {line}"
+                );
+                continue;
+            };
             let dir = parse_dir(&get_arg(line, 5));
             entry_points.push(EntryPoint {
                 x,
@@ -908,9 +918,13 @@ fn parse_worldmap(lib_path: &str) -> MapData {
             continue;
         }
         if compare(&arg1, "ZWeatherPoint:") {
-            let x = atoi(&get_arg(line, 2));
-            let y = atoi(&get_arg(line, 3));
-            let zone_number = atoi(&get_arg(line, 4));
+            let parsed = [2, 3, 4].map(|index| crate::text::parse_i32_atoi(&get_arg(line, index)));
+            let [Ok(x), Ok(y), Ok(zone_number)] = parsed else {
+                log::warn!(
+                    "SYSERR: WorldMap ZWeatherPoint numeric overflow; directive ignored: {line}"
+                );
+                continue;
+            };
             z_weather_points.push(ZWeatherPoint { x, y, zone_number });
             continue;
         }
@@ -1164,20 +1178,27 @@ pub fn do_map(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     };
 
     // C: MIN(MAX(atoi(buf), 1), max) — i.e. clamp into 1..=max.
-    let xm = atoi(&get_arg(arg, 2)).clamp(1, max_x);
-    let ym = atoi(&get_arg(arg, 3)).clamp(1, max_y);
-
-    let a4 = atoi(&get_arg(arg, 4));
-    let xl = if a4 == 0 {
-        (xm + 98).min(max_x)
-    } else {
-        a4.max(xm).min((xm + 98).min(max_x))
+    let parse_arg = |index| crate::text::parse_i32_atoi(&get_arg(arg, index));
+    let (xm, ym, a4, a5) = match (parse_arg(2), parse_arg(3), parse_arg(4), parse_arg(5)) {
+        (Ok(xm), Ok(ym), Ok(a4), Ok(a5)) => (xm.clamp(1, max_x), ym.clamp(1, max_y), a4, a5),
+        _ => {
+            g.send_to_char(
+                ch,
+                "Map coordinates must fit the supported 32-bit range.\r\n",
+            );
+            return;
+        }
     };
-    let a5 = atoi(&get_arg(arg, 5));
-    let yl = if a5 == 0 {
-        (ym + 98).min(max_y)
+
+    let xl = if a4 == 0 {
+        xm.saturating_add(98).min(max_x)
     } else {
-        a5.max(ym).min((ym + 98).min(max_y))
+        a4.max(xm).min(xm.saturating_add(98).min(max_x))
+    };
+    let yl = if a5 == 0 {
+        ym.saturating_add(98).min(max_y)
+    } else {
+        a5.max(ym).min(ym.saturating_add(98).min(max_y))
     };
 
     let pos = player_xy(g, ch);
@@ -1188,6 +1209,21 @@ pub fn do_map(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     };
 
     g.send_to_char(ch, &out);
+}
+
+/// Split the map convention `&<ASCII color><glyph>` without ever indexing a
+/// UTF-8 continuation byte. Inputs such as `&é` are data, not a valid two-byte
+/// color prefix, and deliberately return `None`.
+fn color_glyph_parts(value: &str) -> Option<(&str, &str)> {
+    let bytes = value.as_bytes();
+    if bytes.first() != Some(&b'&')
+        || !bytes.get(1).is_some_and(u8::is_ascii)
+        || !value.is_char_boundary(2)
+    {
+        return None;
+    }
+    let glyph = value.get(2..)?;
+    (!glyph.is_empty()).then_some((&value[..2], glyph))
 }
 
 /// "Map of the World" (do_map default mode). Renders terrain glyphs with C's
@@ -1210,17 +1246,15 @@ fn render_world_map(
                     continue;
                 }
                 let id = m.cell_id(x, y);
-                let id_bytes = id.as_bytes();
                 if x > xm {
                     let left = m.cell_id(x - 1, y);
-                    // Same leading 2-char colour code as the cell to our left,
-                    // and the cell starts with '&': print only the glyph char.
-                    if id_bytes.first() == Some(&b'&')
-                        && id.len() >= 3
-                        && left.len() >= 2
-                        && id_bytes.get(..2) == left.as_bytes().get(..2)
+                    // Same leading colour code as the cell to our left: print
+                    // only the glyph, preserving a multibyte glyph intact.
+                    if let (Some((color, glyph)), Some((left_color, _))) =
+                        (color_glyph_parts(id), color_glyph_parts(left))
+                        && color == left_color
                     {
-                        out.push(id.as_bytes()[2] as char);
+                        out.push_str(glyph);
                         continue;
                     }
                 }
@@ -1253,16 +1287,14 @@ fn render_weather_world_map(
                     continue;
                 }
                 let cur = m.wmap_cell(x, y);
-                let cur_b = cur.as_bytes();
                 if x > xm {
                     // C indexes weather_map[y-1][x-2] (raw, with the < 0 wrap).
                     let left = m.wmap_cell(x - 1, y);
-                    if cur_b.first() == Some(&b'&')
-                        && cur.len() >= 3
-                        && left.len() >= 2
-                        && cur_b.get(..2) == left.as_bytes().get(..2)
+                    if let (Some((color, glyph)), Some((left_color, _))) =
+                        (color_glyph_parts(cur), color_glyph_parts(left))
+                        && color == left_color
                     {
-                        out.push(cur.as_bytes()[2] as char);
+                        out.push_str(glyph);
                         continue;
                     }
                 }
@@ -1418,8 +1450,6 @@ fn check_noroom(
         (x + 1, 1)
     };
     let left = noroom_glyph(m, lx, y, weather_active, advancedmap);
-    let tmp_b = tmp.as_bytes();
-
     // j = rm2x(ch->in_room) +/- radius, wrapped: the x of the window's edge column.
     let mut j = if modifier == 0 {
         px - radius
@@ -1437,14 +1467,15 @@ fn check_noroom(
     // "left is the player": (px,py) == the neighbour cell at (x+lf, y).
     let neighbour_is_player = px == x + lf && py == y;
 
-    if tmp_b.first() == Some(&b'&')
-        && tmp.len() >= 3
-        && left.len() >= 2
-        && tmp_b.get(..2) == left.as_bytes().get(..2)
-        && !neighbour_is_player
+    if matches!(
+        (color_glyph_parts(&tmp), color_glyph_parts(&left)),
+        (Some((color, _)), Some((left_color, _))) if color == left_color
+    ) && !neighbour_is_player
         && j != cur_x
     {
-        tmp[2..].to_string()
+        color_glyph_parts(&tmp)
+            .map(|(_, glyph)| glyph.to_string())
+            .unwrap_or(tmp)
     } else {
         tmp
     }
@@ -1457,7 +1488,9 @@ fn noroom_glyph(m: &MapData, x: i32, y: i32, weather_active: bool, advancedmap: 
     if weather_active && advancedmap && avoid_weather(m.cell_weather(x, y)) {
         // C: wmstr = "&K" with wmstr[2] = weather_map[...][2] (the glyph char).
         let cell = m.wmap_cell(x, y);
-        let glyph = cell.as_bytes().get(2).copied().unwrap_or(b'?') as char;
+        let glyph = color_glyph_parts(cell)
+            .and_then(|(_, glyph)| glyph.chars().next())
+            .unwrap_or('?');
         format!("&K{}", glyph)
     } else {
         m.cell_id(x, y).to_string()
@@ -1634,8 +1667,6 @@ fn printweather(g: &mut GameState, ch: CharId) {
 fn weatherchar<'a>(m: &'a MapData, x: i32, y: i32, inx: i32) -> &'a str {
     let tmp = m.wmap_cell(x, y);
     let left = m.wmap_cell(x - 1, y);
-    let tmp_b = tmp.as_bytes();
-
     // i = rm2x(inroom) - WEATHER_VISION_RADIUS_X, wrapped into 1..=max.
     let mut thr = inx - WEATHER_VISION_RADIUS_X;
     if thr < 1 {
@@ -1643,14 +1674,15 @@ fn weatherchar<'a>(m: &'a MapData, x: i32, y: i32, inx: i32) -> &'a str {
     }
     let (cur_x, _) = m.wrap(x, y);
 
-    if tmp_b.first() == Some(&b'&')
-        && tmp.len() >= 3
-        && left.len() >= 2
-        && tmp_b.get(..2) == left.as_bytes().get(..2)
-        && !(inx == x - 1)
+    if matches!(
+        (color_glyph_parts(tmp), color_glyph_parts(left)),
+        (Some((color, _)), Some((left_color, _))) if color == left_color
+    ) && !(inx == x - 1)
         && thr != cur_x
     {
-        &tmp[2..]
+        color_glyph_parts(tmp)
+            .map(|(_, glyph)| glyph)
+            .unwrap_or(tmp)
     } else {
         tmp
     }
@@ -1694,12 +1726,32 @@ pub fn lweather(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         // Without an explicit cdsr target C draws a random map room; the cell
         // is derived uniformly from the grid's linear index.
         let grid = with_map(g, |m| (m.max_x, m.max_y));
+        if grid.0 <= 0 || grid.1 <= 0 {
+            g.send_to_char(ch, "Map not loaded.\r\n");
+            return;
+        }
         let cells = (grid.0 * grid.1) as i64;
         let r = g.rng.number(0, (cells - 1).max(0) as i32) as i64;
-        let (x, y) = parse_cdsr(&at).unwrap_or((
+        let random = (
             (r % grid.0 as i64) as i32 + 1,
             ((r - r % grid.0 as i64) / grid.1 as i64) as i32 + 1,
-        ));
+        );
+        let (x, y) = match parse_cdsr(&at) {
+            Ok(Some((x, y))) if (1..=grid.0).contains(&x) && (1..=grid.1).contains(&y) => (x, y),
+            Ok(Some(_)) => {
+                g.send_to_char(ch, "Weather coordinates are outside the loaded map.\r\n");
+                return;
+            }
+            Ok(None) => random,
+            Err(crate::text::ParseIntError::Overflow) => {
+                g.send_to_char(
+                    ch,
+                    "Weather coordinates are outside the supported range.\r\n",
+                );
+                return;
+            }
+            Err(_) => random,
+        };
         let name = WEATHER_NAMES[wtype].to_string();
         // Pre-roll the direction here (spawn_weather only draws when given an
         // invalid dir); the map lock borrows g immutably so the game RNG must
@@ -1710,10 +1762,7 @@ pub fn lweather(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             m.spawn_weather(wtype, dir, x, y, &mut unused_rng);
             m.update_weather_map();
         });
-        g.send_to_char(
-            ch,
-            &format!("Spawned a {} at {:>2}x{:>2}.\r\n", name, x, y),
-        );
+        g.send_to_char(ch, &format!("Spawned a {} at {:>2}x{:>2}.\r\n", name, x, y));
         return;
     }
     if first == "destroy" {
@@ -1743,23 +1792,51 @@ pub fn lweather(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
         return;
     }
-    if !first.is_empty() && first.chars().next().map(|c| c.is_ascii_hexdigit()).unwrap_or(false)
+    if !first.is_empty()
+        && first
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_hexdigit())
+            .unwrap_or(false)
         && !first.starts_with("update")
     {
         // No subcommand matched: C's shipped behaviour is the hex echo.
     }
-    let k = parse_leading_hex(arg.trim_start());
+    let k = match parse_leading_hex(arg.trim_start()) {
+        Ok(value) => value,
+        Err(()) => {
+            g.send_to_char(
+                ch,
+                "That hexadecimal value is outside the supported range.\r\n",
+            );
+            return;
+        }
+    };
     g.send_to_char(ch, &format!("{}\r\n", k));
     listweather(g, ch);
 }
 
 /// C cdsr() coordinate form ("12x34") -> 1-based map cell.
-fn parse_cdsr(s: &str) -> Option<(i32, i32)> {
+fn parse_cdsr(s: &str) -> Result<Option<(i32, i32)>, crate::text::ParseIntError> {
     let s = s.trim();
-    let idx = s.find('x')?;
-    let x: i32 = s[..idx].trim().parse().ok()?;
-    let y: i32 = s[idx + 1..].trim().parse().ok()?;
-    Some((x, y))
+    let Some(idx) = s.find('x') else {
+        return Ok(None);
+    };
+    let x = match crate::text::parse_i32_strict(s[..idx].trim()) {
+        Ok(value) => value,
+        Err(crate::text::ParseIntError::Overflow) => {
+            return Err(crate::text::ParseIntError::Overflow);
+        }
+        Err(_) => return Ok(None),
+    };
+    let y = match crate::text::parse_i32_strict(s[idx + 1..].trim()) {
+        Ok(value) => value,
+        Err(crate::text::ParseIntError::Overflow) => {
+            return Err(crate::text::ParseIntError::Overflow);
+        }
+        Err(_) => return Ok(None),
+    };
+    Ok(Some((x, y)))
 }
 
 /// C listweather (maputils.c:1831).
@@ -1802,10 +1879,7 @@ fn listweather(g: &mut GameState, ch: CharId) {
             ));
             lines.push(line);
         }
-        (
-            lines,
-            (MAX_WEATHER as i32).saturating_sub(m.num_weather),
-        )
+        (lines, (MAX_WEATHER as i32).saturating_sub(m.num_weather))
     });
     for line in lines {
         g.send_to_char(ch, &line);
@@ -1974,10 +2048,7 @@ pub fn integrate_map_rooms(g: &mut GameState) -> EntryPointReport {
         );
     }
     if report.unresolved.is_empty() {
-        info!(
-            "EntryPoints: {} linked (all resolved)",
-            report.linked.len()
-        );
+        info!("EntryPoints: {} linked (all resolved)", report.linked.len());
     } else {
         warn!(
             "EntryPoints: {} linked, {} UNRESOLVED (see SYSERR lines above)",
@@ -2348,7 +2419,11 @@ fn unit_activity(g: &mut GameState, room: RoomRnum, wtype: usize) {
             act(
                 g,
                 "You see a holy bolt of lightning discharge from the sky!\r\nThe SHOCKING moment fries $n to a crisp!",
-                true, ch, None, ActArg::None, To::Room,
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
             );
             g.send_to_char(
                 ch,
@@ -2448,7 +2523,6 @@ fn char_weather_xy(g: &GameState, ch: CharId) -> Option<(i32, i32)> {
     player_xy(g, ch).or_else(|| weather_view_xy(g, ch))
 }
 
-
 /// C maputils.c:1387-1450 move_char(ch, length, dir): walk a thrown character
 /// `length` map rooms in direction `dir` (0-3 cardinal, 4-7 diagonal).
 /// Intermediate rooms see the flyby message, and the first mortal bystander
@@ -2530,7 +2604,10 @@ pub fn move_char_fly(g: &mut GameState, ch: CharId, length: i32, dir: i32) {
         if !crate::graph::can_go(g, ch, d1) {
             break;
         }
-        let n1 = match g.room(cur).exits[d1].clone().and_then(|e| g.real_room(e.to_room)) {
+        let n1 = match g.room(cur).exits[d1]
+            .clone()
+            .and_then(|e| g.real_room(e.to_room))
+        {
             Some(n) => n,
             None => break,
         };
@@ -2898,7 +2975,7 @@ fn weather_die(g: &mut GameState, ch: CharId, wtype: usize) {
                 g.obj_to_obj(money, corpse);
             }
             if let Some(c) = g.get_char_mut(ch) {
-                c.points.gold = 0;
+                crate::gold::set(c, crate::gold::Account::Carried, 0);
             }
         }
         g.obj_to_room(corpse, rnum);
@@ -2937,9 +3014,9 @@ fn make_weather_corpse(g: &mut GameState, who: &str, wtype: usize, victim: CharI
     obj.description = format!("The {}corpse of {} is lying here.", adjective, who);
     obj.obj_type = ObjectType::Container;
     // C fight.c:315-318: GET_OBJ_TIMER(corpse) = IS_NPC(ch) ?
-// max_npc_corpse_time (5) : max_pc_corpse_time (10) (config.c:120-121),
-// decremented once per mud hour by point_update. The flat 60 made
-// corpses persist 6-12x longer than C (#102).
+    // max_npc_corpse_time (5) : max_pc_corpse_time (10) (config.c:120-121),
+    // decremented once per mud hour by point_update. The flat 60 made
+    // corpses persist 6-12x longer than C (#102).
     obj.timer = if g.get_char(victim).map(|c| c.is_npc).unwrap_or(true) {
         5
     } else {
@@ -2980,32 +3057,18 @@ pub fn increase_blood(g: &mut GameState, rnum: RoomRnum) {
 // Small local utilities.
 // ---------------------------------------------------------------------------
 
-/// atoi: leading integer, else 0 (C atoi semantics for our arg parsing).
-fn atoi(s: &str) -> i32 {
-    let s = s.trim_start();
-    let mut end = 0;
-    let bytes = s.as_bytes();
-    if end < bytes.len() && (bytes[end] == b'-' || bytes[end] == b'+') {
-        end += 1;
-    }
-    while end < bytes.len() && bytes[end].is_ascii_digit() {
-        end += 1;
-    }
-    s[..end].parse::<i32>().unwrap_or(0)
-}
-
 /// sscanf("%x") on a leading hex number; 0 if none (matches the uninitialised
 /// read C effectively relies on for a non-numeric argument is 0 in practice).
-fn parse_leading_hex(s: &str) -> u32 {
+fn parse_leading_hex(s: &str) -> Result<u32, ()> {
     let mut end = 0;
     let bytes = s.as_bytes();
     while end < bytes.len() && bytes[end].is_ascii_hexdigit() {
         end += 1;
     }
     if end == 0 {
-        return 0;
+        return Ok(0);
     }
-    u32::from_str_radix(&s[..end], 16).unwrap_or(0)
+    u32::from_str_radix(&s[..end], 16).map_err(|_| ())
 }
 
 /// mudlog: broadcast an immortal log line (same shape as the other modules).
@@ -3154,6 +3217,32 @@ WorldMap:\n",
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn lweather_rejects_overflowing_or_off_map_explicit_coordinates() {
+        let dir = temp_lib_with_worldmap("lweather-coordinates", 5, 5, "");
+        let mut cfg = Config::default();
+        cfg.lib_path = dir.to_string_lossy().into_owned();
+        let mut g = GameState::new(cfg);
+        integrate_map_rooms(&mut g);
+        let room = g.map_start_rnum.expect("surface map room");
+        let ch = player_in_room(&mut g, "WeatherAdmin", room);
+        let conn = attach_conn(&mut g, ch, 9198);
+        let before = with_map(&g, |m| m.storms.len());
+
+        for (coords, expected) in [
+            ("2147483648x1", "outside the supported range"),
+            ("2147483647x1", "outside the loaded map"),
+            ("-2147483648x1", "outside the loaded map"),
+        ] {
+            g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+            lweather(&mut g, ch, &format!("new rain {coords}"), 0);
+            assert_eq!(with_map(&g, |m| m.storms.len()), before, "{coords}");
+            assert!(g.descriptors[&conn].outbuf.contains(expected), "{coords}");
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn real_lib_links_temple_and_all_three_towns() {
         // The shipped lib (sibling of the crate); skip on exotic checkouts.
@@ -3163,7 +3252,9 @@ WorldMap:\n",
         }
         let mut g = crate::state::GameState::new(Config::default());
         g.config.lib_path = lib.to_string();
-        crate::file_loader::FileLoader::load_world(&mut g, lib).await.unwrap();
+        crate::file_loader::FileLoader::load_world(&mut g, lib)
+            .await
+            .unwrap();
         let report = integrate_map_rooms(&mut g);
 
         // Temple of Itrius (uncommented 2026-08-31), the three Itrius gates,
@@ -3172,7 +3263,11 @@ WorldMap:\n",
         assert!(
             report.unresolved.is_empty(),
             "unresolved EntryPoints: {:?}",
-            report.unresolved.iter().map(|f| (f.x, f.y, f.interior_vnum)).collect::<Vec<_>>()
+            report
+                .unresolved
+                .iter()
+                .map(|f| (f.x, f.y, f.interior_vnum))
+                .collect::<Vec<_>>()
         );
         assert_eq!(report.linked.len(), 7);
 
@@ -3203,13 +3298,13 @@ WorldMap:\n",
         }
         let mut g = crate::state::GameState::new(Config::default());
         g.config.lib_path = lib.to_string();
-        crate::file_loader::FileLoader::load_world(&mut g, lib).await.unwrap();
+        crate::file_loader::FileLoader::load_world(&mut g, lib)
+            .await
+            .unwrap();
         integrate_map_rooms(&mut g);
 
         let walkable = |r: &Room| r.mapmv > 0 && r.sector_type != SectorType::WaterNoSwim;
-        let start = g
-            .map_coords_to_rnum(10, 82)
-            .expect("Itrius east gate cell");
+        let start = g.map_coords_to_rnum(10, 82).expect("Itrius east gate cell");
         let mut seen = std::collections::HashSet::new();
         let mut queue = std::collections::VecDeque::from([start]);
         seen.insert(start);
@@ -3285,6 +3380,35 @@ WorldMap:\n\
     }
 
     #[test]
+    fn world_map_preserves_unicode_sector_glyph_boundaries() {
+        for (label, show, expected) in [
+            ("unicode-color-glyph", "&Ré", "&Réé"),
+            ("unicode-invalid-prefix", "&é", "&é&é"),
+        ] {
+            let dir = temp_lib_with_worldmap(label, 2, 1, "");
+            let path = dir.join("world/worldmap");
+            let source = std::fs::read_to_string(&path).unwrap();
+            std::fs::write(
+                &path,
+                source.replacen("SectShow: .", &format!("SectShow: {show}"), 1),
+            )
+            .unwrap();
+            let mut config = Config::default();
+            config.lib_path = dir.to_string_lossy().into_owned();
+            let mut g = GameState::new(config);
+
+            integrate_map_rooms(&mut g);
+            let rendered = render_world_map(&g, 1, 1, 2, 1, None);
+
+            assert!(
+                rendered.contains(expected),
+                "show={show:?}, rendered={rendered:?}"
+            );
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
     fn weather_corpse_uses_storm_adjective() {
         let (short, desc) = weather_corpse_descriptions(WEATHER_FIRESTORM);
 
@@ -3315,12 +3439,13 @@ WorldMap:\n\
 
         send_weather_messages(&mut g, WEATHER_MSG_ACT, WEATHER_RAINSTORM, 1, 3, 3);
 
-        assert!(g
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("A rain storm pours down on you from above."));
+        assert!(
+            g.descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("A rain storm pours down on you from above.")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -3375,19 +3500,21 @@ WorldMap:\n\
         // The walk becomes live the moment a worldmap with exits ships.
         // Assert the jettison outcome: alive, resting, landing message sent.
         assert_eq!(g.get_char(victim).unwrap().position, Position::Resting);
-        assert!(g
-            .descriptors
-            .get(&victim_conn)
-            .unwrap()
-            .outbuf
-            .contains("You land head-first into the ground!"));
+        assert!(
+            g.descriptors
+                .get(&victim_conn)
+                .unwrap()
+                .outbuf
+                .contains("You land head-first into the ground!")
+        );
         let _ = observer_conn;
-        assert!(g
-            .descriptors
-            .get(&victim_conn)
-            .unwrap()
-            .outbuf
-            .contains("You land head-first into the ground!"));
+        assert!(
+            g.descriptors
+                .get(&victim_conn)
+                .unwrap()
+                .outbuf
+                .contains("You land head-first into the ground!")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -3434,7 +3561,7 @@ WorldMap:\n\
         {
             let c = g.get_char_mut(ch).unwrap();
             c.desc = Some(conn);
-            c.points.gold = 1234;
+            crate::gold::set(c, crate::gold::Account::Carried, 1234);
         }
 
         weather_die(&mut g, ch, WEATHER_FIRESTORM);
@@ -3482,13 +3609,10 @@ WorldMap:\n\
 
         assert!(!apply_thunderstorm_bolt(
             &mut g,
-
             ch,
-
             WEATHER_THUNDERSTORM,
-
             &mut |_g| 800,
-            ));
+        ));
 
         let c = g.get_char(ch).unwrap();
         assert_eq!(c.points.hit, 950);

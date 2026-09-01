@@ -29,6 +29,7 @@
 
 use crate::state::GameState;
 use crate::types::*;
+use crate::world::zone_vnum_bounds;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -121,10 +122,36 @@ pub fn olc_send(g: &mut GameState, conn: ConnId, msg: &str) {
     let keep = ch.map(|c| olc_colour_on(g, c)).unwrap_or(false);
     if keep {
         if let Some(d) = g.descriptors.get_mut(&conn) {
-            d.outbuf.push_str(msg);
+            d.write(msg);
         }
     } else if let Some(d) = g.descriptors.get_mut(&conn) {
-        d.outbuf.push_str(&crate::connection::strip_color(msg));
+        d.write(&crate::connection::strip_color(msg));
+    }
+}
+
+/// Parse an OLC numeric response while preserving each legacy mode's fallback
+/// for syntactically invalid input. A syntactically numeric value outside the
+/// `i32` range is different: report it and keep the current editor mode so it
+/// cannot silently become the fallback (usually zero or -1).
+pub fn parse_i32_input(
+    g: &mut GameState,
+    conn: ConnId,
+    input: &str,
+    invalid_fallback: i32,
+) -> Option<i32> {
+    match crate::text::parse_i32_strict(input) {
+        Ok(value) => Some(value),
+        Err(crate::text::ParseIntError::Empty | crate::text::ParseIntError::Invalid) => {
+            Some(invalid_fallback)
+        }
+        Err(crate::text::ParseIntError::Overflow) => {
+            olc_send(
+                g,
+                conn,
+                "That number is outside the supported 32-bit range.\r\n",
+            );
+            None
+        }
     }
 }
 
@@ -244,7 +271,6 @@ pub fn olc_remove_from_save_list(zone: i32, kind: i32) {
         .retain(|&(z, t)| !(z == zone && t == kind));
 }
 
-
 /// C act.wizard.c:1927-1990 / comm.c:458-510: before copyover or shutdown,
 /// every entry on the save list is written to disk. Wired into do_copyover
 /// and the Game shutdown path; unsaved redit/oedit work would otherwise be
@@ -252,7 +278,7 @@ pub fn olc_remove_from_save_list(zone: i32, kind: i32) {
 pub fn flush_save_list_to_disk(g: &mut GameState) {
     let entries: Vec<(i32, i32)> = crate::lock_ok::lock(&save_list()).clone();
     for (zone, kind) in entries {
-        let zone_rnum = match real_zone(g, zone * 100) {
+        let zone_rnum = match zone_rnum_for_number(g, zone) {
             Some(z) => z,
             None => continue,
         };
@@ -282,7 +308,7 @@ pub fn olc_saveinfo(g: &mut GameState, ch: CharId) {
     let mut any = false;
     for (zone, kind) in entries {
         if kind != OLC_SAVE_HELP && kind != OLC_SAVE_ACTION {
-            let owned = real_zone(g, zone * 100)
+            let owned = zone_rnum_for_number(g, zone)
                 .map(|zr| can_edit_zone(g, ch, zr))
                 .unwrap_or(false);
             if !owned && level < LVL_IMMORT {
@@ -318,9 +344,14 @@ pub fn real_zone(g: &GameState, vnum: i32) -> Option<usize> {
     if vnum < 0 {
         return None;
     }
-    g.zones
-        .iter()
-        .position(|z| vnum >= z.number * 100 && vnum <= z.top)
+    g.zones.iter().position(|z| z.contains_vnum(vnum))
+}
+
+/// Resolve a persisted zone number without repeating unchecked `* 100`
+/// arithmetic at command/save-list call sites.
+fn zone_rnum_for_number(g: &GameState, zone_number: i32) -> Option<usize> {
+    let (first, _) = zone_vnum_bounds(zone_number)?;
+    real_zone(g, first)
 }
 
 /// True when `ch` may edit the loaded zone at `zone_rnum`.
@@ -425,15 +456,27 @@ pub fn dg_script_edit_parse(
             }
         }
         DgScriptEditMode::New => {
-            let Some((pos, trig_vnum)) = parse_script_position_vnum(line) else {
-                // C dg_olc.c:766-783: an unparseable line leaves vnum at -1 →
-                // real_trigger() < 0 → "Invalid Trigger VNUM!" re-prompt (#304).
-                send_to_conn(
-                    g,
-                    conn,
-                    "Invalid Trigger VNUM!\r\nPlease enter position, vnum   (ex: 1, 200):",
-                );
-                return true;
+            let (pos, trig_vnum) = match parse_script_position_vnum(line) {
+                Ok(Some(parsed)) => parsed,
+                Err(crate::text::ParseIntError::Overflow) => {
+                    send_to_conn(
+                        g,
+                        conn,
+                        "That position or trigger VNUM is outside the supported 32-bit range.\r\nPlease enter position, vnum   (ex: 1, 200):",
+                    );
+                    return true;
+                }
+                Ok(None)
+                | Err(crate::text::ParseIntError::Empty | crate::text::ParseIntError::Invalid) => {
+                    // C dg_olc.c:766-783: an unparseable line leaves vnum at -1 →
+                    // real_trigger() < 0 → "Invalid Trigger VNUM!" re-prompt (#304).
+                    send_to_conn(
+                        g,
+                        conn,
+                        "Invalid Trigger VNUM!\r\nPlease enter position, vnum   (ex: 1, 200):",
+                    );
+                    return true;
+                }
             };
             if pos == 0 || trig_vnum == 0 {
                 dg_script_menu(g, conn, kind, entity_vnum);
@@ -463,7 +506,19 @@ pub fn dg_script_edit_parse(
             dg_script_menu(g, conn, kind, entity_vnum);
         }
         DgScriptEditMode::Delete => {
-            let pos = line.trim().parse::<usize>().unwrap_or(0);
+            let pos = match crate::text::parse_i32_strict(line) {
+                Ok(value) if value > 0 => value as usize,
+                Ok(_)
+                | Err(crate::text::ParseIntError::Empty | crate::text::ParseIntError::Invalid) => 0,
+                Err(crate::text::ParseIntError::Overflow) => {
+                    send_to_conn(
+                        g,
+                        conn,
+                        "That entry number is outside the supported 32-bit range.\r\n",
+                    );
+                    return true;
+                }
+            };
             if pos != 0 && crate::dg_db_scripts::remove_proto_trigger_at(kind, entity_vnum, pos) {
                 mark_dg_script_dirty(g, kind, entity_vnum);
             }
@@ -474,17 +529,22 @@ pub fn dg_script_edit_parse(
     true
 }
 
-fn parse_script_position_vnum(line: &str) -> Option<(usize, i32)> {
-    let nums: Vec<i32> = line
+fn parse_script_position_vnum(
+    line: &str,
+) -> Result<Option<(usize, i32)>, crate::text::ParseIntError> {
+    let tokens: Vec<&str> = line
         .split(|c: char| c == ',' || c.is_whitespace())
         .filter(|s| !s.is_empty())
-        .filter_map(|s| s.parse::<i32>().ok())
         .collect();
-    match nums.as_slice() {
+    let nums: Vec<i32> = tokens
+        .iter()
+        .map(|token| crate::text::parse_i32_strict(token))
+        .collect::<Result<_, _>>()?;
+    Ok(match nums.as_slice() {
         [vnum] => Some((999, *vnum)),
         [pos, vnum, ..] => Some(((*pos).max(0) as usize, *vnum)),
         _ => None,
-    }
+    })
 }
 
 fn can_edit_trigger_zone(g: &GameState, conn: ConnId, trig_vnum: i32) -> bool {
@@ -673,52 +733,54 @@ pub fn do_copy(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
 
     let is_room = crate::interpreter::is_abbrev(&ty, "room");
-    let numeric = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
-    let numeric = |s: &str| numeric(&s.clone());
+    let numeric = |s: &str| {
+        !s.is_empty()
+            && s.chars().all(|c| c.is_ascii_digit())
+            && crate::text::parse_i32_strict(s).is_ok()
+    };
 
-    let (room_or_obj, vnum_src, rnum_src, vnum_targ, rnum_targ, save_zone) = if is_room
-        && numeric(&src_num)
-    {
-        let vnum_src: i32 = src_num.parse().unwrap_or(-1);
-        let rnum_src = g.real_room(vnum_src);
-        let (vnum_targ, rnum_targ) = if targ_num.is_empty() {
-            match g.get_char(ch).and_then(|c| c.in_room) {
-                Some(r) => (g.rooms[r].number, Some(r)),
-                None => return,
-            }
-        } else if numeric(&targ_num) {
-            let v: i32 = targ_num.parse().unwrap_or(-1);
-            (v, g.real_room(v))
+    let (room_or_obj, vnum_src, rnum_src, vnum_targ, rnum_targ, save_zone) =
+        if is_room && numeric(&src_num) {
+            let vnum_src = crate::text::parse_i32_strict(&src_num).unwrap_or(-1);
+            let rnum_src = g.real_room(vnum_src);
+            let (vnum_targ, rnum_targ) = if targ_num.is_empty() {
+                match g.get_char(ch).and_then(|c| c.in_room) {
+                    Some(r) => (g.rooms[r].number, Some(r)),
+                    None => return,
+                }
+            } else if numeric(&targ_num) {
+                let v = crate::text::parse_i32_strict(&targ_num).unwrap_or(-1);
+                (v, g.real_room(v))
+            } else {
+                g.send_to_char(ch, COPY_FORMAT);
+                return;
+            };
+            let save_zone = rnum_targ.map(|r| zone_number_of_room(g, r)).unwrap_or(0);
+            (
+                0,
+                vnum_src,
+                rnum_src.is_some(),
+                vnum_targ,
+                rnum_targ.is_some(),
+                save_zone,
+            )
+        } else if is_obj && !targ_num.is_empty() && numeric(&src_num) && numeric(&targ_num) {
+            let vnum_src = crate::text::parse_i32_strict(&src_num).unwrap_or(-1);
+            let vnum_targ = crate::text::parse_i32_strict(&targ_num).unwrap_or(-1);
+            let rnum_src = g.obj_protos.contains_key(&vnum_src);
+            let rnum_targ = g.obj_protos.contains_key(&vnum_targ);
+            (
+                1,
+                vnum_src,
+                rnum_src,
+                vnum_targ,
+                rnum_targ,
+                vnum_targ / 100, // C zone_number OBJECT formula
+            )
         } else {
             g.send_to_char(ch, COPY_FORMAT);
             return;
         };
-        let save_zone = rnum_targ.map(|r| zone_number_of_room(g, r)).unwrap_or(0);
-        (
-            0,
-            vnum_src,
-            rnum_src.is_some(),
-            vnum_targ,
-            rnum_targ.is_some(),
-            save_zone,
-        )
-    } else if is_obj && !targ_num.is_empty() && numeric(&src_num) && numeric(&targ_num) {
-        let vnum_src: i32 = src_num.parse().unwrap_or(-1);
-        let vnum_targ: i32 = targ_num.parse().unwrap_or(-1);
-        let rnum_src = g.obj_protos.contains_key(&vnum_src);
-        let rnum_targ = g.obj_protos.contains_key(&vnum_targ);
-        (
-            1,
-            vnum_src,
-            rnum_src,
-            vnum_targ,
-            rnum_targ,
-            vnum_targ / 100, // C zone_number OBJECT formula
-        )
-    } else {
-        g.send_to_char(ch, COPY_FORMAT);
-        return;
-    };
 
     let (src_ok, targ_ok) = (rnum_src, rnum_targ);
     if !src_ok || !targ_ok {
@@ -731,7 +793,14 @@ pub fn do_copy(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         );
         return;
     }
-    if !can_edit_zone(g, ch, real_zone(g, save_zone * 100).unwrap_or(usize::MAX)) {
+    let save_zone_rnum = match zone_rnum_for_number(g, save_zone) {
+        Some(zone_rnum) => zone_rnum,
+        None => {
+            g.send_to_char(ch, "That zone number is outside the supported range.\r\n");
+            return;
+        }
+    };
+    if !can_edit_zone(g, ch, save_zone_rnum) {
         g.send_to_char(ch, "You cannot edit that zone.\r\n");
         return;
     }
@@ -814,8 +883,11 @@ pub fn do_rlink(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let mut rnum_targ: Option<usize> = None;
     if target.is_empty() && !disconnect {
         create_new_room = true;
-    } else if !target.is_empty() && target.chars().all(|c| c.is_ascii_digit()) {
-        vnum_targ = target.parse().unwrap_or(-1);
+    } else if !target.is_empty()
+        && target.chars().all(|c| c.is_ascii_digit())
+        && crate::text::parse_i32_strict(&target).is_ok()
+    {
+        vnum_targ = crate::text::parse_i32_strict(&target).unwrap_or(-1);
         rnum_targ = g.real_room(vnum_targ);
     } else {
         g.send_to_char(ch, RLINK_FORMAT);
@@ -829,7 +901,11 @@ pub fn do_rlink(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
 
     let save_zone_1 = zone_number_of_room(g, base_rnum);
-    if !can_edit_zone(g, ch, real_zone(g, save_zone_1 * 100).unwrap_or(usize::MAX)) {
+    let Some(base_zone_rnum) = zone_rnum_for_number(g, save_zone_1) else {
+        g.send_to_char(ch, "You cannot create exits in this zone.\r\n");
+        return;
+    };
+    if !can_edit_zone(g, ch, base_zone_rnum) {
         g.send_to_char(ch, "You cannot create exits in this zone.\r\n");
         return;
     }
@@ -843,12 +919,15 @@ pub fn do_rlink(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         let Some(zr) = real_zone(g, vnum_base) else {
             return;
         };
-        let top_room = match g.zones.get(zr) {
-            Some(z) => z.top,
+        let (zone_start, top_room) = match g.zones.get(zr) {
+            Some(z) => match z.vnum_start() {
+                Some(start) => (start, z.top),
+                None => return,
+            },
             None => return,
         };
         let mut created: Option<i32> = None;
-        for k in (save_zone_1 * 100)..=top_room {
+        for k in zone_start..=top_room {
             if g.real_room(k).is_none() {
                 created = Some(k);
                 break;
@@ -877,8 +956,8 @@ pub fn do_rlink(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         save_zone_2 = zone_number_of_room(g, rt);
     }
 
-    if !can_edit_zone(g, ch, real_zone(g, save_zone_2 * 100).unwrap_or(usize::MAX))
-        && type_int == 2
+    if type_int == 2
+        && !zone_rnum_for_number(g, save_zone_2).is_some_and(|zr| can_edit_zone(g, ch, zr))
     {
         g.send_to_char(ch, "You cannot create exits in the target zone.\r\n");
         return;
@@ -929,25 +1008,49 @@ pub fn do_rlink(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         if type_int == 2 {
             match own_to {
                 Some(to) if to > 0 => {
-                    if g.real_room(to).is_some() {
-                        free_dir(g, to as usize, REV_DIR[dir]);
+                    let Some(to_rnum) = g.real_room(to) else {
+                        g.send_to_char(
+                            ch,
+                            "The exit destination does not exist; no exits changed.\r\n",
+                        );
+                        return;
+                    };
+                    if rnum_targ != Some(to_rnum) {
+                        g.send_to_char(
+                            ch,
+                            "The target does not match this exit; no exits changed.\r\n",
+                        );
+                        return;
                     }
+                    let actual_zone = zone_number_of_room(g, to_rnum);
+                    if !zone_rnum_for_number(g, actual_zone)
+                        .is_some_and(|zr| can_edit_zone(g, ch, zr))
+                    {
+                        g.send_to_char(ch, "You cannot remove exits in the target zone.\r\n");
+                        return;
+                    }
+                    let reverse = REV_DIR[dir];
+                    let reciprocal_to = g.rooms[to_rnum].exits[reverse]
+                        .as_ref()
+                        .map(|exit| exit.to_room);
+                    if reciprocal_to != Some(vnum_base) {
+                        g.send_to_char(
+                            ch,
+                            "There is no matching reciprocal exit; no exits changed.\r\n",
+                        );
+                        return;
+                    }
+                    // Both sides have been validated before either mutation.
+                    free_dir(g, to_rnum, reverse);
                     if !free_dir(g, base_rnum, dir) {
                         g.send_to_char(ch, "No such exit!\r\n");
                         return;
                     }
-                    if let Some(rt) = rnum_targ {
-                        save_zone_2 = zone_number_of_room(g, rt);
-                    }
+                    save_zone_2 = actual_zone;
                 }
                 _ => {
-                    g.send_to_char(ch, "There is no reciprocol exit to remove.\r\n");
-                    if own_to.is_some() {
-                        free_dir(g, base_rnum, dir);
-                    } else {
-                        g.send_to_char(ch, "No such exit!\r\n");
-                        return;
-                    }
+                    g.send_to_char(ch, "No such exit!\r\n");
+                    return;
                 }
             }
         } else {
@@ -987,7 +1090,6 @@ pub fn do_rlink(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         olc_add_to_save_list(save_zone_2, OLC_SAVE_ROOM);
     }
 }
-
 
 // ===========================================================================
 // do_olc — the OLC command interface (olc.c do_olc). Generic parsing, then a
@@ -1052,7 +1154,21 @@ pub fn do_olc(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
                 return;
             } else {
                 save = true;
-                number = buf2.parse::<i32>().unwrap_or(0) * 100;
+                let zone = match crate::text::parse_i32_strict(&buf2) {
+                    Ok(zone) => zone,
+                    Err(crate::text::ParseIntError::Overflow) => {
+                        g.send_to_char(ch, "That zone number is outside the supported range.\r\n");
+                        return;
+                    }
+                    Err(_) => 0,
+                };
+                number = match zone_vnum_bounds(zone) {
+                    Some((number, _)) => number,
+                    None => {
+                        g.send_to_char(ch, "That zone number is outside the supported range.\r\n");
+                        return;
+                    }
+                };
             }
         } else if subcmd == SCMD_OLC_HEDIT || subcmd == SCMD_OLC_AEDIT {
             number = 0;
@@ -1062,7 +1178,14 @@ pub fn do_olc(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
                 // (six stub files + index append + zone-table insert) and
                 // then exits - it does not enter the editor (also fixes the
                 // strn_cmp prefix inversion, #263).
-                let zone_num: i32 = buf2.trim().parse().unwrap_or(-1);
+                let zone_num = match crate::text::parse_i32_strict(&buf2) {
+                    Ok(zone) => zone,
+                    Err(crate::text::ParseIntError::Overflow) => {
+                        g.send_to_char(ch, "That zone number is outside the supported range.\r\n");
+                        return;
+                    }
+                    Err(_) => -1,
+                };
                 crate::zedit::zedit_new_zone(g, ch, zone_num);
             } else {
                 g.send_to_char(ch, "Specify a new zone number.\r\n");
@@ -1076,7 +1199,14 @@ pub fn do_olc(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
 
     // If a numeric argument was given, parse it.
     if number == -1 && subcmd != SCMD_OLC_AEDIT && subcmd != SCMD_OLC_HEDIT {
-        number = buf1.parse::<i32>().unwrap_or(-1);
+        number = match crate::text::parse_i32_strict(&buf1) {
+            Ok(number) => number,
+            Err(crate::text::ParseIntError::Overflow) => {
+                g.send_to_char(ch, "That VNUM is outside the supported range.\r\n");
+                return;
+            }
+            Err(_) => -1,
+        };
     }
 
     // Resolve the zone rnum (skip for AEDIT and un-saved HEDIT, which are
@@ -1180,7 +1310,10 @@ pub fn do_olc(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
                 .get_char(ch)
                 .map(|c| c.get_name().to_string())
                 .unwrap_or_default();
-            let level = g.get_char(ch).map(|c| c.player.level).unwrap_or(LVL_BUILDER_LEVEL);
+            let level = g
+                .get_char(ch)
+                .map(|c| c.player.level)
+                .unwrap_or(LVL_BUILDER_LEVEL);
             crate::syslog::mudlog(
                 g,
                 &format!(
@@ -1233,18 +1366,19 @@ mod tests {
     use crate::config::Config;
     use crate::connection::Descriptor;
     use crate::dg_db_scripts::TrigProto;
-    use crate::world::Zone;
+    use crate::world::{MAX_ZONE_NUMBER, Zone, zone_vnum_bounds};
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
 
     fn zone(number: i32, builders: &str) -> Zone {
+        let (_, top) = zone_vnum_bounds(number).expect("valid test zone number");
         Zone {
             number,
             name: format!("Zone {}", number),
             builders: builders.to_string(),
             lifespan: 30,
             age: 0,
-            top: number * 100 + 99,
+            top,
             reset_mode: 2,
             min_level: 0,
             max_level: 60,
@@ -1287,6 +1421,67 @@ mod tests {
         assert!(can_edit_zone(&g, alice, 0));
         assert!(!can_edit_zone(&g, charlie, 0));
         assert!(can_edit_zone(&g, imp, 0));
+    }
+
+    #[test]
+    fn real_olc_new_zone_checks_boundary_and_overflow_before_writing() {
+        let _guard = olc_test_lock();
+        let lib = temp_lib("zone-number-boundary");
+        let mut cfg = Config::default();
+        cfg.lib_path = lib.to_string_lossy().to_string();
+        let mut g = GameState::new(cfg);
+
+        let conn = ConnId(106);
+        let ch = player(&mut g, "Root", LVL_IMPL);
+        g.get_char_mut(ch).unwrap().desc = Some(conn);
+        let mut descriptor = Descriptor::new(conn, "example.test".to_string());
+        descriptor.character = Some(ch);
+        g.descriptors.insert(conn, descriptor);
+
+        do_olc(
+            &mut g,
+            ch,
+            &format!("new {MAX_ZONE_NUMBER}"),
+            SCMD_OLC_ZEDIT,
+        );
+        let (first, top) = zone_vnum_bounds(MAX_ZONE_NUMBER).unwrap();
+        assert_eq!(g.zones.len(), 1);
+        assert_eq!(g.zones[0].number, MAX_ZONE_NUMBER);
+        assert_eq!(g.zones[0].top, top);
+        assert_eq!(
+            std::fs::read_to_string(lib.join(format!("world/zon/{MAX_ZONE_NUMBER}.zon"))).unwrap(),
+            format!("#{MAX_ZONE_NUMBER}\nNew Zone~\n~\n{top} 30 2\n0 0 0\nS\n$\n")
+        );
+        assert!(
+            std::fs::read_to_string(lib.join(format!("world/wld/{MAX_ZONE_NUMBER}.wld")))
+                .unwrap()
+                .starts_with(&format!("#{first}\n"))
+        );
+
+        for rejected in [
+            (MAX_ZONE_NUMBER + 1).to_string(),
+            "21474836".to_string(),
+            "2147483648".to_string(),
+        ] {
+            g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+            do_olc(&mut g, ch, &format!("new {rejected}"), SCMD_OLC_ZEDIT);
+            assert_eq!(g.zones.len(), 1, "zone {rejected} must not be inserted");
+            assert!(
+                !lib.join(format!("world/zon/{rejected}.zon")).exists(),
+                "zone {rejected} must be rejected before filesystem mutation"
+            );
+            assert!(
+                g.descriptors[&conn]
+                    .outbuf
+                    .contains("outside the supported range")
+                    || g.descriptors[&conn]
+                        .outbuf
+                        .contains("higher then highest zone allowed"),
+                "zone {rejected} should receive an explicit range error"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&lib);
     }
 
     #[test]
@@ -1501,9 +1696,11 @@ mod tests {
         let shp = lib.join("world/shp/43.shp");
         assert!(std::fs::read_to_string(&zon).unwrap().contains("#43\n"));
         assert_eq!(std::fs::read_to_string(&mob).unwrap(), "$\n");
-        assert!(std::fs::read_to_string(&shp)
-            .unwrap()
-            .starts_with("CircleMUD v3.0 Shop File~\n"));
+        assert!(
+            std::fs::read_to_string(&shp)
+                .unwrap()
+                .starts_with("CircleMUD v3.0 Shop File~\n")
+        );
 
         let ch = player(&mut g, "Root", LVL_IMPL);
         g.get_char_mut(ch).unwrap().desc = Some(ConnId(100));
@@ -1511,14 +1708,29 @@ mod tests {
         d.character = Some(ch);
         g.descriptors.insert(ConnId(100), d);
         olc_saveinfo(&mut g, ch);
-        assert!(g
-            .descriptors
-            .get(&ConnId(100))
-            .unwrap()
-            .outbuf
-            .contains("The database is up to date."));
+        assert!(
+            g.descriptors
+                .get(&ConnId(100))
+                .unwrap()
+                .outbuf
+                .contains("The database is up to date.")
+        );
 
         let _ = std::fs::remove_dir_all(&lib);
+    }
+
+    #[test]
+    fn dg_attach_input_rejects_overflow_without_shifting_later_tokens() {
+        assert_eq!(parse_script_position_vnum("1, 200"), Ok(Some((1, 200))));
+        assert_eq!(parse_script_position_vnum("200"), Ok(Some((999, 200))));
+        assert_eq!(
+            parse_script_position_vnum("2147483648, 200"),
+            Err(crate::text::ParseIntError::Overflow)
+        );
+        assert_eq!(
+            parse_script_position_vnum("1, -2147483649"),
+            Err(crate::text::ParseIntError::Overflow)
+        );
     }
 
     #[test]
@@ -1545,11 +1757,13 @@ mod tests {
         let room = g.room(t);
         assert_eq!(room.name, "Source");
         assert_eq!(room.sector_type, crate::room::SectorType::Forest);
-        assert!(g.descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("You copy room 4500 to 4501."));
+        assert!(
+            g.descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("You copy room 4500 to 4501.")
+        );
         // Save-list marks the target zone dirty (C: ROOM == OLC_SAVE_ROOM).
         olc_remove_from_save_list(45, OLC_SAVE_ROOM);
     }
@@ -1574,11 +1788,13 @@ mod tests {
         do_rlink(&mut g, ch, "east connect 1 4601", 0);
         assert_eq!(g.room(a).exits[EAST].as_ref().unwrap().to_room, 4601);
         assert!(g.room(b).exits[WEST].is_none());
-        assert!(g.descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("You make an exit east to room 4601."));
+        assert!(
+            g.descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("You make an exit east to room 4601.")
+        );
 
         // Two-way connect builds the reciprocal exit.
         g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
@@ -1587,13 +1803,29 @@ mod tests {
         assert_eq!(g.room(b).exits[WEST].as_ref().unwrap().to_room, 4600);
         assert_eq!(g.room(a).exits[EAST].as_ref().unwrap().to_room, 4601);
 
+        // Two-way disconnect removes both sides. The stored destination is a
+        // vnum (4600), deliberately unlike its arena rnum (0).
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        do_rlink(&mut g, ch, "west disconnect 2 4600", 0);
+        assert!(g.room(b).exits[WEST].is_none());
+        assert!(g.room(a).exits[EAST].is_none());
+
+        // Restore B -> A for the separate one-way-disconnect assertion.
+        do_rlink(&mut g, ch, "west connect 2 4600", 0);
+
         // Disconnect removes the own exit (stand in B, own the west exit).
         // C quirk kept: despite the usage string's "[target]", the parse
         // demands a numeric target even for disconnect (is_number("") fails).
         g.get_char_mut(ch).unwrap().in_room = Some(b);
         do_rlink(&mut g, ch, "west disconnect 1 4600", 0);
         assert!(g.room(b).exits[WEST].is_none());
-        assert!(g.descriptors.get(&conn).unwrap().outbuf.contains("Exit deleted."));
+        assert!(
+            g.descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("Exit deleted.")
+        );
 
         // Auto-create: omitting the target makes the first free vnum in the zone.
         g.get_char_mut(ch).unwrap().in_room = Some(a);
@@ -1602,7 +1834,93 @@ mod tests {
             g.room(a).exits[SOUTH].as_ref().map(|e| e.to_room),
             Some(4602)
         );
-        assert_eq!(g.room(g.real_room(4602).unwrap()).name, "An unfinished room");
+        assert_eq!(
+            g.room(g.real_room(4602).unwrap()).name,
+            "An unfinished room"
+        );
         olc_remove_from_save_list(46, OLC_SAVE_ROOM);
+    }
+
+    #[test]
+    fn rlink_two_way_disconnect_validates_reciprocal_and_tracks_both_zones() {
+        let _guard = olc_test_lock();
+        let mut g = GameState::new(Config::default());
+        g.zones.push(zone(46, "Root"));
+        g.zones.push(zone(47, "Root"));
+        let base = g.add_room(crate::room::Room::new(
+            4600,
+            0,
+            "Base".into(),
+            String::new(),
+        ));
+        let unrelated = g.add_room(crate::room::Room::new(
+            4601,
+            0,
+            "Unrelated".into(),
+            String::new(),
+        ));
+        let target = g.add_room(crate::room::Room::new(
+            4700,
+            1,
+            "Target".into(),
+            String::new(),
+        ));
+        assert_ne!(base, 4600usize);
+        assert_ne!(target, 4700usize);
+
+        let conn = ConnId(122);
+        let ch = player(&mut g, "Root", LVL_IMPL);
+        g.get_char_mut(ch).unwrap().desc = Some(conn);
+        g.get_char_mut(ch).unwrap().in_room = Some(base);
+        let mut descriptor = Descriptor::new(conn, "example.test".to_string());
+        descriptor.character = Some(ch);
+        g.descriptors.insert(conn, descriptor);
+
+        do_rlink(&mut g, ch, "east connect 2 4700", 0);
+        let dirty = crate::lock_ok::lock(&save_list()).clone();
+        assert!(dirty.contains(&(46, OLC_SAVE_ROOM)));
+        assert!(dirty.contains(&(47, OLC_SAVE_ROOM)));
+        olc_remove_from_save_list(46, OLC_SAVE_ROOM);
+        olc_remove_from_save_list(47, OLC_SAVE_ROOM);
+
+        // A missing reciprocal is a transactional failure: keep the own exit.
+        free_dir(&mut g, target, WEST);
+        do_rlink(&mut g, ch, "east disconnect 2 4700", 0);
+        assert_eq!(
+            g.room(base).exits[EAST].as_ref().map(|e| e.to_room),
+            Some(4700)
+        );
+        assert!(g.room(target).exits[WEST].is_none());
+        assert!(
+            g.descriptors[&conn]
+                .outbuf
+                .contains("no matching reciprocal exit")
+        );
+
+        // A reciprocal owned by another builder is never deleted either.
+        create_dir(&mut g, target, WEST);
+        g.room_mut(target).exits[WEST].as_mut().unwrap().to_room = 4601;
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        do_rlink(&mut g, ch, "east disconnect 2 4700", 0);
+        assert_eq!(
+            g.room(base).exits[EAST].as_ref().map(|e| e.to_room),
+            Some(4700)
+        );
+        assert_eq!(
+            g.room(target).exits[WEST].as_ref().map(|e| e.to_room),
+            Some(g.room(unrelated).number)
+        );
+
+        // Once the reciprocal points back, both sides are removed and both
+        // zones are marked dirty.
+        g.room_mut(target).exits[WEST].as_mut().unwrap().to_room = 4600;
+        do_rlink(&mut g, ch, "east disconnect 2 4700", 0);
+        assert!(g.room(base).exits[EAST].is_none());
+        assert!(g.room(target).exits[WEST].is_none());
+        let dirty = crate::lock_ok::lock(&save_list()).clone();
+        assert!(dirty.contains(&(46, OLC_SAVE_ROOM)));
+        assert!(dirty.contains(&(47, OLC_SAVE_ROOM)));
+        olc_remove_from_save_list(46, OLC_SAVE_ROOM);
+        olc_remove_from_save_list(47, OLC_SAVE_ROOM);
     }
 }

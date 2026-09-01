@@ -3,21 +3,26 @@
 // &mut GameState, drives the heartbeat, and flushes each descriptor's output
 // buffer to its writer task. This is the only place async meets the world.
 
+use crate::DatabaseInterface;
 use crate::character::Abilities;
 use crate::combat;
-use crate::connection::{render_color, ConState, Descriptor, GameMessage, QueuedInput};
+use crate::connection::{
+    ConState, Descriptor, GameMessage, OutputFrame, QueuedInput, render_color,
+};
 use crate::interpreter::run_command;
 use crate::metrics::Metrics;
-use crate::state::GameState;
+use crate::state::{GameState, OfflineOpAuthority, PLAYER_INSPECTION_DENIED};
 use crate::types::*;
-use crate::DatabaseInterface;
 use anyhow::Result;
+use futures_util::FutureExt;
 use log::{error, info, warn};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::os::unix::io::RawFd;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 
 // Telnet ECHO negotiation (RFC 857). The server WILL-ECHO before a password
 // prompt so the client suppresses its own local echo (cleartext password no
@@ -229,6 +234,18 @@ pub struct ShutdownReport {
     pub players_saved: u32,
     pub aliases_written: u32,
     pub save_errors: u32,
+    pub output_attempted: u32,
+    pub output_acknowledged: u32,
+    pub output_failed: u32,
+    pub output_timed_out: u32,
+    /// Backward-compatible aggregate of failed plus timed-out final flushes.
+    pub output_failures: u32,
+}
+
+struct PendingPlayerSave {
+    name: String,
+    snapshot: crate::character::Character,
+    task: tokio::task::JoinHandle<std::result::Result<(), String>>,
 }
 
 pub struct Game {
@@ -236,7 +253,7 @@ pub struct Game {
     db: Arc<dyn DatabaseInterface>,
     /// Async output channel per connection (the writer half lives in the
     /// connection task). The Descriptor (in GameState) only buffers text.
-    outputs: HashMap<ConnId, mpsc::Sender<Vec<u8>>>,
+    outputs: HashMap<ConnId, mpsc::Sender<OutputFrame>>,
     /// Character-creation choices accumulated across nanny steps.
     pending: HashMap<ConnId, PendingChoices>,
     /// Player records loaded at password-verify time (gates + motd choice)
@@ -245,6 +262,17 @@ pub struct Game {
     /// Connections whose character was just created (their first menu-enter
     /// also runs the C `do_start` branch: START_MESSG + do_newbie).
     just_created: std::collections::HashSet<ConnId>,
+    /// At most one ordered save chain per persistent player id. Disconnect is
+    /// non-blocking, while a later save waits behind the prior generation so an
+    /// old snapshot can never finish last and overwrite a newer session.
+    pending_player_saves: HashMap<i64, PendingPlayerSave>,
+    player_save_failures: u32,
+    /// The live input receiver is kept on the Game so a database wait can
+    /// continue servicing established sessions. Messages which would start a
+    /// second database operation are deferred until the current operation
+    /// completes; gameplay input, heartbeats, and output remain live.
+    game_rx: Option<mpsc::Receiver<GameMessage>>,
+    deferred_messages: VecDeque<GameMessage>,
     lib_path: String,
     /// Who-list JSON snapshot (Deltania Breathes W5), shared with the metrics
     /// HTTP task's /api/who route. Written by the Game once a second; readers
@@ -274,6 +302,10 @@ impl Game {
             pending: HashMap::new(),
             pending_load: HashMap::new(),
             just_created: std::collections::HashSet::new(),
+            pending_player_saves: HashMap::new(),
+            player_save_failures: 0,
+            game_rx: None,
+            deferred_messages: VecDeque::new(),
             lib_path: "./lib".to_string(),
             metrics: Arc::new(Metrics::new()),
             who_snapshot: Arc::new(std::sync::RwLock::new(String::new())),
@@ -348,8 +380,9 @@ impl Game {
         crate::maputils::prime_weather(&mut self.state);
     }
 
-    pub async fn run(&mut self, mut game_rx: mpsc::Receiver<GameMessage>) -> Result<()> {
+    pub async fn run(&mut self, game_rx: mpsc::Receiver<GameMessage>) -> Result<()> {
         info!("Game loop starting...");
+        self.game_rx = Some(game_rx);
         let mut tick = interval(Duration::from_millis(100)); // 10 pulses/sec
         // A stall (blocked flush, slow DB) must not turn into a catch-up
         // burst of hundreds of back-to-back pulses on resume: Delay skips to
@@ -380,18 +413,24 @@ impl Game {
                 }
             };
 
-            tokio::select! {
-                Some(msg) = game_rx.recv() => self.handle_message(msg).await,
-                _ = tick.tick() => self.heartbeat(),
-                _ = tokio::signal::ctrl_c() => {
-                    info!("Received Ctrl-C (SIGINT); beginning graceful shutdown.");
-                    self.shutdown().await;
-                    return Ok(());
-                }
-                _ = sigterm_fut => {
-                    info!("Received SIGTERM; beginning graceful shutdown.");
-                    self.shutdown().await;
-                    return Ok(());
+            if let Some(msg) = self.deferred_messages.pop_front() {
+                self.handle_message_isolated(msg).await;
+            } else {
+                tokio::select! {
+                    Some(msg) = self.game_rx.as_mut().expect("receiver installed").recv() => {
+                        self.handle_message_isolated(msg).await;
+                    }
+                    _ = tick.tick() => self.heartbeat(),
+                    _ = tokio::signal::ctrl_c() => {
+                        info!("Received Ctrl-C (SIGINT); beginning graceful shutdown.");
+                        self.shutdown().await;
+                        return Ok(());
+                    }
+                    _ = sigterm_fut => {
+                        info!("Received SIGTERM; beginning graceful shutdown.");
+                        self.shutdown().await;
+                        return Ok(());
+                    }
                 }
             }
             // Async bridge for OFFLINE immortal commands (set/stat/show on a
@@ -399,10 +438,16 @@ impl Game {
             // awaits, where &mut self.state is free for the sync replay — we load
             // the player, replay the command, save, and extract.
             self.drain_offline_ops().await;
-        self.drain_deferred_db_ops().await;
+            self.drain_player_rename_requests().await;
+            self.drain_deferred_db_ops().await;
             self.drain_player_save_requests().await;
             self.drain_pfileclean().await;
+            self.reap_completed_player_saves().await;
             self.flush_all().await;
+
+            if let Some(requester) = self.state.copyover_requested.take() {
+                self.execute_copyover(requester).await;
+            }
 
             // The `shutdown` immortal command sets this (C circle_shutdown=1);
             // halt via the same graceful path as a SIGTERM so the server stops.
@@ -414,6 +459,174 @@ impl Game {
         }
     }
 
+    /// Await one database operation without parking the single world task.
+    ///
+    /// Login/offline maintenance needs async SQL results before it can mutate
+    /// the world. While that result is outstanding, continue ticking the world,
+    /// accepting connections, draining input for already-playing descriptors,
+    /// and flushing output. DB-dependent messages are kept in arrival order and
+    /// replayed as soon as this operation finishes. Unit tests which call nanny
+    /// helpers directly have no installed receiver and simply await the future.
+    async fn await_database<T, F>(&mut self, future: F) -> T
+    where
+        F: Future<Output = T>,
+    {
+        if self.game_rx.is_none() {
+            return future.await;
+        }
+
+        tokio::pin!(future);
+        let mut tick = interval(Duration::from_millis(100));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // interval() fires immediately; consume that artificial first tick so
+        // an SQL call does not add a bonus heartbeat.
+        tick.tick().await;
+
+        loop {
+            tokio::select! {
+                result = &mut future => return result,
+                _ = tick.tick() => {
+                    self.heartbeat();
+                    self.flush_all().await;
+                }
+                message = self.game_rx.as_mut().expect("receiver installed").recv() => {
+                    let Some(message) = message else {
+                        // The sender side is gone; the bounded DB wrapper will
+                        // still complete or time out this operation.
+                        return future.await;
+                    };
+                    self.service_message_during_database_wait(message).await;
+                    self.flush_all().await;
+                }
+            }
+        }
+    }
+
+    async fn service_message_during_database_wait(&mut self, message: GameMessage) {
+        match message {
+            GameMessage::NewConnection {
+                id,
+                host,
+                peer_ip,
+                verified_hostname,
+                raw_fd,
+                output_tx,
+            } => {
+                info!("New connection from {}", host);
+                self.metrics.inc_connections();
+                let mut descriptor =
+                    Descriptor::with_identity(id, host, peer_ip, verified_hostname, raw_fd);
+                descriptor.write(ANSI_QUESTION);
+                self.state.descriptors.insert(id, descriptor);
+                self.outputs.insert(id, output_tx);
+                self.write_prompt(id);
+            }
+            GameMessage::Input { conn_id, input }
+                if self.state.descriptors.get(&conn_id).map(|d| d.state)
+                    == Some(ConState::Playing) =>
+            {
+                // Playing input never performs SQL. Boxing makes the recursive
+                // async call graph explicit while the state guard prevents a
+                // second database wait from nesting here.
+                Box::pin(self.handle_input(conn_id, input)).await;
+            }
+            GameMessage::EnableGmcp { conn_id } => self.enable_gmcp(conn_id),
+            GameMessage::SendMssp { conn_id } => self.send_mssp(conn_id),
+            GameMessage::Disconnect { conn_id } => self.disconnect(conn_id).await,
+            other => self.deferred_messages.push_back(other),
+        }
+    }
+
+    async fn db_player_exists(&mut self, name: &str) -> Result<bool> {
+        let db = self.db.clone();
+        let name = name.to_string();
+        self.await_database(async move { db.player_exists(&name).await })
+            .await
+    }
+
+    async fn db_verify_password(&mut self, name: &str, password: &str) -> Result<bool> {
+        let db = self.db.clone();
+        let name = name.to_string();
+        let password = password.to_string();
+        self.await_database(async move { db.verify_password(&name, &password).await })
+            .await
+    }
+
+    async fn db_get_password_hash(&mut self, name: &str) -> Result<Option<String>> {
+        let db = self.db.clone();
+        let name = name.to_string();
+        self.await_database(async move { db.get_password_hash(&name).await })
+            .await
+    }
+
+    async fn db_load_player(&mut self, name: &str) -> Result<crate::character::Character> {
+        let db = self.db.clone();
+        let name = name.to_string();
+        self.await_database(async move { db.load_player(&name).await })
+            .await
+    }
+
+    async fn db_save_player(&mut self, character: &crate::character::Character) -> Result<()> {
+        let db = self.db.clone();
+        let character = character.clone();
+        self.await_database(async move { db.save_player(&character).await })
+            .await
+    }
+
+    async fn db_save_player_with_host(
+        &mut self,
+        character: &crate::character::Character,
+        host: &str,
+    ) -> Result<()> {
+        let db = self.db.clone();
+        let character = character.clone();
+        let host = host.to_string();
+        self.await_database(async move { db.save_player_with_host(&character, &host).await })
+            .await
+    }
+
+    async fn db_create_player(
+        &mut self,
+        character: &crate::character::Character,
+        password: &str,
+    ) -> Result<i64> {
+        let db = self.db.clone();
+        let character = character.clone();
+        let password = password.to_string();
+        self.await_database(async move { db.create_player(&character, &password).await })
+            .await
+    }
+
+    async fn db_clan_destroy_fixup(&mut self, clan: i32) -> Result<()> {
+        let db = self.db.clone();
+        self.await_database(async move { db.clan_destroy_fixup(clan).await })
+            .await
+    }
+
+    async fn db_clan_lower_ranks(&mut self, clan: i32) -> Result<()> {
+        let db = self.db.clone();
+        self.await_database(async move { db.clan_lower_ranks(clan).await })
+            .await
+    }
+
+    async fn db_delete_deleted_players(&mut self) -> Result<u64> {
+        let db = self.db.clone();
+        self.await_database(async move { db.delete_deleted_players().await })
+            .await
+    }
+
+    async fn db_delete_deleted_players_by_idnums(&mut self, idnums: Vec<i64>) -> Result<u64> {
+        let db = self.db.clone();
+        self.await_database(async move { db.delete_deleted_players_by_idnums(idnums).await })
+            .await
+    }
+
+    async fn db_list_players(&mut self) -> Result<Vec<crate::state::PlayerIndex>> {
+        let db = self.db.clone();
+        self.await_database(async move { db.list_players().await })
+            .await
+    }
+
     /// Graceful-shutdown sequence (CircleMUD's SIGTERM/hupsig + Crash_save_all):
     /// crash-save every in-world player and their objects to disk, push the
     /// final "shutting down" notice + any buffered output to every descriptor,
@@ -422,9 +635,139 @@ impl Game {
     async fn shutdown(&mut self) {
         let report = self.shutdown_save().await;
         info!(
-            "Shutting down, saved {} player(s) ({} alias files, {} save errors).",
-            report.players_saved, report.aliases_written, report.save_errors
+            "Shutting down, saved {} player(s) ({} alias files, {} save errors; output attempted={}, acknowledged={}, failed={}, timed out={}).",
+            report.players_saved,
+            report.aliases_written,
+            report.save_errors,
+            report.output_attempted,
+            report.output_acknowledged,
+            report.output_failed,
+            report.output_timed_out,
         );
+    }
+
+    async fn execute_copyover(&mut self, requester: CharId) {
+        crate::arena::prepare_process_exit(&mut self.state);
+        if self.persist_copyover_players().await != 0 {
+            self.state.send_to_char(
+                requester,
+                "Copyover database save failed; reboot aborted.\n\r",
+            );
+            return;
+        }
+        // The replacement process seeds its clock from `etc/date_record`.
+        // Persist through the effective configured lib root and fail closed so
+        // copyover cannot silently roll the world calendar back (#410).
+        if let Err(error) = crate::weather::try_write_mud_date_to_file(&self.state) {
+            warn!("copyover mud-date save failed: {error}");
+            self.state.send_to_char(
+                requester,
+                "Copyover calendar save failed; reboot aborted.\n\r",
+            );
+            return;
+        }
+        if !self.flush_outputs_for_copyover().await {
+            self.state.send_to_char(
+                requester,
+                "Copyover socket flush failed; reboot aborted.\n\r",
+            );
+            self.flush_all().await;
+            return;
+        }
+        crate::cmd_wizard::perform_copyover(&mut self.state, requester);
+    }
+
+    async fn flush_outputs_for_copyover(&mut self) -> bool {
+        self.flush_all().await;
+        let writers: Vec<(ConnId, mpsc::Sender<OutputFrame>)> = self
+            .outputs
+            .iter()
+            .map(|(&conn, writer)| (conn, writer.clone()))
+            .collect();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let mut waits = Vec::with_capacity(writers.len());
+        let mut ok = true;
+        for (conn, writer) in writers {
+            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+            match writer.try_send(OutputFrame::flush_barrier(ack_tx)) {
+                Ok(()) => waits.push((conn, ack_rx)),
+                Err(error) => {
+                    warn!("copyover flush barrier enqueue failed for {conn}: {error}");
+                    ok = false;
+                }
+            }
+        }
+        let waits = waits
+            .into_iter()
+            .map(|(conn, ack)| async move { (conn, tokio::time::timeout_at(deadline, ack).await) });
+        for (conn, result) in futures_util::future::join_all(waits).await {
+            match result {
+                Ok(Ok(true)) => {}
+                Ok(Ok(false)) | Ok(Err(_)) => {
+                    warn!("copyover socket flush failed for {conn}");
+                    ok = false;
+                }
+                Err(_) => {
+                    warn!("copyover socket flush timed out for {conn}");
+                    ok = false;
+                }
+            }
+        }
+        ok
+    }
+
+    async fn persist_copyover_players(&mut self) -> u32 {
+        // Finish any disconnect generation first. New snapshots are then
+        // chained and awaited, so no stale task can outlive exec and no player
+        // is recovered from an older SQL row.
+        let mut failures = self.await_all_player_saves().await;
+        let players: Vec<CharId> = self
+            .state
+            .descriptors
+            .values()
+            .filter_map(|descriptor| {
+                (descriptor.state == ConState::Playing)
+                    .then_some(descriptor.character)
+                    .flatten()
+            })
+            .collect();
+        for player in players {
+            let room_stamp = self
+                .state
+                .get_char(player)
+                .and_then(|character| character.in_room)
+                .and_then(|room| self.state.rooms.get(room))
+                .map(|room| (room.number, room.map_x.zip(room.map_y)));
+            if let (Some((vnum, coordinates)), Some(character)) =
+                (room_stamp, self.state.get_char_mut(player))
+            {
+                if let Some((x, y)) = coordinates {
+                    character.tloadroom = -1;
+                    character.mapx = x as i64;
+                    character.mapy = y as i64;
+                } else {
+                    character.tloadroom = vnum as i64;
+                    character.mapx = -1;
+                    character.mapy = -1;
+                }
+            }
+            let Some(snapshot) = self.snapshot_online_player_for_save(player) else {
+                continue;
+            };
+            let host = snapshot
+                .desc
+                .and_then(|conn| self.state.descriptors.get(&conn))
+                .map(|descriptor| descriptor.host.clone())
+                .unwrap_or_default();
+            self.state.update_player_index_from_character(
+                &snapshot,
+                snapshot.last_logon.timestamp(),
+                &host,
+            );
+            self.queue_player_save(snapshot, host);
+        }
+        failures = failures.saturating_add(self.await_all_player_saves().await);
+        failures
     }
 
     /// The save-and-flush half of shutdown, extracted (W6 live-ops) so the
@@ -434,6 +777,7 @@ impl Game {
     /// output channel so the shutdown notice actually reaches the sockets.
     /// Returns a report for the shutdown log / tests.
     async fn shutdown_save(&mut self) -> ShutdownReport {
+        crate::arena::prepare_process_exit(&mut self.state);
         // C comm.c:458-510: flush the OLC save list before stopping (#262).
         crate::olc::flush_save_list_to_disk(&mut self.state);
 
@@ -455,9 +799,11 @@ impl Game {
             if let Some(ch) = self.state.descriptors.get(cid).and_then(|d| d.character) {
                 report.players_saved += 1;
                 if let Some(snapshot) = self.snapshot_online_player_for_save(ch) {
-                    if let Err(e) =
-                        crate::alias::write_aliases(&self.lib_path, snapshot.get_name(), snapshot.idnum)
-                    {
+                    if let Err(e) = crate::alias::write_aliases(
+                        &self.lib_path,
+                        snapshot.get_name(),
+                        snapshot.idnum,
+                    ) {
                         warn!(
                             "shutdown write_aliases({}) failed: {}",
                             snapshot.get_name(),
@@ -473,32 +819,85 @@ impl Game {
                         .get(cid)
                         .map(|d| d.host.as_str())
                         .unwrap_or("");
-                    if let Err(e) = self.db.save_player_with_host(&snapshot, host).await {
-                        warn!(
-                            "shutdown save_player({}) failed: {}",
-                            snapshot.get_name(),
-                            e
-                        );
-                        report.save_errors += 1;
-                    }
+                    self.queue_player_save(snapshot, host.to_string());
                 }
             }
         }
+        report.save_errors = report
+            .save_errors
+            .saturating_add(self.await_all_player_saves().await);
 
+        // Snapshot writers before flushing: `flush_all` deliberately removes a
+        // descriptor whose channel is full/closed, but shutdown reporting must
+        // still record that connection's failed final-delivery attempt.
+        let writers: Vec<(ConnId, mpsc::Sender<OutputFrame>)> = self
+            .outputs
+            .iter()
+            .map(|(&conn, tx)| (conn, tx.clone()))
+            .collect();
         // Flush all buffered output (the shutdown notice) to the writer tasks.
         self.flush_all().await;
-        // Deterministic drain: wait until the per-connection writer tasks have
-        // consumed their queues (len() == 0), bounded at 2s so a dead socket
-        // cannot stall shutdown. Replaces the old fixed 200ms sleep.
+        // A queue becoming empty only proves that the writer task dequeued the
+        // bytes. Ordered barriers acknowledge after the socket write+flush.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            let any_pending = self.outputs.values().any(|tx| tx.capacity() < tx.max_capacity());
-            if any_pending == false || tokio::time::Instant::now() >= deadline {
-                break;
+        let mut acknowledgements = Vec::with_capacity(writers.len());
+        for (conn, tx) in writers {
+            report.output_attempted = report.output_attempted.saturating_add(1);
+            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+            match tx.try_send(OutputFrame::shutdown_barrier(ack_tx)) {
+                Ok(()) => acknowledgements.push((conn, ack_rx)),
+                Err(_) => {
+                    warn!("shutdown output barrier enqueue failed for {}", conn);
+                    report.output_failed = report.output_failed.saturating_add(1);
+                }
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        let waits = acknowledgements
+            .into_iter()
+            .map(|(conn, ack)| async move { (conn, tokio::time::timeout_at(deadline, ack).await) });
+        for (conn, outcome) in futures_util::future::join_all(waits).await {
+            match outcome {
+                Ok(Ok(true)) => {
+                    report.output_acknowledged = report.output_acknowledged.saturating_add(1);
+                }
+                Err(_) => {
+                    warn!("shutdown output flush timed out for {}", conn);
+                    report.output_timed_out = report.output_timed_out.saturating_add(1);
+                }
+                Ok(Ok(false)) | Ok(Err(_)) => {
+                    warn!("shutdown output flush failed for {}", conn);
+                    report.output_failed = report.output_failed.saturating_add(1);
+                }
+            }
+        }
+        report.output_failures = report.output_failed.saturating_add(report.output_timed_out);
+        // Closing every sender lets writers without a barrier terminate too;
+        // main owns and deterministically joins/aborts the connection tasks.
+        self.outputs.clear();
         report
+    }
+
+    async fn handle_message_isolated(&mut self, msg: GameMessage) {
+        let conn_id = msg.conn_id();
+        let kind = msg.kind();
+        let outcome = AssertUnwindSafe(self.handle_message(msg))
+            .catch_unwind()
+            .await;
+        if let Err(payload) = outcome {
+            error!(
+                "PANIC while handling {} for connection {:?}: {}",
+                kind,
+                conn_id,
+                panic_payload_str(&*payload)
+            );
+            if let Some(conn_id) = conn_id {
+                crate::modify::abort_conn(&mut self.state, conn_id);
+                if let Some(descriptor) = self.state.descriptors.get_mut(&conn_id) {
+                    descriptor.state = ConState::Close;
+                }
+                self.disconnect(conn_id).await;
+            }
+        }
     }
 
     async fn handle_message(&mut self, msg: GameMessage) {
@@ -506,12 +905,14 @@ impl Game {
             GameMessage::NewConnection {
                 id,
                 host,
+                peer_ip,
+                verified_hostname,
                 raw_fd,
                 output_tx,
             } => {
                 info!("New connection from {}", host);
                 self.metrics.inc_connections();
-                let mut d = Descriptor::with_fd(id, host, raw_fd);
+                let mut d = Descriptor::with_identity(id, host, peer_ip, verified_hostname, raw_fd);
                 // C comm.c:1608: the colour question is the very first output;
                 // the startup banner follows the answer (CON_QANSI) (#198).
                 d.write(ANSI_QUESTION);
@@ -522,11 +923,22 @@ impl Game {
             GameMessage::Recover {
                 id,
                 host,
+                peer_ip,
+                verified_hostname,
                 raw_fd,
                 name,
                 output_tx,
             } => {
-                self.recover_player(id, host, raw_fd, name, output_tx).await;
+                self.recover_player(
+                    id,
+                    host,
+                    peer_ip,
+                    verified_hostname,
+                    raw_fd,
+                    name,
+                    output_tx,
+                )
+                .await;
             }
             GameMessage::Input { conn_id, input } => {
                 self.handle_input(conn_id, input).await;
@@ -540,10 +952,14 @@ impl Game {
             GameMessage::Disconnect { conn_id } => {
                 self.disconnect(conn_id).await;
             }
+            #[cfg(test)]
+            GameMessage::PanicForTest { .. } => {
+                panic!("injected async message panic");
+            }
         }
     }
 
-        /// C comm.c perform_subst (1911-1960): "^telm^tell" replaces the first
+    /// C comm.c perform_subst (1911-1960): "^telm^tell" replaces the first
     /// occurrence of the text between the carets in `orig` with the
     /// replacement. Returns None when the syntax is bad or the search text is
     /// absent (caller prints "Invalid substitution.").
@@ -557,14 +973,10 @@ impl Game {
         new.push_str(&orig[..pos]);
         new.push_str(second);
         new.push_str(&orig[pos + first.len()..]);
-        Some(
-            new.chars()
-                .take(crate::types::MAX_INPUT_LENGTH)
-                .collect(),
-        )
+        Some(crate::text::utf8_prefix(&new, crate::types::MAX_INPUT_LENGTH).to_string())
     }
 
-async fn handle_input(&mut self, conn_id: ConnId, input: String) {
+    async fn handle_input(&mut self, conn_id: ConnId, input: String) {
         // Any input proves the player is alive: reset the login-prompt idle
         // counter (C clears it on entering each password state; the old
         // one-way counter booted ACTIVE players after 30s of accumulated
@@ -594,8 +1006,8 @@ async fn handle_input(&mut self, conn_id: ConnId, input: String) {
             }
         }
         let max_len = crate::types::MAX_INPUT_LENGTH;
-        let mut line = if doubled.chars().count() > max_len {
-            let truncated: String = doubled.chars().take(max_len).collect();
+        let mut line = if doubled.len() > max_len {
+            let truncated = crate::text::utf8_prefix(&doubled, max_len).to_string();
             self.out(
                 conn_id,
                 &format!("Line too long.  Truncated to:\r\n{}\r\n", truncated),
@@ -809,7 +1221,7 @@ async fn handle_input(&mut self, conn_id: ConnId, input: String) {
                     }
                     return;
                 }
-                let exists = self.db.player_exists(&name).await.unwrap_or(false);
+                let exists = self.db_player_exists(&name).await.unwrap_or(false);
                 if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                     d.temp_name = Some(name.clone());
                     d.state = if exists {
@@ -823,7 +1235,7 @@ async fn handle_input(&mut self, conn_id: ConnId, input: String) {
                 let yes = input.eq_ignore_ascii_case("y") || input.eq_ignore_ascii_case("yes");
                 if yes {
                     let host = self.descriptor_host(conn_id);
-                    let banned = crate::ban::isbanned(&host);
+                    let banned = self.descriptor_ban_type(conn_id);
                     if banned >= crate::ban::BanType::New {
                         self.out(
                             conn_id,
@@ -868,8 +1280,7 @@ async fn handle_input(&mut self, conn_id: ConnId, input: String) {
                 // C interpreter.c:1869-2020 CON_PASSWORD.
                 let name = self.descriptor_name(conn_id);
                 let ok = self
-                    .db
-                    .verify_password(&name, &input)
+                    .db_verify_password(&name, &input)
                     .await
                     .unwrap_or(false);
                 if !ok {
@@ -877,9 +1288,9 @@ async fn handle_input(&mut self, conn_id: ConnId, input: String) {
                     // persist it), re-prompt; disconnect at max_bad_pws (#194).
                     let host = self.descriptor_host(conn_id);
                     warn!("Bad PW: {} [{}]", name, host);
-                    if let Ok(mut rec) = self.db.load_player(&name).await {
+                    if let Ok(mut rec) = self.load_player_latest(&name).await {
                         rec.bad_pws = rec.bad_pws.saturating_add(1);
-                        let _ = self.db.save_player(&rec).await;
+                        let _ = self.db_save_player(&rec).await;
                     }
                     let tries = {
                         let d = self
@@ -906,7 +1317,7 @@ async fn handle_input(&mut self, conn_id: ConnId, input: String) {
 
                 // Password was correct.
                 let host = self.descriptor_host(conn_id);
-                let mut rec = match self.db.load_player(&name).await {
+                let mut rec = match self.load_player_latest(&name).await {
                     Ok(c) => c,
                     Err(e) => {
                         warn!("load player {} failed: {}", name, e);
@@ -920,15 +1331,15 @@ async fn handle_input(&mut self, conn_id: ConnId, input: String) {
                 let load_result = rec.bad_pws;
                 if load_result > 0 {
                     rec.bad_pws = 0;
-                    let _ = self.db.save_player(&rec).await;
+                    let _ = self.db_save_player(&rec).await;
                 }
 
                 // C 1914-1952: automatic upgrade of legacy password hashes (#219).
-                if let Ok(Some(hash)) = self.db.get_password_hash(&name).await {
+                if let Ok(Some(hash)) = self.db_get_password_hash(&name).await {
                     if crate::password::password_needs_upgrade(&hash) {
                         info!("Upgrading password security for {}", name);
                         rec.pending_password_hash = Some(crate::password::hash_password(&input));
-                        let _ = self.db.save_player(&rec).await;
+                        let _ = self.db_save_player(&rec).await;
                         rec.pending_password_hash = None;
                     }
                 }
@@ -941,7 +1352,7 @@ async fn handle_input(&mut self, conn_id: ConnId, input: String) {
                 }
 
                 // C 1957-1967: BAN_SELECT without PLR_SITEOK.
-                let banned = crate::ban::isbanned(&host);
+                let banned = self.descriptor_ban_type(conn_id);
                 if banned >= crate::ban::BanType::Select && rec.act_flags & PLR_SITEOK == 0 {
                     self.out(
                         conn_id,
@@ -966,7 +1377,10 @@ async fn handle_input(&mut self, conn_id: ConnId, input: String) {
 If you are playing from a shared connection please e-mail help@deltamud.net\r\n\
 for access.\r\n\r\n",
                     );
-                    warn!("Connection attempt for {} denied from {} - multi-play", name, host);
+                    warn!(
+                        "Connection attempt for {} denied from {} - multi-play",
+                        name, host
+                    );
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                         d.state = ConState::Close;
                     }
@@ -975,7 +1389,10 @@ for access.\r\n\r\n",
                 // C 1980-1989: wizlock (#202).
                 let restrict = crate::cmd_wizard::circle_restrict();
                 if restrict > 0 && (rec.player.level as i32) < restrict {
-                    self.out(conn_id, "The game is temporarily restricted.. try again later.\r\n");
+                    self.out(
+                        conn_id,
+                        "The game is temporarily restricted.. try again later.\r\n",
+                    );
                     warn!("Request for login denied for {} [{}] (wizlock)", name, host);
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                         d.state = ConState::Close;
@@ -1059,7 +1476,10 @@ for access.\r\n\r\n",
                     }
                 } else {
                     // C interpreter.c:2057: '...start over.' + inline prompt.
-                    self.out(conn_id, "\r\nPasswords don't match... start over.\r\nPassword: ");
+                    self.out(
+                        conn_id,
+                        "\r\nPasswords don't match... start over.\r\nPassword: ",
+                    );
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                         d.temp_password = None;
                         d.state = ConState::GetNewPassword;
@@ -1230,8 +1650,7 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
                 // C interpreter.c:2348-2364.
                 let name = self.descriptor_name(conn_id);
                 let ok = self
-                    .db
-                    .verify_password(&name, &input)
+                    .db_verify_password(&name, &input)
                     .await
                     .unwrap_or(false);
                 if ok {
@@ -1248,7 +1667,9 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
             }
             ConState::ChPwdGetNew => {
                 // C interpreter.c:2022-2039 CON_NEWPASSWD (shared).
-                if input.is_empty() || input.len() > 64 || input.len() < 3
+                if input.is_empty()
+                    || input.len() > 64
+                    || input.len() < 3
                     || input.eq_ignore_ascii_case(&self.descriptor_name(conn_id))
                 {
                     self.out(conn_id, "\r\nIllegal password.\r\nPassword: ");
@@ -1269,14 +1690,17 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
                     .map(|p| p == input)
                     .unwrap_or(false);
                 if !matches {
-                    self.out(conn_id, "\r\nPasswords don't match... start over.\r\nPassword: ");
+                    self.out(
+                        conn_id,
+                        "\r\nPasswords don't match... start over.\r\nPassword: ",
+                    );
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                         d.state = ConState::ChPwdGetNew;
                     }
                     return;
                 }
                 let name = self.descriptor_name(conn_id);
-                let mut rec = match self.db.load_player(&name).await {
+                let mut rec = match self.load_player_latest(&name).await {
                     Ok(c) => c,
                     Err(_) => {
                         self.out(conn_id, MENU);
@@ -1287,7 +1711,7 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
                     }
                 };
                 rec.pending_password_hash = Some(crate::password::hash_password(&input));
-                let _ = self.db.save_player(&rec).await;
+                let _ = self.db_save_player(&rec).await;
                 self.out(conn_id, "\r\nDone.\n\r");
                 self.out(conn_id, MENU);
                 if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
@@ -1299,8 +1723,7 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
                 // C interpreter.c:2366-2387 CON_DELCNF1.
                 let name = self.descriptor_name(conn_id);
                 let ok = self
-                    .db
-                    .verify_password(&name, &input)
+                    .db_verify_password(&name, &input)
                     .await
                     .unwrap_or(false);
                 if ok {
@@ -1324,7 +1747,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                 // C interpreter.c:2389-2430 CON_DELCNF2.
                 if input == "yes" || input == "YES" {
                     let name = self.descriptor_name(conn_id);
-                    if let Ok(mut rec) = self.db.load_player(&name).await {
+                    if let Ok(mut rec) = self.load_player_latest(&name).await {
                         if rec.act_flags & crate::flags::PLR_FROZEN != 0 {
                             self.out(
                                 conn_id,
@@ -1339,16 +1762,57 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                             rec.act_flags |= crate::flags::PLR_DELETED;
                         }
                         let level = rec.player.level;
-                        let _ = self.db.save_player(&rec).await;
-                        crate::objsave::crash_delete_file_by_name(&self.lib_path, &name);
-                        self.out(conn_id, &format!("Character '{}' deleted!\r\nGoodbye.\r\n", name));
+                        if let Err(error) = self.db_save_player(&rec).await {
+                            error!(
+                                "self-delete for {} failed before sidecar cleanup: {}",
+                                name, error
+                            );
+                            self.out(
+                                conn_id,
+                                "Character deletion failed; no files were removed. Please contact an administrator.\r\n",
+                            );
+                            if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                                d.state = ConState::Close;
+                            }
+                            return;
+                        }
+
+                        // Policy: the durable DB tombstone is authoritative.
+                        // Missing sidecars are success; any other cleanup error
+                        // is explicitly surfaced and audited instead of falsely
+                        // claiming that deletion completed.
+                        if let Err(cleanup_error) = crate::player_sidecars::delete_player_sidecars(
+                            &self.lib_path,
+                            &name,
+                            rec.idnum,
+                        ) {
+                            error!(
+                                "AUDIT: {} (lev {}) was DB-tombstoned but sidecar cleanup is incomplete: {}",
+                                name, level, cleanup_error
+                            );
+                            self.out(
+                                conn_id,
+                                "Character marked deleted, but file cleanup is incomplete. Administrators have been notified.\r\nGoodbye.\r\n",
+                            );
+                            if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                                d.state = ConState::Close;
+                            }
+                            return;
+                        }
+                        self.out(
+                            conn_id,
+                            &format!("Character '{}' deleted!\r\nGoodbye.\r\n", name),
+                        );
                         info!("{} (lev {}) has self-deleted.", name, level);
                     }
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                         d.state = ConState::Close;
                     }
                 } else {
-                    self.out(conn_id, "\r\nThat was not \"yes\". Character not deleted.\r\n");
+                    self.out(
+                        conn_id,
+                        "\r\nThat was not \"yes\". Character not deleted.\r\n",
+                    );
                     self.out(conn_id, MENU);
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                         d.state = ConState::Menu;
@@ -1409,6 +1873,16 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             .unwrap_or_default()
     }
 
+    fn descriptor_ban_type(&self, conn_id: ConnId) -> crate::ban::BanType {
+        let Some(descriptor) = self.state.descriptors.get(&conn_id) else {
+            return crate::ban::BanType::None;
+        };
+        crate::ban::isbanned_connection(
+            &descriptor.peer_ip,
+            descriptor.verified_hostname.as_deref(),
+        )
+    }
+
     fn snapshot_online_player_for_save(
         &mut self,
         ch: CharId,
@@ -1422,6 +1896,110 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         c.player.time_played = c.player.time_played.saturating_add(elapsed);
         c.last_logon = now;
         Some(c.clone())
+    }
+
+    fn queue_player_save(&mut self, snapshot: crate::character::Character, host: String) {
+        let idnum = snapshot.idnum;
+        let name = snapshot.get_name().to_string();
+        let prior = self
+            .pending_player_saves
+            .remove(&idnum)
+            .map(|save| save.task);
+        let db = self.db.clone();
+        let timeout = Duration::from_secs(self.state.config.db_timeout_secs.max(1));
+        let task_name = name.clone();
+        let task_snapshot = snapshot.clone();
+        let task = tokio::spawn(async move {
+            let mut errors = Vec::new();
+            if let Some(prior) = prior {
+                match prior.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => errors.push(error),
+                    Err(error) => errors.push(format!("prior save task failed: {error}")),
+                }
+            }
+            match tokio::time::timeout(timeout, db.save_player_with_host(&task_snapshot, &host))
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => errors.push(error.to_string()),
+                Err(_) => errors.push(format!(
+                    "database save timed out after {}s",
+                    timeout.as_secs()
+                )),
+            }
+            if errors.is_empty() {
+                Ok(())
+            } else {
+                Err(format!("{}: {}", task_name, errors.join("; ")))
+            }
+        });
+        self.pending_player_saves.insert(
+            idnum,
+            PendingPlayerSave {
+                name,
+                snapshot,
+                task,
+            },
+        );
+    }
+
+    fn pending_player_snapshot(&self, name: &str) -> Option<crate::character::Character> {
+        self.pending_player_saves
+            .values()
+            .find(|save| save.name.eq_ignore_ascii_case(name))
+            .map(|save| save.snapshot.clone())
+    }
+
+    async fn load_player_latest(&mut self, name: &str) -> Result<crate::character::Character> {
+        if let Some(snapshot) = self.pending_player_snapshot(name) {
+            return Ok(snapshot);
+        }
+        self.db_load_player(name).await
+    }
+
+    async fn reap_completed_player_saves(&mut self) {
+        let completed: Vec<i64> = self
+            .pending_player_saves
+            .iter()
+            .filter_map(|(&idnum, save)| save.task.is_finished().then_some(idnum))
+            .collect();
+        for idnum in completed {
+            let Some(save) = self.pending_player_saves.remove(&idnum) else {
+                continue;
+            };
+            match save.task.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    self.player_save_failures = self.player_save_failures.saturating_add(1);
+                    warn!("ordered player save failed: {error}");
+                }
+                Err(error) => {
+                    self.player_save_failures = self.player_save_failures.saturating_add(1);
+                    warn!("ordered player save task for {} failed: {error}", save.name);
+                }
+            }
+        }
+    }
+
+    async fn await_all_player_saves(&mut self) -> u32 {
+        let pending = std::mem::take(&mut self.pending_player_saves);
+        let mut failures = 0u32;
+        for (_, save) in pending {
+            match save.task.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    failures = failures.saturating_add(1);
+                    warn!("ordered player save failed: {error}");
+                }
+                Err(error) => {
+                    failures = failures.saturating_add(1);
+                    warn!("ordered player save task for {} failed: {error}", save.name);
+                }
+            }
+        }
+        self.player_save_failures = self.player_save_failures.saturating_add(failures);
+        failures
     }
 
     async fn create_and_enter(&mut self, conn_id: ConnId) {
@@ -1474,7 +2052,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         };
         self.state.extract_char(temp_id);
 
-        match self.db.create_player(&ch, &pass).await {
+        match self.db_create_player(&ch, &pass).await {
             Ok(idnum) => {
                 // The in-memory char MUST take the assigned idnum, or the
                 // save_player below (which keys on idnum) writes idnum=0 with an
@@ -1506,9 +2084,9 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                     .state
                     .descriptors
                     .get(&conn_id)
-                    .map(|d| d.host.as_str())
-                    .unwrap_or("");
-                if let Err(e) = self.db.save_player_with_host(&ch, host).await {
+                    .map(|d| d.host.clone())
+                    .unwrap_or_default();
+                if let Err(e) = self.db_save_player_with_host(&ch, &host).await {
                     warn!("save new player {} failed: {}", name, e);
                 }
                 crate::alias::clear_aliases(ch.idnum);
@@ -1720,62 +2298,134 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             }
         }
 
-        let dupes: Vec<(ConnId, CharId, bool)> = self
+        // C also sweeps the character list after descriptors. A linkless body
+        // can survive a dropped socket or an interrupted save; creating a new
+        // body beside it duplicates every crash-loaded object. Include both
+        // descriptor roles (`character` and a switched immortal's `original`)
+        // and every descriptor-less live PC when selecting one canonical body.
+        let live_bodies: Vec<CharId> = self
+            .state
+            .chars
+            .iter()
+            .filter_map(|(&cid, ch)| (!ch.is_npc && ch.idnum == idnum).then_some(cid))
+            .collect();
+        if live_bodies.is_empty() {
+            return false;
+        }
+
+        let registered = self
+            .state
+            .players_by_name
+            .values()
+            .copied()
+            .find(|cid| live_bodies.contains(cid));
+        let descriptor_body = self.state.descriptors.iter().find_map(|(&old_conn, d)| {
+            if old_conn == conn_id || d.state != ConState::Playing {
+                return None;
+            }
+            d.original
+                .into_iter()
+                .chain(d.character)
+                .find(|cid| live_bodies.contains(cid))
+        });
+        let body = registered.or(descriptor_body).unwrap_or(live_bodies[0]);
+
+        let dupes: Vec<(ConnId, Option<CharId>, Option<CharId>, bool)> = self
             .state
             .descriptors
             .iter()
-            .filter(|&(c, d)| {
-                *c != conn_id
+            .filter(|&(old_conn, d)| {
+                *old_conn != conn_id
                     && d.character
-                        .map(|cid| {
-                            self.state
-                                .get_char(cid)
-                                .map(|ch| !ch.is_npc && ch.idnum == idnum)
-                                .unwrap_or(false)
-                        })
-                        .unwrap_or(false)
+                        .into_iter()
+                        .chain(d.original)
+                        .any(|cid| live_bodies.contains(&cid))
             })
-            .map(|(&c, d)| (c, d.character.unwrap(), d.state == ConState::Playing))
+            .map(|(&old_conn, d)| {
+                (
+                    old_conn,
+                    d.character,
+                    d.original,
+                    d.state == ConState::Playing,
+                )
+            })
             .collect();
-        if dupes.is_empty() {
-            return false;
-        }
-        let mut adopted: Option<CharId> = None;
-        for (old_conn, old_char, was_playing) in dupes {
-            if adopted.is_none() && was_playing {
+        let mut announced_usurp = false;
+        for (old_conn, controlled, original, was_playing) in dupes {
+            if was_playing && !announced_usurp {
                 // USURP: the old socket is told its body was taken.
                 self.out(old_conn, "\r\nThis body has been usurped!\r\n");
-                adopted = Some(old_char);
-            } else if adopted.is_none() {
-                adopted = Some(old_char);
+                announced_usurp = true;
             }
-            self.out(old_conn, "\r\nMultiple login detected -- disconnecting.\r\n");
+            self.out(
+                old_conn,
+                "\r\nMultiple login detected -- disconnecting.\r\n",
+            );
             if let Some(d) = self.state.descriptors.get_mut(&old_conn) {
                 // Detach WITHOUT the save/extract disconnect path: the body
                 // lives on under this connection (C: k->character = NULL).
                 d.character = None;
+                d.original = None;
                 d.state = ConState::Close;
+            }
+            for detached in controlled.into_iter().chain(original) {
+                if let Some(ch) = self.state.get_char_mut(detached) {
+                    if ch.desc == Some(old_conn) {
+                        ch.desc = None;
+                    }
+                }
             }
             // C 1521-1533: USURP room line + messages to the taker.
             if was_playing {
-                if let Some(cid) = adopted {
-                    crate::act::act(
-                        &mut self.state,
-                        "$n suddenly keels over in pain, surrounded by a white aura...\r\n$n's body has been taken over by a new spirit!",
-                        true,
-                        cid,
-                        None,
-                        crate::act::ActArg::None,
-                        crate::act::To::Room,
-                    );
-                }
+                crate::act::act(
+                    &mut self.state,
+                    "$n suddenly keels over in pain, surrounded by a white aura...\r\n$n's body has been taken over by a new spirit!",
+                    true,
+                    body,
+                    None,
+                    crate::act::ActArg::None,
+                    crate::act::To::Room,
+                );
                 self.out(conn_id, "You take over your own body, already in use!\r\n");
             } else {
                 self.out(conn_id, "Reconnecting.\r\n");
             }
-            info!("{} has re-logged in ... disconnecting old socket.", self.descriptor_name(conn_id));
+            info!(
+                "{} has re-logged in ... disconnecting old socket.",
+                self.descriptor_name(conn_id)
+            );
         }
-        let Some(body) = adopted else { return false; };
+
+        // If a prior failure already left two bodies, retain the canonical
+        // registered/connected one and destroy the duplicate body's copied
+        // inventory before extraction. `extract_char` normally drops gear in
+        // the room, which would preserve the duplication we are repairing.
+        for duplicate in live_bodies.into_iter().filter(|&cid| cid != body) {
+            let copied_objects: Vec<ObjId> = self
+                .state
+                .get_char(duplicate)
+                .map(|ch| {
+                    ch.carrying
+                        .iter()
+                        .copied()
+                        .chain(ch.equipment.iter().flatten().copied())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !self.state.extract_objs(copied_objects) {
+                warn!(
+                    "refused to remove duplicate live body {:?} for persistent player id {} because its object graph is malformed",
+                    duplicate, idnum
+                );
+                continue;
+            }
+            self.state.extract_char(duplicate);
+            warn!(
+                "removed duplicate live body {:?} for persistent player id {}",
+                duplicate, idnum
+            );
+        }
+
         // Re-attach this descriptor to the existing entity.
         if let Some(c) = self.state.get_char_mut(body) {
             c.desc = Some(conn_id);
@@ -1800,7 +2450,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         let name = self.descriptor_name(conn_id);
         let mut ch = match self.pending_load.remove(&conn_id) {
             Some(c) if c.get_name().eq_ignore_ascii_case(&name) => c,
-            _ => match self.db.load_player(&name).await {
+            _ => match self.load_player_latest(&name).await {
                 Ok(c) => c,
                 Err(e) => {
                     warn!("load player {} failed: {}", name, e);
@@ -1809,6 +2459,15 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                 }
             },
         };
+        // Re-run the same-id gate immediately before create_char. The password
+        // gate normally makes two pending menu sessions impossible, but this is
+        // the final invariant boundary: even a pre-existing/raced pending login
+        // or descriptor-less body is closed/adopted instead of materializing a
+        // second body and loading the same rent file twice (#396).
+        if self.perform_dupe_check(conn_id, ch.idnum).await {
+            self.just_created.remove(&conn_id);
+            return;
+        }
         // CON_QANSI answer and menu option 2's description land here, the way
         // C carries them on d->character (#198).
         if let Some(d) = self.state.descriptors.get(&conn_id) {
@@ -2059,12 +2718,14 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         &mut self,
         conn_id: ConnId,
         host: String,
+        peer_ip: String,
+        verified_hostname: Option<String>,
         raw_fd: RawFd,
         name: String,
-        output_tx: mpsc::Sender<Vec<u8>>,
+        output_tx: mpsc::Sender<OutputFrame>,
     ) {
         info!("Copyover recovery: re-attaching {} (fd {})", name, raw_fd);
-        let mut d = Descriptor::with_fd(conn_id, host, raw_fd);
+        let mut d = Descriptor::with_identity(conn_id, host, peer_ip, verified_hostname, raw_fd);
         // The player was already greeted/logged-in pre-reboot; mark the name so
         // descriptor_name() / enter_game pick the right pfile, and start in
         // GetName so enter_game's state transition to Playing is well-defined.
@@ -2076,7 +2737,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         // "\n\rRestoring from copyover...\n\r" was already written to the fd by
         // the OLD process right before exec (do_copyover); here we emit the C
         // "reboot completed" confirmation, then enter the world.
-        let exists = self.db.player_exists(&name).await.unwrap_or(false);
+        let exists = self.db_player_exists(&name).await.unwrap_or(false);
         if !exists {
             // C: "\n\rSomehow, your character was lost in the copyover. Sorry.\n\r"
             self.out(
@@ -2108,7 +2769,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         // String-editor + pager state for this connection must go too: ConnIds
         // are never reused, so a pager holding a full paginated document (or an
         // editor buffer) leaks forever (issue #397).
-        crate::modify::abort_conn(conn_id);
+        crate::modify::abort_conn(&mut self.state, conn_id);
         // Login-side per-conn state (issue #397): pending_load holds an entire
         // 83-column Character clone, pending/just_created hold creation
         // choices -- ConnIds are never reused, so anything left behind after
@@ -2128,7 +2789,6 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             // persist to SQL (issue #390).
             crate::arena::on_link_lost(&mut self.state, cid);
             // Persist then remove the character from the world.
-            // Persist then remove the character from the world.
             if let Some(snapshot) = self.snapshot_online_player_for_save(cid) {
                 // Keep the index current with the saved record (level can
                 // have changed this session); host carries over the last
@@ -2144,16 +2804,13 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                 if let Err(err) = crate::alias::write_aliases(&self.lib_path, &pname, idnum) {
                     warn!("write_aliases({}) failed: {}", pname, err);
                 }
-                let db = self.db.clone();
                 let host = self
                     .state
                     .descriptors
                     .get(&conn_id)
                     .map(|d| d.host.clone())
                     .unwrap_or_default();
-                tokio::spawn(async move {
-                    let _ = db.save_player_with_host(&snapshot, &host).await;
-                });
+                self.queue_player_save(snapshot, host);
             }
             crate::objsave::crash_save(&mut self.state, cid, &self.lib_path);
             self.state.extract_char(cid);
@@ -2179,16 +2836,13 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
     /// loop, so &mut self.state is free for the sync command_interpreter call.
     /// Drain clan-related deferred SQL (queued from sync command paths, #165).
     async fn drain_deferred_db_ops(&mut self) {
-        let ops: Vec<crate::state::DeferredDbOp> =
-            std::mem::take(&mut self.state.deferred_db_ops);
+        let ops: Vec<crate::state::DeferredDbOp> = std::mem::take(&mut self.state.deferred_db_ops);
         for op in ops {
             let r = match op {
                 crate::state::DeferredDbOp::ClanDestroyFixup(n) => {
-                    self.db.clan_destroy_fixup(n).await
+                    self.db_clan_destroy_fixup(n).await
                 }
-                crate::state::DeferredDbOp::ClanLowerRanks(n) => {
-                    self.db.clan_lower_ranks(n).await
-                }
+                crate::state::DeferredDbOp::ClanLowerRanks(n) => self.db_clan_lower_ranks(n).await,
             };
             if let Err(e) = r {
                 log::warn!("deferred clan DB op failed: {}", e);
@@ -2208,7 +2862,21 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             // If the target raced back online (logged in between queue + drain),
             // just replay against the live char — no load/extract needed.
             let key = op.target.to_lowercase();
-            if self.state.players_by_name.contains_key(&key) {
+            if let Some(target) = self.state.players_by_name.get(&key).copied() {
+                let target_level = self
+                    .state
+                    .get_char(target)
+                    .map(|character| character.player.level)
+                    .unwrap_or(u8::MAX);
+                if op.authority == OfflineOpAuthority::InspectPlayer
+                    && !self
+                        .state
+                        .can_inspect_player_level(op.requester, target_level)
+                {
+                    self.state
+                        .send_to_char(op.requester, PLAYER_INSPECTION_DENIED);
+                    continue;
+                }
                 dispatch_command_isolated(
                     &mut self.state,
                     op.requester,
@@ -2218,7 +2886,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                 continue;
             }
 
-            let mut chr = match self.db.load_player(&op.target).await {
+            let mut chr = match self.load_player_latest(&op.target).await {
                 Ok(c) => c,
                 Err(_) => {
                     self.state
@@ -2226,6 +2894,20 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                     continue;
                 }
             };
+            // The player_table gate in cmd_wizard is only a queue-time
+            // snapshot. Re-authorize against the freshly loaded DB row before
+            // exposing any fields or splicing the target into the world; this
+            // closes the level-change TOCTOU window. The replayed online
+            // handler applies this same predicate once more.
+            if op.authority == OfflineOpAuthority::InspectPlayer
+                && !self
+                    .state
+                    .can_inspect_player_level(op.requester, chr.player.level)
+            {
+                self.state
+                    .send_to_char(op.requester, PLAYER_INSPECTION_DENIED);
+                continue;
+            }
             // No live connection; clear stale object refs (the DB clone carries
             // last session's ObjIds — same hygiene as enter_game) so nothing in
             // the world dangles when we extract.
@@ -2266,8 +2948,278 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             }
             self.state.extract_char(id);
             if let Some(s) = snap {
-                let _ = self.db.save_player(&s).await;
+                self.queue_player_save(s, String::new());
             }
+        }
+    }
+
+    /// Commit queued live-player renames without ever exposing a name which is
+    /// only present in memory.  This deliberately quiesces the single-owner
+    /// world while the bounded conditional UPDATE runs: servicing a disconnect
+    /// or save concurrently could otherwise enqueue an old-name REPLACE after
+    /// the rename and silently undo it.  A normal operation is one indexed
+    /// UPDATE and should complete in milliseconds; TimedDatabase supplies the
+    /// fail-closed upper bound.
+    async fn drain_player_rename_requests(&mut self) {
+        let requests = self.state.take_player_rename_requests();
+        for request in requests {
+            let preflight = self
+                .state
+                .get_char(request.requester)
+                .filter(|requester| !requester.is_npc)
+                .map(|requester| (requester.get_name().to_string(), requester.player.level))
+                .zip(self.state.get_char(request.victim).map(|victim| {
+                    (
+                        victim.idnum,
+                        victim.get_name().to_string(),
+                        victim.player.level,
+                    )
+                }));
+            let Some((
+                (requester_name, requester_level),
+                (victim_idnum, victim_name, victim_level),
+            )) = preflight
+            else {
+                warn!(
+                    "AUDIT: rename {} -> {} abandoned because requester or victim left the world",
+                    request.old_name, request.new_name
+                );
+                continue;
+            };
+
+            let old_key = request.old_name.to_lowercase();
+            let new_key = request.new_name.to_lowercase();
+            let identity_is_current = victim_idnum == request.idnum
+                && victim_name.eq_ignore_ascii_case(&request.old_name)
+                && self.state.players_by_name.get(&old_key).copied() == Some(request.victim);
+            let authority_is_current = requester_level > victim_level;
+            let live_collision = self
+                .state
+                .players_by_name
+                .get(&new_key)
+                .is_some_and(|owner| *owner != request.victim);
+            let index_collision = self.state.player_table.iter().any(|player| {
+                player.name.eq_ignore_ascii_case(&request.new_name) && player.idnum != request.idnum
+            });
+            if !identity_is_current
+                || !authority_is_current
+                || live_collision
+                || index_collision
+                || request.old_name.eq_ignore_ascii_case(&request.new_name)
+            {
+                warn!(
+                    "AUDIT: rename {} (id {}) -> {} failed its drain-time identity/authority/collision recheck",
+                    request.old_name, request.idnum, request.new_name
+                );
+                if self.state.char_exists(request.requester) {
+                    self.state.send_to_char(
+                        request.requester,
+                        "Rename failed because the player identity, authority, or destination changed; no name change was made.\r\n",
+                    );
+                }
+                continue;
+            }
+
+            // A disconnect save from an earlier iteration may still be running
+            // with the old name.  It must finish before the conditional rename
+            // so it cannot commit later and restore the old key.
+            if let Some(save) = self.pending_player_saves.remove(&request.idnum) {
+                let save_result = match save.task.await {
+                    Ok(result) => result,
+                    Err(error) => Err(format!("prior save task failed: {error}")),
+                };
+                if let Err(error) = save_result {
+                    self.player_save_failures = self.player_save_failures.saturating_add(1);
+                    error!(
+                        "AUDIT: rename {} (id {}) -> {} aborted after prior player save failure: {}",
+                        request.old_name, request.idnum, request.new_name, error
+                    );
+                    if self.state.char_exists(request.requester) {
+                        self.state.send_to_char(
+                            request.requester,
+                            "Rename failed because the player's pending save did not complete; no name change was made.\r\n",
+                        );
+                    }
+                    continue;
+                }
+            }
+
+            // SQL is the authoritative identity.  Do not touch sidecars until
+            // this exact id/old-name/destination predicate commits.
+            let durable_rename = self
+                .db
+                .rename_player_if_current(request.idnum, &request.old_name, &request.new_name)
+                .await;
+            match durable_rename {
+                Ok(true) => {}
+                Ok(false) => {
+                    warn!(
+                        "AUDIT: rename {} (id {}) -> {} rejected by the durable identity/collision predicate",
+                        request.old_name, request.idnum, request.new_name
+                    );
+                    if self.state.char_exists(request.requester) {
+                        self.state.send_to_char(
+                            request.requester,
+                            "Rename failed because the durable player identity or destination changed; no name change was made.\r\n",
+                        );
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    error!(
+                        "AUDIT: rename {} (id {}) -> {} failed before sidecar publication: {}",
+                        request.old_name, request.idnum, request.new_name, error
+                    );
+                    // A transport timeout while COMMIT is in flight is
+                    // inherently outcome-ambiguous. Run the inverse
+                    // conditional operation (a no-op when the old name never
+                    // changed), then read the exact identity before making any
+                    // claim to the administrator. Sidecars are still untouched.
+                    let compensation = self
+                        .db
+                        .rename_player_if_current(
+                            request.idnum,
+                            &request.new_name,
+                            &request.old_name,
+                        )
+                        .await;
+                    if let Err(compensation_error) = &compensation {
+                        error!(
+                            "AUDIT: rename {} (id {}) -> {} error compensation also failed: {}",
+                            request.old_name, request.idnum, request.new_name, compensation_error
+                        );
+                    }
+                    let observed_name = self.db.player_name_by_id(request.idnum).await;
+                    let old_name_confirmed = observed_name.as_ref().is_ok_and(|name| {
+                        name.as_deref()
+                            .is_some_and(|name| name.eq_ignore_ascii_case(&request.old_name))
+                    });
+                    if !old_name_confirmed {
+                        error!(
+                            "AUDIT: CRITICAL rename {} (id {}) -> {} could not confirm the old SQL identity after error compensation; observed={:?}",
+                            request.old_name, request.idnum, request.new_name, observed_name
+                        );
+                    }
+                    if self.state.char_exists(request.requester) {
+                        let message = if old_name_confirmed {
+                            "Rename failed while saving the durable player identity; the database old name was confirmed and no files or live names were changed.\r\n"
+                        } else {
+                            "CRITICAL: rename database state is indeterminate after a failed compensation. No files or live names were changed; check the audit log immediately.\r\n"
+                        };
+                        self.state.send_to_char(request.requester, message);
+                    }
+                    continue;
+                }
+            }
+
+            // The database now owns the new name.  Move both name-keyed files
+            // as one preflighted/rollback-capable lifecycle.  If it fails,
+            // conditionally restore the SQL name before returning failure.
+            // SQL and the filesystem cannot share one atomic commit: process
+            // or host loss in this small post-COMMIT window can require manual
+            // reconciliation at restart.  We never report success before the
+            // window closes, and every recoverable runtime failure below is
+            // compensated and audited rather than hidden.
+            if let Err(sidecar_error) = crate::player_sidecars::rename_player_sidecars(
+                &self.lib_path,
+                &request.old_name,
+                &request.new_name,
+                request.idnum,
+            ) {
+                let rollback = self
+                    .db
+                    .rename_player_if_current(request.idnum, &request.new_name, &request.old_name)
+                    .await;
+                let sql_rollback_restored_old_name = match rollback {
+                    Ok(true) => {
+                        error!(
+                            "AUDIT: rename {} (id {}) -> {} rolled SQL back after sidecar failure: {}",
+                            request.old_name, request.idnum, request.new_name, sidecar_error
+                        );
+                        true
+                    }
+                    Ok(false) => {
+                        error!(
+                            "AUDIT: CRITICAL rename {} (id {}) -> {} sidecars failed and SQL rollback predicate was rejected: {}",
+                            request.old_name, request.idnum, request.new_name, sidecar_error
+                        );
+                        false
+                    }
+                    Err(rollback_error) => {
+                        error!(
+                            "AUDIT: CRITICAL rename {} (id {}) -> {} sidecars failed and SQL rollback errored: {}; rollback: {}",
+                            request.old_name,
+                            request.idnum,
+                            request.new_name,
+                            sidecar_error,
+                            rollback_error
+                        );
+                        false
+                    }
+                };
+                let fully_consistent_failure =
+                    sql_rollback_restored_old_name && !sidecar_error.rollback_incomplete();
+                if !fully_consistent_failure && sidecar_error.rollback_incomplete() {
+                    error!(
+                        "AUDIT: CRITICAL rename {} (id {}) -> {} left at least one sidecar move incompletely rolled back",
+                        request.old_name, request.idnum, request.new_name
+                    );
+                }
+                if self.state.char_exists(request.requester) {
+                    let message = if fully_consistent_failure {
+                        "Rename failed while moving the player's durable files; the database old name was restored and no live name change was published.\r\n"
+                    } else {
+                        "CRITICAL: rename storage is inconsistent after a failed rollback. No live name change was published; check the audit log immediately.\r\n"
+                    };
+                    self.state.send_to_char(request.requester, message);
+                }
+                continue;
+            }
+
+            // Every durable component now resolves through the new identity.
+            // These remaining in-memory operations are infallible; only here
+            // may users, indexes, mail, or the audit stream observe success.
+            self.state.players_by_name.remove(&old_key);
+            if let Some(victim) = self.state.get_char_mut(request.victim) {
+                victim.player.name = request.new_name.clone();
+            }
+            self.state.players_by_name.insert(new_key, request.victim);
+            if let Some(snapshot) = self.state.get_char(request.victim).cloned() {
+                self.state.update_player_index_from_character(
+                    &snapshot,
+                    snapshot.last_logon.timestamp(),
+                    "",
+                );
+            }
+            crate::mail::mail_register_player(request.idnum, &request.new_name);
+
+            if self.state.char_exists(request.requester) {
+                self.state.send_to_char(
+                    request.requester,
+                    &format!(
+                        "You have renamed {} to {}.\r\n",
+                        request.old_name, request.new_name
+                    ),
+                );
+            }
+            if self.state.char_exists(request.victim) {
+                self.state.send_to_char(
+                    request.victim,
+                    &format!(
+                        "&GYou have been renamed to {} by the gods.&n\r\n",
+                        request.new_name
+                    ),
+                );
+            }
+            crate::syslog::mudlog(
+                &mut self.state,
+                &format!(
+                    "{} has renamed {} to {}",
+                    requester_name, request.old_name, request.new_name
+                ),
+                crate::syslog::NRM,
+                LVL_GOD,
+            );
         }
     }
 
@@ -2276,10 +3228,60 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             return;
         }
 
-        match self.db.delete_deleted_players().await {
+        // Capture the authoritative names/idnums before DELETE so the same
+        // lifecycle used by self-delete can remove name-keyed rent/alias data.
+        // If discovery or any cleanup fails, retain the PLR_DELETED DB row as
+        // the durable audit/tombstone and let a later pfileclean retry.
+        let latest_players = match self.db_list_players().await {
+            Ok(players) => players,
+            Err(err) => {
+                warn!("pfileclean aborted before sidecar cleanup: failed to list players: {err}");
+                return;
+            }
+        };
+        self.state.player_table = latest_players.clone();
+        let deleted_players: Vec<_> = latest_players
+            .into_iter()
+            .filter(|player| player.act_flags & crate::flags::PLR_DELETED != 0)
+            .collect();
+
+        if let Some(player) = deleted_players
+            .iter()
+            .find(|player| self.state.find_player_by_name(&player.name).is_some())
+        {
+            warn!(
+                "AUDIT: pfileclean aborted: deleted player {} (id {}) is still in the world",
+                player.name, player.idnum
+            );
+            return;
+        }
+
+        let mut cleanup_failures = Vec::new();
+        for player in &deleted_players {
+            if let Err(error) = crate::player_sidecars::delete_player_sidecars(
+                &self.lib_path,
+                &player.name,
+                player.idnum,
+            ) {
+                cleanup_failures.push(format!("{} (id {}): {}", player.name, player.idnum, error));
+            }
+        }
+        if !cleanup_failures.is_empty() {
+            error!(
+                "AUDIT: pfileclean retained DB tombstones because sidecar cleanup is incomplete: {}",
+                cleanup_failures.join("; ")
+            );
+            return;
+        }
+
+        let audited_idnums = deleted_players.iter().map(|player| player.idnum).collect();
+        match self
+            .db_delete_deleted_players_by_idnums(audited_idnums)
+            .await
+        {
             Ok(deleted) => {
                 info!("pfileclean deleted {} PLR_DELETED player row(s)", deleted);
-                match self.db.list_players().await {
+                match self.db_list_players().await {
                     Ok(players) => {
                         self.state.player_table = players;
                     }
@@ -2327,13 +3329,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                     err
                 );
             }
-            if let Err(err) = self.db.save_player_with_host(&snapshot, &host).await {
-                warn!(
-                    "queued save_player({}) failed: {}",
-                    snapshot.get_name(),
-                    err
-                );
-            }
+            self.queue_player_save(snapshot, host);
         }
     }
 
@@ -2428,7 +3424,8 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         }
         // Mud-hour block (SECS_PER_MUD_HOUR * PASSES_PER_SEC = 750 pulses):
         // calendar/sky, affect aging (comm.c:1038, #96), then regen/conditions.
-        if pulse % 750 == 0 { // SECS_PER_MUD_HOUR(75) * PASSES_PER_SEC(10)
+        if pulse % 750 == 0 {
+            // SECS_PER_MUD_HOUR(75) * PASSES_PER_SEC(10)
             crate::weather::weather_and_time(&mut self.state);
             crate::magic::affect_update(&mut self.state);
             crate::limits::point_update(&mut self.state);
@@ -2475,7 +3472,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             ) {
                 d.idle_tics += 1;
                 if d.idle_tics >= 2 {
-                    d.outbuf.push_str("\r\nTimed out... goodbye.\r\n");
+                    d.write("\r\nTimed out... goodbye.\r\n");
                     to_close.push(*cid);
                 }
             }
@@ -2588,11 +3585,21 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                 if rm >= wm { rm - wm } else { 60 - (wm - rm) }
             );
             self.state.send_to_all_players(&msg);
-            crate::syslog::mudlog(&mut self.state, "Automatic reboot imminent.", crate::syslog::NRM, 0);
+            crate::syslog::mudlog(
+                &mut self.state,
+                "Automatic reboot imminent.",
+                crate::syslog::NRM,
+                0,
+            );
         }
         if hr == rh && min == rm {
             info!("Auto-reboot triggered; saving and restarting.");
-            crate::syslog::mudlog(&mut self.state, "Automatic reboot triggered.", crate::syslog::NRM, 0);
+            crate::syslog::mudlog(
+                &mut self.state,
+                "Automatic reboot triggered.",
+                crate::syslog::NRM,
+                0,
+            );
             crate::objsave::crash_save_all(&mut self.state);
             crate::house::house_save_all(&mut self.state);
             crate::olc::flush_save_list_to_disk(&mut self.state);
@@ -2604,13 +3611,13 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         let conns: Vec<ConnId> = self.state.descriptors.keys().copied().collect();
         let mut to_close = Vec::new();
         for conn_id in conns {
-            let (text, closing) = {
+            let (text, closing, mut overflowed) = {
                 let d = match self.state.descriptors.get_mut(&conn_id) {
                     Some(d) => d,
                     None => continue,
                 };
-                let t = std::mem::take(&mut d.outbuf);
-                (t, d.state == ConState::Close)
+                let (text, overflowed) = d.take_output_status();
+                (text, d.state == ConState::Close, overflowed)
             };
             if !text.is_empty() {
                 // C comm.c:1637-1642 (#221): the whole buffer (output + prompt)
@@ -2643,9 +3650,21 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                         None => 1,
                     }
                 };
-                let rendered = crate::connection::proc_color(&text, mode, |max| {
+                let mut rendered = crate::connection::proc_color(&text, mode, |max| {
                     1 + self.state.rng.dice(1, max)
                 });
+                if rendered.len() > crate::connection::DESCRIPTOR_OUTPUT_LIMIT {
+                    crate::text::truncate_utf8_bytes(
+                        &mut rendered,
+                        crate::connection::DESCRIPTOR_OUTPUT_LIMIT
+                            .saturating_sub(crate::connection::OUTPUT_OVERFLOW_MARKER.len()),
+                    );
+                    rendered.push_str(crate::connection::OUTPUT_OVERFLOW_MARKER);
+                    overflowed = true;
+                }
+                if overflowed {
+                    self.metrics.inc_output_overflow();
+                }
                 if let Some(tx) = self.outputs.get(&conn_id) {
                     // C comm.c:1713 closes on would-block rather than waiting:
                     // a client that stops reading must not park the Game task
@@ -2653,16 +3672,19 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                     // TCP backpressure). try_send + close on Full is the
                     // non-blocking equivalent; the loop's to_close pass
                     // disconnects the descriptor below.
-                    if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
-                        tx.try_send(rendered.into_bytes())
+                    if tx
+                        .try_send(OutputFrame::data(rendered.into_bytes()))
+                        .is_err()
                     {
+                        self.metrics.inc_output_closed_client();
                         if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                             d.state = ConState::Close;
                         }
+                        to_close.push(conn_id);
                     }
                 }
             }
-            if closing {
+            if closing && !to_close.contains(&conn_id) {
                 to_close.push(conn_id);
             }
         }
@@ -2704,10 +3726,9 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         }
         if c.prf_flags & PRF_DISPMOVE != 0 {
             match c.riding.map(|rid| self.state.get_char(rid)).flatten() {
-                Some(mount) => prompt.push_str(&format!(
-                    "&M{}&m&ym&mmv&w ",
-                    mount.points.move_points
-                )),
+                Some(mount) => {
+                    prompt.push_str(&format!("&M{}&m&ym&mmv&w ", mount.points.move_points))
+                }
                 None => prompt.push_str(&format!("&M{}&mmv&w ", c.points.move_points)),
             }
         }
@@ -2797,10 +3818,9 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                 )
             }
             ConState::GetOldPassword => "Password: ".to_string(),
-            ConState::GetNewPassword => format!(
-                "Give me a password for {}: ",
-                name.unwrap_or_default()
-            ),
+            ConState::GetNewPassword => {
+                format!("Give me a password for {}: ", name.unwrap_or_default())
+            }
             ConState::ConfirmPassword => "\r\nPlease retype password: ".to_string(),
             ConState::GetNewbie => {
                 "Are you completely new to MUDing &c(&YY&c/&YN&c)&n? ".to_string()
@@ -2829,7 +3849,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             ConState::DelCnf1 => "\r\nEnter your password for verification: ".to_string(),
             ConState::DelCnf2 => "\r\nYOU ARE ABOUT TO DELETE THIS CHARACTER PERMANENTLY.\r\n\
  ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: "
-            .to_string(),
+                .to_string(),
             ConState::Playing => {
                 // C comm.c:1213-1293 make_prompt: the full PRF_* chain (#220).
                 self.make_playing_prompt(conn_id)
@@ -2871,7 +3891,14 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
     /// sequences whose lone 0xFF byte must not pass through `.chars()`). Mirrors
     /// connection.rs's negotiation-refusal path: the writer only ever calls
     /// `.as_bytes()`, so wrapping arbitrary bytes in a String is lossless.
-    fn send_raw_bytes(&self, conn_id: ConnId, bytes: &[u8]) {
+    fn send_raw_bytes(&mut self, conn_id: ConnId, bytes: &[u8]) {
+        if bytes.len() > crate::connection::DESCRIPTOR_OUTPUT_LIMIT {
+            self.metrics.inc_output_overflow();
+            if let Some(descriptor) = self.state.descriptors.get_mut(&conn_id) {
+                descriptor.state = ConState::Close;
+            }
+            return;
+        }
         if let Some(tx) = self.outputs.get(&conn_id) {
             // The channel carries raw bytes: telnet frames are NOT valid
             // UTF-8 (IAC = 0xFF), and Vec<u8> makes that contract
@@ -2879,7 +3906,12 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             // try_send avoids making this async; the bounded(256) channel is
             // effectively never full for a 3-byte control sequence, and dropping
             // an echo-negotiation byte under extreme backpressure is harmless.
-            let _ = tx.try_send(bytes.to_vec());
+            if tx.try_send(OutputFrame::data(bytes.to_vec())).is_err() {
+                self.metrics.inc_output_closed_client();
+                if let Some(descriptor) = self.state.descriptors.get_mut(&conn_id) {
+                    descriptor.state = ConState::Close;
+                }
+            }
         }
     }
     fn descriptor_name(&self, conn_id: ConnId) -> String {
@@ -2914,7 +3946,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
     /// GMCP-enabled descriptor that has a playing character. JSON is hand-rolled
     /// (no serde dep): small, one-line, with `"`/`\` escaped in names. Bytes go
     /// down the raw-bytes channel verbatim, never through render_color.
-    fn push_gmcp_update(&self, conn_id: ConnId) {
+    fn push_gmcp_update(&mut self, conn_id: ConnId) {
         for message in self.gmcp_snapshots(conn_id) {
             self.send_raw_bytes(conn_id, &telnet_subneg(TELOPT_GMCP, message.as_bytes()));
         }
@@ -3018,7 +4050,9 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         let mut entries: Vec<(u8, serde_json::Value)> = Vec::new();
         let ids: Vec<CharId> = self.state.players_by_name.values().copied().collect();
         for cid in ids {
-            let Some(c) = self.state.get_char(cid) else { continue };
+            let Some(c) = self.state.get_char(cid) else {
+                continue;
+            };
             if c.is_npc {
                 continue;
             }
@@ -3055,7 +4089,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
     /// block (`IAC SB MSSP <VAR name VAL value>... IAC SE`). Crawlers/listing
     /// sites read this to index the server. PLAYERS/UPTIME need the live Game,
     /// which is why this is driven from here rather than connection.rs.
-    fn send_mssp(&self, conn_id: ConnId) {
+    fn send_mssp(&mut self, conn_id: ConnId) {
         // Count players currently in-world (a character attached, in Playing).
         let players = self
             .state
@@ -3143,24 +4177,30 @@ fn valid_name(name: &str) -> bool {
 /// as player names (#223).
 fn reserved_or_fill_word(name: &str) -> bool {
     const RESERVED: &[&str] = &[
-        "a", "an", "self", "me", "all", "room", "someone", "something",
+        "a",
+        "an",
+        "self",
+        "me",
+        "all",
+        "room",
+        "someone",
+        "something",
     ];
     crate::interpreter::FILL_WORDS
         .iter()
         .any(|f| f.eq_ignore_ascii_case(name))
-        || RESERVED
-            .iter()
-            .any(|r| r.eq_ignore_ascii_case(name))
+        || RESERVED.iter().any(|r| r.eq_ignore_ascii_case(name))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DatabaseInterface;
     use crate::config::Config;
     use crate::mock_database::MockDatabase;
-    use crate::DatabaseInterface;
     use std::sync::Arc;
     use std::sync::{Mutex, OnceLock};
+    use tokio::io::AsyncReadExt;
 
     pub(super) fn test_game(db: Arc<MockDatabase>) -> Game {
         let db_trait: Arc<dyn DatabaseInterface> = db;
@@ -3188,6 +4228,26 @@ mod tests {
     /// connection sits at GetName (tests written against the pre-#198 flow).
     async fn attach_descriptor_at_name(game: &mut Game, conn: ConnId, host: &str) {
         attach_descriptor_host(game, conn, host);
+        game.nanny(conn, "y".to_string()).await;
+        assert_eq!(descriptor_state(game, conn), ConState::GetName);
+    }
+
+    async fn attach_descriptor_identity_at_name(
+        game: &mut Game,
+        conn: ConnId,
+        peer_ip: &str,
+        verified_hostname: &str,
+    ) {
+        game.state.descriptors.insert(
+            conn,
+            Descriptor::with_identity(
+                conn,
+                verified_hostname.to_string(),
+                peer_ip.to_string(),
+                Some(verified_hostname.to_string()),
+                -1,
+            ),
+        );
         game.nanny(conn, "y".to_string()).await;
         assert_eq!(descriptor_state(game, conn), ConState::GetName);
     }
@@ -3223,9 +4283,55 @@ mod tests {
         assert!((chrono::Utc::now() - live.last_logon).num_seconds() <= 1);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn disconnect_persists_restored_arena_state_before_extracting() {
+        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
+        crate::arena::reset_for_tests();
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        let arena_room = game.state.add_room(crate::room::Room::new(
+            4801,
+            48,
+            "Arena Prep".into(),
+            String::new(),
+        ));
+        let conn = ConnId(91);
+        attach_descriptor(&mut game, conn);
+
+        let mut ch = crate::character::Character::new_player(
+            "ArenaSaver".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        ch.wimp_level = 12;
+        ch.recall_level = 34;
+        ch.affect_flags = crate::flags::AFF_INVISIBLE;
+        crate::gold::set(&mut ch, crate::gold::Account::Carried, 7_777);
+        ch.desc = Some(conn);
+        ch.idnum = db.create_player(&ch, "pw").await.unwrap();
+        let cid = game.state.create_char(ch);
+        game.state.char_to_room(cid, arena_room);
+        game.state.descriptors.get_mut(&conn).unwrap().character = Some(cid);
+        crate::arena::set_stat_for_test(cid, crate::arena::ARENA_COMBATANT1);
+        crate::arena::bup_affects(&mut game.state, cid);
+        game.state.get_char_mut(cid).unwrap().affect_flags = crate::flags::AFF_BLIND;
+
+        game.disconnect(conn).await;
+        assert_eq!(game.await_all_player_saves().await, 0);
+
+        let saved = db.load_player("ArenaSaver").await.unwrap();
+        assert_eq!(saved.affect_flags, crate::flags::AFF_INVISIBLE);
+        assert_eq!(saved.wimp_level, 12);
+        assert_eq!(saved.recall_level, 34);
+        assert_eq!(saved.points.gold, 7_777);
+        assert_eq!(crate::arena::arena_stat(cid), crate::arena::ARENA_NOT);
+        assert!(!game.state.char_exists(cid));
+        crate::arena::reset_for_tests();
+    }
+
     fn ban_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        crate::lock_ok::lock(LOCK.get_or_init(|| Mutex::new(())))
     }
 
     #[test]
@@ -3296,14 +4402,23 @@ mod tests {
         // and returns a void-idled character to their previous room.
         let mut g = GameState::new(Config::default());
         g.add_room(crate::room::Room::new(3001, 30, "Home".into(), "".into()));
-        g.add_room(crate::room::Room::new(3002, 30, "Elsewhere".into(), "".into()));
-        let mut ch =
-            crate::character::Character::new_player("Idler".to_string(), Class::Warrior, Race::Human);
+        g.add_room(crate::room::Room::new(
+            3002,
+            30,
+            "Elsewhere".into(),
+            "".into(),
+        ));
+        let mut ch = crate::character::Character::new_player(
+            "Idler".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
         ch.timer = 9; // past the >8 void threshold
         let cid = g.create_char(ch);
 
         let conn = ConnId(77);
-        g.descriptors.insert(conn, Descriptor::new(conn, "example.test".to_string()));
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "example.test".to_string()));
         let mut observer = crate::character::Character::new_player(
             "Watcher".to_string(),
             Class::Warrior,
@@ -3475,35 +4590,111 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ban_new_blocks_new_character_confirmation_by_host() {
+    async fn ban_new_blocks_new_character_confirmation_by_ip() {
         let _guard = ban_test_lock();
-        let lib = temp_ban_lib("new", "new *.blocked.test 0 Root\n");
+        // The C build stores a zero-padded numeric host while slow DNS is
+        // enabled (the production default). Rust stores SocketAddr's canonical
+        // IP string, so boot_ban must migrate the persisted C-style mask.
+        let lib = temp_ban_lib("new", "new 010.020.* 0 Root\n");
         crate::ban::boot_ban(&lib);
 
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db);
         let conn = ConnId(5);
-        attach_descriptor_at_name(&mut game, conn, "sub.blocked.test").await;
+        attach_descriptor_at_name(&mut game, conn, "10.20.30.40").await;
 
         game.nanny(conn, "Denied".to_string()).await;
         game.nanny(conn, "y".to_string()).await;
 
         assert_eq!(descriptor_state(&game, conn), ConState::Close);
-        assert!(game
-            .state
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("new characters are not allowed"));
+        assert!(
+            game.state
+                .descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("new characters are not allowed")
+        );
         let empty = temp_ban_lib("empty-new", "");
         crate::ban::boot_ban(&empty);
     }
 
     #[tokio::test]
-    async fn ban_select_blocks_login_without_siteok_after_password() {
+    async fn ban_new_blocks_new_character_confirmation_by_verified_hostname() {
         let _guard = ban_test_lock();
-        let lib = temp_ban_lib("select", "select blocked.test 0 Root\n");
+        let lib = temp_ban_lib("new-hostname", "new *.blocked.example 0 Root\n");
+        crate::ban::boot_ban(&lib);
+
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        let conn = ConnId(51);
+        attach_descriptor_identity_at_name(&mut game, conn, "192.0.2.51", "dialup.blocked.example")
+            .await;
+
+        game.nanny(conn, "HostDenied".to_string()).await;
+        game.nanny(conn, "y".to_string()).await;
+
+        assert_eq!(descriptor_state(&game, conn), ConState::Close);
+        assert!(
+            game.state
+                .descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("new characters are not allowed")
+        );
+        let empty = temp_ban_lib("empty-new-hostname", "");
+        crate::ban::boot_ban(&empty);
+    }
+
+    #[tokio::test]
+    async fn ban_all_socket_gate_checks_verified_hostname_and_c_numeric_masks() {
+        let _guard = ban_test_lock();
+        let hostname_lib = temp_ban_lib("all-hostname", "all *.blocked.example 0 Root\n");
+        crate::ban::boot_ban(&hostname_lib);
+
+        let peer_ip = "192.0.2.52".parse().unwrap();
+        let (_client, mut unverified_stream) = tokio::io::duplex(128);
+        assert!(
+            !crate::connection::reject_ban_all(
+                &mut unverified_stream,
+                &crate::connection::PeerIdentity::numeric(peer_ip),
+            )
+            .await,
+            "an unverified PTR name must never be trusted"
+        );
+
+        let identity = crate::connection::PeerIdentity {
+            peer_ip,
+            verified_hostname: Some("dialup.blocked.example".to_string()),
+        };
+        let (mut client, mut server) = tokio::io::duplex(128);
+        assert!(crate::connection::reject_ban_all(&mut server, &identity).await);
+        let mut rejection = Vec::new();
+        client.read_to_end(&mut rejection).await.unwrap();
+        assert_eq!(rejection, b"Your site is BANNED!\r\n");
+
+        // C renders unresolved IPv4 peers as three-digit octets. Retaining and
+        // checking that form is required for masks whose wildcard itself spans
+        // a padded octet (it cannot be losslessly canonicalized to `10.*`).
+        let numeric_lib = temp_ban_lib("all-c-numeric", "all 01?.020.* 0 Root\n");
+        crate::ban::boot_ban(&numeric_lib);
+        let numeric_identity =
+            crate::connection::PeerIdentity::numeric("10.20.30.40".parse().unwrap());
+        let (mut client, mut server) = tokio::io::duplex(128);
+        assert!(crate::connection::reject_ban_all(&mut server, &numeric_identity).await);
+        let mut rejection = Vec::new();
+        client.read_to_end(&mut rejection).await.unwrap();
+        assert_eq!(rejection, b"Your site is BANNED!\r\n");
+
+        let empty = temp_ban_lib("empty-all-hostname", "");
+        crate::ban::boot_ban(&empty);
+    }
+
+    #[tokio::test]
+    async fn ban_select_blocks_login_without_siteok_after_password_by_ip() {
+        let _guard = ban_test_lock();
+        let lib = temp_ban_lib("select", "select 192.0.2.44 0 Root\n");
         crate::ban::boot_ban(&lib);
 
         let db = Arc::new(MockDatabase::new());
@@ -3515,20 +4706,21 @@ mod tests {
         db.create_player(&ch, "secret").await.unwrap();
         let mut game = test_game(db);
         let conn = ConnId(6);
-        attach_descriptor_at_name(&mut game, conn, "blocked.test").await;
+        attach_descriptor_at_name(&mut game, conn, "192.0.2.44").await;
 
         game.nanny(conn, "Blocked".to_string()).await;
         assert_eq!(descriptor_state(&game, conn), ConState::GetOldPassword);
         game.nanny(conn, "secret".to_string()).await;
 
         assert_eq!(descriptor_state(&game, conn), ConState::Close);
-        assert!(game
-            .state
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("has not been cleared for login"));
+        assert!(
+            game.state
+                .descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("has not been cleared for login")
+        );
         let empty = temp_ban_lib("empty-select", "");
         crate::ban::boot_ban(&empty);
     }
@@ -3570,13 +4762,14 @@ mod tests {
         assert!(queued.front().unwrap().aliased);
 
         game.process_input_queues();
-        assert!(game
-            .state
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .input_queue
-            .is_empty());
+        assert!(
+            game.state
+                .descriptors
+                .get(&conn)
+                .unwrap()
+                .input_queue
+                .is_empty()
+        );
         crate::alias::clear_aliases(44);
     }
 
@@ -3609,25 +4802,27 @@ mod tests {
         // First failure: re-prompt (C max_bad_pws = 2) (#194).
         game.nanny(conn, "wrong".to_string()).await;
         assert_eq!(descriptor_state(&game, conn), ConState::GetOldPassword);
-        assert!(game
-            .state
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("Wrong password."));
+        assert!(
+            game.state
+                .descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("Wrong password.")
+        );
         assert_eq!(db.load_player("Pwtest").await.unwrap().bad_pws, 1);
 
         // Second failure: disconnect.
         game.nanny(conn, "wrong".to_string()).await;
         assert_eq!(descriptor_state(&game, conn), ConState::Close);
-        assert!(game
-            .state
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("Wrong password... disconnecting."));
+        assert!(
+            game.state
+                .descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("Wrong password... disconnecting.")
+        );
     }
 
     #[tokio::test]
@@ -3657,17 +4852,21 @@ mod tests {
         game.nanny(c2, "Dupe".to_string()).await;
         game.nanny(c2, "pw".to_string()).await;
         assert_eq!(descriptor_state(&game, c2), ConState::Playing);
-        assert_eq!(game.state.descriptors.get(&c2).unwrap().character, Some(body));
+        assert_eq!(
+            game.state.descriptors.get(&c2).unwrap().character,
+            Some(body)
+        );
         // The old socket is detached and closing, with the usurp message.
         assert_eq!(game.state.descriptors.get(&c1).unwrap().character, None);
         assert_eq!(descriptor_state(&game, c1), ConState::Close);
-        assert!(game
-            .state
-            .descriptors
-            .get(&c1)
-            .unwrap()
-            .outbuf
-            .contains("This body has been usurped!"));
+        assert!(
+            game.state
+                .descriptors
+                .get(&c1)
+                .unwrap()
+                .outbuf
+                .contains("This body has been usurped!")
+        );
         // Exactly one entity carries the idnum.
         let owners: Vec<CharId> = game
             .state
@@ -3676,6 +4875,181 @@ mod tests {
             .filter_map(|d| d.character)
             .collect();
         assert_eq!(owners, vec![body]);
+    }
+
+    #[tokio::test]
+    async fn two_pending_menu_logins_materialize_one_body_and_one_rent_inventory() {
+        let db = Arc::new(MockDatabase::new());
+        let seed = crate::character::Character::new_player(
+            "Pendingdupe".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        let idnum = db.create_player(&seed, "pw").await.unwrap();
+        let record = db.load_player("Pendingdupe").await.unwrap();
+        let mut game = test_game(db);
+        game.lib_path = game.state.config.lib_path.clone();
+        game.state.add_room(crate::room::Room::new(
+            0,
+            0,
+            "The Void".into(),
+            String::new(),
+        ));
+
+        let rent = crate::objsave::crash_filename(&game.lib_path, "Pendingdupe").unwrap();
+        std::fs::create_dir_all(rent.parent().unwrap()).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        std::fs::write(
+            &rent,
+            format!(
+                "RENT 1 {now} 0 0 0\n\
+                 OBJ 0 9001 9 1 0 1 1 1 -1 0 0 0 0 0 0 0 0 0 -1|token|a unique token|A unique token lies here.|\n"
+            ),
+        )
+        .unwrap();
+
+        let first = ConnId(221);
+        let second = ConnId(222);
+        for conn in [first, second] {
+            attach_descriptor(&mut game, conn);
+            let descriptor = game.state.descriptors.get_mut(&conn).unwrap();
+            descriptor.temp_name = Some("Pendingdupe".into());
+            descriptor.state = ConState::Menu;
+            game.pending_load.insert(conn, record.clone());
+        }
+
+        // This is the original exploit ordering: both sessions already hold
+        // the same loaded row at the menu, then both select enter-game.
+        game.nanny(first, "1".to_string()).await;
+        game.nanny(second, "1".to_string()).await;
+
+        let bodies: Vec<_> = game
+            .state
+            .chars
+            .iter()
+            .filter(|(_, character)| !character.is_npc && character.idnum == idnum)
+            .map(|(&cid, _)| cid)
+            .collect();
+        assert_eq!(bodies.len(), 1);
+        let materialized: Vec<_> = game
+            .state
+            .objs
+            .iter()
+            .filter(|(_, object)| object.item_number == 9001)
+            .map(|(&oid, _)| oid)
+            .collect();
+        assert_eq!(
+            materialized.len(),
+            1,
+            "rent inventory loaded more than once"
+        );
+        assert_eq!(
+            game.state.get_char(bodies[0]).unwrap().carrying,
+            materialized
+        );
+        assert_eq!(descriptor_state(&game, first), ConState::Playing);
+        assert_eq!(descriptor_state(&game, second), ConState::Close);
+        assert!(game.pending_load.is_empty());
+        assert!(
+            game.state.descriptors[&second]
+                .outbuf
+                .contains("body was taken over")
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_login_adopts_descriptorless_body_and_removes_duplicates() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        let conn = ConnId(24);
+        attach_descriptor(&mut game, conn);
+        game.state.descriptors.get_mut(&conn).unwrap().temp_name = Some("Orphan".into());
+
+        let mut canonical = crate::character::Character::new_player(
+            "Orphan".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        canonical.idnum = 4242;
+        let canonical_id = game.state.create_char(canonical);
+        game.state
+            .players_by_name
+            .insert("orphan".into(), canonical_id);
+
+        let mut duplicate = crate::character::Character::new_player(
+            "Orphan".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        duplicate.idnum = 4242;
+        let duplicate_id = game.state.create_char(duplicate);
+
+        assert!(game.perform_dupe_check(conn, 4242).await);
+        assert_eq!(
+            game.state.descriptors.get(&conn).unwrap().character,
+            Some(canonical_id)
+        );
+        assert_eq!(descriptor_state(&game, conn), ConState::Playing);
+        assert_eq!(game.state.get_char(canonical_id).unwrap().desc, Some(conn));
+        assert!(!game.state.char_exists(duplicate_id));
+        assert_eq!(
+            game.state
+                .chars
+                .values()
+                .filter(|ch| !ch.is_npc && ch.idnum == 4242)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_login_finds_a_switched_descriptors_original_body() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        let old_conn = ConnId(25);
+        let new_conn = ConnId(26);
+        attach_descriptor(&mut game, old_conn);
+        attach_descriptor(&mut game, new_conn);
+        game.state.descriptors.get_mut(&new_conn).unwrap().temp_name = Some("Switcher".into());
+
+        let mut original = crate::character::Character::new_player(
+            "Switcher".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        original.idnum = 4343;
+        let original_id = game.state.create_char(original);
+        game.state
+            .players_by_name
+            .insert("switcher".into(), original_id);
+        let mut switched = crate::character::Character::new_player(
+            "borrowed body".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        switched.is_npc = true;
+        let switched_id = game.state.create_char(switched);
+        game.state.get_char_mut(switched_id).unwrap().desc = Some(old_conn);
+        {
+            let descriptor = game.state.descriptors.get_mut(&old_conn).unwrap();
+            descriptor.state = ConState::Playing;
+            descriptor.character = Some(switched_id);
+            descriptor.original = Some(original_id);
+        }
+
+        assert!(game.perform_dupe_check(new_conn, 4343).await);
+        assert_eq!(
+            game.state.descriptors.get(&new_conn).unwrap().character,
+            Some(original_id)
+        );
+        let old = game.state.descriptors.get(&old_conn).unwrap();
+        assert_eq!(old.state, ConState::Close);
+        assert_eq!(old.character, None);
+        assert_eq!(old.original, None);
+        assert_eq!(game.state.get_char(switched_id).unwrap().desc, None);
     }
 
     #[tokio::test]
@@ -3693,23 +5067,25 @@ mod tests {
         game.nanny(conn, String::new()).await;
         assert_eq!(descriptor_state(&game, conn), ConState::Menu);
         game.nanny(conn, "9".to_string()).await;
-        assert!(game
-            .state
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("That's not a menu choice!"));
+        assert!(
+            game.state
+                .descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("That's not a menu choice!")
+        );
         assert_eq!(descriptor_state(&game, conn), ConState::Menu);
         game.nanny(conn, "0".to_string()).await;
         assert_eq!(descriptor_state(&game, conn), ConState::Close);
-        assert!(game
-            .state
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("land called reality"));
+        assert!(
+            game.state
+                .descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("land called reality")
+        );
     }
 
     #[tokio::test]
@@ -3731,31 +5107,124 @@ mod tests {
         // '$' is doubled on entry so act() renders one literal '$' (#222).
         game.handle_input(conn, "say Hi $n".to_string()).await;
         assert_eq!(
-            game.state.descriptors.get(&conn).unwrap().input_queue.back().map(|q| q.line.clone()),
+            game.state
+                .descriptors
+                .get(&conn)
+                .unwrap()
+                .input_queue
+                .back()
+                .map(|q| q.line.clone()),
             Some("say Hi $$n".to_string())
         );
 
         // '!' repeats the previous line, '^old^new' substitutes (#224).
-        game.state.descriptors.get_mut(&conn).unwrap().input_queue.clear();
+        game.state
+            .descriptors
+            .get_mut(&conn)
+            .unwrap()
+            .input_queue
+            .clear();
         game.handle_input(conn, "!".to_string()).await;
         assert_eq!(
-            game.state.descriptors.get(&conn).unwrap().input_queue.back().map(|q| q.line.clone()),
+            game.state
+                .descriptors
+                .get(&conn)
+                .unwrap()
+                .input_queue
+                .back()
+                .map(|q| q.line.clone()),
             Some("say Hi $$n".to_string())
         );
         game.handle_input(conn, "^Hi^Bye".to_string()).await;
         assert_eq!(
-            game.state.descriptors.get(&conn).unwrap().input_queue.back().map(|q| q.line.clone()),
+            game.state
+                .descriptors
+                .get(&conn)
+                .unwrap()
+                .input_queue
+                .back()
+                .map(|q| q.line.clone()),
             Some("say Bye $$n".to_string())
         );
         // Bad substitution refuses cleanly.
         game.handle_input(conn, "^zzz^qqq".to_string()).await;
-        assert!(game
-            .state
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("Invalid substitution."));
+        assert!(
+            game.state
+                .descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("Invalid substitution.")
+        );
+    }
+
+    #[tokio::test]
+    async fn playing_input_queue_accepts_32_commands_and_closes_on_the_33rd() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        let conn = ConnId(129);
+        attach_descriptor(&mut game, conn);
+        let mut player = crate::character::Character::new_player(
+            "Queuecap".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        player.desc = Some(conn);
+        let player = game.state.create_char(player);
+        let descriptor = game.state.descriptors.get_mut(&conn).unwrap();
+        descriptor.character = Some(player);
+        descriptor.state = ConState::Playing;
+
+        for command in 0..32 {
+            game.handle_input(conn, format!("look {command}")).await;
+        }
+        assert_eq!(game.state.descriptors[&conn].input_queue.len(), 32);
+        assert_eq!(descriptor_state(&game, conn), ConState::Playing);
+
+        game.handle_input(conn, "look overflow".to_string()).await;
+
+        let descriptor = &game.state.descriptors[&conn];
+        assert_eq!(descriptor.input_queue.len(), 32);
+        assert_eq!(descriptor.state, ConState::Close);
+        assert!(descriptor.outbuf.contains("Input queue full."));
+        assert!(
+            descriptor
+                .input_queue
+                .iter()
+                .all(|queued| queued.line != "look overflow")
+        );
+    }
+
+    #[tokio::test]
+    async fn playing_input_truncates_multibyte_characters_at_the_byte_limit() {
+        for (index, character) in ["é", "€", "🦀"].into_iter().enumerate() {
+            let db = Arc::new(MockDatabase::new());
+            let mut game = test_game(db);
+            let conn = ConnId(130 + index as u64);
+            attach_descriptor(&mut game, conn);
+            let mut player = crate::character::Character::new_player(
+                format!("Utf{index}"),
+                Class::Warrior,
+                Race::Human,
+            );
+            player.desc = Some(conn);
+            let player = game.state.create_char(player);
+            let descriptor = game.state.descriptors.get_mut(&conn).unwrap();
+            descriptor.character = Some(player);
+            descriptor.state = ConState::Playing;
+
+            let input = format!("{}{}", "x".repeat(MAX_INPUT_LENGTH - 1), character);
+            game.handle_input(conn, input).await;
+            let queued = &game.state.descriptors[&conn].input_queue[0].line;
+            assert!(queued.len() <= MAX_INPUT_LENGTH);
+            assert!(std::str::from_utf8(queued.as_bytes()).is_ok());
+            assert_eq!(queued, &"x".repeat(MAX_INPUT_LENGTH - 1));
+            assert!(
+                game.state.descriptors[&conn]
+                    .outbuf
+                    .contains("Line too long")
+            );
+        }
     }
 
     #[test]
@@ -3771,6 +5240,10 @@ mod tests {
         );
         assert_eq!(Game::perform_subst("say Hi", "^zzz^qqq"), None);
         assert_eq!(Game::perform_subst("say Hi", "^Hi"), None);
+        let replaced =
+            Game::perform_subst(&format!("{}é", "x".repeat(MAX_INPUT_LENGTH - 1)), "^x^x").unwrap();
+        assert!(replaced.len() <= MAX_INPUT_LENGTH);
+        assert!(std::str::from_utf8(replaced.as_bytes()).is_ok());
     }
 
     #[test]
@@ -3781,7 +5254,10 @@ mod tests {
         println!("normalized: {:?}", name);
         println!("valid_name: {}", valid_name(&name));
         println!("reserved_or_fill: {}", reserved_or_fill_word(&name));
-        println!("ban::valid_name_in: {}", crate::ban::valid_name_in(&game.state, &name));
+        println!(
+            "ban::valid_name_in: {}",
+            crate::ban::valid_name_in(&game.state, &name)
+        );
     }
 
     fn game_normalize(game: &mut Game, s: &str) -> String {
@@ -3844,13 +5320,14 @@ mod tests {
         game.nanny(conn, "dragon".to_string()).await;
         // Still at GetName with the C refusal, not ConfirmName.
         assert_eq!(descriptor_state(&game, conn), ConState::GetName);
-        assert!(game
-            .state
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("Invalid name, please try another."));
+        assert!(
+            game.state
+                .descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("Invalid name, please try another.")
+        );
     }
 
     #[tokio::test]
@@ -3863,11 +5340,14 @@ mod tests {
         }
         let mut g = crate::state::GameState::new(Config::default());
         g.config.lib_path = lib.to_string();
-        crate::file_loader::FileLoader::load_world(&mut g, lib).await.unwrap();
+        crate::file_loader::FileLoader::load_world(&mut g, lib)
+            .await
+            .unwrap();
         g.prime_zones();
 
         let room100 = g.real_room(100).unwrap();
-        let mut player = crate::character::Character::new_player("Rmeln".into(), Class::Warrior, Race::Human);
+        let mut player =
+            crate::character::Character::new_player("Rmeln".into(), Class::Warrior, Race::Human);
         player.player.level = 3;
         let pl = g.create_char(player);
         g.char_to_room(pl, room100);
@@ -3900,7 +5380,11 @@ mod tests {
                 c.quest_countdown = 0;
             }
         }
-        assert!(qmob > 0, "a kill-target quest must be assigned, got {}", qmob);
+        assert!(
+            qmob > 0,
+            "a kill-target quest must be assigned, got {}",
+            qmob
+        );
 
         let victim = g
             .char_ids()
@@ -3917,7 +5401,6 @@ mod tests {
         let _ = qm;
     }
 
-
     #[tokio::test]
     async fn creation_password_guards_match_c() {
         let db = Arc::new(MockDatabase::new());
@@ -3928,38 +5411,41 @@ mod tests {
         game.nanny(conn, "Guard".to_string()).await;
         game.nanny(conn, "y".to_string()).await;
         // "New character." banner precedes the password prompt (C 1774).
-        assert!(game
-            .state
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("New character."));
+        assert!(
+            game.state
+                .descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("New character.")
+        );
 
         // C interpreter.c:2043-2045: >64 chars, name-equality, and <3 all
         // refuse with 'Illegal password.' (#319).
         for bad in ["a", &"x".repeat(65), "Guard"] {
             game.nanny(conn, bad.to_string()).await;
             assert_eq!(descriptor_state(&game, conn), ConState::GetNewPassword);
-            assert!(game
-                .state
-                .descriptors
-                .get(&conn)
-                .unwrap()
-                .outbuf
-                .contains("Illegal password."));
+            assert!(
+                game.state
+                    .descriptors
+                    .get(&conn)
+                    .unwrap()
+                    .outbuf
+                    .contains("Illegal password.")
+            );
         }
 
         // A legal password proceeds; mismatch shows C's 'start over.' text.
         game.nanny(conn, "goodpw".to_string()).await;
         game.nanny(conn, "otherpw".to_string()).await;
-        assert!(game
-            .state
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("Passwords don't match... start over."));
+        assert!(
+            game.state
+                .descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("Passwords don't match... start over.")
+        );
         assert_eq!(descriptor_state(&game, conn), ConState::GetNewPassword);
     }
 
@@ -3975,14 +5461,446 @@ mod tests {
         game.nanny(conn, "pw12345".to_string()).await;
         game.nanny(conn, "y".to_string()).await; // newbie
         game.nanny(conn, "q".to_string()).await; // invalid sex
-        assert!(game
-            .state
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("That is not a sex..\r\nWhat IS your sex? "));
+        assert!(
+            game.state
+                .descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("That is not a sex..\r\nWhat IS your sex? ")
+        );
         assert_eq!(descriptor_state(&game, conn), ConState::GetSex);
+    }
+}
+
+#[cfg(test)]
+mod offline_inspection_tests {
+    use super::tests::{attach_descriptor_host, test_game};
+    use super::*;
+    use crate::DatabaseInterface;
+    use crate::character::Character;
+    use crate::mock_database::MockDatabase;
+    use crate::types::{Class, Race};
+    use std::sync::Arc;
+
+    const ROUTES: [(&str, &str); 3] = [
+        ("stat-player", "IDNum:"),
+        ("stat-file", "IDNum:"),
+        ("show-player", "Player:"),
+    ];
+
+    fn attach_requester(game: &mut Game, conn: ConnId, level: u8) -> CharId {
+        attach_descriptor_host(game, conn, "authority.example.test");
+        let mut requester =
+            Character::new_player("Requester".to_string(), Class::Warrior, Race::Human);
+        requester.desc = Some(conn);
+        requester.player.level = level;
+        requester.godcmds1 = !0;
+        requester.godcmds2 = !0;
+        requester.godcmds3 = !0;
+        requester.godcmds4 = !0;
+        let requester = game.state.create_char(requester);
+        game.state
+            .players_by_name
+            .insert("requester".to_string(), requester);
+        let descriptor = game.state.descriptors.get_mut(&conn).unwrap();
+        descriptor.character = Some(requester);
+        descriptor.state = ConState::Playing;
+        requester
+    }
+
+    async fn seed_target(db: &MockDatabase, name: &str, level: u8) -> i64 {
+        let mut target = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        target.player.level = level;
+        db.create_player(&target, "secret").await.unwrap()
+    }
+
+    fn queue_route(game: &mut Game, requester: CharId, route: &str, target: &str) {
+        match route {
+            "stat-player" => crate::cmd_wizard::do_stat(
+                &mut game.state,
+                requester,
+                &format!("player {target}"),
+                0,
+            ),
+            "stat-file" => {
+                crate::cmd_wizard::do_stat(&mut game.state, requester, &format!("file {target}"), 0)
+            }
+            "show-player" => crate::cmd_wizard::do_show(
+                &mut game.state,
+                requester,
+                &format!("player {target}"),
+                0,
+            ),
+            _ => panic!("unknown route {route}"),
+        }
+    }
+
+    async fn queued_game(
+        route: &str,
+        indexed_level: u8,
+        database_level: u8,
+    ) -> (Game, Arc<MockDatabase>, CharId, i64) {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        game.lib_path = game.state.config.lib_path.clone();
+        let requester = attach_requester(&mut game, ConnId(240), LVL_GOD);
+        let idnum = seed_target(&db, "Target", database_level).await;
+        game.state
+            .update_player_index(idnum, "Target", indexed_level, 0, "offline");
+        queue_route(&mut game, requester, route, "Target");
+        (game, db, requester, idnum)
+    }
+
+    #[tokio::test]
+    async fn replay_matrix_renders_lower_and_equal_targets_for_every_route() {
+        for (route, record_marker) in ROUTES {
+            for target_level in [LVL_GOD - 1, LVL_GOD] {
+                let (mut game, _db, _requester, _idnum) =
+                    queued_game(route, target_level, target_level).await;
+                assert_eq!(game.state.offline_ops.len(), 1, "route={route}");
+
+                game.drain_offline_ops().await;
+
+                let output = &game.state.descriptors[&ConnId(240)].outbuf;
+                assert!(
+                    output.contains(record_marker),
+                    "route={route} level={target_level} output={output:?}"
+                );
+                assert!(
+                    !output.contains(PLAYER_INSPECTION_DENIED.trim()),
+                    "route={route} level={target_level} output={output:?}"
+                );
+                assert!(game.state.find_player_by_name("Target").is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn db_level_change_between_queue_and_replay_is_denied_for_every_route() {
+        for (route, record_marker) in ROUTES {
+            let (mut game, db, _requester, _idnum) =
+                queued_game(route, LVL_GOD - 1, LVL_GOD - 1).await;
+            let mut changed = db.load_player("Target").await.unwrap();
+            changed.player.level = LVL_GOD + 1;
+            db.save_player(&changed).await.unwrap();
+
+            game.drain_offline_ops().await;
+
+            let output = &game.state.descriptors[&ConnId(240)].outbuf;
+            assert!(
+                output.contains(PLAYER_INSPECTION_DENIED.trim()),
+                "route={route} output={output:?}"
+            );
+            assert!(
+                !output.contains(record_marker),
+                "route={route} leaked fields: {output:?}"
+            );
+            assert!(game.state.find_player_by_name("Target").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn target_racing_online_at_a_higher_level_is_denied_for_every_route() {
+        for (route, record_marker) in ROUTES {
+            let (mut game, _db, requester, idnum) =
+                queued_game(route, LVL_GOD - 1, LVL_GOD - 1).await;
+            let mut target =
+                Character::new_player("Target".to_string(), Class::Warrior, Race::Human);
+            target.idnum = idnum;
+            target.player.level = LVL_GOD + 1;
+            let live_target = game.state.create_char(target);
+            game.state
+                .players_by_name
+                .insert("target".to_string(), live_target);
+
+            game.drain_offline_ops().await;
+
+            let output = &game.state.descriptors[&ConnId(240)].outbuf;
+            assert!(output.contains(PLAYER_INSPECTION_DENIED.trim()));
+            assert!(
+                !output.contains(record_marker),
+                "route={route} output={output:?}"
+            );
+            assert!(game.state.char_exists(requester));
+            assert!(game.state.char_exists(live_target));
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnected_requester_cancels_every_inspection_without_loading_target() {
+        for (route, record_marker) in ROUTES {
+            let (mut game, _db, requester, _idnum) =
+                queued_game(route, LVL_GOD - 1, LVL_GOD - 1).await;
+            game.state.extract_char(requester);
+
+            game.drain_offline_ops().await;
+
+            let output = &game.state.descriptors[&ConnId(240)].outbuf;
+            assert!(
+                !output.contains(record_marker),
+                "route={route} output={output:?}"
+            );
+            assert!(!output.contains(PLAYER_INSPECTION_DENIED.trim()));
+            assert!(game.state.find_player_by_name("Target").is_none());
+            assert!(game.state.offline_ops.is_empty());
+        }
+    }
+}
+
+#[cfg(test)]
+mod self_delete_tests {
+    use super::tests::{attach_descriptor_host, test_game};
+    use super::*;
+    use crate::DatabaseInterface;
+    use crate::alias::AliasEntry;
+    use crate::character::Character;
+    use crate::mock_database::MockDatabase;
+    use crate::types::{Class, Race};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    async fn deletion_session(
+        conn: ConnId,
+        name: &str,
+        act_flags: i64,
+    ) -> (Game, Arc<MockDatabase>, i64) {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        game.lib_path = game.state.config.lib_path.clone();
+        let mut character = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        character.act_flags = act_flags;
+        db.create_player(&character, "secret").await.unwrap();
+        let idnum = 9_413_000 + conn.0 as i64;
+        character.idnum = idnum;
+        db.save_player(&character).await.unwrap();
+
+        attach_descriptor_host(&mut game, conn, "delete.example.test");
+        let descriptor = game.state.descriptors.get_mut(&conn).unwrap();
+        descriptor.temp_name = Some(name.to_string());
+        descriptor.state = ConState::DelCnf2;
+        game.pending_load.insert(conn, character);
+        (game, db, idnum)
+    }
+
+    fn seed_sidecars(game: &Game, name: &str, idnum: i64) -> (PathBuf, PathBuf) {
+        let rent = crate::objsave::crash_filename(&game.lib_path, name).unwrap();
+        std::fs::create_dir_all(rent.parent().unwrap()).unwrap();
+        std::fs::write(&rent, b"rent evidence").unwrap();
+
+        crate::alias::set_aliases(
+            idnum,
+            vec![AliasEntry {
+                alias: "stale".to_string(),
+                replacement: "say private text".to_string(),
+                atype: 0,
+            }],
+        );
+        crate::alias::write_aliases(&game.lib_path, name, idnum).unwrap();
+        let alias = crate::alias::alias_filename(&game.lib_path, name).unwrap();
+        (rent, alias)
+    }
+
+    #[tokio::test]
+    async fn confirmed_delete_removes_mixed_case_sidecars_and_name_reuse_is_clean() {
+        let conn = ConnId(210);
+        let name = "MiXeDcase";
+        let (mut game, db, idnum) = deletion_session(conn, name, 0).await;
+        let (rent, alias) = seed_sidecars(&game, name, idnum);
+
+        game.nanny(conn, "yes".to_string()).await;
+
+        assert!(!rent.exists());
+        assert!(!alias.exists());
+        assert!(crate::alias::get_aliases(idnum).is_empty());
+        assert_ne!(
+            db.load_player(name).await.unwrap().act_flags & crate::flags::PLR_DELETED,
+            0
+        );
+        assert!(
+            game.state.descriptors[&conn]
+                .outbuf
+                .contains("Character 'MiXeDcase' deleted!")
+        );
+
+        let reused_idnum = idnum + 10_000;
+        crate::alias::read_aliases(&game.lib_path, "mixedCASE", reused_idnum).unwrap();
+        assert!(crate::alias::get_aliases(reused_idnum).is_empty());
+    }
+
+    #[tokio::test]
+    async fn confirmed_delete_treats_missing_sidecars_as_already_clean() {
+        let conn = ConnId(211);
+        let name = "Nosidecars";
+        let (mut game, db, _) = deletion_session(conn, name, 0).await;
+
+        game.nanny(conn, "YES".to_string()).await;
+
+        assert_ne!(
+            db.load_player(name).await.unwrap().act_flags & crate::flags::PLR_DELETED,
+            0
+        );
+        assert!(game.state.descriptors[&conn].outbuf.contains("deleted!"));
+    }
+
+    #[tokio::test]
+    async fn sidecar_cleanup_failure_is_audited_without_false_success() {
+        let conn = ConnId(212);
+        let name = "Blockedfiles";
+        let (mut game, db, idnum) = deletion_session(conn, name, 0).await;
+        let rent = crate::objsave::crash_filename(&game.lib_path, name).unwrap();
+        let alias = crate::alias::alias_filename(&game.lib_path, name).unwrap();
+        std::fs::create_dir_all(&rent).unwrap();
+        std::fs::create_dir_all(&alias).unwrap();
+        crate::alias::set_aliases(
+            idnum,
+            vec![AliasEntry {
+                alias: "cached".to_string(),
+                replacement: "say stale".to_string(),
+                atype: 0,
+            }],
+        );
+
+        game.nanny(conn, "yes".to_string()).await;
+
+        assert_ne!(
+            db.load_player(name).await.unwrap().act_flags & crate::flags::PLR_DELETED,
+            0,
+            "the durable tombstone is authoritative"
+        );
+        let output = &game.state.descriptors[&conn].outbuf;
+        assert!(output.contains("cleanup is incomplete"));
+        assert!(!output.contains("Character 'Blockedfiles' deleted!"));
+        assert!(rent.is_dir());
+        assert!(alias.is_dir());
+        assert!(crate::alias::get_aliases(idnum).is_empty());
+
+        std::fs::remove_dir(alias).unwrap();
+        std::fs::remove_dir(rent).unwrap();
+    }
+
+    #[tokio::test]
+    async fn frozen_aborted_and_failed_database_deletes_preserve_sidecars() {
+        let frozen_conn = ConnId(213);
+        let (mut frozen, frozen_db, frozen_id) =
+            deletion_session(frozen_conn, "Frozenone", crate::flags::PLR_FROZEN).await;
+        let (frozen_rent, frozen_alias) = seed_sidecars(&frozen, "Frozenone", frozen_id);
+        frozen.nanny(frozen_conn, "yes".to_string()).await;
+        assert!(frozen_rent.exists() && frozen_alias.exists());
+        assert_eq!(
+            frozen_db.load_player("Frozenone").await.unwrap().act_flags & crate::flags::PLR_DELETED,
+            0
+        );
+
+        let aborted_conn = ConnId(214);
+        let (mut aborted, aborted_db, aborted_id) =
+            deletion_session(aborted_conn, "Abortone", 0).await;
+        let (aborted_rent, aborted_alias) = seed_sidecars(&aborted, "Abortone", aborted_id);
+        aborted.nanny(aborted_conn, "no".to_string()).await;
+        assert!(aborted_rent.exists() && aborted_alias.exists());
+        assert_eq!(
+            aborted_db.load_player("Abortone").await.unwrap().act_flags & crate::flags::PLR_DELETED,
+            0
+        );
+        assert_eq!(
+            aborted.state.descriptors[&aborted_conn].state,
+            ConState::Menu
+        );
+
+        let failed_conn = ConnId(215);
+        let (mut failed, failed_db, failed_id) =
+            deletion_session(failed_conn, "Savefailure", 0).await;
+        let (failed_rent, failed_alias) = seed_sidecars(&failed, "Savefailure", failed_id);
+        failed_db.fail_next_save();
+        failed.nanny(failed_conn, "yes".to_string()).await;
+        assert!(failed_rent.exists() && failed_alias.exists());
+        assert_eq!(
+            failed_db
+                .load_player("Savefailure")
+                .await
+                .unwrap()
+                .act_flags
+                & crate::flags::PLR_DELETED,
+            0
+        );
+        assert!(
+            failed.state.descriptors[&failed_conn]
+                .outbuf
+                .contains("no files were removed")
+        );
+
+        for path in [
+            frozen_rent,
+            frozen_alias,
+            aborted_rent,
+            aborted_alias,
+            failed_rent,
+            failed_alias,
+        ] {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn administrative_pfileclean_removes_sidecars_before_deleting_the_db_row() {
+        let db = Arc::new(MockDatabase::new());
+        let mut character =
+            Character::new_player("AdminGone".to_string(), Class::Warrior, Race::Human);
+        character.act_flags |= crate::flags::PLR_DELETED;
+        db.create_player(&character, "secret").await.unwrap();
+        let idnum = 9_413_301;
+        character.idnum = idnum;
+        db.save_player(&character).await.unwrap();
+        let mut game = test_game(db.clone());
+        game.lib_path = game.state.config.lib_path.clone();
+        let (rent, alias) = seed_sidecars(&game, "AdminGone", idnum);
+
+        game.state.queue_pfileclean();
+        game.drain_pfileclean().await;
+
+        assert!(db.load_player("AdminGone").await.is_err());
+        assert!(!rent.exists() && !alias.exists());
+        assert!(crate::alias::get_aliases(idnum).is_empty());
+    }
+
+    #[tokio::test]
+    async fn administrative_pfileclean_retains_tombstone_until_sidecar_failure_is_fixed() {
+        let db = Arc::new(MockDatabase::new());
+        let mut character =
+            Character::new_player("AdminRetry".to_string(), Class::Warrior, Race::Human);
+        character.act_flags |= crate::flags::PLR_DELETED;
+        db.create_player(&character, "secret").await.unwrap();
+        let idnum = 9_413_302;
+        character.idnum = idnum;
+        db.save_player(&character).await.unwrap();
+        let mut game = test_game(db.clone());
+        game.lib_path = game.state.config.lib_path.clone();
+        let rent = crate::objsave::crash_filename(&game.lib_path, "AdminRetry").unwrap();
+        std::fs::create_dir_all(&rent).unwrap();
+        crate::alias::set_aliases(
+            idnum,
+            vec![AliasEntry {
+                alias: "private".into(),
+                replacement: "say retained until audited".into(),
+                atype: 0,
+            }],
+        );
+        crate::alias::write_aliases(&game.lib_path, "AdminRetry", idnum).unwrap();
+        let alias = crate::alias::alias_filename(&game.lib_path, "AdminRetry").unwrap();
+
+        game.state.queue_pfileclean();
+        game.drain_pfileclean().await;
+
+        let retained = db.load_player("AdminRetry").await.unwrap();
+        assert_ne!(retained.act_flags & crate::flags::PLR_DELETED, 0);
+        assert!(rent.is_dir());
+        assert!(!alias.exists(), "successful cleanup steps still converge");
+        assert!(crate::alias::get_aliases(idnum).is_empty());
+
+        std::fs::remove_dir(&rent).unwrap();
+        game.state.queue_pfileclean();
+        game.drain_pfileclean().await;
+        assert!(db.load_player("AdminRetry").await.is_err());
     }
 }
 
@@ -4000,8 +5918,12 @@ mod gmcp_tests {
     #[test]
     fn movement_marks_gmcp_dirty_and_heartbeat_drains_it() {
         let mut game = test_game(Arc::new(MockDatabase::new()));
-        let a = game.state.add_room(Room::new(100, 1, "A".into(), String::new()));
-        let b = game.state.add_room(Room::new(101, 1, "B".into(), String::new()));
+        let a = game
+            .state
+            .add_room(Room::new(100, 1, "A".into(), String::new()));
+        let b = game
+            .state
+            .add_room(Room::new(101, 1, "B".into(), String::new()));
         let conn = ConnId(60);
         game.state
             .descriptors
@@ -4030,7 +5952,9 @@ mod gmcp_tests {
             "The \"Quoted\" &RRoom".into(),
             String::new(),
         ));
-        let b = game.state.add_room(Room::new(101, 1, "B".into(), String::new()));
+        let b = game
+            .state
+            .add_room(Room::new(101, 1, "B".into(), String::new()));
         game.state.rooms[a].exits[EAST] = Some(Exit {
             description: None,
             keyword: None,
@@ -4060,7 +5984,10 @@ mod gmcp_tests {
         let value: serde_json::Value =
             serde_json::from_str(json).expect("Room.Info must be valid JSON");
         assert_eq!(value["num"], 100);
-        assert_eq!(value["name"], "The \"Quoted\" Room", "&R color code stripped");
+        assert_eq!(
+            value["name"], "The \"Quoted\" Room",
+            "&R color code stripped"
+        );
         assert_eq!(value["exits"]["e"], 101);
         assert_eq!(value["doors"][0], "e");
         assert_eq!(value["locked"][0], "e");
@@ -4069,7 +5996,9 @@ mod gmcp_tests {
     #[test]
     fn combat_damage_marks_both_sides_dirty() {
         let mut game = test_game(Arc::new(MockDatabase::new()));
-        let a = game.state.add_room(Room::new(100, 1, "A".into(), String::new()));
+        let a = game
+            .state
+            .add_room(Room::new(100, 1, "A".into(), String::new()));
         let conn = ConnId(63);
         game.state
             .descriptors
@@ -4095,7 +6024,9 @@ mod gmcp_tests {
     #[test]
     fn non_gmcp_descriptors_get_no_snapshots() {
         let mut game = test_game(Arc::new(MockDatabase::new()));
-        let a = game.state.add_room(Room::new(100, 1, "A".into(), String::new()));
+        let a = game
+            .state
+            .add_room(Room::new(100, 1, "A".into(), String::new()));
         let conn = ConnId(64);
         game.state
             .descriptors
@@ -4127,6 +6058,90 @@ mod gmcp_tests {
 }
 
 #[cfg(test)]
+mod bounded_output_tests {
+    use super::tests::test_game;
+    use super::*;
+    use crate::mock_database::MockDatabase;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn color_expansion_is_capped_and_counted_before_writer_enqueue() {
+        let mut game = test_game(Arc::new(MockDatabase::new()));
+        let conn = ConnId(160);
+        game.state
+            .descriptors
+            .insert(conn, Descriptor::new(conn, "color.example.test".into()));
+        game.state
+            .descriptors
+            .get_mut(&conn)
+            .unwrap()
+            .write(&"&r".repeat(crate::connection::DESCRIPTOR_OUTPUT_LIMIT / 2));
+        let (tx, mut rx) = mpsc::channel(1);
+        game.outputs.insert(conn, tx);
+
+        game.flush_all().await;
+
+        let frame = rx.recv().await.unwrap();
+        assert!(frame.bytes.len() <= crate::connection::DESCRIPTOR_OUTPUT_LIMIT);
+        assert!(
+            frame
+                .bytes
+                .ends_with(crate::connection::OUTPUT_OVERFLOW_MARKER.as_bytes())
+        );
+        assert_eq!(
+            game.metrics.output_overflows_total.load(Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_writer_channel_closes_only_that_client_and_increments_metric() {
+        let mut game = test_game(Arc::new(MockDatabase::new()));
+        let stalled = ConnId(161);
+        let healthy = ConnId(162);
+        game.state.descriptors.insert(
+            stalled,
+            Descriptor::new(stalled, "stalled.example.test".into()),
+        );
+        game.state.descriptors.insert(
+            healthy,
+            Descriptor::new(healthy, "healthy.example.test".into()),
+        );
+        game.state
+            .descriptors
+            .get_mut(&stalled)
+            .unwrap()
+            .write("stalled output");
+        game.state
+            .descriptors
+            .get_mut(&healthy)
+            .unwrap()
+            .write("healthy output");
+
+        let (stalled_tx, _stalled_rx) = mpsc::channel(1);
+        stalled_tx
+            .try_send(OutputFrame::data(b"queue full".to_vec()))
+            .unwrap();
+        game.outputs.insert(stalled, stalled_tx);
+        let (healthy_tx, mut healthy_rx) = mpsc::channel(1);
+        game.outputs.insert(healthy, healthy_tx);
+
+        game.flush_all().await;
+
+        assert!(!game.state.descriptors.contains_key(&stalled));
+        assert!(game.state.descriptors.contains_key(&healthy));
+        assert_eq!(healthy_rx.recv().await.unwrap().bytes, b"healthy output");
+        assert_eq!(
+            game.metrics
+                .output_closed_clients_total
+                .load(Ordering::Relaxed),
+            1
+        );
+    }
+}
+
+#[cfg(test)]
 mod shutdown_tests {
     use super::tests::test_game;
     use super::*;
@@ -4148,7 +6163,9 @@ mod shutdown_tests {
         let plrobjs = format!("{}/plrobjs", game.state.config.lib_path);
         std::fs::create_dir_all(&plrobjs).unwrap();
 
-        let room = game.state.add_room(Room::new(3001, 30, "Save Room".into(), String::new()));
+        let room = game
+            .state
+            .add_room(Room::new(3001, 30, "Save Room".into(), String::new()));
         let conn = ConnId(70);
         game.state
             .descriptors
@@ -4156,7 +6173,7 @@ mod shutdown_tests {
 
         let mut ch = Character::new_player("Shutdownee".to_string(), Class::Warrior, Race::Human);
         ch.player.level = 22;
-        ch.points.gold = 4321;
+        crate::gold::set(&mut ch, crate::gold::Account::Carried, 4321);
         ch.player.title = Some("the Persisted".to_string());
         // A playing character carries a persistent idnum (create_player row);
         // save_player_with_host UPDATEs by it.
@@ -4203,20 +6220,42 @@ mod shutdown_tests {
         if let Some(c) = game.state.get_char_mut(cid) {
             c.desc = Some(conn);
         }
-        // Register an output channel so flush_all has something to drain.
+        // Register a writer-like task that acknowledges ordered flush barriers.
         let (tx, mut rx) = mpsc::channel(256);
         game.outputs.insert(conn, tx);
+        let writer = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            while let Some(frame) = rx.recv().await {
+                bytes.extend_from_slice(&frame.bytes);
+                if let Some(ack) = frame.ack {
+                    let _ = ack.send(true);
+                    return bytes;
+                }
+            }
+            bytes
+        });
 
         let report = game.shutdown_save().await;
 
         assert_eq!(report.players_saved, 1);
         assert_eq!(report.save_errors, 0);
+        assert_eq!(report.output_failures, 0);
+        assert_eq!(report.output_attempted, 1);
+        assert_eq!(report.output_acknowledged, 1);
+        assert_eq!(report.output_failed, 0);
+        assert_eq!(report.output_timed_out, 0);
         // The shutdown notice + prompt went through the output channel.
-        let drained = rx.recv().await.expect("shutdown notice flushed");
-        assert!(String::from_utf8_lossy(&drained).contains("shutting down"), "notice must be flushed");
+        let drained = writer.await.expect("writer task completed");
+        assert!(
+            String::from_utf8_lossy(&drained).contains("shutting down"),
+            "notice must be flushed"
+        );
 
         // SQL row: reload through the db and check the core fields survived.
-        let loaded = db.load_player("Shutdownee").await.expect("player persisted");
+        let loaded = db
+            .load_player("Shutdownee")
+            .await
+            .expect("player persisted");
         assert_eq!(loaded.player.level, 22);
         assert_eq!(loaded.points.gold, 4321);
         assert_eq!(loaded.player.title.as_deref(), Some("the Persisted"));
@@ -4241,16 +6280,735 @@ mod shutdown_tests {
             }
         }
         fn walk(dir: &std::path::Path, depth: usize) {
-            if depth > 3 { return; }
+            if depth > 3 {
+                return;
+            }
             for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
                 let p = e.path();
                 eprintln!("TREE: {}", p.display());
-                if p.is_dir() { walk(&p, depth + 1); }
+                if p.is_dir() {
+                    walk(&p, depth + 1);
+                }
             }
         }
         if !found {
             walk(std::path::Path::new(&plrobjs), 0);
         }
         assert!(found, "rent file must exist for the saved player");
+    }
+
+    #[tokio::test]
+    async fn shutdown_reports_closed_and_full_writer_channels_as_failures() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+
+        let closed = ConnId(171);
+        game.state.descriptors.insert(
+            closed,
+            Descriptor::new(closed, "closed.example.test".into()),
+        );
+        let (closed_tx, closed_rx) = mpsc::channel(1);
+        drop(closed_rx);
+        game.outputs.insert(closed, closed_tx);
+
+        let full = ConnId(172);
+        game.state
+            .descriptors
+            .insert(full, Descriptor::new(full, "full.example.test".into()));
+        let (full_tx, _full_rx) = mpsc::channel(1);
+        full_tx
+            .try_send(OutputFrame::data(b"already queued".to_vec()))
+            .unwrap();
+        game.outputs.insert(full, full_tx);
+
+        let report = game.shutdown_save().await;
+        assert_eq!(report.output_attempted, 2);
+        assert_eq!(report.output_acknowledged, 0);
+        assert_eq!(report.output_failed, 2);
+        assert_eq!(report.output_timed_out, 0);
+        assert_eq!(report.output_failures, 2);
+    }
+
+    #[tokio::test]
+    async fn one_timed_out_writer_does_not_hide_a_healthy_acknowledgement() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+
+        let healthy = ConnId(173);
+        game.state.descriptors.insert(
+            healthy,
+            Descriptor::new(healthy, "healthy.example.test".into()),
+        );
+        let (healthy_tx, mut healthy_rx) = mpsc::channel(4);
+        game.outputs.insert(healthy, healthy_tx);
+        let healthy_writer = tokio::spawn(async move {
+            while let Some(frame) = healthy_rx.recv().await {
+                if let Some(ack) = frame.ack {
+                    let _ = ack.send(true);
+                    break;
+                }
+            }
+        });
+
+        let stalled = ConnId(174);
+        game.state.descriptors.insert(
+            stalled,
+            Descriptor::new(stalled, "stalled.example.test".into()),
+        );
+        let (stalled_tx, _stalled_rx) = mpsc::channel(4);
+        game.outputs.insert(stalled, stalled_tx);
+
+        let report = game.shutdown_save().await;
+        healthy_writer.await.unwrap();
+        assert_eq!(report.output_attempted, 2);
+        assert_eq!(report.output_acknowledged, 1);
+        assert_eq!(report.output_failed, 0);
+        assert_eq!(report.output_timed_out, 1);
+        assert_eq!(report.output_failures, 1);
+    }
+}
+
+#[cfg(test)]
+mod async_message_isolation_tests {
+    use super::tests::{attach_descriptor_host, test_game};
+    use super::*;
+    use crate::mock_database::MockDatabase;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn delayed_login_database_call_keeps_pulses_input_and_output_live() {
+        let db = Arc::new(MockDatabase::new());
+        db.set_exists_delay(Some(Duration::from_millis(500)));
+        let mut game = test_game(db);
+        let metrics = Arc::new(Metrics::new());
+        game.set_metrics(metrics.clone());
+
+        let login = ConnId(191);
+        attach_descriptor_host(&mut game, login, "slow-login.example.test");
+        game.state.descriptors.get_mut(&login).unwrap().state = ConState::GetName;
+        let (login_output, _login_rx) = mpsc::channel(8);
+        game.outputs.insert(login, login_output);
+
+        let playing = ConnId(192);
+        attach_descriptor_host(&mut game, playing, "active.example.test");
+        let player = game
+            .state
+            .create_char(crate::character::Character::new_player(
+                "Active".to_string(),
+                Class::Warrior,
+                Race::Human,
+            ));
+        {
+            let descriptor = game.state.descriptors.get_mut(&playing).unwrap();
+            descriptor.state = ConState::Playing;
+            descriptor.character = Some(player);
+            descriptor.write("queued output during SQL wait\r\n");
+        }
+        game.state.get_char_mut(player).unwrap().desc = Some(playing);
+        let (playing_output, mut playing_rx) = mpsc::channel(8);
+        game.outputs.insert(playing, playing_output);
+
+        let (game_tx, game_rx) = mpsc::channel(8);
+        let game_task = tokio::spawn(async move { game.run(game_rx).await });
+        game_tx
+            .send(GameMessage::Input {
+                conn_id: login,
+                input: "Neverstored".to_string(),
+            })
+            .await
+            .unwrap();
+        game_tx
+            .send(GameMessage::Input {
+                conn_id: playing,
+                input: "score".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let frame = tokio::time::timeout(Duration::from_millis(350), playing_rx.recv())
+            .await
+            .expect("output must flush before the delayed lookup completes")
+            .expect("playing output channel remains open");
+        assert!(String::from_utf8_lossy(&frame.bytes).contains("queued output"));
+
+        tokio::time::timeout(Duration::from_millis(350), async {
+            loop {
+                if metrics.commands_total.load(Ordering::Relaxed) >= 1
+                    && metrics.pulse.load(Ordering::Relaxed) >= 1
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("heartbeat must dispatch unrelated gameplay while SQL is delayed");
+
+        game_task.abort();
+        let _ = game_task.await;
+    }
+
+    #[tokio::test]
+    async fn async_message_panic_disconnects_only_the_offending_connection() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        let bad = ConnId(91);
+        let good = ConnId(92);
+        attach_descriptor_host(&mut game, bad, "bad.example.test");
+        attach_descriptor_host(&mut game, good, "good.example.test");
+
+        game.handle_message_isolated(GameMessage::PanicForTest { conn_id: bad })
+            .await;
+
+        assert!(!game.state.descriptors.contains_key(&bad));
+        assert!(game.state.descriptors.contains_key(&good));
+
+        game.handle_message_isolated(GameMessage::EnableGmcp { conn_id: good })
+            .await;
+        assert!(game.state.descriptors.get(&good).unwrap().gmcp);
+    }
+}
+
+#[cfg(test)]
+mod ordered_player_save_tests {
+    use super::tests::test_game;
+    use super::*;
+    use crate::character::Character;
+    use crate::mock_database::MockDatabase;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn ordered_saves_keep_game_output_live_and_newest_snapshot_wins() {
+        let db = Arc::new(MockDatabase::new());
+        let seed = Character::new_player("Savechain".into(), Class::Warrior, Race::Human);
+        let idnum = db.create_player(&seed, "pw").await.unwrap();
+        let mut game = test_game(db.clone());
+        db.set_save_delay(Some(Duration::from_millis(75)));
+
+        let mut old = db.load_player("Savechain").await.unwrap();
+        old.idnum = idnum;
+        crate::gold::set(&mut old, crate::gold::Account::Carried, 10);
+        game.queue_player_save(old, "old.example.test".into());
+
+        let mut newest = db.load_player("Savechain").await.unwrap();
+        newest.idnum = idnum;
+        crate::gold::set(&mut newest, crate::gold::Account::Carried, 20);
+        game.queue_player_save(newest, "new.example.test".into());
+
+        let conn = ConnId(93);
+        game.state
+            .descriptors
+            .insert(conn, Descriptor::new(conn, "viewer.example.test".into()));
+        game.state
+            .descriptors
+            .get_mut(&conn)
+            .unwrap()
+            .write("still responsive");
+        let (tx, mut rx) = mpsc::channel(1);
+        game.outputs.insert(conn, tx);
+        game.flush_all().await;
+        let frame = tokio::time::timeout(Duration::from_millis(25), rx.recv())
+            .await
+            .expect("output must not wait for a delayed player save")
+            .expect("output frame");
+        assert_eq!(frame.bytes, b"still responsive");
+        assert_eq!(
+            game.pending_player_snapshot("Savechain")
+                .unwrap()
+                .points
+                .gold,
+            20
+        );
+        assert_eq!(
+            game.load_player_latest("Savechain")
+                .await
+                .unwrap()
+                .points
+                .gold,
+            20,
+            "a fast reconnect must see the newest in-memory save generation"
+        );
+
+        assert_eq!(game.await_all_player_saves().await, 0);
+        db.set_save_delay(None);
+        assert_eq!(db.load_player("Savechain").await.unwrap().points.gold, 20);
+    }
+
+    #[tokio::test]
+    async fn ordered_save_failures_are_counted_and_reported() {
+        let db = Arc::new(MockDatabase::new());
+        let seed = Character::new_player("Saveerror".into(), Class::Warrior, Race::Human);
+        let idnum = db.create_player(&seed, "pw").await.unwrap();
+        let mut game = test_game(db.clone());
+        let mut snapshot = db.load_player("Saveerror").await.unwrap();
+        snapshot.idnum = idnum;
+        db.fail_next_save();
+
+        game.queue_player_save(snapshot, String::new());
+
+        assert_eq!(game.await_all_player_saves().await, 1);
+        assert_eq!(game.player_save_failures, 1);
+    }
+
+    #[tokio::test]
+    async fn copyover_aborts_when_a_player_database_save_fails() {
+        let db = Arc::new(MockDatabase::new());
+        let seed = Character::new_player("Copyfail".into(), Class::Warrior, Race::Human);
+        let idnum = db.create_player(&seed, "pw").await.unwrap();
+        let mut game = test_game(db.clone());
+        let conn = ConnId(94);
+        game.state
+            .descriptors
+            .insert(conn, Descriptor::new(conn, "copy.example.test".into()));
+        let mut player = db.load_player("Copyfail").await.unwrap();
+        player.idnum = idnum;
+        player.desc = Some(conn);
+        let player_id = game.state.create_char(player);
+        {
+            let descriptor = game.state.descriptors.get_mut(&conn).unwrap();
+            descriptor.state = ConState::Playing;
+            descriptor.character = Some(player_id);
+        }
+        db.fail_next_save();
+
+        assert_eq!(game.persist_copyover_players().await, 1);
+        assert!(game.pending_player_saves.is_empty());
+    }
+
+    #[tokio::test]
+    async fn copyover_aborts_when_the_configured_mud_date_cannot_be_saved() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let lib = std::env::temp_dir().join(format!(
+            "deltamud-copyover-date-failure-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(lib.join("etc/date_record")).unwrap();
+        game.lib_path = lib.to_string_lossy().into_owned();
+        game.state.config.lib_path = game.lib_path.clone();
+
+        let conn = ConnId(95);
+        let mut requester = Character::new_player("Datekeeper".into(), Class::Warrior, Race::Human);
+        requester.desc = Some(conn);
+        let requester = game.state.create_char(requester);
+        let mut descriptor = Descriptor::new(conn, "copy.example.test".into());
+        descriptor.state = ConState::Menu;
+        descriptor.character = Some(requester);
+        game.state.descriptors.insert(conn, descriptor);
+
+        game.execute_copyover(requester).await;
+
+        let output = game
+            .state
+            .descriptors
+            .get(&conn)
+            .map(|descriptor| descriptor.outbuf.as_str())
+            .unwrap_or_default();
+        assert!(output.contains("Copyover calendar save failed"));
+        assert!(!output.contains("Copyover unavailable"));
+        assert!(!lib.join("copyover.dat").exists());
+
+        let _ = std::fs::remove_dir_all(lib);
+    }
+}
+
+#[cfg(test)]
+mod durable_player_rename_tests {
+    use super::*;
+    use crate::DatabaseInterface;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::database_timeout::TimedDatabase;
+    use crate::mock_database::MockDatabase;
+    use std::path::PathBuf;
+
+    struct RenameFixture {
+        game: Game,
+        db: Arc<MockDatabase>,
+        lib: PathBuf,
+        admin: CharId,
+        victim: CharId,
+        idnum: i64,
+        old_rent: PathBuf,
+        old_alias: PathBuf,
+        new_rent: PathBuf,
+        new_alias: PathBuf,
+    }
+
+    async fn fixture(
+        label: &str,
+        db: Arc<MockDatabase>,
+        game_db: Arc<dyn DatabaseInterface>,
+    ) -> RenameFixture {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let lib = std::env::temp_dir().join(format!(
+            "deltamud-durable-rename-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&lib).unwrap();
+        let mut config = Config::default();
+        config.lib_path = lib.to_string_lossy().into_owned();
+        let mut game = Game::new(GameState::new(config.clone()), game_db);
+        game.lib_path = config.lib_path.clone();
+
+        let mut stored = Character::new_player("Oldname".into(), Class::Warrior, Race::Human);
+        stored.player.level = 20;
+        let idnum = db.create_player(&stored, "password").await.unwrap();
+        let mut victim_record = db.load_player("Oldname").await.unwrap();
+        victim_record.desc = Some(ConnId(202));
+        let victim = game.state.create_char(victim_record);
+        let mut victim_descriptor = Descriptor::new(ConnId(202), "victim.example.test".into());
+        victim_descriptor.state = ConState::Playing;
+        victim_descriptor.character = Some(victim);
+        game.state
+            .descriptors
+            .insert(ConnId(202), victim_descriptor);
+        game.state.players_by_name.insert("oldname".into(), victim);
+
+        let mut admin_record = Character::new_player("Admin".into(), Class::Warrior, Race::Human);
+        admin_record.player.level = LVL_IMPL;
+        admin_record.idnum = 9_413_900;
+        admin_record.desc = Some(ConnId(201));
+        let admin = game.state.create_char(admin_record);
+        let mut admin_descriptor = Descriptor::new(ConnId(201), "admin.example.test".into());
+        admin_descriptor.state = ConState::Playing;
+        admin_descriptor.character = Some(admin);
+        game.state.descriptors.insert(ConnId(201), admin_descriptor);
+        game.state.players_by_name.insert("admin".into(), admin);
+        game.state.player_table = db.list_players().await.unwrap();
+
+        let old_rent = crate::objsave::crash_filename(&config.lib_path, "Oldname").unwrap();
+        std::fs::create_dir_all(old_rent.parent().unwrap()).unwrap();
+        std::fs::write(&old_rent, b"Oldname rent").unwrap();
+        crate::alias::set_aliases(
+            idnum,
+            vec![crate::alias::AliasEntry {
+                alias: "greet".into(),
+                replacement: "say hello".into(),
+                atype: 0,
+            }],
+        );
+        crate::alias::write_aliases(&config.lib_path, "Oldname", idnum).unwrap();
+        let old_alias = crate::alias::alias_filename(&config.lib_path, "Oldname").unwrap();
+        let new_rent = crate::objsave::crash_filename(&config.lib_path, "Newname").unwrap();
+        let new_alias = crate::alias::alias_filename(&config.lib_path, "Newname").unwrap();
+
+        RenameFixture {
+            game,
+            db,
+            lib,
+            admin,
+            victim,
+            idnum,
+            old_rent,
+            old_alias,
+            new_rent,
+            new_alias,
+        }
+    }
+
+    fn cleanup(fixture: RenameFixture) {
+        crate::alias::clear_aliases(fixture.idnum);
+        let _ = std::fs::remove_dir_all(fixture.lib);
+    }
+
+    fn queue_rename(fixture: &mut RenameFixture) {
+        crate::cmd_wizard::do_rename(&mut fixture.game.state, fixture.admin, "Oldname Newname", 0);
+    }
+
+    fn assert_old_live_identity(fixture: &RenameFixture) {
+        assert_eq!(
+            fixture
+                .game
+                .state
+                .get_char(fixture.victim)
+                .unwrap()
+                .get_name(),
+            "Oldname"
+        );
+        assert_eq!(
+            fixture.game.state.find_player_by_name("Oldname"),
+            Some(fixture.victim)
+        );
+        assert!(fixture.game.state.find_player_by_name("Newname").is_none());
+        assert_eq!(
+            fixture.game.state.get_name_by_id(fixture.idnum).as_deref(),
+            Some("Oldname")
+        );
+    }
+
+    #[tokio::test]
+    async fn success_is_published_only_after_sql_and_both_sidecars_are_durable() {
+        let db = Arc::new(MockDatabase::new());
+        let game_db: Arc<dyn DatabaseInterface> = db.clone();
+        let mut fixture = fixture("success", db, game_db).await;
+
+        queue_rename(&mut fixture);
+
+        assert_old_live_identity(&fixture);
+        assert!(fixture.old_rent.is_file() && fixture.old_alias.is_file());
+        assert!(!fixture.new_rent.exists() && !fixture.new_alias.exists());
+        assert!(fixture.db.load_player("Oldname").await.is_ok());
+        assert!(
+            !fixture.game.state.descriptors[&ConnId(201)]
+                .outbuf
+                .contains("You have renamed")
+        );
+
+        fixture.game.drain_player_rename_requests().await;
+
+        assert_eq!(
+            fixture
+                .game
+                .state
+                .get_char(fixture.victim)
+                .unwrap()
+                .get_name(),
+            "Newname"
+        );
+        assert!(fixture.game.state.find_player_by_name("Oldname").is_none());
+        assert_eq!(
+            fixture.game.state.find_player_by_name("Newname"),
+            Some(fixture.victim)
+        );
+        assert_eq!(
+            fixture.game.state.get_name_by_id(fixture.idnum).as_deref(),
+            Some("Newname")
+        );
+        assert!(fixture.db.load_player("Oldname").await.is_err());
+        assert_eq!(
+            fixture.db.load_player("Newname").await.unwrap().get_name(),
+            "Newname"
+        );
+        assert!(!fixture.old_rent.exists() && !fixture.old_alias.exists());
+        assert!(fixture.new_rent.is_file() && fixture.new_alias.is_file());
+        assert!(
+            fixture.game.state.descriptors[&ConnId(201)]
+                .outbuf
+                .contains("You have renamed Oldname to Newname")
+        );
+        assert!(
+            fixture.game.state.descriptors[&ConnId(202)]
+                .outbuf
+                .contains("You have been renamed to Newname")
+        );
+        assert!(fixture.game.state.player_save_requests.is_empty());
+
+        cleanup(fixture);
+    }
+
+    #[tokio::test]
+    async fn database_error_keeps_old_sql_live_index_and_sidecars_without_false_success() {
+        let db = Arc::new(MockDatabase::new());
+        let game_db: Arc<dyn DatabaseInterface> = db.clone();
+        let mut fixture = fixture("db-error", db, game_db).await;
+        fixture.db.fail_next_rename();
+        queue_rename(&mut fixture);
+
+        fixture.game.drain_player_rename_requests().await;
+
+        assert_old_live_identity(&fixture);
+        assert_eq!(
+            fixture.db.load_player("Oldname").await.unwrap().get_name(),
+            "Oldname"
+        );
+        assert!(fixture.db.load_player("Newname").await.is_err());
+        assert!(fixture.old_rent.is_file() && fixture.old_alias.is_file());
+        assert!(!fixture.new_rent.exists() && !fixture.new_alias.exists());
+        let output = &fixture.game.state.descriptors[&ConnId(201)].outbuf;
+        assert!(output.contains("Rename failed"), "output={output:?}");
+        assert!(!output.contains("You have renamed"), "output={output:?}");
+
+        cleanup(fixture);
+    }
+
+    #[tokio::test]
+    async fn database_timeout_is_cancelled_before_mutation_and_leaves_sidecars_unpublished() {
+        let db = Arc::new(MockDatabase::new());
+        let inner: Arc<dyn DatabaseInterface> = db.clone();
+        let game_db: Arc<dyn DatabaseInterface> =
+            Arc::new(TimedDatabase::new(inner, Duration::from_millis(10)));
+        let mut fixture = fixture("db-timeout", db, game_db).await;
+        fixture
+            .db
+            .set_rename_delay(Some(Duration::from_millis(100)));
+        queue_rename(&mut fixture);
+
+        fixture.game.drain_player_rename_requests().await;
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        assert_old_live_identity(&fixture);
+        assert!(fixture.db.load_player("Oldname").await.is_ok());
+        assert!(fixture.db.load_player("Newname").await.is_err());
+        assert!(fixture.old_rent.is_file() && fixture.old_alias.is_file());
+        assert!(!fixture.new_rent.exists() && !fixture.new_alias.exists());
+        let output = &fixture.game.state.descriptors[&ConnId(201)].outbuf;
+        assert!(output.contains("Rename failed"), "output={output:?}");
+        assert!(!output.contains("You have renamed"), "output={output:?}");
+
+        cleanup(fixture);
+    }
+
+    #[tokio::test]
+    async fn sidecar_collision_rolls_the_committed_sql_name_back_to_old_identity() {
+        let db = Arc::new(MockDatabase::new());
+        let game_db: Arc<dyn DatabaseInterface> = db.clone();
+        let mut fixture = fixture("sidecar-rollback", db, game_db).await;
+        std::fs::create_dir_all(fixture.new_alias.parent().unwrap()).unwrap();
+        std::fs::write(&fixture.new_alias, b"belongs to another identity").unwrap();
+        queue_rename(&mut fixture);
+
+        fixture.game.drain_player_rename_requests().await;
+
+        assert_old_live_identity(&fixture);
+        assert_eq!(
+            fixture.db.load_player("Oldname").await.unwrap().get_name(),
+            "Oldname"
+        );
+        assert!(fixture.db.load_player("Newname").await.is_err());
+        assert!(fixture.old_rent.is_file() && fixture.old_alias.is_file());
+        assert!(!fixture.new_rent.exists());
+        assert_eq!(
+            std::fs::read(&fixture.new_alias).unwrap(),
+            b"belongs to another identity"
+        );
+        let output = &fixture.game.state.descriptors[&ConnId(201)].outbuf;
+        assert!(output.contains("Rename failed"), "output={output:?}");
+        assert!(!output.contains("You have renamed"), "output={output:?}");
+
+        cleanup(fixture);
+    }
+
+    #[tokio::test]
+    async fn rollback_failure_is_reported_as_critical_without_false_durable_state_claim() {
+        let db = Arc::new(MockDatabase::new());
+        let game_db: Arc<dyn DatabaseInterface> = db.clone();
+        let mut fixture = fixture("critical-rollback", db, game_db).await;
+        std::fs::create_dir_all(fixture.new_alias.parent().unwrap()).unwrap();
+        std::fs::write(&fixture.new_alias, b"blocks sidecar publication").unwrap();
+        // First call commits Oldname -> Newname; the second call is the
+        // compensating SQL rollback and is deliberately failed.
+        fixture.db.fail_rename_on_call(2);
+        queue_rename(&mut fixture);
+
+        fixture.game.drain_player_rename_requests().await;
+
+        assert_old_live_identity(&fixture);
+        assert!(fixture.db.load_player("Oldname").await.is_err());
+        assert_eq!(
+            fixture.db.load_player("Newname").await.unwrap().get_name(),
+            "Newname"
+        );
+        assert!(fixture.old_rent.is_file() && fixture.old_alias.is_file());
+        let output = &fixture.game.state.descriptors[&ConnId(201)].outbuf;
+        assert!(output.contains("CRITICAL"), "output={output:?}");
+        assert!(output.contains("inconsistent"), "output={output:?}");
+        assert!(
+            !output.contains("old name was restored"),
+            "output={output:?}"
+        );
+        assert!(!output.contains("You have renamed"), "output={output:?}");
+
+        cleanup(fixture);
+    }
+
+    #[tokio::test]
+    async fn drain_rechecks_authority_before_touching_sql_or_files() {
+        let db = Arc::new(MockDatabase::new());
+        let game_db: Arc<dyn DatabaseInterface> = db.clone();
+        let mut fixture = fixture("authority", db, game_db).await;
+        queue_rename(&mut fixture);
+        fixture
+            .game
+            .state
+            .get_char_mut(fixture.admin)
+            .unwrap()
+            .player
+            .level = 20;
+
+        fixture.game.drain_player_rename_requests().await;
+
+        assert_old_live_identity(&fixture);
+        assert!(fixture.db.load_player("Oldname").await.is_ok());
+        assert!(fixture.old_rent.is_file() && fixture.old_alias.is_file());
+        assert!(!fixture.new_rent.exists() && !fixture.new_alias.exists());
+        assert!(
+            !fixture.game.state.descriptors[&ConnId(201)]
+                .outbuf
+                .contains("You have renamed")
+        );
+
+        cleanup(fixture);
+    }
+
+    #[tokio::test]
+    async fn durable_collision_appearing_after_queue_is_rejected_without_sidecar_publication() {
+        let db = Arc::new(MockDatabase::new());
+        let game_db: Arc<dyn DatabaseInterface> = db.clone();
+        let mut fixture = fixture("durable-collision", db, game_db).await;
+        queue_rename(&mut fixture);
+        let collision = Character::new_player("Newname".into(), Class::MagicUser, Race::Elf);
+        fixture
+            .db
+            .create_player(&collision, "password")
+            .await
+            .unwrap();
+
+        fixture.game.drain_player_rename_requests().await;
+
+        assert_old_live_identity(&fixture);
+        assert!(fixture.db.load_player("Oldname").await.is_ok());
+        assert_eq!(
+            fixture
+                .db
+                .load_player("Newname")
+                .await
+                .unwrap()
+                .player
+                .class,
+            Class::MagicUser
+        );
+        assert!(fixture.old_rent.is_file() && fixture.old_alias.is_file());
+        assert!(!fixture.new_rent.exists() && !fixture.new_alias.exists());
+        assert!(
+            !fixture.game.state.descriptors[&ConnId(201)]
+                .outbuf
+                .contains("You have renamed")
+        );
+
+        cleanup(fixture);
+    }
+
+    #[tokio::test]
+    async fn prior_old_name_save_finishes_before_rename_and_cannot_recreate_the_old_key() {
+        let db = Arc::new(MockDatabase::new());
+        let game_db: Arc<dyn DatabaseInterface> = db.clone();
+        let mut fixture = fixture("prior-save", db, game_db).await;
+        fixture.db.set_save_delay(Some(Duration::from_millis(40)));
+        let mut old_snapshot = fixture.db.load_player("Oldname").await.unwrap();
+        crate::gold::set(&mut old_snapshot, crate::gold::Account::Carried, 1234);
+        fixture
+            .game
+            .queue_player_save(old_snapshot, "saved.example.test".into());
+        queue_rename(&mut fixture);
+
+        fixture.game.drain_player_rename_requests().await;
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        assert!(fixture.game.pending_player_saves.is_empty());
+        assert!(fixture.db.load_player("Oldname").await.is_err());
+        let stored = fixture.db.load_player("Newname").await.unwrap();
+        assert_eq!(stored.get_name(), "Newname");
+        assert_eq!(stored.points.gold, 1234);
+
+        cleanup(fixture);
     }
 }

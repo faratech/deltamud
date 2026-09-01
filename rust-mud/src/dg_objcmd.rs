@@ -27,11 +27,11 @@
 // All lookups go through GameState's id-indexed finders; nothing holds a borrow
 // across a mutation.
 
-use crate::act::{act, ActArg, To};
-use crate::dg_comm::{sub_write, TO_CHAR, TO_ROOM};
+use crate::act::{ActArg, To, act};
+use crate::dg_comm::{TO_CHAR, TO_ROOM, sub_write};
 use crate::dg_handler::ROOM_ID_BASE;
 use crate::interpreter::{command_interpreter, is_abbrev};
-use crate::object::{ObjLoc, ObjectType};
+use crate::object::{ObjLoc, ObjectGraphOrder, ObjectType, walk_object_graph};
 use crate::room::RoomFlags;
 use crate::state::GameState;
 use crate::types::*;
@@ -95,32 +95,15 @@ fn two_args(argument: &str) -> (String, String, &str) {
 }
 
 fn is_number(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
+    !s.is_empty()
+        && s.chars().all(|c| c.is_ascii_digit())
+        && crate::text::parse_i32_strict(s).is_ok()
 }
 
 /// atoi: leading optional sign + digits, C-style (stops at first non-digit,
 /// returns 0 on no digits). Preserves the negative handling odamage relies on.
-fn atoi(s: &str) -> i32 {
-    let s = s.trim_start();
-    let mut chars = s.chars().peekable();
-    let mut sign = 1i64;
-    if let Some(&c) = chars.peek() {
-        if c == '-' {
-            sign = -1;
-            chars.next();
-        } else if c == '+' {
-            chars.next();
-        }
-    }
-    let mut val: i64 = 0;
-    for c in chars {
-        if let Some(d) = c.to_digit(10) {
-            val = val * 10 + d as i64;
-        } else {
-            break;
-        }
-    }
-    (sign * val) as i32
+fn atoi(s: &str) -> Result<i32, crate::text::ParseIntError> {
+    crate::text::parse_i32_atoi(s)
 }
 
 // ---------------------------------------------------------------------------
@@ -128,20 +111,47 @@ fn atoi(s: &str) -> i32 {
 // the container it sits in — currently occupies. Recurses up the in_obj chain.
 // ---------------------------------------------------------------------------
 fn obj_room(g: &GameState, obj: ObjId) -> Option<RoomRnum> {
-    match g.get_obj(obj)?.loc {
-        ObjLoc::Room(rnum) => Some(rnum),
-        ObjLoc::Carried(cid) | ObjLoc::Worn(cid, _) => g.get_char(cid).and_then(|c| c.in_room),
-        ObjLoc::Contained(container) => obj_room(g, container),
-        ObjLoc::Nowhere => None,
+    let walk = walk_object_graph(
+        [obj],
+        ObjectGraphOrder::Preorder,
+        "DG object command obj_room",
+        |id| {
+            g.get_obj(id).map(|object| match object.loc {
+                ObjLoc::Contained(parent) => vec![parent],
+                _ => Vec::new(),
+            })
+        },
+    );
+    for visit in walk.visits {
+        match g.get_obj(visit.id).map(|object| object.loc) {
+            Some(ObjLoc::Room(room)) => return Some(room),
+            Some(ObjLoc::Carried(ch) | ObjLoc::Worn(ch, _)) => {
+                return g.get_char(ch).and_then(|character| character.in_room);
+            }
+            Some(ObjLoc::Contained(_)) => {}
+            Some(ObjLoc::Nowhere) | None => return None,
+        }
     }
+    None
 }
 
 /// cycle_up: the outermost container of `obj` (C cycle_up — follows in_obj).
 fn cycle_up(g: &GameState, obj: ObjId) -> ObjId {
-    match g.get_obj(obj).map(|o| o.loc) {
-        Some(ObjLoc::Contained(container)) => cycle_up(g, container),
-        _ => obj,
-    }
+    walk_object_graph(
+        [obj],
+        ObjectGraphOrder::Preorder,
+        "DG object command cycle_up",
+        |id| {
+            g.get_obj(id).map(|object| match object.loc {
+                ObjLoc::Contained(parent) => vec![parent],
+                _ => Vec::new(),
+            })
+        },
+    )
+    .visits
+    .last()
+    .map(|visit| visit.id)
+    .unwrap_or(obj)
 }
 
 // ---------------------------------------------------------------------------
@@ -165,11 +175,7 @@ fn find_char_by_id(g: &GameState, id: i64) -> Option<CharId> {
         return None;
     }
     let cid = CharId(id as u64);
-    if g.char_exists(cid) {
-        Some(cid)
-    } else {
-        None
-    }
+    if g.char_exists(cid) { Some(cid) } else { None }
 }
 
 fn find_obj_by_id(g: &GameState, id: i64) -> Option<ObjId> {
@@ -347,7 +353,7 @@ fn find_obj_target_room(g: &GameState, obj: ObjId, rawroomstr: &str) -> Option<R
         // UID room reference.
         location = find_room_by_id(g, id)?;
     } else if is_number(&roomstr) {
-        location = g.real_room(atoi(&roomstr))?;
+        location = g.real_room(atoi(&roomstr).ok()?)?;
     } else if let Some(cid) = get_char_by_obj(g, obj, &roomstr) {
         location = g.get_char(cid)?.in_room?;
     } else if let Some(tobj) = get_obj_by_obj(g, obj, &roomstr) {
@@ -456,7 +462,14 @@ fn do_oexp(g: &mut GameState, obj: ObjId, argument: &str) {
         return;
     }
     if let Some(ch) = get_char_by_obj(g, obj, &name) {
-        crate::limits::gain_exp(g, ch, atoi(&amount) as i64);
+        let amount = match atoi(&amount) {
+            Ok(amount) => amount,
+            Err(_) => {
+                obj_log(g, obj, "oexp: amount outside supported range");
+                return;
+            }
+        };
+        crate::limits::gain_exp(g, ch, amount as i64);
     } else {
         obj_log(g, obj, "oexp: target not found");
     }
@@ -474,8 +487,17 @@ fn do_otimer(g: &mut GameState, obj: ObjId, argument: &str) {
         .unwrap_or(false)
     {
         obj_log(g, obj, "otimer: bad argument");
-    } else if let Some(o) = g.get_obj_mut(obj) {
-        o.timer = atoi(&arg);
+    } else {
+        let timer = match atoi(&arg) {
+            Ok(timer) => timer,
+            Err(_) => {
+                obj_log(g, obj, "otimer: argument outside supported range");
+                return;
+            }
+        };
+        if let Some(o) = g.get_obj_mut(obj) {
+            o.timer = timer;
+        }
     }
 }
 
@@ -497,7 +519,13 @@ fn do_otransform(g: &mut GameState, obj: ObjId, argument: &str) {
         return;
     }
 
-    let vnum = atoi(&arg);
+    let vnum = match atoi(&arg) {
+        Ok(vnum) => vnum,
+        Err(_) => {
+            obj_log(g, obj, "otransform: argument outside supported range");
+            return;
+        }
+    };
     // Load the prototype into a temporary, copy its prototype-derived fields
     // onto the existing object (keeping id/loc/contains/worn state), then drop
     // the temporary. read_object(vnum, VIRTUAL).
@@ -565,7 +593,6 @@ fn do_otransform(g: &mut GameState, obj: ObjId, argument: &str) {
     }
 
     // Discard the temporary load.
-    g.obj_from_anywhere(tmp);
     g.extract_obj(tmp);
 }
 
@@ -604,7 +631,6 @@ fn do_opurge(g: &mut GameState, obj: ObjId, argument: &str) {
             for o in contents {
                 if o != obj {
                     crate::dg_handler::on_obj_extracted(g, o);
-                    g.obj_from_anywhere(o);
                     g.extract_obj(o);
                 }
             }
@@ -630,7 +656,6 @@ fn do_opurge(g: &mut GameState, obj: ObjId, argument: &str) {
             crate::dg_scripts::set_owner_purged();
         }
         crate::dg_handler::on_obj_extracted(g, o);
-        g.obj_from_anywhere(o);
         g.extract_obj(o);
     } else {
         obj_log(g, obj, "opurge: bad argument");
@@ -677,11 +702,17 @@ fn do_oteleport(g: &mut GameState, obj: ObjId, argument: &str) {
 /// oload: load a mob or object into the object's room (fires the LOAD trigger).
 fn do_dgoload(g: &mut GameState, obj: ObjId, argument: &str) {
     let (arg1, arg2, _) = two_args(argument);
-    if arg1.is_empty() || arg2.is_empty() || !is_number(&arg2) || atoi(&arg2) < 0 {
+    if arg1.is_empty() || arg2.is_empty() || !is_number(&arg2) {
         obj_log(g, obj, "oload: bad syntax");
         return;
     }
-    let number = atoi(&arg2);
+    let number = match crate::text::parse_i32_strict(&arg2) {
+        Ok(number) if number >= 0 => number,
+        _ => {
+            obj_log(g, obj, "oload: bad syntax");
+            return;
+        }
+    };
 
     let room = match obj_room(g, obj) {
         Some(r) => r,
@@ -728,7 +759,13 @@ fn do_odamage(g: &mut GameState, obj: ObjId, argument: &str) {
         obj_log(g, obj, "odamage: bad syntax");
         return;
     }
-    let dam = atoi(&amount);
+    let dam = match atoi(&amount) {
+        Ok(dam) => dam,
+        Err(_) => {
+            obj_log(g, obj, "odamage: amount outside supported range");
+            return;
+        }
+    };
 
     // Build the target set. "all" -> everyone in the room of the outermost
     // container's carrier/wearer; otherwise the single named target.
@@ -1085,9 +1122,9 @@ fn make_corpse(g: &mut GameState, who: &str, victim: CharId) -> ObjId {
     obj.obj_type = ObjectType::Container;
     crate::combat::apply_corpse_metadata(&mut obj, g, victim);
     // C fight.c:315-318: GET_OBJ_TIMER(corpse) = IS_NPC(ch) ?
-// max_npc_corpse_time (5) : max_pc_corpse_time (10) (config.c:120-121),
-// decremented once per mud hour by point_update. The flat 60 made
-// corpses persist 6-12x longer than C (#102).
+    // max_npc_corpse_time (5) : max_pc_corpse_time (10) (config.c:120-121),
+    // decremented once per mud hour by point_update. The flat 60 made
+    // corpses persist 6-12x longer than C (#102).
     obj.timer = if g.get_char(victim).map(|c| c.is_npc).unwrap_or(true) {
         5
     } else {
@@ -1119,4 +1156,46 @@ fn is_immortal(g: &GameState, ch: CharId) -> bool {
     g.get_char(ch)
         .map(|c| c.player.level >= LVL_IMMORT)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod object_ancestry_tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::object::Object;
+    use crate::room::Room;
+
+    #[test]
+    fn dg_object_ancestry_is_cycle_safe_and_depth_bounded() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(700, 7, "DG room".into(), String::new()));
+
+        let a = g.create_obj(Object::new(NOTHING, "a".into(), "a".into()));
+        let b = g.create_obj(Object::new(NOTHING, "b".into(), "b".into()));
+        g.get_obj_mut(a).unwrap().loc = ObjLoc::Contained(b);
+        g.get_obj_mut(b).unwrap().loc = ObjLoc::Contained(a);
+        assert_eq!(obj_room(&g, a), None);
+        assert_eq!(cycle_up(&g, a), b);
+
+        let chain: Vec<ObjId> = (0..crate::object::MAX_OBJECT_GRAPH_DEPTH + 5)
+            .map(|index| {
+                g.create_obj(Object::new(
+                    NOTHING,
+                    format!("deep {index}"),
+                    format!("deep {index}"),
+                ))
+            })
+            .collect();
+        for pair in chain.windows(2) {
+            g.get_obj_mut(pair[0]).unwrap().loc = ObjLoc::Contained(pair[1]);
+        }
+        g.get_obj_mut(*chain.last().unwrap()).unwrap().loc = ObjLoc::Room(room);
+
+        // The room and outermost container lie beyond the shared safety bound.
+        assert_eq!(obj_room(&g, chain[0]), None);
+        assert_eq!(
+            cycle_up(&g, chain[0]),
+            chain[crate::object::MAX_OBJECT_GRAPH_DEPTH - 1]
+        );
+    }
 }

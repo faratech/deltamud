@@ -21,6 +21,14 @@ pub struct Metrics {
     pub connections_total: AtomicU64,
     /// Total player commands dispatched since boot. Monotonic counter.
     pub commands_total: AtomicU64,
+    /// Metrics connections rejected because the independent scrape limit was full.
+    pub metrics_rejected_total: AtomicU64,
+    /// Metrics exchanges terminated by an I/O or whole-request deadline.
+    pub metrics_timeouts_total: AtomicU64,
+    /// Descriptor text batches truncated by the pending/rendered byte ceiling.
+    pub output_overflows_total: AtomicU64,
+    /// Game clients closed after their bounded writer channel stopped accepting data.
+    pub output_closed_clients_total: AtomicU64,
     /// Wall-clock of the most recent heartbeat pulse, microseconds. Gauge.
     pub last_tick_micros: AtomicU64,
     /// High-water mark of any single pulse, microseconds. Gauge (max-so-far).
@@ -41,6 +49,10 @@ impl Metrics {
             players: AtomicU64::new(0),
             connections_total: AtomicU64::new(0),
             commands_total: AtomicU64::new(0),
+            metrics_rejected_total: AtomicU64::new(0),
+            metrics_timeouts_total: AtomicU64::new(0),
+            output_overflows_total: AtomicU64::new(0),
+            output_closed_clients_total: AtomicU64::new(0),
             last_tick_micros: AtomicU64::new(0),
             max_tick_micros: AtomicU64::new(0),
             mobs: AtomicU64::new(0),
@@ -65,6 +77,27 @@ impl Metrics {
     #[inline]
     pub fn inc_commands(&self) {
         self.commands_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn inc_metrics_rejected(&self) {
+        self.metrics_rejected_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn inc_metrics_timeout(&self) {
+        self.metrics_timeouts_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn inc_output_overflow(&self) {
+        self.output_overflows_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn inc_output_closed_client(&self) {
+        self.output_closed_clients_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline]
@@ -111,6 +144,10 @@ impl Metrics {
         let players = self.players.load(Ordering::Relaxed);
         let connections = self.connections_total.load(Ordering::Relaxed);
         let commands = self.commands_total.load(Ordering::Relaxed);
+        let metrics_rejected = self.metrics_rejected_total.load(Ordering::Relaxed);
+        let metrics_timeouts = self.metrics_timeouts_total.load(Ordering::Relaxed);
+        let output_overflows = self.output_overflows_total.load(Ordering::Relaxed);
+        let output_closed_clients = self.output_closed_clients_total.load(Ordering::Relaxed);
         let last_tick = self.last_tick_micros.load(Ordering::Relaxed);
         let max_tick = self.max_tick_micros.load(Ordering::Relaxed);
         let mobs = self.mobs.load(Ordering::Relaxed);
@@ -133,6 +170,34 @@ impl Metrics {
         s.push_str("# HELP deltamud_commands_total Total player commands dispatched since boot.\n");
         s.push_str("# TYPE deltamud_commands_total counter\n");
         s.push_str(&format!("deltamud_commands_total {}\n", commands));
+
+        s.push_str("# HELP deltamud_metrics_rejected_total Metrics connections rejected at the scrape concurrency limit.\n");
+        s.push_str("# TYPE deltamud_metrics_rejected_total counter\n");
+        s.push_str(&format!(
+            "deltamud_metrics_rejected_total {}\n",
+            metrics_rejected
+        ));
+
+        s.push_str("# HELP deltamud_metrics_timeouts_total Metrics exchanges closed by an I/O or request deadline.\n");
+        s.push_str("# TYPE deltamud_metrics_timeouts_total counter\n");
+        s.push_str(&format!(
+            "deltamud_metrics_timeouts_total {}\n",
+            metrics_timeouts
+        ));
+
+        s.push_str("# HELP deltamud_output_overflows_total Descriptor output batches truncated at the byte ceiling.\n");
+        s.push_str("# TYPE deltamud_output_overflows_total counter\n");
+        s.push_str(&format!(
+            "deltamud_output_overflows_total {}\n",
+            output_overflows
+        ));
+
+        s.push_str("# HELP deltamud_output_closed_clients_total Clients closed after writer-channel backpressure or failure.\n");
+        s.push_str("# TYPE deltamud_output_closed_clients_total counter\n");
+        s.push_str(&format!(
+            "deltamud_output_closed_clients_total {}\n",
+            output_closed_clients
+        ));
 
         s.push_str("# HELP deltamud_heartbeat_tick_micros Duration of the most recent heartbeat pulse in microseconds.\n");
         s.push_str("# TYPE deltamud_heartbeat_tick_micros gauge\n");

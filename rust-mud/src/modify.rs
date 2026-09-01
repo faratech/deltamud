@@ -23,10 +23,10 @@
 // pager's page vector) lives in module statics keyed by ConnId, exactly as the
 // brief prescribes (no GameState methods / Character fields added).
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::connection::InputContext;
 use crate::interpreter::{half_chop, one_argument};
-use crate::spell_parser::{find_skill_num, skill_name, TOP_SPELL_DEFINE};
+use crate::spell_parser::{TOP_SPELL_DEFINE, find_skill_num, skill_name};
 use crate::state::GameState;
 use crate::types::*;
 use std::collections::HashMap;
@@ -91,6 +91,25 @@ enum EditTarget {
 struct EditState {
     target: EditTarget,
     max_len: usize,
+}
+
+/// Release ALL per-connection string-editor and pager state (W6 crash
+/// hardening: ConnIds are never reused, so every leaked entry was permanent
+/// memory growth — a pager holds the entire paginated document).
+pub fn abort_conn(g: &mut GameState, conn_id: ConnId) {
+    let target = crate::lock_ok::lock(&edits())
+        .remove(&conn_id)
+        .map(|edit| edit.target);
+    crate::lock_ok::lock(&pagers()).remove(&conn_id);
+    match target {
+        Some(EditTarget::Mail) => {
+            crate::mail::abort_mail(conn_id);
+        }
+        Some(EditTarget::Board) => {
+            crate::boards::board_finish_write(g, conn_id, "", false);
+        }
+        _ => {}
+    }
 }
 
 fn edits() -> &'static Mutex<HashMap<ConnId, EditState>> {
@@ -165,7 +184,7 @@ fn write_buffer(g: &mut GameState, conn: ConnId, new: String) {
 /// Append text to the connection's output buffer (SEND_TO_Q on d).
 fn send_to_q(g: &mut GameState, conn: ConnId, msg: &str) {
     if let Some(d) = g.descriptors.get_mut(&conn) {
-        d.outbuf.push_str(msg);
+        d.write(msg);
     }
 }
 
@@ -389,7 +408,7 @@ pub fn editor_buffer_input(
                 if let Some(cid) = conn_char(g, conn) {
                     g.send_to_char(cid, "String too long - Truncated.\r\n");
                 }
-                append.truncate(max_len);
+                crate::text::truncate_utf8_bytes(&mut append, max_len);
             }
             *buf = append;
         } else if append.len() + buf.len() > max_len {
@@ -548,6 +567,15 @@ fn finish_editor(g: &mut GameState, conn: ConnId, terminator: i32) {
                     d.temp_description = Some(buffer.clone());
                 }
             }
+            // C interpreter.c CON_EXDESCTERMINATE: print Done and return to
+            // the menu. The old code left ConState::ExDesc set -- write_prompt
+            // emits nothing there, so the descriptor sat silently until its
+            // next line hit the recovery arm (swallowing a keystroke).
+            if let Some(d) = g.descriptors.get_mut(&conn) {
+                d.state = crate::connection::ConState::Menu;
+                d.suppress_prompt = false;
+            }
+            send_to_q(g, conn, "Done.\r\n");
         }
     }
 
@@ -739,13 +767,17 @@ fn parse_action(
         }
         ParseCmd::Delete => {
             let (low, high) = match scan_range(string) {
-                Some(r) => r,
-                None => {
+                Ok(Some(r)) => r,
+                Ok(None) => {
                     send_to_q(
                         g,
                         conn,
                         "You must specify a line number or range to delete.\r\n",
                     );
+                    return;
+                }
+                Err(()) => {
+                    send_to_q(g, conn, "Line number is outside the supported range.\r\n");
                     return;
                 }
             };
@@ -786,7 +818,14 @@ fn parse_action(
                 );
                 return;
             }
-            let line_low: i32 = numstr.parse().unwrap_or(0);
+            let line_low = match crate::text::parse_i32_strict(&numstr) {
+                Ok(value) => value,
+                Err(crate::text::ParseIntError::Overflow) => {
+                    send_to_q(g, conn, "Line number is outside the supported range.\r\n");
+                    return;
+                }
+                Err(_) => 0,
+            };
             if buf.is_empty() {
                 send_to_q(g, conn, "Buffer is empty, nowhere to insert.\r\n");
                 return;
@@ -822,7 +861,14 @@ fn parse_action(
                 );
                 return;
             }
-            let line_low: i32 = numstr.parse().unwrap_or(0);
+            let line_low = match crate::text::parse_i32_strict(&numstr) {
+                Ok(value) => value,
+                Err(crate::text::ParseIntError::Overflow) => {
+                    send_to_q(g, conn, "Line number is outside the supported range.\r\n");
+                    return;
+                }
+                Err(_) => 0,
+            };
             if buf.is_empty() {
                 send_to_q(g, conn, "Buffer is empty, nothing to change.\r\n");
                 return;
@@ -874,27 +920,35 @@ fn line_segments(buf: &str) -> Vec<String> {
     out
 }
 
-/// sscanf(" %d - %d ") emulation: None (no number), Some((n,n)) (one), or
-/// Some((low,high)) (a range).
-fn scan_range(s: &str) -> Option<(i32, i32)> {
+/// sscanf(" %d - %d ") emulation: Ok(None) (no number), Ok(Some((n,n)))
+/// (one), or Ok(Some((low,high))) (a range). Numeric overflow is an error so a
+/// range such as `1-2147483648` cannot degrade into the single line `1`.
+fn scan_range(s: &str) -> Result<Option<(i32, i32)>, ()> {
+    let parse = |raw: &str| match crate::text::parse_i32_strict(raw) {
+        Ok(value) => Ok(Some(value)),
+        Err(crate::text::ParseIntError::Overflow) => Err(()),
+        Err(_) => Ok(None),
+    };
     let trimmed = s.trim();
     if trimmed.is_empty() {
-        return None;
+        return Ok(None);
     }
     if let Some(idx) = trimmed.find('-') {
-        let low = trimmed[..idx].trim().parse::<i32>().ok();
-        let high = trimmed[idx + 1..].trim().parse::<i32>().ok();
-        match (low, high) {
+        let low = parse(trimmed[..idx].trim())?;
+        let high = parse(trimmed[idx + 1..].trim())?;
+        Ok(match (low, high) {
             (Some(l), Some(h)) => Some((l, h)),
             (Some(l), None) => Some((l, l)),
             _ => None,
-        }
+        })
     } else {
-        trimmed
+        let value = trimmed
             .split_whitespace()
             .next()
-            .and_then(|w| w.parse::<i32>().ok())
-            .map(|n| (n, n))
+            .map(parse)
+            .transpose()?
+            .flatten();
+        Ok(value.map(|n| (n, n)))
     }
 }
 
@@ -981,8 +1035,12 @@ fn list_buffer(g: &mut GameState, conn: ConnId, string: &str, numbered: bool, bu
         (1, 999999)
     } else {
         match scan_range(string) {
-            Some((l, h)) => (l, h),
-            None => (1, 999999),
+            Ok(Some((l, h))) => (l, h),
+            Ok(None) => (1, 999999),
+            Err(()) => {
+                send_to_q(g, conn, "Line number is outside the supported range.\r\n");
+                return;
+            }
         }
     };
     if low < 1 {
@@ -1095,7 +1153,7 @@ fn format_text(src: &str, mode: i32, maxlen: usize) -> String {
     }
     formatted.push_str("\r\n");
     if formatted.len() > maxlen {
-        formatted.truncate(maxlen);
+        crate::text::truncate_utf8_bytes(&mut formatted, maxlen);
     }
     formatted
 }
@@ -1160,29 +1218,27 @@ fn replace_str(
 // show_string. ANSI-aware, 22-line / 80-col pages.
 // ===========================================================================
 
-/// next_page: byte offset of the start of the next page in `str`, or None if
-/// this is the last page. Mirrors the C col/line/ANSI walk.
-fn next_page(bytes: &[u8], start: usize) -> Option<usize> {
+/// next_page: byte offset of the start of the next page in `value`, or None if
+/// this is the last page. The offset is produced by `char_indices`, so it is
+/// always a legal UTF-8 slice boundary while still counting visible columns.
+fn next_page(value: &str, start: usize) -> Option<usize> {
+    debug_assert!(value.is_char_boundary(start));
     let mut col = 1;
     let mut line = 1;
     let mut spec_code = false;
-    let mut idx = start;
-    loop {
-        if idx >= bytes.len() {
-            return None;
-        }
+    for (relative, c) in value[start..].char_indices() {
+        let idx = start + relative;
         if line > PAGE_LENGTH {
             return Some(idx);
         }
-        let c = bytes[idx];
-        if c == 0x1B && !spec_code {
+        if c == '\u{1b}' && !spec_code {
             spec_code = true;
-        } else if c == b'm' && spec_code {
+        } else if c == 'm' && spec_code {
             spec_code = false;
         } else if !spec_code {
-            if c == b'\r' {
+            if c == '\r' {
                 col = 1;
-            } else if c == b'\n' {
+            } else if c == '\n' {
                 line += 1;
             } else if col > PAGE_WIDTH {
                 col = 1;
@@ -1191,26 +1247,23 @@ fn next_page(bytes: &[u8], start: usize) -> Option<usize> {
                 col += 1;
             }
         }
-        idx += 1;
     }
+    None
 }
 
 /// Split `str` into page strings using next_page boundaries.
 fn paginate(str: &str) -> Vec<String> {
-    let bytes = str.as_bytes();
     let mut bounds = vec![0usize];
     let mut at = 0usize;
-    while let Some(next) = next_page(bytes, at) {
+    while let Some(next) = next_page(str, at) {
         bounds.push(next);
         at = next;
     }
-    bounds.push(bytes.len());
+    bounds.push(str.len());
     let mut pages = Vec::new();
     for w in bounds.windows(2) {
         if w[0] < w[1] {
-            // Slice on byte boundaries that are guaranteed valid: next_page only
-            // ever stops at the start of a fresh column/line, never mid-UTF-8,
-            // since multibyte bytes count as ordinary columns.
+            // `next_page` walks char indices, so every bound is slice-safe.
             pages.push(str[w[0]..w[1]].to_string());
         }
     }
@@ -1301,7 +1354,14 @@ fn show_string(g: &mut GameState, conn: ConnId, input: &str) {
             }
         }
         Some(c) if c.is_ascii_digit() => {
-            let want = input.trim().parse::<i64>().unwrap_or(1);
+            let want = match crate::text::parse_i64_strict(input) {
+                Ok(value) => value,
+                Err(crate::text::ParseIntError::Overflow) => {
+                    send_to_q(g, conn, "Page number is outside the supported range.\r\n");
+                    return;
+                }
+                Err(_) => 1,
+            };
             let new = (want - 1).clamp(0, total as i64 - 1) as usize;
             let mut guard = crate::lock_ok::lock(&pagers());
             if let Some(p) = guard.get_mut(&conn) {
@@ -1595,7 +1655,14 @@ pub fn do_skillset(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "Learned value expected.\r\n");
         return;
     }
-    let value: i32 = value_tok.parse().unwrap_or(-1);
+    let value = match crate::text::parse_i32_strict(&value_tok) {
+        Ok(value) => value,
+        Err(crate::text::ParseIntError::Overflow) => {
+            g.send_to_char(ch, "Learned value is outside the supported range.\r\n");
+            return;
+        }
+        Err(_) => -1,
+    };
     if value < 0 {
         g.send_to_char(ch, "Minimum value for learned is 0.\r\n");
         return;
@@ -1704,12 +1771,13 @@ mod tests {
             g.get_obj(obj).unwrap().action_description.as_deref(),
             Some("hello\r\n")
         );
-        assert!(g
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("Note saved."));
+        assert!(
+            g.descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("Note saved.")
+        );
     }
 
     #[test]
@@ -1725,12 +1793,13 @@ mod tests {
         assert!(g.descriptors.get(&conn).unwrap().editors.is_empty());
         assert!(g.get_obj(obj).unwrap().action_description.is_none());
         assert_eq!(g.get_char(ch).unwrap().act_flags & PLR_WRITING, 0);
-        assert!(g
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("Note aborted."));
+        assert!(
+            g.descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("Note aborted.")
+        );
     }
 
     #[test]
@@ -1744,12 +1813,41 @@ mod tests {
         );
 
         assert_eq!(buf, "omega beta omega\r\n");
-        assert!(g
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("Replaced 2 occurances"));
+        assert!(
+            g.descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("Replaced 2 occurances")
+        );
+    }
+
+    #[test]
+    fn buffer_editor_rejects_overflowing_delete_and_list_ranges() {
+        let (mut g, conn, _ch, _obj) = editor_game();
+        let original = "first\r\nsecond\r\n".to_string();
+        let mut buf = original.clone();
+
+        assert_eq!(
+            editor_buffer_input(&mut g, conn, &mut buf, 1000, "/d 1-2147483648"),
+            BufferEditorResult::Continue
+        );
+        assert_eq!(
+            buf, original,
+            "overflow must not degrade to deleting line 1"
+        );
+
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        assert_eq!(
+            editor_buffer_input(&mut g, conn, &mut buf, 1000, "/n 2147483648"),
+            BufferEditorResult::Continue
+        );
+        let out = &g.descriptors[&conn].outbuf;
+        assert!(out.contains("outside the supported range"));
+        assert!(
+            !out.contains("first"),
+            "overflow must not list the whole buffer"
+        );
     }
 
     #[test]
@@ -1764,11 +1862,117 @@ mod tests {
 
         assert!(buf.starts_with("   One sentence."));
         assert!(buf.contains("  Another sentence"));
-        assert!(g
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("Text formatted with indent."));
+        assert!(
+            g.descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("Text formatted with indent.")
+        );
+    }
+
+    #[test]
+    fn buffer_editor_truncates_two_three_and_four_byte_input_boundaries() {
+        for (max_len, input, expected) in [
+            (4, "aéé", "aé\r\n"),
+            (5, "a€€", "a€\r\n"),
+            (6, "a🦀🦀", "a🦀\r\n"),
+        ] {
+            let (mut g, conn, _ch, _obj) = editor_game();
+            let mut buf = String::new();
+
+            assert_eq!(
+                editor_buffer_input(&mut g, conn, &mut buf, max_len, input),
+                BufferEditorResult::Continue
+            );
+            assert_eq!(buf, expected, "input={input:?}, max_len={max_len}");
+            assert!(buf.is_char_boundary(buf.len()));
+        }
+    }
+
+    #[test]
+    fn format_text_truncates_multibyte_output_on_a_char_boundary() {
+        let formatted = format_text("ééé", 0, 5);
+
+        assert!(formatted.len() <= 5);
+        assert!(formatted.is_char_boundary(formatted.len()));
+        assert_eq!(formatted, "éé");
+    }
+
+    #[test]
+    fn pager_wraps_multibyte_text_only_at_character_boundaries() {
+        for scalar in ['é', '€', '🦀'] {
+            let input = scalar
+                .to_string()
+                .repeat((PAGE_WIDTH as usize + 1) * (PAGE_LENGTH as usize + 1));
+            let pages = paginate(&input);
+
+            assert!(pages.len() >= 2, "scalar={scalar:?}");
+            assert_eq!(pages.concat(), input, "scalar={scalar:?}");
+            assert!(pages.iter().all(|page| page.is_char_boundary(page.len())));
+        }
+    }
+
+    #[test]
+    fn login_description_save_returns_to_menu() {
+        let (mut g, conn, ch, _obj) = editor_game();
+        g.descriptors.get_mut(&conn).unwrap().state = ConState::ExDesc;
+        start_login_description_editing(&mut g, conn, 1000);
+
+        assert!(editor_input(&mut g, conn, "A short biography."));
+        assert!(!editor_input(&mut g, conn, "/s"));
+
+        let d = g.descriptors.get(&conn).unwrap();
+        assert_eq!(d.state, ConState::Menu);
+        assert!(!d.suppress_prompt);
+        assert_eq!(
+            d.temp_description.as_deref(),
+            Some("A short biography.\r\n")
+        );
+        assert!(d.outbuf.contains("Done.\r\n"));
+        assert_eq!(g.get_char(ch).unwrap().act_flags & PLR_WRITING, 0);
+    }
+
+    #[test]
+    fn abort_conn_clears_editor_and_pager_side_tables() {
+        let (mut g, conn, _ch, _obj) = editor_game();
+        start_string_editing(&mut g, conn, 1000);
+        let long_page = "line\r\n".repeat((PAGE_LENGTH as usize * 2) + 2);
+        page_string(&mut g, conn, &long_page);
+        assert!(editing_any(conn));
+        assert!(page_active(conn));
+
+        abort_conn(&mut g, conn);
+
+        assert!(!editing_any(conn));
+        assert!(!page_active(conn));
+    }
+
+    #[test]
+    fn abort_conn_routes_mail_target_cleanup() {
+        let (mut g, conn, _ch, _obj) = editor_game();
+        crate::mail::seed_pending_mail_for_test(conn);
+        start_mail_editing(&mut g, conn, 1000);
+        assert!(editing_any(conn));
+        assert!(crate::mail::has_pending_mail(conn));
+
+        abort_conn(&mut g, conn);
+
+        assert!(!editing_any(conn));
+        assert!(!crate::mail::has_pending_mail(conn));
+    }
+
+    #[test]
+    fn abort_conn_routes_board_target_cleanup() {
+        let (mut g, conn, _ch, _obj) = editor_game();
+        crate::boards::seed_pending_write_for_test(conn);
+        start_board_editing(&mut g, conn, 1000);
+        assert!(editing_any(conn));
+        assert!(crate::boards::has_pending_write_for_test(conn));
+
+        abort_conn(&mut g, conn);
+
+        assert!(!editing_any(conn));
+        assert!(!crate::boards::has_pending_write_for_test(conn));
     }
 }

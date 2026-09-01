@@ -13,7 +13,7 @@
 // the routine dispatch lives in magic::call_magic, which this file calls at
 // the end of cast_spell.
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::interpreter::{any_one_arg, is_abbrev, one_argument};
 use crate::state::GameState;
 use crate::types::*;

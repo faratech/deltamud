@@ -15,7 +15,7 @@
 // integrator can wire the real sources later. The command *logic* and output
 // strings are otherwise faithful 1:1.
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::constants;
 use crate::flags::*;
 use crate::handler::{get_number, isname};
@@ -131,11 +131,7 @@ fn numdisplay(val: i64) -> String {
             out.push(',');
         }
     }
-    if neg {
-        format!("-{}", out)
-    } else {
-        out
-    }
+    if neg { format!("-{}", out) } else { out }
 }
 
 /// mlog(b, arg): CircleMUD utils.c mlog -> log(arg) / log(b).
@@ -567,7 +563,15 @@ fn look_at_char(g: &mut GameState, i: CharId, ch: CharId) {
         };
         if same(riding) {
             if riding == Some(ch) {
-                act(g, "$e is mounted on you.", false, i, None, ActArg::Char(ch), To::Vict);
+                act(
+                    g,
+                    "$e is mounted on you.",
+                    false,
+                    i,
+                    None,
+                    ActArg::Char(ch),
+                    To::Vict,
+                );
             } else if let Some(r) = riding {
                 let name = crate::act::pers(g, ch, r);
                 let line = format!("$e is mounted upon {}.", name);
@@ -575,7 +579,15 @@ fn look_at_char(g: &mut GameState, i: CharId, ch: CharId) {
             }
         } else if same(ridden_by) {
             if ridden_by == Some(ch) {
-                act(g, "You are mounted upon $m.", false, i, None, ActArg::Char(ch), To::Vict);
+                act(
+                    g,
+                    "You are mounted upon $m.",
+                    false,
+                    i,
+                    None,
+                    ActArg::Char(ch),
+                    To::Vict,
+                );
             } else if let Some(r) = ridden_by {
                 let name = crate::act::pers(g, ch, r);
                 let line = format!("$e is mounted by {}.", name);
@@ -2301,6 +2313,27 @@ fn find_class_bitvector(c: char) -> i64 {
     crate::class::find_class_bitvector(c)
 }
 
+fn parse_level_range(raw: &str) -> Result<(u8, Option<u8>), ()> {
+    let parse = |value: &str| {
+        crate::text::parse_i32_strict(value)
+            .ok()
+            .and_then(|value| u8::try_from(value).ok())
+            .ok_or(())
+    };
+    match raw.split_once('-') {
+        Some((low, high)) => {
+            let low = parse(low)?;
+            let high = if high.is_empty() {
+                None
+            } else {
+                Some(parse(high)?)
+            };
+            Ok((low, high))
+        }
+        None => Ok((parse(raw)?, None)),
+    }
+}
+
 pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     // Argument parsing (CircleMUD do_who parser).
     let mut low = 0u8;
@@ -2322,12 +2355,13 @@ pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         let first = arg.chars().next().unwrap_or(' ');
         if first.is_ascii_digit() {
             // "low-high"
-            let mut it = arg.split('-');
-            if let Some(l) = it.next().and_then(|s| s.parse::<u8>().ok()) {
-                low = l;
-            }
-            if let Some(h) = it.next().and_then(|s| s.parse::<u8>().ok()) {
-                high = h;
+            let Ok((new_low, new_high)) = parse_level_range(&arg) else {
+                g.send_to_char(ch, "Level range is outside the supported range.\r\n");
+                return;
+            };
+            low = new_low;
+            if let Some(value) = new_high {
+                high = value;
             }
             rest = after;
         } else if first == '-' {
@@ -2351,12 +2385,13 @@ pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
                 }
                 'l' => {
                     let (lv, r) = half_chop(&after);
-                    let mut it = lv.split('-');
-                    if let Some(l) = it.next().and_then(|s| s.parse::<u8>().ok()) {
-                        low = l;
-                    }
-                    if let Some(h) = it.next().and_then(|s| s.parse::<u8>().ok()) {
-                        high = h;
+                    let Ok((new_low, new_high)) = parse_level_range(&lv) else {
+                        g.send_to_char(ch, "Level range is outside the supported range.\r\n");
+                        return;
+                    };
+                    low = new_low;
+                    if let Some(value) = new_high {
+                        high = value;
                     }
                     rest = r;
                 }
@@ -2681,12 +2716,13 @@ pub fn do_users(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
                 }
                 'l' => {
                     let (lv, r) = half_chop(&after);
-                    let mut it = lv.split('-');
-                    if let Some(l) = it.next().and_then(|s| s.parse::<u8>().ok()) {
-                        low = l;
-                    }
-                    if let Some(h) = it.next().and_then(|s| s.parse::<u8>().ok()) {
-                        high = h;
+                    let Ok((new_low, new_high)) = parse_level_range(&lv) else {
+                        g.send_to_char(ch, "Level range is outside the supported range.\r\n");
+                        return;
+                    };
+                    low = new_low;
+                    if let Some(value) = new_high {
+                        high = value;
                     }
                     rest = r;
                 }
@@ -3529,7 +3565,13 @@ pub fn do_mudheal(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
 /// GET_INVIS_LEV(ch) as a Level (0 for mortals/NPCs).
 fn invis_level(g: &GameState, id: CharId) -> u8 {
     g.get_char(id)
-        .map(|c| if c.is_npc { 0 } else { c.invis_level.clamp(0, 255) as u8 })
+        .map(|c| {
+            if c.is_npc {
+                0
+            } else {
+                c.invis_level.clamp(0, 255) as u8
+            }
+        })
         .unwrap_or(0)
 }
 
@@ -4069,6 +4111,27 @@ mod tests {
         assert!(!out.contains("rank 2 of clan 0"));
     }
 
+    #[test]
+    fn who_and_users_reject_overflowing_level_ranges_at_command_entry() {
+        let mut g = GameState::new(Config::default());
+        let viewer = connected_player(&mut g, ConnId(57), "Viewer", LVL_IMPL);
+
+        do_who(&mut g, viewer, "1-256", 0);
+        assert!(
+            g.descriptors[&ConnId(57)]
+                .outbuf
+                .contains("Level range is outside the supported range")
+        );
+
+        g.descriptors.get_mut(&ConnId(57)).unwrap().outbuf.clear();
+        do_users(&mut g, viewer, "-l 2147483648", 0);
+        assert!(
+            g.descriptors[&ConnId(57)]
+                .outbuf
+                .contains("Level range is outside the supported range")
+        );
+    }
+
     /// #251/#335: the who tag is C's "[ level Race Class ]" with the real
     /// class.c/races.c abbreviations — "Mu" (not "Mag") and "Gob"/"Dro". The
     /// race tag comes from races.c's nine-row table (via `races::race_abbrev`),
@@ -4129,11 +4192,11 @@ mod tests {
 
         // (letter, the name that must appear, a name that must not).
         let cases = [
-            ("d", "Zap", "Bash"),    // Magic User
-            ("a", "Pray", "Zap"),    // Cleric
-            ("b", "Bash", "Sneak"),  // Warrior (bit 3)
-            ("c", "Sneak", "Bash"),  // Thief (bit 2)
-            ("e", "Craft", "Pray"),  // Artisan
+            ("d", "Zap", "Bash"),   // Magic User
+            ("a", "Pray", "Zap"),   // Cleric
+            ("b", "Bash", "Sneak"), // Warrior (bit 3)
+            ("c", "Sneak", "Bash"), // Thief (bit 2)
+            ("e", "Craft", "Pray"), // Artisan
         ];
         for (letter, hit, miss) in cases {
             for conn in 51..=56 {
@@ -4143,7 +4206,13 @@ mod tests {
             }
             do_who(&mut g, viewer, &format!("-c {}", letter), 0);
             let out = &g.descriptors.get(&ConnId(51)).unwrap().outbuf;
-            assert!(out.contains(hit), "who -c {} should match {}: {}", letter, hit, out);
+            assert!(
+                out.contains(hit),
+                "who -c {} should match {}: {}",
+                letter,
+                hit,
+                out
+            );
             assert!(
                 !out.contains(miss),
                 "who -c {} should not match {}: {}",
@@ -4166,7 +4235,9 @@ mod tests {
         do_who(&mut g, viewer, "", 0);
         let out = out_of(&mut g, ConnId(73));
         assert!(
-            out.contains("There are 2 visible mortals.\r\nThere is a boot time high of 2 players.\r\n"),
+            out.contains(
+                "There are 2 visible mortals.\r\nThere is a boot time high of 2 players.\r\n"
+            ),
             "{}",
             out
         );
@@ -4231,7 +4302,11 @@ mod tests {
         let out = out_of(&mut g, ConnId(61));
         assert!(out.contains("&RGoner"), "deleted row is red: {}", out);
         assert!(out.contains("&BBricklayer"), "builder row is blue: {}", out);
-        assert!(out.contains("&WAdmin") || out.contains("&YAdmin"), "{}", out);
+        assert!(
+            out.contains("&WAdmin") || out.contains("&YAdmin"),
+            "{}",
+            out
+        );
     }
 
     /// #345: whois resolves an offline player from the index and renders C's
@@ -4325,9 +4400,32 @@ mod tests {
             ),
             // C's %-3s pads to three columns; the values below are a fresh
             // character's (all preferences clear, wimp 0, colour off).
-            "OFF", "OFF", "ON ", "OFF", "OFF", "NO ", "OFF", "OFF", "YES", "OFF", "NO ", "OFF",
-            "ON ", "ON ", "ON ", "OFF", "OFF", "OFF", "OFF", "OFF", "ON ", "ON ", "ON ",
-            "off     ", "OFF", "OFF",
+            "OFF",
+            "OFF",
+            "ON ",
+            "OFF",
+            "OFF",
+            "NO ",
+            "OFF",
+            "OFF",
+            "YES",
+            "OFF",
+            "NO ",
+            "OFF",
+            "ON ",
+            "ON ",
+            "ON ",
+            "OFF",
+            "OFF",
+            "OFF",
+            "OFF",
+            "OFF",
+            "ON ",
+            "ON ",
+            "ON ",
+            "off     ",
+            "OFF",
+            "OFF",
         );
         assert!(
             out.contains(&expected),
@@ -4355,8 +4453,7 @@ mod tests {
         g.char_to_room(ch, r_field);
         do_mcheck(&mut g, ch, "", 0);
         assert!(
-            out_of(&mut g, ConnId(1))
-                .contains("This area is not under jurisdiction."),
+            out_of(&mut g, ConnId(1)).contains("This area is not under jurisdiction."),
             "indoor non-city is not jurdicted: {}",
             out_of(&mut g, ConnId(1))
         );
@@ -4368,8 +4465,7 @@ mod tests {
         g.char_to_room(ch, r_city);
         do_mcheck(&mut g, ch, "", 0);
         assert!(
-            out_of(&mut g, ConnId(1))
-                .contains("This area is protected under jurisdiction."),
+            out_of(&mut g, ConnId(1)).contains("This area is protected under jurisdiction."),
             "{}",
             out_of(&mut g, ConnId(1))
         );

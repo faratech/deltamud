@@ -4,7 +4,7 @@
 
 use crate::character::{CharPoints, Character};
 use crate::flags::*;
-use crate::object::{ObjLoc, ObjectType};
+use crate::object::{ObjLoc, ObjectGraphOrder, ObjectType, walk_object_graph};
 use crate::state::GameState;
 use crate::types::*;
 
@@ -37,8 +37,13 @@ pub fn get_number(arg: &str) -> (i32, String) {
         if num.eq_ignore_ascii_case("all") {
             return (i32::MAX, name.to_string());
         }
-        if let Ok(n) = num.parse::<i32>() {
-            return (n, name.to_string());
+        match crate::text::parse_i32_strict(num) {
+            Ok(n) => return (n, name.to_string()),
+            Err(crate::text::ParseIntError::Overflow) => {
+                log::warn!("object/character ordinal is outside i32 range: {num:?}");
+                return (0, name.to_string());
+            }
+            Err(crate::text::ParseIntError::Empty | crate::text::ParseIntError::Invalid) => {}
         }
     }
     (1, arg.to_string())
@@ -69,13 +74,17 @@ impl GameState {
     // ---- Character placement -------------------------------------------
     /// CircleMUD char_to_room: prepend to room.people (newest first).
     pub fn char_to_room(&mut self, cid: CharId, rnum: RoomRnum) {
+        if rnum >= self.rooms.len() {
+            return;
+        }
+        // Every real relocation converges here. If an arena participant is
+        // placed outside arena space, restore/clear them before any later save
+        // can snapshot the stripped arena values (#414).
+        crate::arena::arena_departure_on_relocation(self, cid, Some(rnum));
         // Everyone in the destination sees an arrival; the mover's Room.Info
         // goes stale (W5 event-driven GMCP).
         self.note_gmcp_room(rnum);
         self.note_gmcp(cid);
-        if rnum >= self.rooms.len() {
-            return;
-        }
         self.rooms[rnum].people.insert(0, cid);
         if let Some(ch) = self.chars.get_mut(&cid) {
             ch.in_room = Some(rnum);
@@ -130,6 +139,24 @@ impl GameState {
         if rnum >= self.rooms.len() {
             return;
         }
+        let Some(object) = self.objs.get(&oid) else {
+            log::warn!(
+                "SYSERR: obj_to_room rejected missing object {:?} for room {}",
+                oid,
+                rnum,
+            );
+            return;
+        };
+        if object.loc != ObjLoc::Nowhere {
+            log::warn!(
+                "SYSERR: obj_to_room rejected double-parenting object {:?} vnum {} from {:?} into room {}",
+                oid,
+                object.item_number,
+                object.loc,
+                rnum,
+            );
+            return;
+        }
         self.rooms[rnum].contents.insert(0, oid);
         if let Some(o) = self.objs.get_mut(&oid) {
             o.loc = ObjLoc::Room(rnum);
@@ -137,7 +164,9 @@ impl GameState {
         // C handler.c:884-887: dropping an object in a house flags the house
         // for its next crashsave (ROOM_HOUSE_CRASH, C bit 12 - the RoomFlags
         // name for that bit is NO_RECALL, hence the raw test) (#164).
-        if self.rooms[rnum].room_flags.contains(crate::room::RoomFlags::HOUSE)
+        if self.rooms[rnum]
+            .room_flags
+            .contains(crate::room::RoomFlags::HOUSE)
             && self.rooms[rnum].room_flags.bits() & (1 << 12) == 0
         {
             let bits = self.rooms[rnum].room_flags.bits() | (1 << 12);
@@ -146,7 +175,34 @@ impl GameState {
     }
 
     pub fn obj_to_char(&mut self, oid: ObjId, cid: CharId) {
-        let weight = self.objs.get(&oid).map(|o| o.weight).unwrap_or(0);
+        let Some(object) = self.objs.get(&oid) else {
+            log::warn!(
+                "SYSERR: obj_to_char rejected missing object {:?} for character {:?}",
+                oid,
+                cid,
+            );
+            return;
+        };
+        if !self.chars.contains_key(&cid) {
+            log::warn!(
+                "SYSERR: obj_to_char rejected object {:?} vnum {} for missing character {:?}",
+                oid,
+                object.item_number,
+                cid,
+            );
+            return;
+        }
+        if object.loc != ObjLoc::Nowhere {
+            log::warn!(
+                "SYSERR: obj_to_char rejected double-parenting object {:?} vnum {} from {:?} onto character {:?}",
+                oid,
+                object.item_number,
+                object.loc,
+                cid,
+            );
+            return;
+        }
+        let weight = object.weight;
         if let Some(ch) = self.chars.get_mut(&cid) {
             ch.carrying.insert(0, oid);
             ch.carry_weight += weight;
@@ -160,9 +216,84 @@ impl GameState {
     }
 
     pub fn obj_to_obj(&mut self, oid: ObjId, container: ObjId) {
-        if oid == container {
+        let object_vnum = self.objs.get(&oid).map(|object| object.item_number);
+        let container_vnum = self.objs.get(&container).map(|object| object.item_number);
+        if object_vnum.is_none() || container_vnum.is_none() {
+            log::warn!(
+                "SYSERR: obj_to_obj rejected missing object/container: object={:?} vnum={:?}, container={:?} vnum={:?}",
+                oid,
+                object_vnum,
+                container,
+                container_vnum,
+            );
             return;
         }
+        if oid == container {
+            log::warn!(
+                "SYSERR: obj_to_obj rejected direct cycle for {:?} (vnum {:?})",
+                oid,
+                object_vnum,
+            );
+            return;
+        }
+        let object_location = self.objs.get(&oid).map(|object| object.loc);
+        if object_location != Some(ObjLoc::Nowhere) {
+            log::warn!(
+                "SYSERR: obj_to_obj rejected double-parenting for {:?} (vnum {:?}); existing location {:?}, requested container {:?} (vnum {:?})",
+                oid,
+                object_vnum,
+                object_location,
+                container,
+                container_vnum,
+            );
+            return;
+        }
+
+        // Follow the destination's parent chain before mutating either side.
+        // If it already reaches `oid`, insertion would create an indirect cycle.
+        // A pre-existing malformed cycle in the destination chain is rejected
+        // as well, so this mutator never makes a damaged graph harder to repair.
+        let mut current = container;
+        let mut ancestors = std::collections::HashSet::new();
+        loop {
+            if current == oid {
+                log::warn!(
+                    "SYSERR: obj_to_obj rejected indirect cycle: object {:?} (vnum {:?}), container {:?} (vnum {:?})",
+                    oid,
+                    object_vnum,
+                    container,
+                    container_vnum,
+                );
+                return;
+            }
+            if !ancestors.insert(current) {
+                log::warn!(
+                    "SYSERR: obj_to_obj rejected malformed destination ancestry near {:?}: object {:?} (vnum {:?}), container {:?} (vnum {:?})",
+                    current,
+                    oid,
+                    object_vnum,
+                    container,
+                    container_vnum,
+                );
+                return;
+            }
+            match self.objs.get(&current).map(|object| object.loc) {
+                Some(ObjLoc::Contained(parent)) => current = parent,
+                Some(_) => break,
+                None => {
+                    log::warn!(
+                        "SYSERR: obj_to_obj rejected missing ancestor {:?} while placing {:?} (vnum {:?}) into {:?} (vnum {:?})",
+                        current,
+                        oid,
+                        object_vnum,
+                        container,
+                        container_vnum,
+                    );
+                    return;
+                }
+            }
+        }
+
         let weight = self.objs.get(&oid).map(|o| o.weight).unwrap_or(0);
         if let Some(c) = self.objs.get_mut(&container) {
             c.contains.insert(0, oid);
@@ -175,37 +306,80 @@ impl GameState {
 
     pub(crate) fn adjust_container_chain_weight(&mut self, container: ObjId, delta: i32) {
         let mut current = container;
-        let mut seen = 0;
-        loop {
-            let loc = match self.objs.get_mut(&current) {
-                Some(obj) => {
-                    obj.weight += delta;
-                    obj.loc
-                }
-                None => return,
+        let mut visited = std::collections::HashSet::new();
+        let mut path = Vec::new();
+        let carrier = loop {
+            if !visited.insert(current) {
+                log::warn!(
+                    "SYSERR: container weight update rejected cyclic ancestry near {:?}; no weights changed",
+                    current
+                );
+                return;
+            }
+            let Some(object) = self.objs.get(&current) else {
+                log::warn!(
+                    "SYSERR: container weight update rejected missing ancestor {:?}; no weights changed",
+                    current
+                );
+                return;
             };
-            match loc {
-                ObjLoc::Contained(parent) => {
-                    current = parent;
-                    seen += 1;
-                    if seen > self.objs.len() {
-                        return;
-                    }
-                }
-                ObjLoc::Carried(cid) => {
-                    if let Some(ch) = self.chars.get_mut(&cid) {
-                        ch.carry_weight += delta;
-                    }
-                    return;
-                }
-                _ => return,
+            path.push(current);
+            match object.loc {
+                ObjLoc::Contained(parent) => current = parent,
+                ObjLoc::Carried(character) => break Some(character),
+                _ => break None,
+            }
+        };
+
+        for id in path {
+            if let Some(object) = self.objs.get_mut(&id) {
+                object.weight = object.weight.saturating_add(delta);
+            }
+        }
+        if let Some(character) = carrier {
+            if let Some(character) = self.chars.get_mut(&character) {
+                character.carry_weight = character.carry_weight.saturating_add(delta);
             }
         }
     }
 
-    /// Equip a worn item. Caller guarantees the slot is empty.
+    /// Equip a detached item into an empty worn slot.
     pub fn equip_char(&mut self, cid: CharId, oid: ObjId, pos: usize) {
         if pos >= NUM_WEARS {
+            return;
+        }
+        let Some(object) = self.objs.get(&oid) else {
+            log::warn!(
+                "SYSERR: equip_char rejected missing object {:?} for character {:?} slot {}",
+                oid,
+                cid,
+                pos,
+            );
+            return;
+        };
+        let slot_empty = self
+            .chars
+            .get(&cid)
+            .is_some_and(|character| character.equipment[pos].is_none());
+        if !slot_empty {
+            log::warn!(
+                "SYSERR: equip_char rejected object {:?} vnum {} for missing character {:?} or occupied slot {}",
+                oid,
+                object.item_number,
+                cid,
+                pos,
+            );
+            return;
+        }
+        if object.loc != ObjLoc::Nowhere {
+            log::warn!(
+                "SYSERR: equip_char rejected double-parenting object {:?} vnum {} from {:?} onto character {:?} slot {}",
+                oid,
+                object.item_number,
+                object.loc,
+                cid,
+                pos,
+            );
             return;
         }
         // C handler.c:699-707 equip: affect_modify(..., obj bitvector, TRUE)
@@ -232,11 +406,17 @@ impl GameState {
     /// weapon-ceiling helper (#122).
     fn enforce_weapon_restriction(&mut self, cid: CharId) {
         use crate::object::ObjectType;
-        let level = self.get_char(cid).map(|c| c.player.level).unwrap_or(LVL_IMPL);
+        let level = self
+            .get_char(cid)
+            .map(|c| c.player.level)
+            .unwrap_or(LVL_IMPL);
         if level >= LVL_IMMORT || crate::cmd_item::weapon_restrictions() <= 0 {
             return;
         }
-        let wielded = self.chars.get(&cid).and_then(|c| c.equipment[crate::types::WEAR_WIELD]);
+        let wielded = self
+            .chars
+            .get(&cid)
+            .and_then(|c| c.equipment[crate::types::WEAR_WIELD]);
         let Some(w) = wielded else { return };
         let (ty, v1, v2) = match self.objs.get(&w) {
             Some(o) => (o.obj_type, o.values[1], o.values[2]),
@@ -256,7 +436,10 @@ impl GameState {
             }
             self.send_to_room(
                 self.chars.get(&cid).and_then(|c| c.in_room).unwrap_or(0),
-                &format!("{} fumbles out of {}'s inexperienced hands.\r\n", on, cid_name),
+                &format!(
+                    "{} fumbles out of {}'s inexperienced hands.\r\n",
+                    on, cid_name
+                ),
                 None,
             );
         }
@@ -361,6 +544,11 @@ impl GameState {
     /// Remove a character from the world. Detaches from room, drops fighters,
     /// and extracts inventory/equipment. PCs are normally respawned instead.
     pub fn extract_char(&mut self, cid: CharId) {
+        // Restore arena-backed state while the Character still exists. The
+        // helper is idempotent, so disconnect/death paths may already have run
+        // it before reaching extract_char.
+        crate::arena::arena_departure_on_relocation(self, cid, None);
+
         // C handler.c:1080 — detach from the follow graph before anything else,
         // so no master/follower id is left dangling (BUG 22).
         self.die_follower(cid);
@@ -448,9 +636,7 @@ impl GameState {
             // Nowhere to drop them (void extraction) - C's obj_to_room with
             // NOWHERE is a no-op, so the objects vanish as before.
             for o in worn {
-                if let Some(o) = self.chars.get(&cid).and_then(|ch| ch.equipment.iter().position(|s| *s == Some(o))).and_then(|p| self.unequip_char(cid, p)) {
-                    self.extract_obj(o);
-                }
+                self.extract_obj(o);
             }
             for o in carried {
                 self.extract_obj(o);
@@ -503,10 +689,7 @@ impl GameState {
             return false;
         }
         let light_ok = match v.in_room {
-            Some(rnum) => {
-                !self.is_dark(rnum)
-                    || v.affect_flags & AFF_INFRAVISION != 0
-            }
+            Some(rnum) => !self.is_dark(rnum) || v.affect_flags & AFF_INFRAVISION != 0,
             None => true,
         };
         if !light_ok {
@@ -833,17 +1016,20 @@ fn points_assign_apply(dst: &mut CharPoints, src: &CharPoints) {
     dst.technique = src.technique;
 }
 
-/// Helper used by Object containment weight (recursive total weight).
+/// Helper used by Object containment weight. The shared bounded walker keeps a
+/// corrupt/deep graph from recursing into a stack overflow and counts each
+/// identity at most once.
 pub fn obj_total_weight(state: &GameState, oid: ObjId) -> i32 {
-    let obj = match state.objs.get(&oid) {
-        Some(o) => o,
-        None => return 0,
-    };
-    let mut total = obj.weight;
-    for &c in &obj.contains {
-        total += obj_total_weight(state, c);
-    }
-    total
+    walk_object_graph(
+        [oid],
+        ObjectGraphOrder::Preorder,
+        "obj_total_weight",
+        |id| state.objs.get(&id).map(|object| object.contains.clone()),
+    )
+    .visits
+    .into_iter()
+    .filter_map(|visit| state.objs.get(&visit.id).map(|object| object.weight))
+    .fold(0i32, i32::saturating_add)
 }
 
 #[cfg(test)]
@@ -871,6 +1057,17 @@ mod tests {
         // Tokens longer than the arg still match; arg longer than token does not.
         assert!(isname("s", "sword"));
         assert!(!isname("swords", "sword"));
+    }
+
+    #[test]
+    fn get_number_rejects_overflow_instead_of_falling_back_to_first_match() {
+        assert_eq!(get_number("2147483647.sword"), (i32::MAX, "sword".into()));
+        assert_eq!(get_number("2147483648.sword"), (0, "sword".into()));
+        assert_eq!(get_number("-2147483649.sword"), (0, "sword".into()));
+        assert_eq!(
+            get_number("not-a-number.sword"),
+            (1, "not-a-number.sword".into())
+        );
     }
 
     fn fresh_game() -> GameState {
@@ -1216,6 +1413,172 @@ mod tests {
         assert_eq!(g.get_char(cid).unwrap().carry_weight, 15);
     }
 
+    #[test]
+    fn obj_to_obj_rejects_direct_indirect_and_double_parenting_without_mutation() {
+        let mut g = fresh_game();
+        let mut a = Object::new(101, "a".into(), "container a".into());
+        a.weight = 10;
+        let a = g.create_obj(a);
+        let mut b = Object::new(102, "b".into(), "container b".into());
+        b.weight = 5;
+        let b = g.create_obj(b);
+        let child = g.create_obj(Object::new(103, "child".into(), "a child".into()));
+
+        g.obj_to_obj(a, a);
+        assert_eq!(g.get_obj(a).unwrap().loc, ObjLoc::Nowhere);
+        assert!(g.get_obj(a).unwrap().contains.is_empty());
+
+        g.obj_to_obj(b, a);
+        let a_weight = g.get_obj(a).unwrap().weight;
+        let b_weight = g.get_obj(b).unwrap().weight;
+        g.obj_to_obj(a, b);
+        assert_eq!(g.get_obj(a).unwrap().loc, ObjLoc::Nowhere);
+        assert_eq!(g.get_obj(b).unwrap().loc, ObjLoc::Contained(a));
+        assert_eq!(g.get_obj(a).unwrap().contains, vec![b]);
+        assert!(g.get_obj(b).unwrap().contains.is_empty());
+        assert_eq!(g.get_obj(a).unwrap().weight, a_weight);
+        assert_eq!(g.get_obj(b).unwrap().weight, b_weight);
+
+        g.obj_to_obj(child, a);
+        let a_contents = g.get_obj(a).unwrap().contains.clone();
+        let b_contents = g.get_obj(b).unwrap().contains.clone();
+        g.obj_to_obj(child, b);
+        assert_eq!(g.get_obj(child).unwrap().loc, ObjLoc::Contained(a));
+        assert_eq!(g.get_obj(a).unwrap().contains, a_contents);
+        assert_eq!(g.get_obj(b).unwrap().contains, b_contents);
+
+        g.obj_to_obj(ObjId(u64::MAX), a);
+        g.obj_to_obj(child, ObjId(u64::MAX));
+        assert_eq!(g.get_obj(child).unwrap().loc, ObjLoc::Contained(a));
+    }
+
+    #[test]
+    fn placement_mutators_reject_reverse_double_attachments() {
+        let mut g = fresh_game();
+        let first = g.add_room(crate::room::Room::new(
+            9100,
+            0,
+            "First".into(),
+            String::new(),
+        ));
+        let second = g.add_room(crate::room::Room::new(
+            9101,
+            0,
+            "Second".into(),
+            String::new(),
+        ));
+        let character = g.create_char(Character::new_player(
+            "Carrier".into(),
+            Class::Warrior,
+            Race::Human,
+        ));
+        let object = g.create_obj(Object::new(104, "token".into(), "a token".into()));
+
+        g.obj_to_room(object, first);
+        g.obj_to_room(object, second);
+        g.obj_to_char(object, character);
+        g.equip_char(character, object, WEAR_BODY);
+        assert_eq!(g.get_obj(object).unwrap().loc, ObjLoc::Room(first));
+        assert_eq!(g.room(first).contents, vec![object]);
+        assert!(g.room(second).contents.is_empty());
+        assert!(g.get_char(character).unwrap().carrying.is_empty());
+        assert_eq!(g.get_char(character).unwrap().equipment[WEAR_BODY], None);
+
+        g.obj_from_anywhere(object);
+        g.obj_to_char(object, character);
+        g.obj_to_room(object, second);
+        g.equip_char(character, object, WEAR_BODY);
+        assert_eq!(g.get_obj(object).unwrap().loc, ObjLoc::Carried(character));
+        assert_eq!(g.get_char(character).unwrap().carrying, vec![object]);
+        assert_eq!(g.get_char(character).unwrap().carry_items, 1);
+        assert!(g.room(second).contents.is_empty());
+        assert_eq!(g.get_char(character).unwrap().equipment[WEAR_BODY], None);
+
+        g.obj_from_anywhere(object);
+        g.equip_char(character, object, WEAR_BODY);
+        g.obj_to_room(object, second);
+        g.obj_to_char(object, character);
+        assert_eq!(
+            g.get_obj(object).unwrap().loc,
+            ObjLoc::Worn(character, WEAR_BODY)
+        );
+        assert_eq!(
+            g.get_char(character).unwrap().equipment[WEAR_BODY],
+            Some(object)
+        );
+        assert!(g.get_char(character).unwrap().carrying.is_empty());
+        assert!(g.room(second).contents.is_empty());
+    }
+
+    #[test]
+    fn total_weight_is_bounded_and_identity_safe_on_a_corrupt_cycle() {
+        let mut g = fresh_game();
+        let mut a = Object::new(201, "a".into(), "a".into());
+        a.weight = 3;
+        let a = g.create_obj(a);
+        let mut b = Object::new(202, "b".into(), "b".into());
+        b.weight = 7;
+        let b = g.create_obj(b);
+        g.get_obj_mut(a).unwrap().contains = vec![b];
+        g.get_obj_mut(b).unwrap().contains = vec![a];
+
+        assert_eq!(obj_total_weight(&g, a), 10);
+    }
+
+    #[test]
+    fn snoop_fanout_is_utf8_safe_and_obeys_each_descriptor_output_ceiling() {
+        let mut g = fresh_game();
+        let room = g.add_room(crate::room::Room::new(
+            9991,
+            0,
+            "Fanout".into(),
+            String::new(),
+        ));
+        let victim_conn = ConnId(81);
+        let snooper_conn = ConnId(82);
+        g.descriptors.insert(
+            victim_conn,
+            Descriptor::new(victim_conn, "victim.test".into()),
+        );
+        g.descriptors.insert(
+            snooper_conn,
+            Descriptor::new(snooper_conn, "snooper.test".into()),
+        );
+        let mut victim = Character::new_player("Victim".into(), Class::Warrior, Race::Human);
+        victim.desc = Some(victim_conn);
+        let victim = g.create_char(victim);
+        let mut snooper = Character::new_player("Snooper".into(), Class::Warrior, Race::Human);
+        snooper.desc = Some(snooper_conn);
+        let snooper = g.create_char(snooper);
+        g.descriptors.get_mut(&victim_conn).unwrap().character = Some(victim);
+        g.descriptors.get_mut(&snooper_conn).unwrap().character = Some(snooper);
+        g.get_char_mut(victim).unwrap().snoop_by = Some(snooper);
+        g.get_char_mut(snooper).unwrap().snooping = Some(victim);
+        g.char_to_room(victim, room);
+        g.char_to_room(snooper, room);
+
+        // One direct delivery must independently cap both the victim and the
+        // snooper relay. A multibyte payload exercises the UTF-8 truncation
+        // boundary; avoiding room fan-out here proves the snooper did not only
+        // overflow because it happened to be another room recipient (#417).
+        let huge = "🦀".repeat(crate::connection::DESCRIPTOR_OUTPUT_LIMIT);
+        g.send_to_char(victim, &huge);
+
+        for conn in [victim_conn, snooper_conn] {
+            let (output, overflowed) = g.descriptors.get_mut(&conn).unwrap().take_output_status();
+            assert!(overflowed);
+            assert!(output.len() <= crate::connection::DESCRIPTOR_OUTPUT_LIMIT);
+            assert!(std::str::from_utf8(output.as_bytes()).is_ok());
+            assert!(output.ends_with(crate::connection::OUTPUT_OVERFLOW_MARKER));
+            assert_eq!(
+                output
+                    .matches(crate::connection::OUTPUT_OVERFLOW_MARKER)
+                    .count(),
+                1
+            );
+        }
+    }
+
     fn lit_light(g: &mut GameState) -> ObjId {
         let mut light = Object::new(20, "torch".into(), "a torch".into());
         light.obj_type = ObjectType::Light;
@@ -1372,11 +1735,41 @@ mod tests {
         g.extract_char(victim);
 
         assert_eq!(g.get_char(snooper).unwrap().snooping, None);
-        assert!(g
-            .descriptors
-            .get(&snooper_conn)
-            .unwrap()
-            .outbuf
-            .contains("Your victim is no longer among us.\r\n"));
+        assert!(
+            g.descriptors
+                .get(&snooper_conn)
+                .unwrap()
+                .outbuf
+                .contains("Your victim is no longer among us.\r\n")
+        );
+    }
+
+    #[test]
+    fn extract_char_tears_down_arena_state_before_removal() {
+        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
+        crate::arena::reset_for_tests();
+        let mut g = fresh_game();
+        let arena_room = g.add_room(crate::room::Room::new(
+            4801,
+            48,
+            "Arena Prep".into(),
+            String::new(),
+        ));
+        let mut player = Character::new_player("Extracted".into(), Class::Warrior, Race::Human);
+        player.idnum = 77;
+        player.wimp_level = 12;
+        player.recall_level = 34;
+        player.affect_flags = AFF_INVISIBLE;
+        let player = g.create_char(player);
+        g.char_to_room(player, arena_room);
+        crate::arena::set_stat_for_test(player, crate::arena::ARENA_COMBATANT1);
+        crate::arena::bup_affects(&mut g, player);
+
+        g.extract_char(player);
+
+        assert!(!g.char_exists(player));
+        assert_eq!(crate::arena::arena_stat(player), crate::arena::ARENA_NOT);
+        assert_eq!(g.player_save_requests, vec![player]);
+        crate::arena::reset_for_tests();
     }
 }

@@ -28,18 +28,19 @@
 // already renders an offline player straight from the boot-loaded player_table
 // index, so it stays synchronous (no deferral needed).
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::connection::ConState;
 use crate::constants;
-use crate::dg_handler::{self, ScriptKey, OBJ_TRIGGER, WLD_TRIGGER};
+use crate::dg_handler::{self, OBJ_TRIGGER, ScriptKey, WLD_TRIGGER};
 use crate::flags::*;
 use crate::gcmd::*;
 use crate::interpreter::{command_interpreter, half_chop, is_abbrev, one_argument, search_block};
 use crate::limits::{exp_to_level, gain_exp_regardless};
 use crate::object::{ObjLoc, ObjectType};
-use crate::state::GameState;
+use crate::state::{GameState, OfflineOpAuthority, PLAYER_INSPECTION_DENIED};
 use crate::syslog::{BRF, CMP, NRM, PFT};
 use crate::types::*;
+use crate::world::zone_vnum_bounds;
 
 // ---------------------------------------------------------------------------
 // Level constants (structs.h) — the contract gives LVL_IMMORT/GOD/GRGOD/IMPL;
@@ -142,20 +143,12 @@ fn cap(s: &str) -> String {
 
 /// ONOFF(): C macro -> "ON"/"OFF".
 fn onoff(b: bool) -> &'static str {
-    if b {
-        "ON"
-    } else {
-        "OFF"
-    }
+    if b { "ON" } else { "OFF" }
 }
 
 /// YESNO().
 fn yesno(b: bool) -> &'static str {
-    if b {
-        "YES"
-    } else {
-        "NO"
-    }
+    if b { "YES" } else { "NO" }
 }
 
 /// sprinttype(): index a "\n"-terminated name table by ordinal, with the
@@ -261,18 +254,16 @@ fn is_number(s: &str) -> bool {
     start < bytes.len() && bytes[start..].iter().all(|b| b.is_ascii_digit())
 }
 
-/// atoi() semantics: leading integer, 0 on garbage.
-fn atoi(s: &str) -> i32 {
-    let t = s.trim();
-    let mut end = 0;
-    let bytes = t.as_bytes();
-    if end < bytes.len() && (bytes[end] == b'-' || bytes[end] == b'+') {
-        end += 1;
+/// C `atoi` syntax with explicit overflow rejection at command entry points.
+fn command_atoi(g: &mut GameState, ch: CharId, s: &str) -> Option<i32> {
+    match crate::text::parse_i32_atoi(s) {
+        Ok(value) => Some(value),
+        Err(crate::text::ParseIntError::Overflow) => {
+            g.send_to_char(ch, "That number is outside the supported range.\r\n");
+            None
+        }
+        Err(_) => unreachable!("parse_i32_atoi maps nonnumeric input to zero"),
     }
-    while end < bytes.len() && bytes[end].is_ascii_digit() {
-        end += 1;
-    }
-    t[..end].parse::<i32>().unwrap_or(0)
 }
 
 /// two_arguments(): first two whitespace tokens (orig case) + remainder.
@@ -353,7 +344,7 @@ const WTRIG_TYPES: &[&str] = &[
 /// can_edit_zone then bounds-checks the negative).
 fn real_zone(g: &GameState, number: i32) -> i32 {
     for (idx, z) in g.zones.iter().enumerate() {
-        if number >= z.number * 100 && number <= z.top {
+        if z.contains_vnum(number) {
             return idx as i32;
         }
     }
@@ -572,7 +563,13 @@ fn get_char_vis(g: &GameState, ch: CharId, arg: &str) -> Option<CharId> {
 /// caller then sends its normal not-found line). Never fires for a name that is
 /// already online (find_player_by_name resolves it) — including the requester —
 /// so the online path is untouched and the bridge can't double-load.
-fn try_defer_offline(g: &mut GameState, ch: CharId, name: &str, command: &str) -> bool {
+fn try_defer_offline(
+    g: &mut GameState,
+    ch: CharId,
+    name: &str,
+    command: &str,
+    authority: OfflineOpAuthority,
+) -> bool {
     let first = name.split_whitespace().next().unwrap_or("");
     if first.is_empty() {
         return false;
@@ -588,10 +585,23 @@ fn try_defer_offline(g: &mut GameState, ch: CharId, name: &str, command: &str) -
             ch,
             &format!("[ Loading {} from the player file... ]\r\n", first),
         );
-        g.queue_offline_op(ch, first, command);
+        g.queue_offline_op(ch, first, command, authority);
         return true;
     }
     false
+}
+
+/// Apply the one player-inspection authority rule and its one denial string.
+/// Callers resolve the authoritative target level for their path (live entity
+/// or persistent index); the async bridge repeats this with the freshly loaded
+/// entity before replay.
+fn authorize_player_inspection(g: &mut GameState, requester: CharId, target_level: u8) -> bool {
+    if g.can_inspect_player_level(requester, target_level) {
+        true
+    } else {
+        g.send_to_char(requester, PLAYER_INSPECTION_DENIED);
+        false
+    }
 }
 
 /// get_player_vis(ch, name): a visible PC (in room first, then world).
@@ -676,7 +686,13 @@ fn find_target_room(g: &mut GameState, ch: CharId, rawroomstr: &str) -> Option<R
         .unwrap_or(false)
         && !roomstr.contains('.')
     {
-        let tmp = atoi(&roomstr);
+        let tmp = match crate::text::parse_i32_strict(&roomstr) {
+            Ok(vnum) => vnum,
+            Err(_) => {
+                g.send_to_char(ch, "Invalid or out-of-range room number.\r\n");
+                return None;
+            }
+        };
         match g.real_room(tmp) {
             Some(r) => location = r,
             None => {
@@ -1780,7 +1796,13 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
     let lvl_line = if klevel < LVL_IMMORT {
         format!(
             "{}{}, Lev: [&y{:2}&n], XP: [&y{:7}&n], Align: [{:4}], MaxWeapon: [{}], Cstat: [{}]\r\n",
-            class_label, classstr, klevel, exp, align, maxweapon, citizen + 1
+            class_label,
+            classstr,
+            klevel,
+            exp,
+            align,
+            maxweapon,
+            citizen + 1
         )
     } else {
         format!(
@@ -1857,7 +1879,7 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
             "Coins: [{:9}], Bank: [{:9}] (Total: {})\r\n",
             points.gold,
             points.bank_gold,
-            points.gold + points.bank_gold
+            i64::from(points.gold) + i64::from(points.bank_gold)
         ),
     );
     g.send_to_char(
@@ -2099,13 +2121,29 @@ pub fn do_stat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     } else if is_abbrev(&kind, "player") {
         if rest.is_empty() {
             g.send_to_char(ch, "Stats on which player?\r\n");
-        } else if let Some(v) = get_player_vis(g, ch, &rest) {
-            do_stat_character(g, ch, v);
-        } else if try_defer_offline(g, ch, &rest, &format!("stat player {}", rest)) {
-            // Offline: the async bridge loads the player, replays `stat player
-            // <name>` (now resolving online), prints the full record, extracts.
         } else {
-            g.send_to_char(ch, "No such player around.\r\n");
+            let online = get_player_vis(g, ch, &rest);
+            let target_level = online
+                .map(|target| level_of(g, target))
+                .or_else(|| g.player_index(&rest).map(|entry| entry.level));
+            if let Some(level) = target_level
+                && !authorize_player_inspection(g, ch, level)
+            {
+                return;
+            }
+            if let Some(v) = online {
+                do_stat_character(g, ch, v);
+            } else if try_defer_offline(
+                g,
+                ch,
+                &rest,
+                &format!("stat player {}", rest),
+                OfflineOpAuthority::InspectPlayer,
+            ) {
+                // The replay repeats this level check after the DB load.
+            } else {
+                g.send_to_char(ch, "No such player around.\r\n");
+            }
         }
     } else if is_abbrev(&kind, "file") {
         // stat file <name>: retrieve_player_entry() loads an OFFLINE player's
@@ -2131,18 +2169,26 @@ pub fn do_stat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             };
             match target_level {
                 None => g.send_to_char(ch, "There is no such player.\r\n"),
-                Some(lvl) if lvl > level_of(g, ch) => {
-                    g.send_to_char(ch, "Sorry, you can't do that.\r\n")
-                }
-                Some(_) => match online {
-                    Some(v) => do_stat_character(g, ch, v),
-                    // Offline: the async bridge loads the record, replays
-                    // `stat player <name>` so the online path renders it, then
-                    // saves + extracts (C retrieve_player_entry/insert_player_entry).
-                    None => {
-                        try_defer_offline(g, ch, &rest, &format!("stat player {}", rest));
+                Some(level) => {
+                    if !authorize_player_inspection(g, ch, level) {
+                        return;
                     }
-                },
+                    match online {
+                        Some(v) => do_stat_character(g, ch, v),
+                        // Offline: the async bridge loads the record, replays
+                        // `stat player <name>` so the online path renders it, then
+                        // saves + extracts (C retrieve_player_entry/insert_player_entry).
+                        None => {
+                            try_defer_offline(
+                                g,
+                                ch,
+                                &rest,
+                                &format!("stat player {}", rest),
+                                OfflineOpAuthority::InspectPlayer,
+                            );
+                        }
+                    }
+                }
             }
         }
     } else if is_abbrev(&kind, "object") {
@@ -2455,7 +2501,9 @@ pub fn do_load(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "Usage: load { obj | mob } <number>\r\n");
         return;
     }
-    let number = atoi(&numstr);
+    let Some(number) = command_atoi(g, ch, &numstr) else {
+        return;
+    };
     if number < 0 {
         g.send_to_char(ch, "A NEGATIVE number??\r\n");
         return;
@@ -2585,8 +2633,12 @@ pub fn do_load(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 pub fn do_aload(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
     let (kind, from_s, rest) = two_arguments(arg);
     let (to_s, _r) = one_argument(&rest);
-    let to = atoi(&to_s);
-    let frm = atoi(&from_s);
+    let Some(to) = command_atoi(g, ch, &to_s) else {
+        return;
+    };
+    let Some(frm) = command_atoi(g, ch, &from_s) else {
+        return;
+    };
     if frm <= 0 {
         g.send_to_char(ch, "You're missing the starting item number\r\n");
         return;
@@ -2628,7 +2680,9 @@ pub fn do_vstat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "Usage: vstat { obj | mob } <number>\r\n");
         return;
     }
-    let number = atoi(&numstr);
+    let Some(number) = command_atoi(g, ch, &numstr) else {
+        return;
+    };
     if number < 0 {
         g.send_to_char(ch, "A NEGATIVE number??\r\n");
         return;
@@ -2758,7 +2812,6 @@ pub fn do_purge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                     ActArg::None,
                     To::Room,
                 );
-                g.obj_from_anywhere(obj);
                 g.extract_obj(obj);
                 g.send_to_char(ch, OK);
             } else {
@@ -2799,7 +2852,6 @@ pub fn do_purge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 || ch_level >= LVL_GRGOD
                 || obj_vnum == NOTHING
             {
-                g.obj_from_anywhere(obj);
                 g.extract_obj(obj);
             }
         }
@@ -2870,7 +2922,9 @@ pub fn do_advance(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "NO!  Not on NPC's.\r\n");
         return;
     }
-    let newlevel = atoi(&levelstr);
+    let Some(newlevel) = command_atoi(g, ch, &levelstr) else {
+        return;
+    };
     if levelstr.is_empty() || newlevel <= 0 {
         g.send_to_char(ch, "That's not a level!\r\n");
         return;
@@ -3062,7 +3116,9 @@ pub fn do_invis(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             perform_immort_invis(g, ch, lvl);
         }
     } else {
-        let level = atoi(&name);
+        let Some(level) = command_atoi(g, ch, &name) else {
+            return;
+        };
         if level > level_of(g, ch) as i32 {
             g.send_to_char(ch, "You can't go invisible above your own level.\r\n");
         } else if level < 1 {
@@ -3242,7 +3298,9 @@ pub fn do_poofset(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
 // ===========================================================================
 pub fn do_dc(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let (numstr, _rest) = one_argument(arg);
-    let num_to_dc = atoi(&numstr);
+    let Some(num_to_dc) = command_atoi(g, ch, &numstr) else {
+        return;
+    };
     if num_to_dc == 0 {
         g.send_to_char(ch, "Usage: DC <user number> (type USERS for a list)\r\n");
         return;
@@ -3302,7 +3360,9 @@ pub fn do_wizlock(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let (name, _rest) = one_argument(arg);
     let when: &str;
     if !name.is_empty() {
-        let value = atoi(&name);
+        let Some(value) = command_atoi(g, ch, &name) else {
+            return;
+        };
         if value < 0 || value > level_of(g, ch) as i32 {
             g.send_to_char(ch, "Invalid wizlock value.\r\n");
             return;
@@ -3577,7 +3637,10 @@ pub fn do_wiznet(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             let (firstw, _r) = one_argument(after);
             if is_number(&firstw) {
                 let (numw, rest) = half_chop(after);
-                level = atoi(&numw).max(LVL_IMMORT as i32);
+                let Some(parsed_level) = command_atoi(g, ch, &numw) else {
+                    return;
+                };
+                level = parsed_level.max(LVL_IMMORT as i32);
                 if level > level_of(g, ch) as i32 {
                     g.send_to_char(ch, "You can't wizline above your own level.\r\n");
                     return;
@@ -3749,7 +3812,9 @@ pub fn do_zreset(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             .and_then(|c| c.in_room)
             .map(|r| g.rooms[r].zone as usize)
     } else {
-        let j = atoi(&name);
+        let Some(j) = command_atoi(g, ch, &name) else {
+            return;
+        };
         g.zones.iter().position(|z| z.number == j)
     };
 
@@ -4003,7 +4068,6 @@ fn plr_tog_chk(g: &mut GameState, id: CharId, flag: i64) -> bool {
 /// distribution lives in class.c (not surfaced); use the same 3d6-style spread
 /// CircleMUD's default roll_real_abils produces so the values are sane.
 
-
 // ===========================================================================
 // do_show
 // ===========================================================================
@@ -4087,7 +4151,9 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                     print_zone_to_buf(&mut buf, &z);
                 }
             } else if !value.is_empty() && is_number(&value) {
-                let j = atoi(&value);
+                let Some(j) = command_atoi(g, ch, &value) else {
+                    return;
+                };
                 match g.zones.iter().find(|z| z.number == j).cloned() {
                     Some(z) => print_zone_to_buf(&mut buf, &z),
                     None => {
@@ -4115,8 +4181,23 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 g.send_to_char(ch, "A name would help.\r\n");
                 return;
             }
-            if g.find_player_by_name(&value).is_none()
-                && try_defer_offline(g, ch, &value, &format!("show player {}", value))
+            let online = g.find_player_by_name(&value);
+            let target_level = online
+                .map(|target| level_of(g, target))
+                .or_else(|| g.player_index(&value).map(|entry| entry.level));
+            if let Some(level) = target_level {
+                if !authorize_player_inspection(g, ch, level) {
+                    return;
+                }
+            }
+            if online.is_none()
+                && try_defer_offline(
+                    g,
+                    ch,
+                    &value,
+                    &format!("show player {}", value),
+                    OfflineOpAuthority::InspectPlayer,
+                )
             {
                 return;
             }
@@ -4170,7 +4251,18 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
         3 => {
             // rent: Crash_listrent — dump the named player's stored rent file.
-            crate::objsave::crash_listrent(g, ch, &value);
+            let canonical = if value.len() >= 2
+                && value.len() <= 20
+                && value.chars().all(|c| c.is_ascii_alphabetic())
+            {
+                g.player_index(&value).map(|entry| entry.name.clone())
+            } else {
+                None
+            };
+            match canonical {
+                Some(name) => crate::objsave::crash_listrent(g, ch, &name),
+                None => g.send_to_char(ch, "There is no such player.\r\n"),
+            }
         }
         4 => {
             // stats
@@ -4541,7 +4633,14 @@ fn perform_set(
                 output = format!("{}'s {} set {}.", vname, field.cmd, onoff(on));
             }
             T_NUMBER => {
-                value = atoi(val_arg);
+                value = match crate::text::parse_i32_atoi(val_arg) {
+                    Ok(value) => value,
+                    Err(crate::text::ParseIntError::Overflow) => {
+                        g.send_to_char(cch, "That number is outside the supported range.\r\n");
+                        return false;
+                    }
+                    Err(_) => unreachable!("parse_i32_atoi maps nonnumeric input to zero"),
+                };
                 mudlog(
                     g,
                     &format!("(GC) {} set {}'s {} to {}.", cname, vname, field.cmd, value),
@@ -4764,13 +4863,13 @@ fn perform_set(
         19 => {
             let nv = range_i32(0, 100_000_000, value);
             if let Some(v) = g.get_char_mut(vict) {
-                v.points.gold = nv;
+                crate::gold::set(v, crate::gold::Account::Carried, i64::from(nv));
             }
         }
         20 => {
             let nv = range_i32(0, 100_000_000, value);
             if let Some(v) = g.get_char_mut(vict) {
-                v.points.bank_gold = nv;
+                crate::gold::set(v, crate::gold::Account::Bank, i64::from(nv));
             }
         }
         21 => {
@@ -4893,7 +4992,18 @@ fn perform_set(
         41 => set_or_remove_prf2(g, PRF2_QCHAN),
         42 => {
             if is_number(val_arg) {
-                value = atoi(val_arg);
+                value = match crate::text::parse_i32_strict(val_arg) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        if let Some(cch) = ch {
+                            g.send_to_char(
+                                cch,
+                                "Must be a room's virtual number in the supported range.\r\n",
+                            );
+                        }
+                        return false;
+                    }
+                };
                 if g.real_room(value).is_some() || value == -1 {
                     if let Some(v) = g.get_char_mut(vict) {
                         v.load_room = value;
@@ -5236,7 +5346,12 @@ pub fn do_set(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 ch,
                 &format!("[ Loading {} from the player file... ]\r\n", fname),
             );
-            g.queue_offline_op(ch, &fname, &format!("set player {} {}", fname, frest));
+            g.queue_offline_op(
+                ch,
+                &fname,
+                &format!("set player {} {}", fname, frest),
+                OfflineOpAuthority::ReplayHandler,
+            );
             return;
         }
         g.send_to_char(ch, "There is no such player.\r\n");
@@ -5314,7 +5429,13 @@ pub fn do_set(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         match get_player_vis(g, ch, &name) {
             Some(v) => v,
             None => {
-                if try_defer_offline(g, ch, &name, &format!("set {}", arg)) {
+                if try_defer_offline(
+                    g,
+                    ch,
+                    &name,
+                    &format!("set {}", arg),
+                    OfflineOpAuthority::ReplayHandler,
+                ) {
                     return;
                 }
                 g.send_to_char(ch, "There is no such player.\r\n");
@@ -5325,7 +5446,13 @@ pub fn do_set(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         match get_char_vis(g, ch, &name) {
             Some(v) => v,
             None => {
-                if try_defer_offline(g, ch, &name, &format!("set {}", arg)) {
+                if try_defer_offline(
+                    g,
+                    ch,
+                    &name,
+                    &format!("set {}", arg),
+                    OfflineOpAuthority::ReplayHandler,
+                ) {
                     return;
                 }
                 g.send_to_char(ch, "There is no such creature.\r\n");
@@ -5382,8 +5509,12 @@ pub fn do_rlist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "Usage: rlist <begining number> <ending number>\r\n");
         return;
     }
-    let first = atoi(&a);
-    let last = atoi(&b);
+    let Some(first) = command_atoi(g, ch, &a) else {
+        return;
+    };
+    let Some(last) = command_atoi(g, ch, &b) else {
+        return;
+    };
     // C act.wizard.c:4091-4100: a mortal builder may only enumerate the zone(s)
     // they own, checked on both arguments before any range validation.
     if level_of(g, ch) < LVL_IMMORT {
@@ -5445,8 +5576,12 @@ pub fn do_mlist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "Usage: mlist <begining number> <ending number>\r\n");
         return;
     }
-    let first = atoi(&a);
-    let last = atoi(&b);
+    let Some(first) = command_atoi(g, ch, &a) else {
+        return;
+    };
+    let Some(last) = command_atoi(g, ch, &b) else {
+        return;
+    };
     // C act.wizard.c:4146-4155: same two-gate builder check as rlist.
     if level_of(g, ch) < LVL_IMMORT {
         if !can_edit_zone(g, ch, real_zone(g, first)) {
@@ -5504,8 +5639,12 @@ pub fn do_olist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "Usage: olist <begining number> <ending number>\r\n");
         return;
     }
-    let first = atoi(&a);
-    let last = atoi(&b);
+    let Some(first) = command_atoi(g, ch, &a) else {
+        return;
+    };
+    let Some(last) = command_atoi(g, ch, &b) else {
+        return;
+    };
     // C act.wizard.c:4199-4208: same two-gate builder check as rlist.
     if level_of(g, ch) < LVL_IMMORT {
         if !can_edit_zone(g, ch, real_zone(g, first)) {
@@ -5572,7 +5711,12 @@ pub fn do_whoupd(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     match crate::whohtml::make_who2html(g) {
         Ok(()) => g.send_to_char(ch, "Updating the web who list...\r\n"),
         Err(e) => {
-            crate::syslog::mudlog(g, &format!("ERROR: who2html: {}", e), crate::syslog::NRM, LVL_GOD);
+            crate::syslog::mudlog(
+                g,
+                &format!("ERROR: who2html: {}", e),
+                crate::syslog::NRM,
+                LVL_GOD,
+            );
             g.send_to_char(ch, "The WWW who update failed; see syslog.\r\n");
         }
     }
@@ -5655,8 +5799,12 @@ static WARN_MIN: AtomicI32 = AtomicI32::new(0);
 
 pub fn do_setreboot(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let (a, b, _r) = two_arguments(arg);
-    let hr = atoi(&a);
-    let min = atoi(&b);
+    let Some(hr) = command_atoi(g, ch, &a) else {
+        return;
+    };
+    let Some(min) = command_atoi(g, ch, &b) else {
+        return;
+    };
 
     if a.is_empty() {
         g.send_to_char(ch, "Usage: setreboot <reboothr> <rebootmin>\r\n");
@@ -5756,8 +5904,14 @@ pub fn do_esave(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             lvl,
         );
         // do_olc resolves the save target as real_zone(atoi(arg)*100).
-        let znum = atoi(&a);
-        if let Some(zr) = crate::olc::real_zone(g, znum * 100) {
+        let Some(znum) = command_atoi(g, ch, &a) else {
+            return;
+        };
+        let Some((zone_vnum, _)) = zone_vnum_bounds(znum) else {
+            g.send_to_char(ch, "That zone number is outside the supported range.\r\n");
+            return;
+        };
+        if let Some(zr) = crate::olc::real_zone(g, zone_vnum) {
             for kind in 0..=4 {
                 crate::olc::olc_save_to_disk(g, zr, kind);
             }
@@ -5771,7 +5925,9 @@ pub fn do_copyto(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "Format: copyto <room number>\r\n");
         return;
     }
-    let iroom = atoi(&a);
+    let Some(iroom) = command_atoi(g, ch, &a) else {
+        return;
+    };
     let rroom = match g.real_room(iroom) {
         Some(r) => r,
         None => {
@@ -5812,7 +5968,9 @@ pub fn do_dig(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "Format: dig <dir> <room number>\r\n");
         return;
     }
-    let iroom = atoi(&room_s);
+    let Some(iroom) = command_atoi(g, ch, &room_s) else {
+        return;
+    };
     let rroom = match g.real_room(iroom) {
         Some(r) if r > 0 => r,
         _ => {
@@ -6157,9 +6315,9 @@ pub fn do_rename(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
     // Name validation (_parse_name / Valid_Name / reserved_word / fill_word):
-    // require 2..=MAX_NAME_LENGTH alphabetic chars.
+    // require 2..=MAX_NAME_LENGTH alphabetic chars (structs.h: 20).
     let tmp = cap(&arg2);
-    let valid = tmp.len() >= 2 && tmp.chars().all(|c| c.is_ascii_alphabetic());
+    let valid = (2..=20).contains(&tmp.len()) && tmp.chars().all(|c| c.is_ascii_alphabetic());
     if !valid {
         g.send_to_char(ch, "The new name is invalid.\r\n");
         return;
@@ -6179,48 +6337,28 @@ pub fn do_rename(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
     let oldname = name_of(g, victim);
-    g.send_to_char(ch, &format!("You have renamed {} to {}.\r\n", oldname, tmp));
-    let cname = name_of(g, ch);
-    mudlog(
-        g,
-        &format!("{} has renamed {} to {}", cname, oldname, arg2),
-        NRM,
-        LVL_GOD,
-    );
-    // Re-key the players_by_name index and update the name.
-    g.players_by_name.remove(&oldname.to_lowercase());
     let victim_idnum = g.get_char(victim).map(|c| c.idnum).unwrap_or(-1);
-    if let Some(v) = g.get_char_mut(victim) {
-        v.player.name = tmp.clone();
+    if oldname.eq_ignore_ascii_case(&tmp) {
+        g.send_to_char(ch, "That player already has that name.\r\n");
+        return;
     }
-    g.players_by_name.insert(tmp.to_lowercase(), victim);
+    if g.player_rename_requests
+        .iter()
+        .any(|request| request.victim == victim || request.idnum == victim_idnum)
+    {
+        g.send_to_char(
+            ch,
+            "A durable rename for that player is already pending.\r\n",
+        );
+        return;
+    }
 
-    // Move the rent/alias sidecars so the OLD name cannot be re-created and
-    // crash-load the victim's whole inventory (issue #385). Keep the DB row
-    // save (which rewrites the name column) queued.
-    let lib = g.config.lib_path.clone();
-    if let (Some(from), Some(to)) = (
-        crate::objsave::crash_filename(&lib, &oldname),
-        crate::objsave::crash_filename(&lib, &tmp),
-    ) {
-        let _ = std::fs::rename(&from, &to);
-    }
-    if let (Some(from), Some(to)) = (
-        crate::alias::alias_filename(&lib, &oldname),
-        crate::alias::alias_filename(&lib, &tmp),
-    ) {
-        let _ = std::fs::rename(&from, &to);
-    }
-    for p in g.player_table.iter_mut() {
-        if p.idnum == victim_idnum {
-            p.name = tmp.clone();
-        }
-    }
-    g.request_player_save(victim);
-    g.send_to_char(
-        victim,
-        &format!("&GYou have been renamed to {} by the gods.&n\r\n", tmp),
-    );
+    // The command path is synchronous, while a correct rename needs a
+    // conditional SQL commit plus two name-keyed sidecars.  Queue the exact
+    // identities and publish nothing here.  The async Game drain rechecks
+    // authority/collisions and reports success only after all durable pieces
+    // have committed (#411/#413).
+    g.queue_player_rename(ch, victim, victim_idnum, &oldname, &tmp);
 }
 
 // ===========================================================================
@@ -6275,7 +6413,9 @@ pub fn do_citizen(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             return;
         }
     };
-    let i = atoi(&lvl_s);
+    let Some(i) = command_atoi(g, ch, &lvl_s) else {
+        return;
+    };
     if i == 0 || i > 7 {
         g.send_to_char(ch, "Valid levels are 1..7!\r\n");
         return;
@@ -6383,8 +6523,12 @@ pub fn do_questmobs(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "Usage: questmobs <from vnum> <to vnum>\r\n");
         return;
     }
-    let from = atoi(&a);
-    let to = atoi(&b);
+    let Some(from) = command_atoi(g, ch, &a) else {
+        return;
+    };
+    let Some(to) = command_atoi(g, ch, &b) else {
+        return;
+    };
     if from < 0 || to < 0 {
         g.send_to_char(ch, "A NEGATIVE number??\r\n");
         return;
@@ -6429,7 +6573,9 @@ pub fn do_reward(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let all = target == "all";
     let playeronly = !roomonly && !all;
 
-    let obj_vnum = atoi(&vnum_s);
+    let Some(obj_vnum) = command_atoi(g, ch, &vnum_s) else {
+        return;
+    };
     if obj_vnum < 0 {
         g.send_to_char(ch, "A NEGATIVE number??\r\n");
         return;
@@ -6629,7 +6775,17 @@ pub fn do_levelme(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
 // process inherits the fds and re-wraps them in main.rs's copyover-recovery path
 // (comm.c copyover_recover).
 pub fn do_copyover(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    use std::io::Write;
+    if g.copyover_requested.is_some() {
+        g.send_to_char(ch, "A copyover is already being prepared.\n\r");
+        return;
+    }
+    g.copyover_requested = Some(ch);
+    g.send_to_char(ch, "Preparing a durable copyover snapshot...\n\r");
+}
+
+/// Execute the filesystem/socket half only after the async Game shell has
+/// confirmed every player record is durable in the database.
+pub fn perform_copyover(g: &mut GameState, ch: CharId) {
     use std::os::unix::io::RawFd;
 
     // C act.wizard.c:1927-1990: flush the OLC save list to disk before the
@@ -6637,7 +6793,7 @@ pub fn do_copyover(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     crate::olc::flush_save_list_to_disk(g);
 
     let listener_fd = crate::state::listener_fd();
-    if listener_fd < 0 {
+    if listener_fd < 3 {
         // No inherited listener => seamless reboot impossible; abort like C's
         // unwritable-file path rather than dropping everyone.
         g.send_to_char(ch, "Copyover unavailable (no listener fd).\n\r");
@@ -6654,16 +6810,73 @@ pub fn do_copyover(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         }
     };
 
-    // Open the copyover state file (C: COPYOVER_FILE "copyover.dat", run from one
-    // dir above lib). We keep it under the lib path so cwd is irrelevant.
     let copyover_path = std::path::Path::new(&g.config.lib_path).join("copyover.dat");
-    let mut fp = match std::fs::File::create(&copyover_path) {
-        Ok(f) => f,
-        Err(_) => {
-            g.send_to_char(ch, "Copyover file not writeable, aborted.\n\r");
+    // Build and validate the complete recovery set before mutating descriptors
+    // or inheriting a single fd. The structured snapshot carries its record
+    // count, completion bit, and checksum; JSON escaping handles arbitrary
+    // titles/hosts without delimiter assumptions.
+    let conns: Vec<ConnId> = g.descriptors.keys().copied().collect();
+    let mut inherit_fds: Vec<RawFd> = Vec::new();
+    let mut entries = Vec::new();
+    let mut nonplaying = Vec::new();
+    for &conn in &conns {
+        let (has_char, state, fd, host) = match g.descriptors.get(&conn) {
+            Some(d) => (d.character.is_some(), d.state, d.raw_fd, d.host.clone()),
+            None => continue,
+        };
+        if !has_char || state != ConState::Playing {
+            nonplaying.push((conn, fd));
+            continue;
+        }
+        let cid = match g.descriptors.get(&conn).and_then(|d| d.character) {
+            Some(c) => c,
+            None => continue,
+        };
+        let (player_name, player_id, character_snapshot) = match g.get_char(cid) {
+            Some(character) if !character.is_npc => (
+                character.get_name().to_string(),
+                character.idnum,
+                crate::copyover::CharacterSnapshot::from_character(character),
+            ),
+            _ => {
+                g.send_to_char(ch, "Copyover found an invalid playing body; aborted.\n\r");
+                return;
+            }
+        };
+        if !crate::objsave::crash_save(g, cid, &g.config.lib_path.clone()) {
+            g.send_to_char(ch, "Copyover could not save player objects; aborted.\n\r");
             return;
         }
+        if let Err(error) = crate::alias::write_aliases(&g.config.lib_path, &player_name, player_id)
+        {
+            log::warn!("copyover alias save failed: {error}");
+            g.send_to_char(ch, "Copyover could not save player aliases; aborted.\n\r");
+            return;
+        }
+        entries.push(crate::copyover::ConnectionSnapshot {
+            fd,
+            host,
+            character: character_snapshot,
+        });
+        inherit_fds.push(fd);
+    }
+    let payload = crate::copyover::SnapshotPayload {
+        listener_fd,
+        entries,
     };
+    if let Err(error) = crate::copyover::validate_inherited_fds(&payload) {
+        log::warn!("copyover fd validation failed: {error:#}");
+        g.send_to_char(
+            ch,
+            "Copyover found an invalid socket set; reboot aborted.\n\r",
+        );
+        return;
+    }
+    if let Err(error) = crate::copyover::write_atomic(&copyover_path, payload) {
+        log::warn!("copyover snapshot failed: {error:#}");
+        g.send_to_char(ch, "Copyover snapshot failed; reboot aborted.\n\r");
+        return;
+    }
 
     let cname = name_of(g, ch);
     send_to_all(
@@ -6673,192 +6886,60 @@ pub fn do_copyover(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
             cname
         ),
     );
-
-    // Persist every playing player's objects first so nothing is lost even if
-    // recovery fails (C Crash_rentsave's each char before execl()).
-    crate::objsave::crash_save_all(g);
-
-    // Character snapshot (Rust-port addition). C relies on the on-disk player
-    // FILE surviving the exec; the production MySQL DB does the same here, but
-    // the in-memory MockDatabase (golden/offline harness) dies with the process
-    // image. So we also dump each playing char's score-relevant fields to
-    // `copyover_chars.dat`; main.rs re-seeds them into the DB after exec ONLY if
-    // the player isn't already present (so the real-DB path is untouched). This
-    // is the disk-persistence analogue of C's pfile, scoped to what reload needs.
-    let chars_path = std::path::Path::new(&g.config.lib_path).join("copyover_chars.dat");
-    let mut cfp = std::fs::File::create(&chars_path).ok();
-
-    // First line of the state file: the inherited listener fd (C writes
-    // `-C<mother_desc>`; we store the bare fd and rebuild the listener from it).
-    let _ = writeln!(fp, "{}", listener_fd);
-
-    // Walk every descriptor. Playing ones are serialised + their fd inherited;
-    // everyone else (logging in / link-dead) is dropped, exactly as C does.
-    let conns: Vec<ConnId> = g.descriptors.keys().copied().collect();
-    let mut inherit_fds: Vec<RawFd> = Vec::new();
-    for conn in conns {
-        let (has_char, state, fd, host) = match g.descriptors.get(&conn) {
-            Some(d) => (d.character.is_some(), d.state, d.raw_fd, d.host.clone()),
+    for (conn, fd) in nonplaying {
+        let bye = b"\n\rSorry, we are rebooting. Come back in a minute.\n\r";
+        if fd >= 0 {
+            let _ = write_fd_all(fd, bye);
+        }
+        if let Some(descriptor) = g.descriptors.get_mut(&conn) {
+            descriptor.state = ConState::Close;
+        }
+    }
+    for &conn in &conns {
+        let (fd, playing) = match g.descriptors.get(&conn) {
+            Some(descriptor) => (
+                descriptor.raw_fd,
+                descriptor.state == ConState::Playing && descriptor.character.is_some(),
+            ),
             None => continue,
         };
-        if !has_char || state != ConState::Playing {
-            // C: write_to_descriptor + close_socket for non-playing descriptors.
-            if fd >= 0 {
-                let bye = "\n\rSorry, we are rebooting. Come back in a minute.\n\r";
-                unsafe {
-                    libc::write(fd, bye.as_ptr() as *const libc::c_void, bye.len());
-                }
-            }
-            if let Some(d) = g.descriptors.get_mut(&conn) {
-                d.state = ConState::Close;
-            }
+        if !playing {
             continue;
         }
-
-        let cid = match g.descriptors.get(&conn).and_then(|d| d.character) {
-            Some(c) => c,
-            None => continue,
-        };
-        let pname = name_of(g, cid);
-
-        // BUG #15: stamp the player's CURRENT room so enter_game (recovery)
-        // drops them where they were standing, not at the temple. C do_copyover
-        // (act.wizard.c): for a surface-map room it saves mapx/mapy; otherwise it
-        // sets `saved.tloadroom = GET_ROOM_VNUM(och->in_room)` — a temporary,
-        // higher-priority loadroom that enter_player_game honors then clears.
-        let stamp_vnum = g.char_room_vnum(cid);
-        let on_map = g
-            .get_char(cid)
-            .and_then(|c| c.in_room)
-            .and_then(|rnum| g.rooms.get(rnum))
-            .map(|r| r.map_x.is_some() && r.map_y.is_some())
-            .unwrap_or(false);
-        if on_map {
-            // Map room: C stamps the coordinates (find_room_by_coords path).
-            // Resolve them up front (immutable room borrow), then mutate — house
-            // style: never hold a borrow across a mutation.
-            let coords = g
-                .get_char(cid)
-                .and_then(|c| c.in_room)
-                .and_then(|rnum| g.rooms.get(rnum))
-                .and_then(|r| match (r.map_x, r.map_y) {
-                    (Some(x), Some(y)) => Some((x, y)),
-                    _ => None,
-                });
-            if let (Some((x, y)), Some(c)) = (coords, g.get_char_mut(cid)) {
-                c.mapx = x as i64;
-                c.mapy = y as i64;
-            }
-        } else if let Some(vnum) = stamp_vnum {
-            if let Some(c) = g.get_char_mut(cid) {
-                c.tloadroom = vnum as i64;
-            }
-        }
-
-        // Persist the player record itself (C save_char). The async DB save in
-        // disconnect won't run, so write it synchronously here via the runtime
-        // handle if a real DB is in use; the mock DB clones on load so the
-        // in-memory state is already authoritative.
-        crate::objsave::crash_save(g, cid, &g.config.lib_path.clone());
-        if let Some(c) = g.get_char(cid) {
-            if let Err(err) = crate::alias::write_aliases(&g.config.lib_path, c.get_name(), c.idnum)
-            {
-                log::warn!("copyover write_aliases({}) failed: {}", c.get_name(), err);
-            }
-        }
-
-        // Dump the char snapshot line (pipe-delimited; player names are
-        // alphabetic so they never collide with the separator).
-        if let (Some(cfp), Some(c)) = (cfp.as_mut(), g.get_char(cid)) {
-            let title = c.player.title.clone().unwrap_or_default();
-            let _ = writeln!(
-                cfp,
-                // Fields 28..30 (tloadroom|mapx|mapy) carry the BUG #15 room
-                // stamp through the exec so the reseeded mock record honors it.
-                // title (field 27) is pipe-free by convention, so the room
-                // fields stay at fixed indices after it.
-                "{idnum}|{name}|{level}|{class}|{race}|{sex}|{align}|{home}|{gold}|{bank}|{exp}|\
-                 {hit}|{maxhit}|{mana}|{maxmana}|{mv}|{maxmv}|{ac}|{hr}|{dr}|\
-                 {st}|{sa}|{intel}|{wis}|{dex}|{con}|{cha}|{title}|{tload}|{mapx}|{mapy}",
-                idnum = c.idnum,
-                name = c.player.name,
-                level = c.player.level,
-                class = c.player.class as u8,
-                race = c.player.race as u8,
-                sex = c.player.sex as u8,
-                align = c.alignment,
-                home = c.player.hometown,
-                gold = c.points.gold,
-                bank = c.points.bank_gold,
-                exp = c.points.exp,
-                hit = c.points.hit,
-                maxhit = c.points.max_hit,
-                mana = c.points.mana,
-                maxmana = c.points.max_mana,
-                mv = c.points.move_points,
-                maxmv = c.points.max_move,
-                ac = c.points.armor,
-                hr = c.points.hitroll,
-                dr = c.points.damroll,
-                st = c.real_abils.str,
-                sa = c.real_abils.str_add,
-                intel = c.real_abils.intel,
-                wis = c.real_abils.wis,
-                dex = c.real_abils.dex,
-                con = c.real_abils.con,
-                cha = c.real_abils.cha,
-                title = title,
-                tload = c.tloadroom,
-                mapx = c.mapx,
-                mapy = c.mapy,
-            );
-        }
-
-        // Serialise: "fd name host" (C fprintf "%d %s %s\n").
-            use std::io::Write as _;
-        if writeln!(fp, "{} {} {}", fd, pname, host).is_err() {
-            g.send_to_char(ch, "Copyover file not writeable, aborted.\n\r");
-            return;
-        }
-
-        // Final synchronous flush to this player: their pending outbuf (rendered
-        // + colorised, since the async render path won't run after exec) plus the
-        // C "Restoring from copyover..." banner. libc::write because the tokio
-        // writer task is about to vanish with the process image.
-        let mut tail = String::new();
-        if let Some(d) = g.descriptors.get_mut(&conn) {
-            tail.push_str(&std::mem::take(&mut d.outbuf));
-        }
+        let mut tail = g
+            .descriptors
+            .get_mut(&conn)
+            .map(|descriptor| descriptor.take_output())
+            .unwrap_or_default();
         tail.push_str("\n\rRestoring from copyover...\n\r");
         let rendered = crate::connection::render_color(&tail);
-        if fd >= 0 {
-            unsafe {
-                libc::write(fd, rendered.as_ptr() as *const libc::c_void, rendered.len());
-            }
+        if let Err(error) = write_fd_all(fd, rendered.as_bytes()) {
+            log::warn!("copyover socket flush failed for fd {fd}: {error}");
+            let _ = std::fs::remove_file(&copyover_path);
+            g.send_to_char(ch, "Copyover socket flush failed; reboot aborted.\n\r");
+            return;
         }
-        inherit_fds.push(fd);
-    }
-
-    // Terminator line (C: "-1\n"). The recovery parser pairs entries by line
-    // order: a short file MUST abort rather than re-pair sockets with the
-    // wrong players.
-    use std::io::Write as _;
-    if writeln!(fp, "-1").is_err() || fp.flush().is_err() {
-        g.send_to_char(ch, "Copyover file not writeable, aborted.\n\r");
-        return;
-    }
-    drop(fp);
-    if let Some(mut cfp) = cfp.take() {
-        let _ = cfp.flush();
     }
 
     // Clear FD_CLOEXEC on the listener and every inherited playing fd so the
     // kernel keeps them open across execv (the whole point — without this the
     // exec closes them and the sockets die).
-    clear_cloexec(listener_fd);
-    for fd in &inherit_fds {
-        clear_cloexec(*fd);
-    }
+    let inheritance_fds: Vec<RawFd> = std::iter::once(listener_fd)
+        .chain(inherit_fds.iter().copied())
+        .collect();
+    let inheritance_guard =
+        match crate::copyover::InheritedFdGuard::clear_for_exec(&inheritance_fds) {
+            Ok(guard) => guard,
+            Err(error) => {
+                log::warn!("copyover could not prepare inherited sockets: {error:#}");
+                let _ = std::fs::remove_file(&copyover_path);
+                g.send_to_char(
+                    ch,
+                    "Copyover could not inherit sockets; reboot aborted.\n\r",
+                );
+                return;
+            }
+        };
 
     // exec the same binary: argv = [exe, "--copyover", "<port>", "<listener_fd>"].
     // CommandExt::exec() is execvp with no fork: on success it never returns.
@@ -6871,22 +6952,33 @@ pub fn do_copyover(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
 
     // Only reached if exec failed (C: perror + "Copyover FAILED!").
     eprintln!("do_copyover: exec failed: {}", err);
+    if let Err(rollback_error) = inheritance_guard.rollback() {
+        log::error!("copyover fd rollback failed after exec error: {rollback_error:#}");
+    }
+    let _ = std::fs::remove_file(&copyover_path);
     g.send_to_char(ch, "Copyover FAILED!\n\r");
 }
 
-/// Clear FD_CLOEXEC so a file descriptor survives execv (the kernel otherwise
-/// closes every CLOEXEC fd on exec). Mirrors C's implicit behaviour where MUD
-/// sockets are created without CLOEXEC.
-fn clear_cloexec(fd: std::os::unix::io::RawFd) {
-    if fd < 0 {
-        return;
-    }
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFD);
-        if flags >= 0 {
-            libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+fn write_fd_all(fd: std::os::unix::io::RawFd, mut bytes: &[u8]) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        let written =
+            unsafe { libc::write(fd, bytes.as_ptr() as *const libc::c_void, bytes.len()) };
+        if written < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
         }
+        if written == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "copyover socket write returned zero",
+            ));
+        }
+        bytes = &bytes[written as usize..];
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -6938,6 +7030,74 @@ mod tests {
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
         assert!(out.contains("&YOkay.&n\r\n"));
         assert!(out.contains("(GC) Imm has advanced Mort to level 10."));
+    }
+
+    #[test]
+    fn admin_teleport_uses_forced_arena_departure_without_penalty() {
+        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
+        crate::arena::reset_for_tests();
+        let mut g = GameState::new(Config::default());
+        let arena_room = g.add_room(Room::new(4801, 48, "Arena".into(), String::new()));
+        let outside = g.add_room(Room::new(3001, 30, "Temple".into(), String::new()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        let victim = connected_player(&mut g, ConnId(2), "Victim", 10);
+        g.char_to_room(imm, outside);
+        g.char_to_room(victim, arena_room);
+        if let Some(c) = g.get_char_mut(victim) {
+            c.wimp_level = 12;
+            c.recall_level = 34;
+            c.affect_flags = crate::flags::AFF_INVISIBLE;
+            crate::gold::set(c, crate::gold::Account::Carried, 9_999);
+        }
+        crate::arena::set_stat_for_test(victim, crate::arena::ARENA_COMBATANT1);
+        crate::arena::bup_affects(&mut g, victim);
+        g.get_char_mut(victim).unwrap().affect_flags = crate::flags::AFF_BLIND;
+
+        do_teleport(&mut g, imm, "Victim 3001", 0);
+
+        let victim_state = g.get_char(victim).unwrap();
+        assert_eq!(victim_state.in_room, Some(outside));
+        assert_eq!(victim_state.affect_flags, crate::flags::AFF_INVISIBLE);
+        assert_eq!(victim_state.wimp_level, 12);
+        assert_eq!(victim_state.recall_level, 34);
+        assert_eq!(victim_state.points.gold, 9_999);
+        assert_eq!(crate::arena::arena_stat(victim), crate::arena::ARENA_NOT);
+        assert_eq!(g.player_save_requests, vec![victim]);
+        crate::arena::reset_for_tests();
+    }
+
+    #[test]
+    fn admin_transfer_uses_forced_arena_departure_without_penalty() {
+        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
+        crate::arena::reset_for_tests();
+        let mut g = GameState::new(Config::default());
+        let arena_room = g.add_room(Room::new(4801, 48, "Arena".into(), String::new()));
+        let outside = g.add_room(Room::new(3001, 30, "Temple".into(), String::new()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        let victim = connected_player(&mut g, ConnId(2), "Victim", 10);
+        g.char_to_room(imm, outside);
+        g.char_to_room(victim, arena_room);
+        if let Some(c) = g.get_char_mut(victim) {
+            c.wimp_level = 12;
+            c.recall_level = 34;
+            c.affect_flags = crate::flags::AFF_INVISIBLE;
+            crate::gold::set(c, crate::gold::Account::Carried, 9_999);
+        }
+        crate::arena::set_stat_for_test(victim, crate::arena::ARENA_COMBATANT1);
+        crate::arena::bup_affects(&mut g, victim);
+        g.get_char_mut(victim).unwrap().affect_flags = crate::flags::AFF_BLIND;
+
+        do_trans(&mut g, imm, "Victim", 0);
+
+        let victim_state = g.get_char(victim).unwrap();
+        assert_eq!(victim_state.in_room, Some(outside));
+        assert_eq!(victim_state.affect_flags, crate::flags::AFF_INVISIBLE);
+        assert_eq!(victim_state.wimp_level, 12);
+        assert_eq!(victim_state.recall_level, 34);
+        assert_eq!(victim_state.points.gold, 9_999);
+        assert_eq!(crate::arena::arena_stat(victim), crate::arena::ARENA_NOT);
+        assert_eq!(g.player_save_requests, vec![victim]);
+        crate::arena::reset_for_tests();
     }
 
     fn object_proto(vnum: ObjVnum, obj_type: ObjectType, short: &str) -> ObjectProto {
@@ -7093,6 +7253,93 @@ mod tests {
         assert!(line.contains("3"), "expected 3 registered, got: {}", line);
     }
 
+    const INSPECTION_ROUTES: [(&str, &str); 3] = [
+        ("stat-player", "IDNum:"),
+        ("stat-file", "IDNum:"),
+        ("show-player", "Player:"),
+    ];
+
+    fn run_inspection_route(g: &mut GameState, requester: CharId, route: &str, target: &str) {
+        match route {
+            "stat-player" => do_stat(g, requester, &format!("player {target}"), 0),
+            "stat-file" => do_stat(g, requester, &format!("file {target}"), 0),
+            "show-player" => do_show(g, requester, &format!("player {target}"), 0),
+            _ => panic!("unknown inspection route {route}"),
+        }
+    }
+
+    #[test]
+    fn online_inspection_authority_matrix_allows_lower_and_equal_but_denies_higher() {
+        for (route, record_marker) in INSPECTION_ROUTES {
+            for (target_level, allowed) in
+                [(LVL_GOD - 1, true), (LVL_GOD, true), (LVL_GOD + 1, false)]
+            {
+                let mut g = GameState::new(Config::default());
+                let requester = connected_player(&mut g, ConnId(1), "Requester", LVL_GOD);
+                let target = connected_player(&mut g, ConnId(2), "Target", target_level);
+                g.get_char_mut(target).unwrap().idnum = 9_409_001;
+
+                run_inspection_route(&mut g, requester, route, "Target");
+
+                let output = &g.descriptors[&ConnId(1)].outbuf;
+                assert_eq!(
+                    output.contains(record_marker),
+                    allowed,
+                    "route={route} target_level={target_level} output={output:?}"
+                );
+                assert_eq!(
+                    output.contains(PLAYER_INSPECTION_DENIED.trim()),
+                    !allowed,
+                    "route={route} target_level={target_level} output={output:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn offline_inspection_queue_matrix_uses_the_same_authority_rule() {
+        for (route, _) in INSPECTION_ROUTES {
+            for (target_level, allowed) in
+                [(LVL_GOD - 1, true), (LVL_GOD, true), (LVL_GOD + 1, false)]
+            {
+                let mut g = GameState::new(Config::default());
+                let requester = connected_player(&mut g, ConnId(1), "Requester", LVL_GOD);
+                g.update_player_index(9_409_002, "Target", target_level, 0, "test");
+
+                run_inspection_route(&mut g, requester, route, "Target");
+
+                let output = &g.descriptors[&ConnId(1)].outbuf;
+                assert_eq!(
+                    g.offline_ops.len(),
+                    usize::from(allowed),
+                    "route={route} target_level={target_level} output={output:?}"
+                );
+                assert_eq!(
+                    output.contains(PLAYER_INSPECTION_DENIED.trim()),
+                    !allowed,
+                    "route={route} target_level={target_level} output={output:?}"
+                );
+                if allowed {
+                    assert_eq!(
+                        g.offline_ops[0].authority,
+                        OfflineOpAuthority::InspectPlayer
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn show_rent_rejects_paths_and_requires_an_indexed_player() {
+        let mut g = GameState::new(Config::default());
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+
+        do_show(&mut g, imm, "rent ../../etc/passwd", 0);
+
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert_eq!(out, "There is no such player.\r\n");
+    }
+
     /// `show stats` case 4 (act.wizard.c:2780-2811) — the dispatcher arm that
     /// prints the "Current stats:" block.
     fn show_stats_case_4(g: &mut GameState, ch: CharId) {
@@ -7208,12 +7455,13 @@ mod tests {
 
         do_dig(&mut g, builder, "east 200", 0);
 
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("You don't have permissions to that zone.\r\n"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("You don't have permissions to that zone.\r\n")
+        );
         assert!(g.room(here).exits[EAST].is_none());
         assert!(g.room(there).exits[WEST].is_none());
     }
@@ -7251,12 +7499,13 @@ mod tests {
             Some(100)
         );
         crate::olc::olc_saveinfo(&mut g, builder);
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("Rooms for zone 2"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("Rooms for zone 2")
+        );
         crate::olc::olc_remove_from_save_list(2, crate::olc::OLC_SAVE_ROOM);
     }
 
@@ -7367,6 +7616,22 @@ WorldMap:\n",
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn goto_rejects_numeric_overflow_instead_of_resolving_room_zero() {
+        let mut g = GameState::new(Config::default());
+        let zero = g.add_room(Room::new(0, 0, "Void".to_string(), "Void.".to_string()));
+        let start = g.add_room(Room::new(100, 0, "Start".to_string(), "Start.".to_string()));
+        let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
+        g.char_to_room(imm, start);
+
+        do_goto(&mut g, imm, "999999999999999999999999999999", 0);
+
+        assert_eq!(g.get_char(imm).unwrap().in_room, Some(start));
+        assert_ne!(g.get_char(imm).unwrap().in_room, Some(zero));
+        let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
+        assert!(out.contains("Invalid or out-of-range room number."));
+    }
+
     // ---- #204: stat's MaxWeapon / practices-per / regen rates --------------
 
     #[test]
@@ -7441,16 +7706,22 @@ WorldMap:\n",
         // vnum 34000 is the (production-inert) pet-shop registration; 3031 is
         // now zone 30's Tower Magazine (COMPATIBILITY.md collisions table).
         let plain = g.add_room(Room::new(100, 0, "Plain".to_string(), "Plain.".to_string()));
-        let petshop = g.add_room(Room::new(34000, 30, "Pets".to_string(), "Pets.".to_string()));
+        let petshop = g.add_room(Room::new(
+            34000,
+            30,
+            "Pets".to_string(),
+            "Pets.".to_string(),
+        ));
         let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
         g.char_to_room(imm, petshop);
         do_stat_room(&mut g, imm);
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("SpecProc: Exists"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("SpecProc: Exists")
+        );
 
         // Object vnum 20 is the generic portal (ASSIGNOBJ 20 portal).
         let obj = g.create_obj(Object::new(
@@ -7500,6 +7771,88 @@ WorldMap:\n",
 
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
         assert!(out.contains("God-Commands: No\r\n"), "out: {}", out);
+    }
+
+    fn rename_test_state(label: &str) -> (GameState, std::path::PathBuf, CharId, CharId) {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let lib = std::env::temp_dir().join(format!(
+            "deltamud-rename-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&lib).unwrap();
+        let mut config = Config::default();
+        config.lib_path = lib.to_string_lossy().into_owned();
+        let mut g = GameState::new(config);
+        let admin = connected_player(&mut g, ConnId(1), "Admin", LVL_IMPL);
+        let victim = connected_player(&mut g, ConnId(2), "Oldname", 20);
+        g.get_char_mut(victim).unwrap().idnum = 9_413_101;
+        g.update_player_index(9_413_101, "Oldname", 20, 0, "test");
+        (g, lib, admin, victim)
+    }
+
+    fn seed_rename_sidecars(g: &GameState, idnum: i64) -> (std::path::PathBuf, std::path::PathBuf) {
+        let rent = crate::objsave::crash_filename(&g.config.lib_path, "Oldname").unwrap();
+        std::fs::create_dir_all(rent.parent().unwrap()).unwrap();
+        std::fs::write(&rent, b"rent owned by Oldname").unwrap();
+        crate::alias::set_aliases(
+            idnum,
+            vec![crate::alias::AliasEntry {
+                alias: "waveall".into(),
+                replacement: "wave all".into(),
+                atype: 0,
+            }],
+        );
+        crate::alias::write_aliases(&g.config.lib_path, "Oldname", idnum).unwrap();
+        let alias = crate::alias::alias_filename(&g.config.lib_path, "Oldname").unwrap();
+        (rent, alias)
+    }
+
+    #[test]
+    fn rename_queues_a_durable_operation_without_publishing_any_identity() {
+        let (mut g, lib, admin, victim) = rename_test_state("queue");
+        let idnum = g.get_char(victim).unwrap().idnum;
+        let (old_rent, old_alias) = seed_rename_sidecars(&g, idnum);
+        let new_rent = crate::objsave::crash_filename(&g.config.lib_path, "Newname").unwrap();
+        let new_alias = crate::alias::alias_filename(&g.config.lib_path, "Newname").unwrap();
+
+        do_rename(&mut g, admin, "Oldname Newname", 0);
+
+        assert_eq!(g.get_char(victim).unwrap().get_name(), "Oldname");
+        assert_eq!(g.find_player_by_name("Oldname"), Some(victim));
+        assert!(g.find_player_by_name("Newname").is_none());
+        assert!(old_rent.is_file() && old_alias.is_file());
+        assert!(!new_rent.exists() && !new_alias.exists());
+        assert!(g.player_save_requests.is_empty());
+        assert_eq!(g.player_rename_requests.len(), 1);
+        let queued = &g.player_rename_requests[0];
+        assert_eq!(queued.requester, admin);
+        assert_eq!(queued.victim, victim);
+        assert_eq!(queued.idnum, idnum);
+        assert_eq!(queued.old_name, "Oldname");
+        assert_eq!(queued.new_name, "Newname");
+        assert!(!g.descriptors[&ConnId(1)].outbuf.contains("renamed"));
+        assert!(!g.descriptors[&ConnId(2)].outbuf.contains("renamed"));
+
+        crate::alias::clear_aliases(idnum);
+        std::fs::remove_dir_all(lib).unwrap();
+    }
+
+    #[test]
+    fn rename_rejects_a_second_request_for_the_same_identity() {
+        let (mut g, lib, admin, victim) = rename_test_state("duplicate");
+        do_rename(&mut g, admin, "Oldname Newname", 0);
+        do_rename(&mut g, admin, "Oldname Anothername", 0);
+
+        assert_eq!(g.player_rename_requests.len(), 1);
+        assert_eq!(g.get_char(victim).unwrap().get_name(), "Oldname");
+        let output = &g.descriptors[&ConnId(1)].outbuf;
+        assert!(output.contains("already pending"), "output={output:?}");
+        assert!(!output.contains("You have renamed"), "output={output:?}");
+
+        std::fs::remove_dir_all(lib).unwrap();
     }
 
     // ---- #201: `stat file` refuses a target above the requester ------------
@@ -7617,12 +7970,13 @@ WorldMap:\n",
 
         do_set(&mut g, god, "Legal_PKS ON", 0);
         assert!(g.pk_allowed, "the gate must actually open");
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("Legal PKs are now Allowed."));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("Legal PKs are now Allowed.")
+        );
 
         // The do_hit murder-redirect is `if (!pk_allowed)` in C — it must not
         // fire once the gate is open.
@@ -7636,12 +7990,13 @@ WorldMap:\n",
 
         do_set(&mut g, god, "Legal_PKS OFF", 0);
         assert!(!g.pk_allowed, "the gate must actually close");
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("Legal PKs are now Disallowed."));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("Legal PKs are now Disallowed.")
+        );
     }
 
     #[test]
@@ -7673,41 +8028,45 @@ WorldMap:\n",
         do_echo(&mut g, ghost, "drifts through the wall.", SCMD_EMOTE);
 
         // The sender still sees it; the mortal does not.
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("drifts through the wall."));
-        assert!(!g
-            .descriptors
-            .get(&ConnId(2))
-            .unwrap()
-            .outbuf
-            .contains("drifts through the wall."));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("drifts through the wall.")
+        );
+        assert!(
+            !g.descriptors
+                .get(&ConnId(2))
+                .unwrap()
+                .outbuf
+                .contains("drifts through the wall.")
+        );
 
         // A builder ghost (PRF2_MBUILDING) is delivered to mortals again.
         g.get_char_mut(ghost).unwrap().prf2_flags |= PRF2_MBUILDING;
         g.descriptors.get_mut(&ConnId(2)).unwrap().outbuf.clear();
         do_echo(&mut g, ghost, "drifts through the wall.", SCMD_EMOTE);
-        assert!(g
-            .descriptors
-            .get(&ConnId(2))
-            .unwrap()
-            .outbuf
-            .contains("drifts through the wall."));
+        assert!(
+            g.descriptors
+                .get(&ConnId(2))
+                .unwrap()
+                .outbuf
+                .contains("drifts through the wall.")
+        );
 
         // So is an emote seen by a mortal who is themselves intangible.
         g.get_char_mut(ghost).unwrap().prf2_flags &= !PRF2_MBUILDING;
         g.get_char_mut(mort).unwrap().prf2_flags |= PRF2_INTANGIBLE;
         g.descriptors.get_mut(&ConnId(2)).unwrap().outbuf.clear();
         do_echo(&mut g, ghost, "drifts through the wall.", SCMD_EMOTE);
-        assert!(g
-            .descriptors
-            .get(&ConnId(2))
-            .unwrap()
-            .outbuf
-            .contains("drifts through the wall."));
+        assert!(
+            g.descriptors
+                .get(&ConnId(2))
+                .unwrap()
+                .outbuf
+                .contains("drifts through the wall.")
+        );
     }
 
     // ---- #212: return disconnects an occupant of the original body ---------

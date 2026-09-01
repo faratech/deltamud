@@ -30,7 +30,7 @@ use crate::constants::{DIRS, EQUIPMENT_TYPES};
 use crate::olc::{self, EditorKind};
 use crate::state::GameState;
 use crate::types::*;
-use crate::world::ResetCmd;
+use crate::world::{MAX_ZONE_NUMBER, ResetCmd, zone_vnum_bounds};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -181,8 +181,16 @@ pub fn do_zedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             }
         }
     } else {
-        match arg.parse() {
+        match crate::text::parse_i32_strict(arg) {
             Ok(v) => v,
+            Err(crate::text::ParseIntError::Overflow) => {
+                send(
+                    g,
+                    conn,
+                    "That room VNUM is outside the supported range.\r\n",
+                );
+                return;
+            }
             Err(_) => {
                 send(
                     g,
@@ -257,7 +265,10 @@ pub fn do_zedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             .enumerate()
             .filter(|(i, c)| {
                 belongs_to_room_at(&all_copy, room_vnum, *i)
-                    && all_copy.get(*i).map(|x| std::ptr::eq(x, *c)).unwrap_or(false)
+                    && all_copy
+                        .get(*i)
+                        .map(|x| std::ptr::eq(x, *c))
+                        .unwrap_or(false)
             })
             .map(|(_, c)| c.clone())
             .collect()
@@ -274,8 +285,14 @@ pub fn do_zedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         level_of_editor: level,
     };
     // C olc.c:198-212 (#272): key on the zone being edited.
-    if crate::lock_ok::lock(&states()).values().any(|s| s.zone_number == st.zone_number) {
-        g.send_to_char(ch, "That zone is currently being edited by someone else.\r\n");
+    if crate::lock_ok::lock(&states())
+        .values()
+        .any(|s| s.zone_number == st.zone_number)
+    {
+        g.send_to_char(
+            ch,
+            "That zone is currently being edited by someone else.\r\n",
+        );
         return;
     }
     crate::lock_ok::lock(&states()).insert(conn, st);
@@ -296,7 +313,7 @@ pub fn do_zedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 fn zone_for_vnum(g: &GameState, vnum: RoomVnum) -> Option<i32> {
     g.zones
         .iter()
-        .find(|z| z.number * 100 <= vnum && z.top >= vnum)
+        .find(|z| z.contains_vnum(vnum))
         .map(|z| z.number)
 }
 
@@ -706,16 +723,18 @@ fn equipment_name(i: i32) -> &'static str {
 // ===========================================================================
 
 fn snapshot(conn: ConnId) -> Option<ZeditState> {
-    crate::lock_ok::lock(&states()).get(&conn).map(|s| ZeditState {
-        room_vnum: s.room_vnum,
-        zone_number: s.zone_number,
-        zone_index: s.zone_index,
-        hdr: s.hdr.clone(),
-        cmds: s.cmds.clone(),
-        mode: s.mode,
-        cur: s.cur,
-        level_of_editor: s.level_of_editor,
-    })
+    crate::lock_ok::lock(&states())
+        .get(&conn)
+        .map(|s| ZeditState {
+            room_vnum: s.room_vnum,
+            zone_number: s.zone_number,
+            zone_index: s.zone_index,
+            hdr: s.hdr.clone(),
+            cmds: s.cmds.clone(),
+            mode: s.mode,
+            cur: s.cur,
+            level_of_editor: s.level_of_editor,
+        })
 }
 
 fn set_mode(conn: ConnId, mode: Mode) {
@@ -1030,7 +1049,9 @@ fn parse_arg1(g: &mut GameState, conn: ConnId, line: &str) {
         send(g, conn, "Must be a numeric value, try again : ");
         return;
     }
-    let vnum: i32 = atoi(t);
+    let Some(vnum) = olc_atoi(g, conn, t) else {
+        return;
+    };
     let cmd = cur_cmd_letter(conn);
     let ch = char_for_conn(g, conn);
     match cmd {
@@ -1046,7 +1067,11 @@ fn parse_arg1(g: &mut GameState, conn: ConnId, line: &str) {
                     .map(|id| can_edit_vnum_zone(g, id, vnum))
                     .unwrap_or(false)
             {
-                send(g, conn, "You don't have permissions to that zone, try again : ");
+                send(
+                    g,
+                    conn,
+                    "You don't have permissions to that zone, try again : ",
+                );
                 return;
             }
             if g.mob_protos.contains_key(&vnum) {
@@ -1081,7 +1106,9 @@ fn parse_arg2(g: &mut GameState, conn: ConnId, line: &str) {
         send(g, conn, "Must be a numeric value, try again : ");
         return;
     }
-    let val = atoi(t);
+    let Some(val) = olc_atoi(g, conn, t) else {
+        return;
+    };
     let cmd = cur_cmd_letter(conn);
     match cmd {
         'M' | 'O' => {
@@ -1127,7 +1154,9 @@ fn parse_arg3(g: &mut GameState, conn: ConnId, line: &str) {
         send(g, conn, "Must be a numeric value, try again : ");
         return;
     }
-    let val = atoi(t);
+    let Some(val) = olc_atoi(g, conn, t) else {
+        return;
+    };
     let cmd = cur_cmd_letter(conn);
     match cmd {
         'E' => {
@@ -1180,7 +1209,9 @@ fn parse_arg4(g: &mut GameState, conn: ConnId, line: &str) {
         send(g, conn, "Must be a numeric value, try again : ");
         return;
     }
-    let val = atoi(t);
+    let Some(val) = olc_atoi(g, conn, t) else {
+        return;
+    };
     let cmd = cur_cmd_letter(conn);
     match cmd {
         'E' | 'M' | 'O' | 'P' => {
@@ -1215,7 +1246,10 @@ fn parse_prob(g: &mut GameState, conn: ConnId, line: &str) {
 }
 
 fn parse_prob2(g: &mut GameState, conn: ConnId, line: &str) {
-    let val = atoi(line.trim()).clamp(0, 100);
+    let Some(val) = olc_atoi(g, conn, line.trim()) else {
+        return;
+    };
+    let val = val.clamp(0, 100);
     with_cur(conn, |c| c.arg4 = val);
     disp_menu(g, conn);
 }
@@ -1235,7 +1269,9 @@ fn parse_zone_builders(g: &mut GameState, conn: ConnId, line: &str) {
 }
 
 fn parse_zone_top(g: &mut GameState, conn: ConnId, line: &str) {
-    let val = atoi(line.trim());
+    let Some(val) = olc_atoi(g, conn, line.trim()) else {
+        return;
+    };
     let (zone_index, zone_number) = {
         let st = crate::lock_ok::lock(&states());
         match st.get(&conn) {
@@ -1245,8 +1281,15 @@ fn parse_zone_top(g: &mut GameState, conn: ConnId, line: &str) {
     };
     // Top is clamped to >= zone*100, and (if not the last zone) below the next
     // zone's base (CircleMUD ZEDIT_ZONE_TOP).
-    let lower = zone_number * 100;
-    let upper = g.zones.get(zone_index + 1).map(|z| z.number * 100);
+    let Some(lower) = zone_vnum_bounds(zone_number).map(|(first, _)| first) else {
+        send(
+            g,
+            conn,
+            "That zone number is outside the supported range.\r\n",
+        );
+        return;
+    };
+    let upper = g.zones.get(zone_index + 1).and_then(|z| z.vnum_start());
     let new_top = match upper {
         Some(u) => val.max(lower).min(u),
         None => val.max(lower),
@@ -1258,7 +1301,9 @@ fn parse_zone_top(g: &mut GameState, conn: ConnId, line: &str) {
 
 fn parse_zone_life(g: &mut GameState, conn: ConnId, line: &str) {
     let t = line.trim();
-    let val = atoi(t);
+    let Some(val) = olc_atoi(g, conn, t) else {
+        return;
+    };
     if !starts_digit(t) || val < 0 || val > 240 {
         send(g, conn, "Try again (0-240) : ");
         return;
@@ -1270,7 +1315,9 @@ fn parse_zone_life(g: &mut GameState, conn: ConnId, line: &str) {
 
 fn parse_zone_reset(g: &mut GameState, conn: ConnId, line: &str) {
     let t = line.trim();
-    let val = atoi(t);
+    let Some(val) = olc_atoi(g, conn, t) else {
+        return;
+    };
     if !starts_digit(t) || !(0..=2).contains(&val) {
         send(g, conn, "Try again (0-2) : ");
         return;
@@ -1283,7 +1330,10 @@ fn parse_zone_reset(g: &mut GameState, conn: ConnId, line: &str) {
 fn parse_levels(g: &mut GameState, conn: ConnId, line: &str) {
     let t = line.trim();
     if starts_digit(t) {
-        match atoi(t) {
+        let Some(value) = olc_atoi(g, conn, t) else {
+            return;
+        };
+        match value {
             1 => {
                 send(g, conn, "Minimum level? ");
                 set_mode(conn, Mode::MinLvl);
@@ -1313,7 +1363,9 @@ fn parse_min_lvl(g: &mut GameState, conn: ConnId, line: &str) {
         disp_menu(g, conn); // C zedit.c:1626-1643: error, then back to the menu (#280)
         return;
     }
-    let pos = atoi(t);
+    let Some(pos) = olc_atoi(g, conn, t) else {
+        return;
+    };
     if pos > 100 {
         send(g, conn, "Value must be below 100. Minimum level? ");
         disp_menu(g, conn);
@@ -1338,7 +1390,9 @@ fn parse_max_lvl(g: &mut GameState, conn: ConnId, line: &str) {
         disp_menu(g, conn); // #280
         return;
     }
-    let pos = atoi(t);
+    let Some(pos) = olc_atoi(g, conn, t) else {
+        return;
+    };
     if pos > 100 {
         send(g, conn, "Value must be below 100. Maximum level? ");
         disp_menu(g, conn);
@@ -1386,7 +1440,6 @@ fn parse_confirm_save(g: &mut GameState, conn: ConnId, line: &str) {
         }
     }
 }
-
 
 fn editor_char(g: &GameState, conn: ConnId) -> Option<CharId> {
     g.descriptors.get(&conn).and_then(|d| d.character)
@@ -1824,14 +1877,19 @@ fn read_disk_header(path: &std::path::Path) -> Option<DiskHeader> {
     }
 
     // "top lifespan reset_mode".
-    let hl: Vec<i32> = lines
-        .get(i)
-        .map(|l| {
-            l.split_whitespace()
-                .filter_map(|t| t.parse().ok())
-                .collect()
-        })
-        .unwrap_or_default();
+    let hl: Vec<i32> = match lines.get(i) {
+        Some(line) => {
+            let mut parsed = Vec::new();
+            for (index, token) in line.split_whitespace().enumerate() {
+                match disk_i32(path, &format!("header field {}", index + 1), token, 0) {
+                    Some(value) => parsed.push(value),
+                    None => return None,
+                }
+            }
+            parsed
+        }
+        None => Vec::new(),
+    };
     i += 1;
     let top = *hl.first().unwrap_or(&0);
     let lifespan = *hl.get(1).unwrap_or(&30);
@@ -1841,7 +1899,10 @@ fn read_disk_header(path: &std::path::Path) -> Option<DiskHeader> {
     let (mut lvl1, mut lvl2, mut status_mode) = (0, 0, 0);
     if let Some(l) = lines.get(i) {
         let toks: Vec<&str> = l.split_whitespace().collect();
-        let nums: Vec<i32> = toks.iter().filter_map(|t| t.parse().ok()).collect();
+        let nums: Vec<i32> = toks
+            .iter()
+            .filter_map(|token| disk_i32(path, "level/status header", token, 0))
+            .collect();
         if !toks.is_empty() && nums.len() == toks.len() && nums.len() >= 3 {
             lvl1 = nums[0];
             lvl2 = nums[1];
@@ -1902,7 +1963,10 @@ fn read_disk_cmds(path: &std::path::Path) -> Option<Vec<RawCmd>> {
     // all-numeric line here can only be the level/status header.
     if i < lines.len() {
         let toks: Vec<&str> = lines[i].split_whitespace().collect();
-        let all_num = !toks.is_empty() && toks.iter().all(|x| x.parse::<i32>().is_ok());
+        let all_num = !toks.is_empty()
+            && toks
+                .iter()
+                .all(|x| crate::text::parse_i32_strict(x).is_ok());
         if all_num && toks.len() >= 3 {
             i += 1;
         }
@@ -1923,17 +1987,39 @@ fn read_disk_cmds(path: &std::path::Path) -> Option<Vec<RawCmd>> {
             continue;
         }
         let toks: Vec<&str> = t.split_whitespace().collect();
-        let n = |k: usize| toks.get(k).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+        let n = |k: usize| match toks.get(k) {
+            Some(token) => disk_i32(path, "reset command", token, 0),
+            None => Some(0),
+        };
+        let (Some(if_flag), Some(arg1), Some(arg2), Some(arg3), Some(arg4)) =
+            (n(1), n(2), n(3), n(4), n(5))
+        else {
+            continue;
+        };
         out.push(RawCmd {
             command: first,
-            if_flag: n(1).max(0),
-            arg1: n(2),
-            arg2: n(3),
-            arg3: n(4),
-            arg4: n(5),
+            if_flag: if_flag.max(0),
+            arg1,
+            arg2,
+            arg3,
+            arg4,
         });
     }
     Some(out)
+}
+
+fn disk_i32(path: &std::path::Path, field: &str, raw: &str, invalid_fallback: i32) -> Option<i32> {
+    match crate::text::parse_i32_strict(raw) {
+        Ok(value) => Some(value),
+        Err(crate::text::ParseIntError::Overflow) => {
+            log::warn!(
+                "SYSERR: zone {field} overflow in {}; value rejected",
+                path.display()
+            );
+            None
+        }
+        Err(_) => Some(invalid_fallback),
+    }
 }
 
 // ===========================================================================
@@ -1947,17 +2033,15 @@ fn starts_digit(s: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn atoi(s: &str) -> i32 {
-    let t = s.trim();
-    let mut end = 0;
-    let bytes = t.as_bytes();
-    if !bytes.is_empty() && (bytes[0] == b'-' || bytes[0] == b'+') {
-        end = 1;
+fn olc_atoi(g: &mut GameState, conn: ConnId, s: &str) -> Option<i32> {
+    match crate::text::parse_i32_atoi(s) {
+        Ok(value) => Some(value),
+        Err(crate::text::ParseIntError::Overflow) => {
+            send(g, conn, "That number is outside the supported range.\r\n");
+            None
+        }
+        Err(_) => unreachable!("parse_i32_atoi maps nonnumeric input to zero"),
     }
-    while end < bytes.len() && bytes[end].is_ascii_digit() {
-        end += 1;
-    }
-    t[..end].parse().unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -1965,16 +2049,19 @@ mod tests {
     use super::*;
     use crate::character::Character;
     use crate::config::Config;
-    use crate::world::Zone;
+    use crate::connection::Descriptor;
+    use crate::room::Room;
+    use crate::world::{Zone, zone_vnum_bounds};
 
     fn zone(number: i32, builders: &str) -> Zone {
+        let (_, top) = zone_vnum_bounds(number).expect("valid test zone number");
         Zone {
             number,
             name: format!("Zone {}", number),
             builders: builders.to_string(),
             lifespan: 30,
             age: 0,
-            top: number * 100 + 99,
+            top,
             reset_mode: 2,
             min_level: 0,
             max_level: 60,
@@ -2048,13 +2135,113 @@ mod tests {
         assert_eq!(hdr.builders, "Builders");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    fn editor_game(conn: ConnId) -> (GameState, CharId, RoomVnum, RoomVnum) {
+        let mut config = Config::default();
+        config.lib_path = format!(
+            "/tmp/deltamud-zedit-overflow-{}-{}",
+            std::process::id(),
+            conn.0
+        );
+        let mut g = GameState::new(config);
+        let zone_number = 40_402;
+        let (room_vnum, _) = zone_vnum_bounds(zone_number).expect("valid test zone");
+        g.zones.push(zone(zone_number, "Root"));
+        g.add_room(Room::new(
+            room_vnum,
+            0,
+            "Overflow test room".into(),
+            "A room used by the zedit overflow regression.".into(),
+        ));
+
+        let mut ch = Character::new_player("Root".into(), Class::Cleric, Race::Human);
+        ch.player.level = LVL_IMPL;
+        let ch = g.create_char(ch);
+        g.get_char_mut(ch).unwrap().desc = Some(conn);
+        let mut descriptor = Descriptor::new(conn, "example.test".into());
+        descriptor.character = Some(ch);
+        g.descriptors.insert(conn, descriptor);
+        (g, ch, room_vnum, room_vnum)
+    }
+
+    fn top_and_mode(conn: ConnId) -> (RoomVnum, Mode) {
+        let map = crate::lock_ok::lock(&states());
+        let state = map.get(&conn).expect("active zedit state");
+        (state.hdr.top, state.mode)
+    }
+
+    #[test]
+    fn zedit_entry_accepts_i32_edges_and_rejects_adjacent_overflow() {
+        let conn = ConnId(4_040_003);
+        crate::olc::abort_editor(conn);
+        let (mut g, ch, room_vnum, zone_start) = editor_game(conn);
+
+        for input in ["2147483648", "-2147483649"] {
+            g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+            do_zedit(&mut g, ch, input, 0);
+            assert_eq!(
+                g.descriptors[&conn].outbuf, "That room VNUM is outside the supported range.\r\n",
+                "input={input:?}"
+            );
+            assert!(!crate::olc::in_olc(conn));
+        }
+
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        do_zedit(&mut g, ch, &room_vnum.to_string(), 0);
+        assert_eq!(crate::olc::active_editor(conn), Some(EditorKind::Zedit));
+
+        for (input, expected) in [
+            ("2147483647", Some(i32::MAX)),
+            ("-2147483648", Some(zone_start)),
+            ("2147483648", None),
+            ("-2147483649", None),
+        ] {
+            set_mode(conn, Mode::MainMenu);
+            zedit_parse(&mut g, conn, "t");
+            assert!(top_and_mode(conn).1 == Mode::ZoneTop);
+            let before = top_and_mode(conn).0;
+            g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+
+            zedit_parse(&mut g, conn, input);
+            let (top, mode) = top_and_mode(conn);
+            match expected {
+                Some(value) => {
+                    assert_eq!(top, value, "input={input:?}");
+                    assert!(mode == Mode::MainMenu, "input={input:?}");
+                    assert!(
+                        !g.descriptors[&conn]
+                            .outbuf
+                            .contains("outside the supported range"),
+                        "input={input:?}"
+                    );
+                }
+                None => {
+                    assert_eq!(top, before, "input={input:?}");
+                    assert!(mode == Mode::ZoneTop, "input={input:?}");
+                    assert_eq!(
+                        g.descriptors[&conn].outbuf,
+                        "That number is outside the supported range.\r\n",
+                        "input={input:?}"
+                    );
+                }
+            }
+        }
+
+        set_mode(conn, Mode::MainMenu);
+        zedit_parse(&mut g, conn, "q");
+        zedit_parse(&mut g, conn, "n");
+        assert!(!crate::olc::in_olc(conn));
+        assert_eq!(
+            g.get_char(ch).unwrap().act_flags & crate::flags::PLR_WRITING,
+            0
+        );
+    }
 }
 
 /// C zedit.c:153-330 zedit_new_zone + zedit_create_index: create the six
 /// stub files, append the new zone to every world index file, and insert the
 /// zone into the live zone table ('olc zedit new <zone>'; issue #263).
 const LVL_BUILDER_LEVEL: u8 = 100;
-
 
 /// C zedit.c:489/600-603: write to "<file>.new" then rename over the target,
 /// so a crash mid-write cannot truncate the live .zon (#283).
@@ -2065,21 +2252,16 @@ fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 pub fn zedit_new_zone(g: &mut GameState, ch: CharId, vzone_num: i32) {
-    const MAX_ZONE_NUM: i32 = 999;
     if vzone_num < 0 {
         g.send_to_char(ch, "You can't make negative zones.\r\n");
         return;
     }
-    if vzone_num > MAX_ZONE_NUM {
+    let Some((room, default_top)) = zone_vnum_bounds(vzone_num) else {
+        debug_assert!(vzone_num > MAX_ZONE_NUMBER);
         g.send_to_char(ch, "That is higher then highest zone allowed.\r\n");
         return;
-    }
-    let room = vzone_num * 100;
-    if g
-        .zones
-        .iter()
-        .any(|z| z.number * 100 <= room && z.top >= room)
-    {
+    };
+    if g.zones.iter().any(|z| z.contains_vnum(room)) {
         g.send_to_char(ch, "A zone already covers that area.\r\n");
         return;
     }
@@ -2094,10 +2276,27 @@ pub fn zedit_new_zone(g: &mut GameState, ch: CharId, vzone_num: i32) {
     };
 
     let mut wrote = true;
-    if write(&format!("world/zon/{}.zon", vzone_num), &format!("#{}\nNew Zone~\n~\n{} 30 2\n0 0 0\nS\n$\n", vzone_num, vzone_num * 100 + 99)).is_err() {
+    if write(
+        &format!("world/zon/{}.zon", vzone_num),
+        &format!(
+            "#{}\nNew Zone~\n~\n{} 30 2\n0 0 0\nS\n$\n",
+            vzone_num, default_top
+        ),
+    )
+    .is_err()
+    {
         wrote = false;
     }
-    if wrote && write(&format!("world/wld/{}.wld", vzone_num), &format!("#{}\nThe Beginning~\nNot much here.\n~\n{} 0 0\nS\n$\n", vzone_num * 100, vzone_num)).is_err() {
+    if wrote
+        && write(
+            &format!("world/wld/{}.wld", vzone_num),
+            &format!(
+                "#{}\nThe Beginning~\nNot much here.\n~\n{} 0 0\nS\n$\n",
+                room, vzone_num
+            ),
+        )
+        .is_err()
+    {
         wrote = false;
     }
     if wrote && write(&format!("world/mob/{}.mob", vzone_num), "$\n").is_err() {
@@ -2113,7 +2312,12 @@ pub fn zedit_new_zone(g: &mut GameState, ch: CharId, vzone_num: i32) {
         wrote = false;
     }
     if !wrote {
-        crate::syslog::mudlog(g, "SYSERR: OLC: Can't write new zone file", crate::syslog::BRF, LVL_IMPL);
+        crate::syslog::mudlog(
+            g,
+            "SYSERR: OLC: Can't write new zone file",
+            crate::syslog::BRF,
+            LVL_IMPL,
+        );
         g.send_to_char(ch, "Could not write zone file.\r\n");
         return;
     }
@@ -2136,7 +2340,7 @@ pub fn zedit_new_zone(g: &mut GameState, ch: CharId, vzone_num: i32) {
         builders: String::new(),
         lifespan: 30,
         age: 0,
-        top: vzone_num * 100 + 99,
+        top: default_top,
         reset_mode: 2,
         min_level: 0,
         max_level: 0,

@@ -25,8 +25,9 @@
 
 use crate::interpreter::{any_one_arg, one_argument};
 use crate::state::GameState;
-use crate::syslog::{mudlog, NRM};
+use crate::syslog::{NRM, mudlog};
 use crate::types::*;
+use std::net::IpAddr;
 use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
@@ -144,20 +145,8 @@ fn wildmatch(mask: &str, string: &str) -> bool {
     // The C code indexes mask[mpos]/string[spos] and compares strlen-pos-1
     // against 0; out-of-range reads in the original land on the NUL terminator.
     // We treat any read at/after the slice end as 0 ('\0').
-    let mc = |i: usize| -> u8 {
-        if i < mlen {
-            m[i]
-        } else {
-            0
-        }
-    };
-    let sc = |i: usize| -> u8 {
-        if i < slen {
-            s[i]
-        } else {
-            0
-        }
-    };
+    let mc = |i: usize| -> u8 { if i < mlen { m[i] } else { 0 } };
+    let sc = |i: usize| -> u8 { if i < slen { s[i] } else { 0 } };
 
     loop {
         // strlen(string)-spos-1==0  <=>  spos == slen-1 (last char), and the
@@ -216,6 +205,91 @@ fn is_name(arg: &str, namelist: &str) -> bool {
     namelist
         .split_whitespace()
         .any(|w| w.eq_ignore_ascii_case(arg))
+}
+
+/// Canonicalize an IP mask against `SocketAddr::ip().to_string()`. Exact
+/// IPv4/IPv6 values are parsed through `IpAddr`; globs may contain only IP
+/// punctuation, hexadecimal digits, `*`, and `?`. Wildcard IPv4 masks retain
+/// their spelling because the C server compared them with its `%03u` numeric
+/// host, while live matching checks both canonical and C-padded peer forms.
+/// Returning `None` means the token may still be a hostname mask rather than
+/// that it is invalid.
+fn canonical_ip_mask(raw: &str) -> Option<String> {
+    let raw = raw.trim().to_ascii_lowercase();
+    if raw.is_empty() || raw.len() > BANNED_SITE_LENGTH {
+        return None;
+    }
+    let has_wildcard = raw.contains('*') || raw.contains('?');
+    if !has_wildcard {
+        if let Ok(ip) = raw.parse::<IpAddr>() {
+            return Some(ip.to_string());
+        }
+    } else if raw == "*" {
+        return Some(raw);
+    }
+    if raw.contains(':') {
+        return raw
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || matches!(c, ':' | '*' | '?'))
+            .then_some(raw);
+    }
+    if !raw.contains('.') {
+        return None;
+    }
+    let parts: Vec<&str> = raw.split('.').collect();
+    if parts.is_empty()
+        || parts.len() > 4
+        || (!has_wildcard && parts.len() != 4)
+        || parts.iter().any(|part| part.is_empty())
+    {
+        return None;
+    }
+    let mut validated = Vec::with_capacity(parts.len());
+    for part in parts {
+        if !part
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '*' | '?'))
+        {
+            return None;
+        }
+        if part.contains('*') || part.contains('?') {
+            if part.len() > 3 {
+                return None;
+            }
+            validated.push(part.to_string());
+        } else {
+            part.parse::<u8>().ok()?;
+            validated.push(part.to_string());
+        }
+    }
+    if has_wildcard {
+        Some(validated.join("."))
+    } else {
+        let canonical = validated
+            .iter()
+            .map(|part| part.parse::<u8>().ok().map(|octet| octet.to_string()))
+            .collect::<Option<Vec<_>>>()?;
+        Some(canonical.join("."))
+    }
+}
+
+/// C accepts any whitespace-delimited site token up to BANNED_SITE_LENGTH and
+/// lowercases it. Keep that broad hostname/glob compatibility while rejecting
+/// control/non-ASCII text that cannot be emitted safely in logs or returned by
+/// the system DNS resolver. IP-shaped masks take the stricter canonicalization
+/// path above so legacy `%03u.%03u.%03u.%03u` records still match Rust's
+/// canonical peer address.
+fn canonical_ban_mask(raw: &str) -> Option<String> {
+    let raw = raw.trim().to_ascii_lowercase();
+    if raw.is_empty() || raw.len() > BANNED_SITE_LENGTH || !raw.is_ascii() {
+        return None;
+    }
+    if let Some(ip_mask) = canonical_ip_mask(&raw) {
+        return Some(ip_mask);
+    }
+    raw.bytes()
+        .all(|byte| byte.is_ascii_graphic())
+        .then_some(raw)
 }
 
 // ===========================================================================
@@ -293,9 +367,20 @@ fn load_banned(lib_path: &str) -> Vec<BanNode> {
             BanType::None
         };
 
-        let mut site_s: String = site.chars().take(BANNED_SITE_LENGTH).collect();
-        site_s.truncate(BANNED_SITE_LENGTH);
-        let name_s: String = name.chars().take(MAX_NAME_LENGTH).collect();
+        let mut site_s = site.to_string();
+        crate::text::truncate_utf8_bytes(&mut site_s, BANNED_SITE_LENGTH);
+        let site_s = match canonical_ban_mask(&site_s) {
+            Some(canonical) => canonical,
+            None => {
+                eprintln!(
+                    "SYSERR: invalid site ban mask '{}' in '{}'; record ignored",
+                    site_s, path
+                );
+                continue;
+            }
+        };
+        let mut name_s = name.to_string();
+        crate::text::truncate_utf8_bytes(&mut name_s, MAX_NAME_LENGTH);
 
         // prepend (ban_list = next_node).
         list.insert(
@@ -303,7 +388,23 @@ fn load_banned(lib_path: &str) -> Vec<BanNode> {
             BanNode {
                 site: site_s,
                 name: name_s,
-                date: date.parse::<i64>().unwrap_or(0),
+                date: match crate::text::parse_i64_strict(date) {
+                    Ok(value) => value,
+                    Err(crate::text::ParseIntError::Overflow) => {
+                        let clamped = if date.starts_with('-') {
+                            i64::MIN
+                        } else {
+                            i64::MAX
+                        };
+                        log::warn!(
+                            "SYSERR: ban timestamp overflow in {}; clamped to {}",
+                            path,
+                            clamped
+                        );
+                        clamped
+                    }
+                    Err(_) => 0,
+                },
                 ban_type: bt,
             },
         );
@@ -376,20 +477,44 @@ fn write_ban_list(d: &BanData) {
 /// CircleMUD isbanned(): lowercase the host, wildmatch every ban mask against
 /// it, and return the strongest matching BanType (MAX over matches). An empty
 /// host is never banned.
-// NOTE (W6 audit): bans match against the canonical IP STRING the connection
-// reports (addr.ip().to_string()). Hostname masks ("*.aol.com") and C's
-// zero-padded form ("010.000.000.001") written by the old server are INERT.
-// Normalize legacy badsites entries to IP globs on import.
-
 pub fn isbanned(host: &str) -> BanType {
-    if host.is_empty() {
+    isbanned_connection(host, None)
+}
+
+/// Match every connection identity that is safe to trust. `peer_ip` is always
+/// the canonical address captured from the socket and is checked even when a
+/// forward-confirmed reverse-DNS hostname is available. This prevents adding
+/// hostname support from weakening existing exact/glob IP bans.
+pub fn isbanned_connection(peer_ip: &str, verified_hostname: Option<&str>) -> BanType {
+    let parsed_ip = peer_ip.parse::<IpAddr>().ok();
+    let canonical_ip = parsed_ip
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| peer_ip.to_ascii_lowercase());
+    let c_padded_ipv4 = match parsed_ip {
+        Some(IpAddr::V4(ip)) => {
+            let [a, b, c, d] = ip.octets();
+            Some(format!("{a:03}.{b:03}.{c:03}.{d:03}"))
+        }
+        _ => None,
+    };
+    let hostname = verified_hostname
+        .filter(|host| !host.is_empty())
+        .map(str::to_ascii_lowercase);
+    if canonical_ip.is_empty() && hostname.is_none() {
         return BanType::None;
     }
-    let host = host.to_ascii_lowercase();
+
     let d = crate::lock_ok::lock(&data());
     let mut worst = BanType::None;
     for node in &d.ban_list {
-        if wildmatch(&node.site, &host) {
+        let matches_ip = (!canonical_ip.is_empty() && wildmatch(&node.site, &canonical_ip))
+            || c_padded_ipv4
+                .as_deref()
+                .is_some_and(|ip| wildmatch(&node.site, ip));
+        let matches_hostname = hostname
+            .as_deref()
+            .is_some_and(|host| wildmatch(&node.site, host));
+        if matches_ip || matches_hostname {
             if node.ban_type > worst {
                 worst = node.ban_type;
             }
@@ -540,11 +665,16 @@ pub fn do_ban(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         }
     };
 
-    // Lowercase + truncate the site mask exactly as C does (before the dup check
-    // C compares the *raw* typed site, so do the dup test on the typed string).
-    let mut site_lc: String = site.chars().take(BANNED_SITE_LENGTH).collect();
-    site_lc.truncate(BANNED_SITE_LENGTH);
-    let site_lc = site_lc.to_ascii_lowercase();
+    let site_lc = match canonical_ban_mask(&site) {
+        Some(mask) => mask,
+        None => {
+            g.send_to_char(
+                ch,
+                "Site must be a hostname, IP address, or wildcard mask.\r\n",
+            );
+            return;
+        }
+    };
 
     let banner = name_of(g, ch);
     let now = chrono::Utc::now().timestamp();
@@ -552,7 +682,7 @@ pub fn do_ban(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     // Duplicate check + insert under the lock, then persist a snapshot.
     let duplicate = {
         let d = crate::lock_ok::lock(&data());
-        d.ban_list.iter().any(|n| str_cmp(&n.site, &site))
+        d.ban_list.iter().any(|n| str_cmp(&n.site, &site_lc))
     };
     if duplicate {
         g.send_to_char(
@@ -564,8 +694,8 @@ pub fn do_ban(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
     {
         let mut d = crate::lock_ok::lock(&data());
-        let mut banner_t: String = banner.chars().take(MAX_NAME_LENGTH).collect();
-        banner_t.truncate(MAX_NAME_LENGTH);
+        let mut banner_t = banner.clone();
+        crate::text::truncate_utf8_bytes(&mut banner_t, MAX_NAME_LENGTH);
         d.ban_list.insert(
             0,
             BanNode {
@@ -599,9 +729,10 @@ pub fn do_unban(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     }
 
     // Find + remove the node, capturing its type/site for the log message.
+    let lookup = canonical_ban_mask(&site).unwrap_or_else(|| site.to_ascii_lowercase());
     let removed = {
         let mut d = crate::lock_ok::lock(&data());
-        match d.ban_list.iter().position(|n| str_cmp(&n.site, &site)) {
+        match d.ban_list.iter().position(|n| str_cmp(&n.site, &lookup)) {
             Some(idx) => {
                 let node = d.ban_list.remove(idx);
                 write_ban_list(&d);
@@ -649,4 +780,76 @@ fn fmt_ban_row(site: &str, bantype: &str, when: &str, by: &str) -> String {
         pad_trunc(when, 10),
         pad_trunc(by, 16),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonicalizes_exact_and_zero_padded_ip_masks() {
+        assert_eq!(
+            canonical_ip_mask("010.000.000.001").as_deref(),
+            Some("10.0.0.1")
+        );
+        assert_eq!(
+            canonical_ip_mask("2001:0db8::1").as_deref(),
+            Some("2001:db8::1")
+        );
+    }
+
+    #[test]
+    fn accepts_ip_and_hostname_globs() {
+        assert_eq!(canonical_ip_mask("010.000.*").as_deref(), Some("010.000.*"));
+        assert_eq!(canonical_ip_mask("01?.000.*").as_deref(), Some("01?.000.*"));
+        assert_eq!(
+            canonical_ip_mask("2001:db8::*").as_deref(),
+            Some("2001:db8::*")
+        );
+        assert_eq!(canonical_ip_mask("*.example.com"), None);
+        assert_eq!(
+            canonical_ban_mask("*.Example.COM").as_deref(),
+            Some("*.example.com")
+        );
+        assert_eq!(
+            canonical_ban_mask("example.com").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(canonical_ban_mask("bad\nmask"), None);
+    }
+
+    #[test]
+    fn badsites_loader_preserves_utf8_boundaries_at_fixed_byte_caps() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("deltamud-ban-utf8-{}-{stamp}", std::process::id()));
+        std::fs::create_dir_all(root.join("etc")).unwrap();
+        let mut contents = String::new();
+        for scalar in ['é', '€', '🦀'] {
+            contents.push_str(&format!(
+                "all {}{scalar} 0 {}{scalar}\n",
+                "1".repeat(BANNED_SITE_LENGTH - 1),
+                "a".repeat(MAX_NAME_LENGTH - 1),
+            ));
+        }
+        std::fs::write(root.join(BAN_FILE_REL), contents).unwrap();
+
+        let loaded = load_banned(root.to_str().unwrap());
+        assert_eq!(loaded.len(), 3);
+        for node in loaded {
+            assert!(node.site.len() <= BANNED_SITE_LENGTH);
+            assert!(node.site.is_char_boundary(node.site.len()));
+            assert!(node.name.len() <= MAX_NAME_LENGTH);
+            assert!(node.name.is_char_boundary(node.name.len()));
+            assert!(
+                ['é', '€', '🦀']
+                    .into_iter()
+                    .all(|scalar| !node.name.contains(scalar))
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

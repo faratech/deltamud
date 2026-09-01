@@ -93,6 +93,21 @@ pub fn clear_aliases(idnum: i64) {
     crate::lock_ok::lock(&table()).remove(&idnum);
 }
 
+/// Remove both the durable alias sidecar and its live cache entry. This is
+/// used by permanent character deletion so recreating the same name cannot
+/// inherit commands owned by the deleted identity.
+pub fn delete_aliases(lib_path: &str, name: &str, idnum: i64) -> std::io::Result<()> {
+    clear_aliases(idnum);
+    let Some(path) = alias_filename(lib_path, name) else {
+        return Ok(());
+    };
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
 fn alias_bucket(name: &str) -> &'static str {
     match name.chars().next().unwrap_or('z').to_ascii_lowercase() {
         'a'..='e' => "A-E",
@@ -144,10 +159,22 @@ pub fn read_aliases(lib_path: &str, name: &str, idnum: i64) -> std::io::Result<(
         let Some(atype) = lines.next() else {
             break;
         };
+        let atype = match crate::text::parse_i32_strict(&atype) {
+            Ok(value) => value,
+            Err(crate::text::ParseIntError::Overflow) => {
+                log::warn!(
+                    "SYSERR: alias type overflow in {}; record '{}' rejected",
+                    path.display(),
+                    alias
+                );
+                continue;
+            }
+            Err(_) => ALIAS_SIMPLE,
+        };
         list.push(AliasEntry {
             alias,
             replacement,
-            atype: atype.parse().unwrap_or(ALIAS_SIMPLE),
+            atype,
         });
     }
     if !list.is_empty() {
@@ -276,13 +303,10 @@ fn perform_complex_alias(orig: &str, a: &AliasEntry) -> Vec<String> {
     commands
 }
 
-/// Truncate `s` to at most `max` chars without splitting a UTF-8 boundary
+/// Truncate `s` to at most `max` bytes without splitting a UTF-8 boundary
 /// (C clamps the C-string at MAX_INPUT_LENGTH-1 bytes).
 fn truncate_to(s: &mut String, max: usize) {
-    if s.chars().count() > max {
-        let end = s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len());
-        s.truncate(end);
-    }
+    crate::text::truncate_utf8_bytes(s, max);
 }
 
 // ---------------------------------------------------------------------------
@@ -505,6 +529,29 @@ mod tests {
         set_aliases(idnum, Vec::new());
         write_aliases(lib.to_str().unwrap(), "Tester", idnum).unwrap();
         assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
+    #[test]
+    fn permanent_delete_removes_sidecar_and_live_aliases() {
+        let lib = temp_lib("delete");
+        let idnum = 43;
+        set_aliases(
+            idnum,
+            vec![AliasEntry {
+                alias: "x".to_string(),
+                replacement: "say stale".to_string(),
+                atype: ALIAS_SIMPLE,
+            }],
+        );
+        write_aliases(lib.to_str().unwrap(), "Tester", idnum).unwrap();
+        let path = alias_filename(lib.to_str().unwrap(), "Tester").unwrap();
+        assert!(path.exists());
+
+        delete_aliases(lib.to_str().unwrap(), "Tester", idnum).unwrap();
+
+        assert!(!path.exists());
+        assert!(get_aliases(idnum).is_empty());
         let _ = std::fs::remove_dir_all(lib);
     }
 }

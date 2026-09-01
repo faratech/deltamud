@@ -12,6 +12,13 @@ struct Stored {
 pub struct MockDatabase {
     players: Mutex<HashMap<String, Stored>>,
     next_idnum: Mutex<i64>,
+    exists_delay: Mutex<Option<std::time::Duration>>,
+    save_delay: Mutex<Option<std::time::Duration>>,
+    rename_delay: Mutex<Option<std::time::Duration>>,
+    rename_calls: Mutex<u64>,
+    fail_next_save: Mutex<bool>,
+    fail_next_rename: Mutex<bool>,
+    fail_rename_on_call: Mutex<Option<u64>>,
 }
 
 impl MockDatabase {
@@ -19,7 +26,39 @@ impl MockDatabase {
         MockDatabase {
             players: Mutex::new(HashMap::new()),
             next_idnum: Mutex::new(1),
+            exists_delay: Mutex::new(None),
+            save_delay: Mutex::new(None),
+            rename_delay: Mutex::new(None),
+            rename_calls: Mutex::new(0),
+            fail_next_save: Mutex::new(false),
+            fail_next_rename: Mutex::new(false),
+            fail_rename_on_call: Mutex::new(None),
         }
+    }
+
+    pub fn set_save_delay(&self, delay: Option<std::time::Duration>) {
+        *crate::lock_ok::lock(&self.save_delay) = delay;
+    }
+
+    pub fn set_exists_delay(&self, delay: Option<std::time::Duration>) {
+        *crate::lock_ok::lock(&self.exists_delay) = delay;
+    }
+
+    pub fn fail_next_save(&self) {
+        *crate::lock_ok::lock(&self.fail_next_save) = true;
+    }
+
+    pub fn set_rename_delay(&self, delay: Option<std::time::Duration>) {
+        *crate::lock_ok::lock(&self.rename_delay) = delay;
+    }
+
+    pub fn fail_next_rename(&self) {
+        *crate::lock_ok::lock(&self.fail_next_rename) = true;
+    }
+
+    pub fn fail_rename_on_call(&self, call: u64) {
+        *crate::lock_ok::lock(&self.rename_calls) = 0;
+        *crate::lock_ok::lock(&self.fail_rename_on_call) = Some(call);
     }
 }
 
@@ -36,6 +75,10 @@ impl crate::DatabaseInterface for MockDatabase {
     }
 
     async fn player_exists(&self, name: &str) -> Result<bool> {
+        let delay = *crate::lock_ok::lock(&self.exists_delay);
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         Ok(self
             .players
             .lock()
@@ -69,6 +112,13 @@ impl crate::DatabaseInterface for MockDatabase {
     }
 
     async fn save_player(&self, character: &Character) -> Result<()> {
+        let delay = *crate::lock_ok::lock(&self.save_delay);
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+        if std::mem::take(&mut *crate::lock_ok::lock(&self.fail_next_save)) {
+            anyhow::bail!("injected save failure");
+        }
         let mut players = crate::lock_ok::lock(&self.players);
         if let Some(s) = players.get_mut(&character.get_name().to_lowercase()) {
             s.character = character.clone();
@@ -77,6 +127,69 @@ impl crate::DatabaseInterface for MockDatabase {
             }
         }
         Ok(())
+    }
+
+    async fn rename_player_if_current(
+        &self,
+        idnum: i64,
+        expected_old_name: &str,
+        new_name: &str,
+    ) -> Result<bool> {
+        let delay = *crate::lock_ok::lock(&self.rename_delay);
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+        let call = {
+            let mut calls = crate::lock_ok::lock(&self.rename_calls);
+            *calls = calls.saturating_add(1);
+            *calls
+        };
+        let fail_this_call = {
+            let mut configured = crate::lock_ok::lock(&self.fail_rename_on_call);
+            if *configured == Some(call) {
+                *configured = None;
+                true
+            } else {
+                false
+            }
+        };
+        if fail_this_call {
+            anyhow::bail!("injected rename failure on call {call}");
+        }
+        if std::mem::take(&mut *crate::lock_ok::lock(&self.fail_next_rename)) {
+            anyhow::bail!("injected rename failure");
+        }
+
+        let old_key = expected_old_name.to_lowercase();
+        let new_key = new_name.to_lowercase();
+        let mut players = crate::lock_ok::lock(&self.players);
+        let current_matches = players
+            .get(&old_key)
+            .is_some_and(|stored| stored.character.idnum == idnum);
+        if !current_matches {
+            return Ok(false);
+        }
+        if players
+            .get(&new_key)
+            .is_some_and(|stored| stored.character.idnum != idnum)
+        {
+            return Ok(false);
+        }
+
+        let Some(mut stored) = players.remove(&old_key) else {
+            return Ok(false);
+        };
+        stored.character.player.name = new_name.to_string();
+        players.insert(new_key, stored);
+        Ok(true)
+    }
+
+    async fn player_name_by_id(&self, idnum: i64) -> Result<Option<String>> {
+        let players = crate::lock_ok::lock(&self.players);
+        Ok(players
+            .values()
+            .find(|stored| stored.character.idnum == idnum)
+            .map(|stored| stored.character.get_name().to_string()))
     }
 
     async fn verify_password(&self, name: &str, password: &str) -> Result<bool> {
@@ -89,13 +202,26 @@ impl crate::DatabaseInterface for MockDatabase {
 
     async fn get_password_hash(&self, name: &str) -> Result<Option<String>> {
         let players = crate::lock_ok::lock(&self.players);
-        Ok(players.get(&name.to_lowercase()).map(|s| s.password.clone()))
+        Ok(players
+            .get(&name.to_lowercase())
+            .map(|s| s.password.clone()))
     }
 
     async fn delete_deleted_players(&self) -> Result<u64> {
         let mut players = crate::lock_ok::lock(&self.players);
         let before = players.len();
         players.retain(|_, s| (s.character.act_flags & crate::flags::PLR_DELETED) == 0);
+        Ok((before - players.len()) as u64)
+    }
+
+    async fn delete_deleted_players_by_idnums(&self, idnums: Vec<i64>) -> Result<u64> {
+        let ids: std::collections::HashSet<i64> = idnums.into_iter().collect();
+        let mut players = crate::lock_ok::lock(&self.players);
+        let before = players.len();
+        players.retain(|_, stored| {
+            !ids.contains(&stored.character.idnum)
+                || stored.character.act_flags & crate::flags::PLR_DELETED == 0
+        });
         Ok((before - players.len()) as u64)
     }
 
@@ -255,5 +381,48 @@ mod tests {
         db.create_player(&noclan, "pass").await.unwrap();
 
         assert_eq!(db.clan_member_counts().await.unwrap(), vec![(2, 2)]);
+    }
+
+    #[tokio::test]
+    async fn conditional_rename_requires_the_exact_id_old_name_and_free_destination() {
+        let db = MockDatabase::new();
+        let old = Character::new_player(
+            "Oldname".to_string(),
+            crate::types::Class::Warrior,
+            crate::types::Race::Human,
+        );
+        let occupied = Character::new_player(
+            "Occupied".to_string(),
+            crate::types::Class::Cleric,
+            crate::types::Race::Elf,
+        );
+        let idnum = db.create_player(&old, "old-pass").await.unwrap();
+        db.create_player(&occupied, "occupied-pass").await.unwrap();
+
+        assert!(
+            !db.rename_player_if_current(idnum + 100, "Oldname", "Newname")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !db.rename_player_if_current(idnum, "Wrongname", "Newname")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !db.rename_player_if_current(idnum, "Oldname", "Occupied")
+                .await
+                .unwrap()
+        );
+        assert!(db.load_player("Oldname").await.is_ok());
+
+        assert!(
+            db.rename_player_if_current(idnum, "Oldname", "Newname")
+                .await
+                .unwrap()
+        );
+        assert!(db.load_player("Oldname").await.is_err());
+        assert_eq!(db.load_player("Newname").await.unwrap().idnum, idnum);
+        assert!(db.verify_password("Newname", "old-pass").await.unwrap());
     }
 }

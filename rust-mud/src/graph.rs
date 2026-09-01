@@ -23,8 +23,8 @@
 use crate::cmd_movement::perform_move;
 use crate::combat::hit;
 use crate::interpreter::one_argument;
-use crate::room::{RoomFlags, EX_CLOSED};
-use crate::spell_parser::{get_char_world_vis, SKILL_TRACK, TYPE_UNDEFINED};
+use crate::room::{EX_CLOSED, RoomFlags};
+use crate::spell_parser::{SKILL_TRACK, TYPE_UNDEFINED, get_char_world_vis};
 use crate::state::GameState;
 use crate::types::*;
 

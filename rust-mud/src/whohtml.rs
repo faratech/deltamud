@@ -14,20 +14,26 @@ use crate::state::GameState;
 use crate::types::*;
 
 /// C comm.c WizLevels[] labels for L101..L105.
-const WIZ_LEVELS: [&str; 5] = [
-    "Immortal",
-    "Sage",
-    "Seer",
-    "Prophet",
-    "Implementor",
-];
+const WIZ_LEVELS: [&str; 5] = ["Immortal", "Sage", "Seer", "Prophet", "Implementor"];
 
 /// race_name (C act.informative.c race_name()): the full race name for the
 /// who-list line.
 pub(crate) fn race_name(g: &GameState, ch: CharId) -> &'static str {
     const RACES: [&str; 14] = [
-        "Human", "Elf", "Gnome", "Dwarf", "Troll", "Goblin", "Drow", "Orc",
-        "Minotaur", "Half-Elf", "Half-Orc", "Half-Giant", "Kender", "Unknown",
+        "Human",
+        "Elf",
+        "Gnome",
+        "Dwarf",
+        "Troll",
+        "Goblin",
+        "Drow",
+        "Orc",
+        "Minotaur",
+        "Half-Elf",
+        "Half-Orc",
+        "Half-Giant",
+        "Kender",
+        "Unknown",
     ];
     g.get_char(ch)
         .map(|c| {
@@ -149,5 +155,7 @@ pub fn make_who2html(g: &mut GameState) -> Result<(), String> {
 }
 
 fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }

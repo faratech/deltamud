@@ -64,6 +64,29 @@ pub enum ResetCmd {
 /// C db.c:1873 `#define ZO_DEAD 999` - a queued zone's age marker.
 pub const ZONE_DEAD: i32 = 999;
 
+/// C structs.h `MAX_ZONE_NUM`.  A zone number is persisted in `.zon` headers
+/// and is also used as the hundred-vnum band prefix throughout the world and
+/// OLC code.  Keeping the C limit as a single invariant guarantees that both
+/// `number * 100` and the default `+ 99` top fit in [`RoomVnum`].
+pub const MAX_ZONE_NUMBER: i32 = 500_000;
+const ZONE_VNUM_WIDTH: i32 = 100;
+const ZONE_VNUM_LAST_OFFSET: i32 = ZONE_VNUM_WIDTH - 1;
+
+/// Return the first and default-last vnums for a valid persisted zone number.
+///
+/// This is deliberately checked even though `MAX_ZONE_NUMBER` is comfortably
+/// inside the `i32` arithmetic limit: disk input and command input must pass
+/// through the same fail-closed contract rather than relying on every caller
+/// to remember the limit before multiplying.
+pub fn zone_vnum_bounds(number: i32) -> Option<(RoomVnum, RoomVnum)> {
+    if !(0..=MAX_ZONE_NUMBER).contains(&number) {
+        return None;
+    }
+    let first = number.checked_mul(ZONE_VNUM_WIDTH)?;
+    let default_last = first.checked_add(ZONE_VNUM_LAST_OFFSET)?;
+    Some((first, default_last))
+}
+
 #[derive(Debug, Clone)]
 pub struct Zone {
     pub number: i32,
@@ -81,6 +104,22 @@ pub struct Zone {
     pub map_x: Option<i32>,
     pub map_y: Option<i32>,
     pub reset_commands: Vec<ResetCmd>,
+}
+
+impl Zone {
+    /// First vnum owned by this zone, or `None` for an invalid in-memory zone.
+    /// Production zones are validated by both construction paths (world-file
+    /// loading and `olc zedit new`), while the checked return keeps tests and
+    /// future callers from turning a malformed value into an overflow panic.
+    pub fn vnum_start(&self) -> Option<RoomVnum> {
+        zone_vnum_bounds(self.number).map(|(first, _)| first)
+    }
+
+    /// Whether `vnum` is within this zone's configured persisted range.
+    pub fn contains_vnum(&self, vnum: RoomVnum) -> bool {
+        self.vnum_start()
+            .is_some_and(|first| vnum >= first && vnum <= self.top)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -214,7 +253,11 @@ impl GameState {
         mob.points.defense = proto.defense;
         mob.points.mdefense = proto.mdefense;
         mob.points.technique = proto.technique;
-        mob.points.gold = proto.gold;
+        crate::gold::set(
+            &mut mob,
+            crate::gold::Account::Carried,
+            i64::from(proto.gold),
+        );
         mob.points.exp = proto.experience;
         mob.short_desc = Some(proto.short_desc);
         mob.long_desc = Some(proto.long_desc);
@@ -506,7 +549,6 @@ impl GameState {
                                 self.objs.get(&o).map(|x| x.item_number) == Some(*obj_vnum)
                             });
                         if let Some(o) = found {
-                            self.obj_from_anywhere(o);
                             self.extract_obj(o);
                             summary.objs_removed += 1;
                             last_obj = None;
@@ -578,10 +620,11 @@ impl GameState {
         // the zone and firing reset_wtrigger - WTRIG_RESET scripts re-seal
         // doors and restore one-shot state on every repop (#144).
         if let Some(z) = self.zones.iter().find(|z| z.number == zone_number) {
-            let start = z.number * 100;
-            for vnum in start..=z.top {
-                if let Some(rnum) = self.real_room(vnum) {
-                    crate::dg_triggers::reset_wtrigger(self, rnum);
+            if let Some(start) = z.vnum_start() {
+                for vnum in start..=z.top {
+                    if let Some(rnum) = self.real_room(vnum) {
+                        crate::dg_triggers::reset_wtrigger(self, rnum);
+                    }
                 }
             }
         }
@@ -593,6 +636,18 @@ impl GameState {
 mod hit_dice_tests {
     use super::*;
     use crate::config::Config;
+
+    #[test]
+    fn checked_zone_vnum_bounds_match_c_limit() {
+        assert_eq!(zone_vnum_bounds(0), Some((0, 99)));
+        assert_eq!(
+            zone_vnum_bounds(MAX_ZONE_NUMBER),
+            Some((50_000_000, 50_000_099))
+        );
+        for invalid in [-1, MAX_ZONE_NUMBER + 1, 21_474_836, i32::MAX] {
+            assert_eq!(zone_vnum_bounds(invalid), None, "zone {invalid}");
+        }
+    }
 
     fn bare_proto(hit_dice: (i32, i32, i32)) -> MobileProto {
         MobileProto {

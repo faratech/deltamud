@@ -17,7 +17,7 @@ use crate::constants::{
     AFFECTED_BITS, APPLY_TYPES, CONTAINER_BITS, DRINKS, EXTRA_BITS, ITEM_TYPES, WEAR_BITS,
 };
 use crate::object::{ExtraFlags, ObjectType, WearFlags};
-use crate::olc::{self, EditorKind, CYN, GRN, NRM, YEL};
+use crate::olc::{self, CYN, EditorKind, GRN, NRM, YEL};
 use crate::state::GameState;
 use crate::types::*;
 use crate::world::ObjectProto;
@@ -140,7 +140,9 @@ pub fn do_oedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         Some(c) => c,
         None => return,
     };
-    let vnum: ObjVnum = arg.trim().parse().unwrap_or(NOTHING);
+    let Some(vnum) = olc::parse_i32_input(g, conn, arg.trim(), NOTHING) else {
+        return;
+    };
     if vnum < 0 {
         g.send_to_char(ch, "That's not a valid object number.\r\n");
         return;
@@ -759,7 +761,9 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
 
         OeditMode::Type => {
-            let number: i32 = arg.parse().unwrap_or(-1);
+            let Some(number) = olc::parse_i32_input(g, conn, arg, -1) else {
+                return;
+            };
             if number < 1 || number as usize >= real_len(ITEM_TYPES) {
                 send(g, conn, "Invalid choice, try again : ");
             } else {
@@ -769,7 +773,9 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
 
         OeditMode::Extras => {
-            let number: i32 = arg.parse().unwrap_or(-1);
+            let Some(number) = olc::parse_i32_input(g, conn, arg, -1) else {
+                return;
+            };
             if number < 0 || number as usize > real_len(EXTRA_BITS) {
                 disp_extra_menu(g, conn);
             } else if number == 0 {
@@ -785,7 +791,9 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
 
         OeditMode::Wear => {
-            let number: i32 = arg.parse().unwrap_or(-1);
+            let Some(number) = olc::parse_i32_input(g, conn, arg, -1) else {
+                return;
+            };
             if number < 0 || number as usize > real_len(WEAR_BITS) {
                 send(g, conn, "That's not a valid choice!\r\n");
                 disp_wear_menu(g, conn);
@@ -802,37 +810,51 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
 
         OeditMode::Weight => {
-            let v: i32 = arg.parse().unwrap_or(0);
+            let Some(v) = olc::parse_i32_input(g, conn, arg, 0) else {
+                return;
+            };
             with_state(conn, |s| s.obj.weight = v);
             commit_and_menu(g, conn);
         }
         OeditMode::Cost => {
-            let v: i32 = arg.parse().unwrap_or(0);
+            let Some(v) = olc::parse_i32_input(g, conn, arg, 0) else {
+                return;
+            };
             with_state(conn, |s| s.obj.cost = v);
             commit_and_menu(g, conn);
         }
         OeditMode::CostPerDay => {
-            let v: i32 = arg.parse().unwrap_or(0);
+            let Some(v) = olc::parse_i32_input(g, conn, arg, 0) else {
+                return;
+            };
             with_state(conn, |s| s.obj.rent = v);
             commit_and_menu(g, conn);
         }
         OeditMode::Timer => {
-            let v: i32 = arg.parse().unwrap_or(0);
+            let Some(v) = olc::parse_i32_input(g, conn, arg, 0) else {
+                return;
+            };
             with_state(conn, |s| s.obj.timer = v);
             commit_and_menu(g, conn);
         }
         OeditMode::Durability => {
-            let v: i32 = arg.parse().unwrap_or(0);
+            let Some(v) = olc::parse_i32_input(g, conn, arg, 0) else {
+                return;
+            };
             with_state(conn, |s| s.obj.cslots = v);
             commit_and_menu(g, conn);
         }
         OeditMode::Durability2 => {
-            let v: i32 = arg.parse().unwrap_or(0);
+            let Some(v) = olc::parse_i32_input(g, conn, arg, 0) else {
+                return;
+            };
             with_state(conn, |s| s.obj.tslots = v);
             commit_and_menu(g, conn);
         }
         OeditMode::Level => {
-            let v: i32 = arg.parse().unwrap_or(0);
+            let Some(v) = olc::parse_i32_input(g, conn, arg, 0) else {
+                return;
+            };
             with_state(conn, |s| s.obj.level = v);
             commit_and_menu(g, conn);
         }
@@ -843,7 +865,9 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
 
         OeditMode::PermAffects => {
-            let number: i32 = arg.parse().unwrap_or(-1);
+            let Some(number) = olc::parse_i32_input(g, conn, arg, -1) else {
+                return;
+            };
             if number == 0 {
                 commit_and_menu(g, conn);
             } else if number < 1 || number as usize > real_len(AFFECTED_BITS) {
@@ -858,7 +882,9 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
 
         OeditMode::Value1 => {
-            let v: i32 = arg.parse().unwrap_or(0);
+            let Some(v) = olc::parse_i32_input(g, conn, arg, 0) else {
+                return;
+            };
             with_state(conn, |s| s.obj.values[0] = v);
             disp_val2_menu(g, conn);
         }
@@ -867,7 +893,9 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         OeditMode::Value4 => parse_value4(g, conn, arg),
 
         OeditMode::PromptApply => {
-            let number: i32 = arg.parse().unwrap_or(-1);
+            let Some(number) = olc::parse_i32_input(g, conn, arg, -1) else {
+                return;
+            };
             if number == 0 {
                 commit_and_menu(g, conn);
             } else if number < 0 || number as usize > MAX_OBJ_AFFECT + 1 {
@@ -881,14 +909,17 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             }
         }
         OeditMode::Apply => {
-            let number: i32 = arg.parse().unwrap_or(-1);
+            let Some(number) = olc::parse_i32_input(g, conn, arg, -1) else {
+                return;
+            };
             if number == 0 {
                 with_state(conn, |s| {
                     let slot = s.apply_slot;
                     s.obj.affects[slot] = (0, 0);
                 });
                 disp_prompt_apply_menu(g, conn);
-            } else if number < 0 || number as usize >= 22 { // NUM_APPLIES (#289)
+            } else if number < 0 || number as usize >= 22 {
+                // NUM_APPLIES (#289)
                 disp_apply_menu(g, conn);
             } else {
                 with_state(conn, |s| {
@@ -900,7 +931,9 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             }
         }
         OeditMode::ApplyMod => {
-            let v: i32 = arg.parse().unwrap_or(0);
+            let Some(v) = olc::parse_i32_input(g, conn, arg, 0) else {
+                return;
+            };
             with_state(conn, |s| {
                 let slot = s.apply_slot;
                 s.obj.affects[slot].1 = v;
@@ -1068,7 +1101,9 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, arg: &str) {
 }
 
 fn parse_value2(g: &mut GameState, conn: ConnId, arg: &str) {
-    let number: i32 = arg.parse().unwrap_or(0);
+    let Some(number) = olc::parse_i32_input(g, conn, arg, 0) else {
+        return;
+    };
     let t = with_state(conn, |s| s.obj.obj_type).unwrap_or(ObjectType::Other);
     match t {
         ObjectType::Scroll | ObjectType::Potion => {
@@ -1100,7 +1135,9 @@ fn parse_value2(g: &mut GameState, conn: ConnId, arg: &str) {
 }
 
 fn parse_value3(g: &mut GameState, conn: ConnId, arg: &str) {
-    let number: i32 = arg.parse().unwrap_or(0);
+    let Some(number) = olc::parse_i32_input(g, conn, arg, 0) else {
+        return;
+    };
     let t = with_state(conn, |s| s.obj.obj_type).unwrap_or(ObjectType::Other);
     let (min_val, max_val) = match t {
         ObjectType::Scroll | ObjectType::Potion => (0, NUM_SPELLS - 1),
@@ -1116,7 +1153,9 @@ fn parse_value3(g: &mut GameState, conn: ConnId, arg: &str) {
 }
 
 fn parse_value4(g: &mut GameState, conn: ConnId, arg: &str) {
-    let number: i32 = arg.parse().unwrap_or(0);
+    let Some(number) = olc::parse_i32_input(g, conn, arg, 0) else {
+        return;
+    };
     let t = with_state(conn, |s| s.obj.obj_type).unwrap_or(ObjectType::Other);
     let (min_val, max_val) = match t {
         ObjectType::Scroll | ObjectType::Potion => (0, NUM_SPELLS - 1),
@@ -1130,7 +1169,9 @@ fn parse_value4(g: &mut GameState, conn: ConnId, arg: &str) {
 }
 
 fn parse_extradesc_menu(g: &mut GameState, conn: ConnId, arg: &str) {
-    let number: i32 = arg.parse().unwrap_or(-1);
+    let Some(number) = olc::parse_i32_input(g, conn, arg, -1) else {
+        return;
+    };
     match number {
         0 => {
             with_state(conn, |s| {
@@ -1205,6 +1246,14 @@ fn class_str2num(s: &str) -> i32 {
     CLASS_UNDEFINED
 }
 
+fn autoset_strength_row<'a>(strengths: &'a [[i32; 5]], class: i32) -> &'a [i32; 5] {
+    usize::try_from(class)
+        .ok()
+        .and_then(|class| class.checked_add(1))
+        .and_then(|row| strengths.get(row))
+        .unwrap_or(&strengths[0])
+}
+
 // autoset_obj_applies — set the five DeltaMUD combat applies from class/level.
 fn autoset_applies(g: &mut GameState, conn: ConnId) {
     // class_strengths[6][5] (oedit.c). Index 0 = Generic, then the 5 PC classes.
@@ -1252,7 +1301,7 @@ fn autoset_applies(g: &mut GameState, conn: ConnId) {
             level, class_name
         ),
     );
-    let row = STRENGTHS[(class + 1) as usize];
+    let row = autoset_strength_row(&STRENGTHS, class);
     // CLASS_APPMODNUM(num) = 750 * strength * level / 5 / 100 / NUM_WEARS
     let modnum = |num: usize| -> i32 { 750 * row[num] * level / 5 / 100 / (NUM_WEARS as i32) };
     use crate::flags::{APPLY_DEFENSE, APPLY_MDEFENSE, APPLY_MPOWER, APPLY_POWER, APPLY_TECHNIQUE};
@@ -1264,6 +1313,30 @@ fn autoset_applies(g: &mut GameState, conn: ConnId) {
         s.obj.affects[4] = (APPLY_TECHNIQUE, modnum(4));
         s.modified = true;
     });
+}
+
+#[cfg(test)]
+mod autoset_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_object_classes_fall_back_to_generic_strengths() {
+        const ROWS: [[i32; 5]; 6] = [
+            [3, 3, 3, 3, 3],
+            [1, 5, 1, 5, 4],
+            [2, 3, 4, 4, 3],
+            [4, 1, 4, 2, 5],
+            [5, 1, 5, 2, 3],
+            [2, 5, 2, 2, 5],
+        ];
+
+        assert_eq!(autoset_strength_row(&ROWS, CLASS_UNDEFINED), &ROWS[0]);
+        assert_eq!(autoset_strength_row(&ROWS, 0), &ROWS[1]);
+        assert_eq!(autoset_strength_row(&ROWS, 4), &ROWS[5]);
+        assert_eq!(autoset_strength_row(&ROWS, 5), &ROWS[0]);
+        assert_eq!(autoset_strength_row(&ROWS, i32::MIN), &ROWS[0]);
+        assert_eq!(autoset_strength_row(&ROWS, i32::MAX), &ROWS[0]);
+    }
 }
 
 // ===========================================================================
@@ -1379,11 +1452,13 @@ fn finish(g: &mut GameState, conn: ConnId) {
 // full object is written back, not a lossy subset.
 // ===========================================================================
 pub fn oedit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
-    let (zone_number, top) = match g.zones.get(zone_rnum) {
-        Some(z) => (z.number, z.top),
+    let (zone_number, start, top) = match g.zones.get(zone_rnum) {
+        Some(z) => match z.vnum_start() {
+            Some(start) => (z.number, start, z.top),
+            None => return,
+        },
         None => return,
     };
-    let start = zone_number * 100;
 
     let mut out = String::new();
     for vnum in start..=top {

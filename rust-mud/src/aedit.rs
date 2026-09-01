@@ -122,10 +122,28 @@ fn load_socials_file(lib_path: &str) -> Vec<SocialAction> {
         let mut it = header.split_whitespace();
         let command = it.next().unwrap_or("~").trim_start_matches('~').to_string();
         let sort_as = it.next().unwrap_or("").to_string();
-        let hide = it.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
-        let min_char_pos = it.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
-        let min_vict_pos = it.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
-        let min_lvl = it.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+        let loader_i32 = |raw: Option<&str>, field: &str| match raw {
+            Some(raw) => match crate::text::parse_i32_strict(raw) {
+                Ok(value) => value,
+                Err(crate::text::ParseIntError::Overflow) => {
+                    let clamped = if raw.trim_start().starts_with('-') {
+                        i32::MIN
+                    } else {
+                        i32::MAX
+                    };
+                    log::warn!(
+                        "SYSERR: social {command} {field} overflow in {path}; clamped to {clamped}"
+                    );
+                    clamped
+                }
+                Err(_) => 0,
+            },
+            None => 0,
+        };
+        let hide = loader_i32(it.next(), "hide");
+        let min_char_pos = loader_i32(it.next(), "minimum character position");
+        let min_vict_pos = loader_i32(it.next(), "minimum victim position");
+        let min_lvl = loader_i32(it.next(), "minimum level");
 
         let read = |lines: &mut std::str::Lines| -> Option<String> {
             let l = lines.next().unwrap_or("#");
@@ -365,7 +383,11 @@ pub fn do_aedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 st.mode = AeditMode::ConfirmEdit;
             });
             let cmd = command_at(r).unwrap_or_default();
-            send(g, ch, &format!("Do you wish to edit the '{}' action? ", cmd));
+            send(
+                g,
+                ch,
+                &format!("Do you wish to edit the '{}' action? ", cmd),
+            );
         }
         None => {
             if command_exists(&buf1) {
@@ -374,7 +396,11 @@ pub fn do_aedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 return;
             }
             with_state(conn, |st| st.mode = AeditMode::ConfirmAdd);
-            send(g, ch, &format!("Do you wish to add the '{}' action? ", buf1));
+            send(
+                g,
+                ch,
+                &format!("Do you wish to add the '{}' action? ", buf1),
+            );
         }
     }
 }
@@ -491,11 +517,7 @@ fn aedit_disp_menu(g: &mut GameState, conn: ConnId) {
 }
 
 fn trunc(s: &str, n: usize) -> String {
-    if s.len() > n {
-        s[..n].to_string()
-    } else {
-        s.to_string()
-    }
+    crate::text::utf8_prefix(s, n).to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -641,11 +663,19 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     with_state(conn, |st| st.mode = AeditMode::SortAs);
                 }
                 Some('2') => {
-                    send(g, ch, "Enter the minimum position the Character has to be in to activate social [0 - 8]: ");
+                    send(
+                        g,
+                        ch,
+                        "Enter the minimum position the Character has to be in to activate social [0 - 8]: ",
+                    );
                     with_state(conn, |st| st.mode = AeditMode::MinCharPos);
                 }
                 Some('3') => {
-                    send(g, ch, "Enter the minimum position the Victim has to be in to activate social [0 - 8]: ");
+                    send(
+                        g,
+                        ch,
+                        "Enter the minimum position the Victim has to be in to activate social [0 - 8]: ",
+                    );
                     with_state(conn, |st| st.mode = AeditMode::MinVictPos);
                 }
                 Some('4') => {
@@ -797,7 +827,9 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         // ---- Numeric fields --------------------------------------------
         AeditMode::MinCharPos | AeditMode::MinVictPos => {
             if !trimmed.is_empty() {
-                let i = trimmed.parse::<i32>().unwrap_or(-1);
+                let Some(i) = crate::olc::parse_i32_input(g, conn, trimmed, -1) else {
+                    return;
+                };
                 // C bug-faithful guard: `(i < 0) && (i > POS_STANDING)` is never
                 // true, so any parse passes through. We keep the practical clamp
                 // the data demands: 0..=POS_STANDING.
@@ -816,7 +848,9 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
         AeditMode::MinCharLevel => {
             if !trimmed.is_empty() {
-                let i = trimmed.parse::<i32>().unwrap_or(0);
+                let Some(i) = crate::olc::parse_i32_input(g, conn, trimmed, 0) else {
+                    return;
+                };
                 let v = i.clamp(0, LVL_IMPL as i32);
                 with_state(conn, |st| st.action.min_level_char = v);
             } else {

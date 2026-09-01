@@ -24,7 +24,7 @@
 //                    deobserve, on_link_lost
 //   queries          is_arena_combatant, arena_stat, arena_flee_timer
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::flags::AFF_INVISIBLE;
 use crate::interpreter::is_abbrev;
 use crate::state::GameState;
@@ -49,6 +49,7 @@ pub const ARENA_OBSERVER: u8 = 100;
 const ARENA_ENTRANCE: RoomVnum = 4800;
 const ARENA_PREPROOM: RoomVnum = 4801;
 const ARENA_OBSERVEROOM: RoomVnum = 4899;
+const ARENA_ZONE: RoomVnum = 48;
 const ARENA_LEAVE_PENALTY_MULT: i32 = 100;
 const ARENA_FLEE_TIMEOUT: i32 = 3; // # tics for the flee-recall timeout
 const ARENA_COMBATANT_FEE: i32 = 1000; // combatant entrance fee multiplier
@@ -85,11 +86,30 @@ struct ArenaChar {
 }
 
 struct ArenaWorld {
-    chars: HashMap<CharId, ArenaChar>,
+    chars: HashMap<ArenaCharKey, ArenaChar>,
     /// `arenamaster` global — the entrance-master mob (set by the spec proc).
     arenamaster: Option<CharId>,
     /// `defaultobserve` global — combatant new observers latch onto.
     defaultobserve: Option<CharId>,
+}
+
+// Unit tests construct many independent GameStates in parallel, and each one
+// starts allocating CharIds at 1. Namespace the process-global side table by
+// the harness thread in test builds so one test cannot restore or clear a
+// different test's same-numbered character. The live server has one GameState,
+// so production retains the direct CharId key.
+#[cfg(not(test))]
+type ArenaCharKey = CharId;
+#[cfg(test)]
+type ArenaCharKey = (std::thread::ThreadId, CharId);
+
+#[cfg(not(test))]
+fn arena_char_key(id: CharId) -> ArenaCharKey {
+    id
+}
+#[cfg(test)]
+fn arena_char_key(id: CharId) -> ArenaCharKey {
+    (std::thread::current().id(), id)
 }
 
 static ARENA: OnceLock<Mutex<ArenaWorld>> = OnceLock::new();
@@ -107,16 +127,18 @@ fn arena() -> &'static Mutex<ArenaWorld> {
 // ---- tiny accessors over the side table (lock-scoped) ---------------------
 
 fn get_stat(id: CharId) -> u8 {
+    let key = arena_char_key(id);
     arena()
         .lock()
         .ok()
-        .and_then(|w| w.chars.get(&id).map(|c| c.stat))
+        .and_then(|w| w.chars.get(&key).map(|c| c.stat))
         .unwrap_or(ARENA_NOT)
 }
 
 fn set_stat(id: CharId, stat: u8) {
     if let Ok(mut w) = arena().lock() {
-        let e = w.chars.entry(id).or_default();
+        let key = arena_char_key(id);
+        let e = w.chars.entry(key.clone()).or_default();
         e.stat = stat;
         // ARENA_NOT means "gone from arena" — drop the side-table entry once it
         // holds nothing of interest, mirroring how C just clears the fields.
@@ -127,55 +149,59 @@ fn set_stat(id: CharId, stat: u8) {
             && e.observe_by.is_none()
             && e.bup.is_none()
         {
-            w.chars.remove(&id);
+            w.chars.remove(&key);
         }
     }
 }
 
 fn observing_of(id: CharId) -> Option<CharId> {
+    let key = arena_char_key(id);
     arena()
         .lock()
         .ok()
-        .and_then(|w| w.chars.get(&id).and_then(|c| c.observing))
+        .and_then(|w| w.chars.get(&key).and_then(|c| c.observing))
 }
 fn observe_by_of(id: CharId) -> Option<CharId> {
+    let key = arena_char_key(id);
     arena()
         .lock()
         .ok()
-        .and_then(|w| w.chars.get(&id).and_then(|c| c.observe_by))
+        .and_then(|w| w.chars.get(&key).and_then(|c| c.observe_by))
 }
 fn set_observing(id: CharId, to: Option<CharId>) {
     if let Ok(mut w) = arena().lock() {
-        w.chars.entry(id).or_default().observing = to;
+        w.chars.entry(arena_char_key(id)).or_default().observing = to;
     }
 }
 fn set_observe_by(id: CharId, to: Option<CharId>) {
     if let Ok(mut w) = arena().lock() {
-        w.chars.entry(id).or_default().observe_by = to;
+        w.chars.entry(arena_char_key(id)).or_default().observe_by = to;
     }
 }
 
 fn get_flee_timer(id: CharId) -> i32 {
+    let key = arena_char_key(id);
     arena()
         .lock()
         .ok()
-        .and_then(|w| w.chars.get(&id).map(|c| c.flee_timer))
+        .and_then(|w| w.chars.get(&key).map(|c| c.flee_timer))
         .unwrap_or(0)
 }
 fn set_flee_timer(id: CharId, v: i32) {
     if let Ok(mut w) = arena().lock() {
-        w.chars.entry(id).or_default().flee_timer = v;
+        w.chars.entry(arena_char_key(id)).or_default().flee_timer = v;
     }
 }
 fn get_last_fighting(id: CharId) -> Option<CharId> {
+    let key = arena_char_key(id);
     arena()
         .lock()
         .ok()
-        .and_then(|w| w.chars.get(&id).and_then(|c| c.last_fighting))
+        .and_then(|w| w.chars.get(&key).and_then(|c| c.last_fighting))
 }
 fn set_last_fighting(id: CharId, v: Option<CharId>) {
     if let Ok(mut w) = arena().lock() {
-        w.chars.entry(id).or_default().last_fighting = v;
+        w.chars.entry(arena_char_key(id)).or_default().last_fighting = v;
     }
 }
 
@@ -263,11 +289,7 @@ fn numdisplay(val: i64) -> String {
         }
         out.push(ch);
     }
-    if neg {
-        format!("-{}", out)
-    } else {
-        out
-    }
+    if neg { format!("-{}", out) } else { out }
 }
 
 /// stop_fighting(ch): clear the fighting target and drop out of POS_FIGHTING.
@@ -426,7 +448,7 @@ pub fn match_over(
         ),
     );
     if let Some(c) = g.get_char_mut(winner) {
-        c.points.gold += winnings;
+        crate::gold::credit(c, crate::gold::Account::Carried, i64::from(winnings));
         if c.wins < 254 {
             c.wins += 1;
         }
@@ -509,7 +531,7 @@ pub fn bup_affects(g: &mut GameState, ch: CharId) {
         return;
     };
     if let Ok(mut w) = arena().lock() {
-        w.chars.entry(ch).or_default().bup = Some(saved);
+        w.chars.entry(arena_char_key(ch)).or_default().bup = Some(saved);
     }
     g.affect_total(ch);
 }
@@ -519,20 +541,27 @@ pub fn restore_bup_affects(g: &mut GameState, ch: CharId) {
     if is_npc(g, ch) {
         return;
     }
-    let saved = arena()
+    if !g.char_exists(ch) {
+        return;
+    }
+    let key = arena_char_key(ch);
+    let Some(saved) = arena()
         .lock()
         .ok()
-        .and_then(|mut w| w.chars.get_mut(&ch).and_then(|c| c.bup.take()));
+        .and_then(|mut w| w.chars.get_mut(&key).and_then(|c| c.bup.take()))
+    else {
+        // The backup is consumed on the first restore. A repeated departure
+        // must not erase affects acquired after leaving the arena (#414).
+        return;
+    };
     if let Some(c) = g.get_char_mut(ch) {
         // First clear off the arena affects.
         c.affected.clear();
         c.affect_flags = 0;
-        if let Some(s) = saved {
-            c.affect_flags = s.aff_flags;
-            c.affected = s.affected;
-            c.wimp_level = s.wimp_level;
-            c.recall_level = s.recall_level; // GET_RECALL_LEV = BUP_RECALL_LEV
-        }
+        c.affect_flags = saved.aff_flags;
+        c.affected = saved.affected;
+        c.wimp_level = saved.wimp_level;
+        c.recall_level = saved.recall_level; // GET_RECALL_LEV = BUP_RECALL_LEV
     }
     g.affect_total(ch);
 }
@@ -699,7 +728,7 @@ pub fn arenaentrancemaster(
         );
         master_tell(g, ch, &mybuf);
         if let Some(c) = g.get_char_mut(ch) {
-            c.points.gold -= fee;
+            crate::gold::debit(c, crate::gold::Account::Carried, i64::from(fee));
         }
         set_stat(ch, ARENA_COMBATANT1);
         act(
@@ -796,7 +825,7 @@ pub fn arenaentrancemaster(
         linkobserve(ch, default);
 
         if let Some(c) = g.get_char_mut(ch) {
-            c.points.gold -= fee;
+            crate::gold::debit(c, crate::gold::Account::Carried, i64::from(fee));
         }
         set_stat(ch, ARENA_OBSERVER);
         act(
@@ -1035,6 +1064,100 @@ pub fn arena_flee_pulse(g: &mut GameState, ch: CharId) {
 //
 // `from` is the room the char is leaving; `to_vnum` is the destination vnum.
 // ===========================================================================
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArenaDeparturePolicy {
+    Forced,
+    NormalCombatantExit,
+}
+
+fn destination_is_arena_space(g: &GameState, destination: RoomRnum) -> bool {
+    g.room_opt(destination)
+        .map(|room| room.number != ARENA_ENTRANCE && room.number / 100 == ARENA_ZONE)
+        .unwrap_or(false)
+}
+
+/// Restore and clear all state owned by an arena participant. The normal-exit
+/// policy is the only path that charges the historical never-matched penalty;
+/// forced/admin/spell/DG/death/disconnect departures deliberately do not.
+fn complete_arena_departure(g: &mut GameState, ch: CharId, policy: ArenaDeparturePolicy) -> bool {
+    let stat = get_stat(ch);
+    if stat == ARENA_NOT {
+        return false;
+    }
+
+    let combatant = stat >= ARENA_COMBATANT1 && stat <= ARENA_COMBATANTZ;
+    let lvl = level(g, ch);
+    if combatant {
+        restore_bup_affects(g, ch);
+    }
+
+    if policy == ArenaDeparturePolicy::NormalCombatantExit {
+        if stat == ARENA_COMBATANT1 && lvl < LVL_IMMORT {
+            g.send_to_char(
+                ch,
+                "There's a penalty for leaving the arena without matching at least once!\r\n",
+            );
+            let penalty = lvl as i32 * ARENA_LEAVE_PENALTY_MULT;
+            if penalty == 0 {
+                g.send_to_char(
+                    ch,
+                    "Setting your current move points to and mana points 1.\r\n\r\n",
+                );
+            } else {
+                g.send_to_char(
+                    ch,
+                    &format!(
+                        "Deducting {} coins from you and setting your current move points to and mana points 1.\r\n\r\n",
+                        numdisplay(penalty as i64)
+                    ),
+                );
+            }
+            if let Some(c) = g.get_char_mut(ch) {
+                c.points.move_points = 1;
+                c.points.mana = 1;
+            }
+            if penalty > 0 {
+                apply_leave_penalty(g, ch, penalty);
+            }
+        } else {
+            g.send_to_char(ch, "&GHope to see you soon!\r\n\r\n");
+        }
+    }
+
+    // These helpers must run while the old status is still visible: observer
+    // unlinking and combatant fan-out both use GET_ARENASTAT as their gate.
+    deobserve(ch);
+    clearobservers(ch);
+    set_flee_timer(ch, 0);
+    set_last_fighting(ch, None);
+    set_stat(ch, ARENA_NOT);
+
+    if get_defaultobserve() == Some(ch) {
+        set_defaultobserve(findanyinarena(g));
+    }
+    if !is_npc(g, ch) {
+        // Restoration and teardown are complete before any persistence layer
+        // can snapshot this player.
+        g.request_player_save(ch);
+    }
+    true
+}
+
+/// Called by GameState's placement/removal boundary. A destination elsewhere
+/// in zone 48 remains arena space; the entrance and every other zone are a
+/// departure. This is intentionally idempotent through the ARENA_NOT guard.
+pub fn arena_departure_on_relocation(
+    g: &mut GameState,
+    ch: CharId,
+    destination: Option<RoomRnum>,
+) -> bool {
+    if destination.is_some_and(|room| destination_is_arena_space(g, room)) {
+        return false;
+    }
+    complete_arena_departure(g, ch, ArenaDeparturePolicy::Forced)
+}
+
 pub fn arena_leave_via_exit(
     g: &mut GameState,
     ch: CharId,
@@ -1051,9 +1174,7 @@ pub fn arena_leave_via_exit(
         if lvl < LVL_IMMORT {
             arena_channel(g, &format!("{} has left the arena observatory.", name));
         }
-        deobserve(ch);
-        clearobservers(ch);
-        set_stat(ch, ARENA_NOT);
+        complete_arena_departure(g, ch, ArenaDeparturePolicy::Forced);
         return true;
     }
 
@@ -1072,50 +1193,7 @@ pub fn arena_leave_via_exit(
             if lvl < LVL_IMMORT {
                 arena_channel(g, &format!("{} has left the arena.", name));
             }
-            restore_bup_affects(g, ch);
-
-            // Penalty for leaving a never-matched combatant.
-            if get_stat(ch) == ARENA_COMBATANT1 && lvl < LVL_IMMORT {
-                g.send_to_char(
-                    ch,
-                    "There's a penalty for leaving the arena without matching at least once!\r\n",
-                );
-                let penalty = lvl as i32 * ARENA_LEAVE_PENALTY_MULT;
-                if penalty == 0 {
-                    g.send_to_char(
-                        ch,
-                        "Setting your current move points to and mana points 1.\r\n\r\n",
-                    );
-                } else {
-                    g.send_to_char(
-                        ch,
-                        &format!(
-                            "Deducting {} coins from you and setting your current move points to and mana points 1.\r\n\r\n",
-                            numdisplay(penalty as i64)
-                        ),
-                    );
-                }
-                // GET_MOVE = 1; GET_MANA = 1; then deduct gold, then bank.
-                if let Some(c) = g.get_char_mut(ch) {
-                    c.points.move_points = 1;
-                    c.points.mana = 1;
-                }
-                if penalty > 0 {
-                    apply_leave_penalty(g, ch, penalty);
-                }
-            } else {
-                g.send_to_char(ch, "&GHope to see you soon!\r\n\r\n");
-            }
-
-            deobserve(ch);
-            clearobservers(ch);
-            set_stat(ch, ARENA_NOT);
-            g.request_player_save(ch);
-
-            // Repoint defaultobserve if the leaver was it.
-            if get_defaultobserve() == Some(ch) {
-                set_defaultobserve(findanyinarena(g));
-            }
+            complete_arena_departure(g, ch, ArenaDeparturePolicy::NormalCombatantExit);
             return true;
         } else if get_stat(ch) == ARENA_COMBATANTZ {
             // Out of matches: only the entrance exit is allowed.
@@ -1133,19 +1211,7 @@ pub fn arena_leave_via_exit(
 /// Deduct the leave penalty: gold first, then bank (C act.movement.c).
 fn apply_leave_penalty(g: &mut GameState, ch: CharId, penalty: i32) {
     if let Some(c) = g.get_char_mut(ch) {
-        if penalty > c.points.gold {
-            let mut rem = penalty - c.points.gold;
-            c.points.gold = 0;
-            if rem > c.points.bank_gold {
-                c.points.bank_gold = 0;
-            } else {
-                c.points.bank_gold -= rem;
-                rem = 0;
-            }
-            let _ = rem;
-        } else {
-            c.points.gold -= penalty;
-        }
+        crate::gold::debit_carried_then_bank(c, i64::from(penalty));
     }
 }
 
@@ -1170,14 +1236,21 @@ pub fn arena_relay_move(g: &mut GameState, ch: CharId, dir: usize) {
 // who goes linkdead has their affects restored and observer links cleared.
 // ===========================================================================
 pub fn on_link_lost(g: &mut GameState, ch: CharId) {
-    if is_arena_combatant(ch) {
-        restore_bup_affects(g, ch);
-    }
-    deobserve(ch);
-    clearobservers(ch);
-    // If the defaulted-on combatant just dropped, repoint it.
-    if get_defaultobserve() == Some(ch) {
-        set_defaultobserve(findanyinarena(g));
+    arena_departure_on_relocation(g, ch, None);
+}
+
+/// Restore every arena participant before a process-exit persistence sweep.
+/// Arena backups live only in this process; saving stripped combat state and
+/// then exiting would otherwise permanently lose the pre-arena affects,
+/// wimpy level, and recall level. Forced departure carries no exit penalty.
+pub fn prepare_process_exit(g: &mut GameState) {
+    let participants: Vec<CharId> = g
+        .char_ids()
+        .into_iter()
+        .filter(|&ch| get_stat(ch) != ARENA_NOT)
+        .collect();
+    for ch in participants {
+        complete_arena_departure(g, ch, ArenaDeparturePolicy::Forced);
     }
 }
 
@@ -1188,7 +1261,7 @@ pub fn forget_char(ch: CharId) {
     deobserve(ch);
     clearobservers(ch);
     if let Ok(mut w) = arena().lock() {
-        w.chars.remove(&ch);
+        w.chars.remove(&arena_char_key(ch));
         if w.defaultobserve == Some(ch) {
             w.defaultobserve = None;
         }
@@ -1209,6 +1282,9 @@ pub fn forget_char(ch: CharId) {
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) static ARENA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 pub(crate) fn reset_for_tests() {
@@ -1240,8 +1316,7 @@ pub fn send_to_observers_rendered(
     }
     let mut tmp = observe_by_of(who);
     while let Some(t) = tmp {
-        if get_stat(t) == ARENA_OBSERVER
-            && g.get_char(t).map(|c| c.desc.is_some()).unwrap_or(false)
+        if get_stat(t) == ARENA_OBSERVER && g.get_char(t).map(|c| c.desc.is_some()).unwrap_or(false)
         {
             let line = render(g, t);
             g.send_to_char(t, &line);
@@ -1254,4 +1329,134 @@ pub fn send_to_observers_rendered(
 #[cfg(test)]
 pub fn set_stat_for_test(id: CharId, stat: u8) {
     set_stat(id, stat);
+}
+
+#[cfg(test)]
+pub fn default_observe_for_test() -> Option<CharId> {
+    get_defaultobserve()
+}
+
+#[cfg(test)]
+mod output_fanout_tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::{DESCRIPTOR_OUTPUT_LIMIT, Descriptor, OUTPUT_OVERFLOW_MARKER};
+
+    fn connected_player(g: &mut GameState, conn: ConnId, name: &str) -> CharId {
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, format!("{name}.test")));
+        let mut character = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        character.desc = Some(conn);
+        let character = g.create_char(character);
+        g.descriptors.get_mut(&conn).unwrap().character = Some(character);
+        character
+    }
+
+    #[test]
+    fn arena_observer_fanout_is_utf8_safe_and_bounded_per_descriptor() {
+        let _guard = crate::lock_ok::lock(&ARENA_TEST_LOCK);
+        reset_for_tests();
+
+        let mut g = GameState::new(Config::default());
+        let combatant_conn = ConnId(901);
+        let observer_conn = ConnId(902);
+        let combatant = connected_player(&mut g, combatant_conn, "Combatant");
+        let observer = connected_player(&mut g, observer_conn, "Observer");
+        set_stat_for_test(combatant, ARENA_COMBATANT1);
+        set_stat_for_test(observer, ARENA_OBSERVER);
+        linkobserve(observer, combatant);
+
+        // Model the two arms of arena act delivery: normal output reaches the
+        // combatant, while the arena helper fans the same oversized line out to
+        // observers. Each descriptor owns its limit and deterministic marker.
+        let huge = "界".repeat(DESCRIPTOR_OUTPUT_LIMIT);
+        g.send_to_char(combatant, &huge);
+        send_to_observers(&mut g, &huge, combatant);
+
+        for conn in [combatant_conn, observer_conn] {
+            let (output, overflowed) = g.descriptors.get_mut(&conn).unwrap().take_output_status();
+            assert!(overflowed);
+            assert!(output.len() <= DESCRIPTOR_OUTPUT_LIMIT);
+            assert!(std::str::from_utf8(output.as_bytes()).is_ok());
+            assert!(output.ends_with(OUTPUT_OVERFLOW_MARKER));
+            assert_eq!(output.matches(OUTPUT_OVERFLOW_MARKER).count(), 1);
+        }
+
+        reset_for_tests();
+    }
+}
+
+#[cfg(test)]
+mod process_exit_tests {
+    use super::*;
+    use crate::DatabaseInterface;
+    use crate::character::{Affect, Character};
+    use crate::config::Config;
+    use crate::flags::{AFF_BLIND, AFF_INVISIBLE};
+    use crate::mock_database::MockDatabase;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn process_exit_restores_arena_backup_before_persisting_player() {
+        let _guard = crate::lock_ok::lock(&ARENA_TEST_LOCK);
+        reset_for_tests();
+
+        let db = MockDatabase::new();
+        let mut player =
+            Character::new_player("ArenaExit".to_string(), Class::Warrior, Race::Human);
+        player.wimp_level = 12;
+        player.recall_level = 34;
+        player.affect_flags = AFF_INVISIBLE;
+        player.affected.push(Affect {
+            spell_type: 7,
+            duration: 8,
+            modifier: 9,
+            location: 10,
+            bitvector: AFF_INVISIBLE,
+            caster: None,
+        });
+        player.idnum = db.create_player(&player, "pw").await.unwrap();
+
+        let mut g = GameState::new(Config::default());
+        let ch = g.create_char(player);
+        set_stat_for_test(ch, ARENA_COMBATANT1);
+        bup_affects(&mut g, ch);
+        {
+            let arena_state = g.get_char_mut(ch).unwrap();
+            arena_state.wimp_level = 0;
+            arena_state.recall_level = 0;
+            arena_state.affect_flags = AFF_BLIND;
+            arena_state.affected.push(Affect {
+                spell_type: 11,
+                duration: 12,
+                modifier: 13,
+                location: 14,
+                bitvector: AFF_BLIND,
+                caster: None,
+            });
+        }
+
+        prepare_process_exit(&mut g);
+
+        let restored = g.get_char(ch).unwrap();
+        assert_eq!(restored.wimp_level, 12);
+        assert_eq!(restored.recall_level, 34);
+        assert_eq!(restored.affect_flags, AFF_INVISIBLE);
+        assert_eq!(restored.affected.len(), 1);
+        assert_eq!(restored.affected[0].spell_type, 7);
+        assert_eq!(arena_stat(ch), ARENA_NOT);
+        assert_eq!(g.player_save_requests, vec![ch]);
+
+        for request in g.take_player_save_requests() {
+            db.save_player(g.get_char(request).unwrap()).await.unwrap();
+        }
+        let persisted = db.load_player("ArenaExit").await.unwrap();
+        assert_eq!(persisted.wimp_level, 12);
+        assert_eq!(persisted.recall_level, 34);
+        assert_eq!(persisted.affect_flags, AFF_INVISIBLE);
+        assert_eq!(persisted.affected.len(), 1);
+        assert_eq!(persisted.affected[0].spell_type, 7);
+
+        reset_for_tests();
+    }
 }

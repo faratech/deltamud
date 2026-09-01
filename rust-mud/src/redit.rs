@@ -12,8 +12,8 @@
 // menu; `redit_parse` is the per-line handler the olc router calls.
 
 use crate::constants::{ROOM_BITS, SECTOR_TYPES};
-use crate::olc::{self, EditorKind, CYN, GRN, NRM, YEL};
-use crate::room::{Exit, Room, RoomFlags, SectorType, EX_ISDOOR, EX_PICKPROOF};
+use crate::olc::{self, CYN, EditorKind, GRN, NRM, YEL};
+use crate::room::{EX_ISDOOR, EX_PICKPROOF, Exit, Room, RoomFlags, SectorType};
 use crate::state::GameState;
 use crate::types::*;
 use std::collections::HashMap;
@@ -121,7 +121,9 @@ pub fn do_redit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         Some(c) => c,
         None => return,
     };
-    let vnum: RoomVnum = arg.trim().parse().unwrap_or(NOWHERE);
+    let Some(vnum) = olc::parse_i32_input(g, conn, arg.trim(), NOWHERE) else {
+        return;
+    };
     if vnum < 0 {
         g.send_to_char(ch, "That's not a valid room number.\r\n");
         return;
@@ -135,7 +137,9 @@ pub fn do_redit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     };
 
     // Already-being-edited check.
-    let conflict = crate::lock_ok::lock(&states()).values().any(|s| s.vnum == vnum);
+    let conflict = crate::lock_ok::lock(&states())
+        .values()
+        .any(|s| s.vnum == vnum);
     if conflict {
         g.send_to_char(ch, "That room is currently being edited.\r\n");
         return;
@@ -236,11 +240,7 @@ fn disp_menu(g: &mut GameState, conn: ConnId) {
     let (vnum, znum, name, desc, flags, sector, n, e, so, w, u, d, sx, sxn) = s;
     // C redit.c:801: zone_table[OLC_ZNUM(d)].number — the owning zone's
     // builder number, not vnum/100 (wrong for map rooms >= 2,000,100) (#294).
-    let zonenum = g
-        .zones
-        .get(znum)
-        .map(|z| z.number)
-        .unwrap_or(vnum / 100);
+    let zonenum = g.zones.get(znum).map(|z| z.number).unwrap_or(vnum / 100);
 
     let body = format!(
         "-- Room number : [{cyn}{vnum}{nrm}]\tRoom zone: [{cyn}{zone}{nrm}]\r\n\
@@ -560,7 +560,9 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
         ReditMode::SExitNumber => {
             // C redit.c:1200-1222: -1 clears the destination; otherwise the
             // room must exist and (below LVL_IMMORT) be in an owned zone.
-            let number: i32 = arg.trim().parse().unwrap_or(-2);
+            let Some(number) = olc::parse_i32_input(g, conn, arg.trim(), -2) else {
+                return;
+            };
             if number == -1 {
                 with_state(conn, |s| {
                     if let Some(se) = s.room.special_exit.as_mut() {
@@ -610,11 +612,8 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
                 if let Some(text) = result {
                     with_state(conn, |s| {
                         if let Some(se) = s.room.special_exit.as_mut() {
-                            se.general_description = if text.is_empty() {
-                                None
-                            } else {
-                                Some(text)
-                            };
+                            se.general_description =
+                                if text.is_empty() { None } else { Some(text) };
                         }
                         s.modified = true;
                     });
@@ -624,7 +623,11 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
         }
 
         ReditMode::SExitKeyword => {
-            let v = if arg.is_empty() { None } else { Some(arg.to_string()) };
+            let v = if arg.is_empty() {
+                None
+            } else {
+                Some(arg.to_string())
+            };
             with_state(conn, |s| {
                 if let Some(se) = s.room.special_exit.as_mut() {
                     se.keyword = v;
@@ -635,7 +638,11 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
         }
 
         ReditMode::SExitName => {
-            let v = if arg.is_empty() { None } else { Some(arg.to_string()) };
+            let v = if arg.is_empty() {
+                None
+            } else {
+                Some(arg.to_string())
+            };
             with_state(conn, |s| {
                 if let Some(se) = s.room.special_exit.as_mut() {
                     se.ex_name = v;
@@ -662,7 +669,9 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
         }
 
         ReditMode::SExitKey => {
-            let key: i32 = arg.trim().parse().unwrap_or(-1);
+            let Some(key) = olc::parse_i32_input(g, conn, arg.trim(), -1) else {
+                return;
+            };
             with_state(conn, |s| {
                 if let Some(se) = s.room.special_exit.as_mut() {
                     se.key = key;
@@ -675,7 +684,9 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
         ReditMode::SExitDoorflags => {
             // C redit.c:1281-1309: 0-2 set the door state (preserving
             // HIDDEN), 3 toggles HIDDEN in place.
-            let number: i32 = arg.parse().unwrap_or(-1);
+            let Some(number) = olc::parse_i32_input(g, conn, arg, -1) else {
+                return;
+            };
             if !(0..=3).contains(&number) {
                 send(g, conn, "That's not a valid choice!\r\n");
                 disp_exit_flag_menu(g, conn);
@@ -714,7 +725,6 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
         _ => {}
     }
 }
-
 
 fn disp_extradesc_menu(g: &mut GameState, conn: ConnId) {
     let (kw, desc, has_next) = match with_state(conn, |s| {
@@ -875,7 +885,7 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             // C writes arg[MAX_ROOM_NAME - 1] = '\0' when strlen > MAX_ROOM_NAME,
             // so an over-long name keeps 74 chars (C's own off-by-one).
             if name.len() > MAX_ROOM_NAME {
-                name.truncate(MAX_ROOM_NAME - 1);
+                crate::text::truncate_utf8_bytes(&mut name, MAX_ROOM_NAME - 1);
             }
             with_state(conn, |s| {
                 s.room.name = name;
@@ -901,7 +911,9 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
 
         ReditMode::Flags => {
-            let number: i32 = arg.parse().unwrap_or(-1);
+            let Some(number) = olc::parse_i32_input(g, conn, arg, -1) else {
+                return;
+            };
             if number < 0 || number as usize > num_room_flags() {
                 send(g, conn, "That is not a valid choice!\r\n");
                 disp_flag_menu(g, conn);
@@ -919,7 +931,9 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
 
         ReditMode::Sector => {
-            let number: i32 = arg.parse().unwrap_or(-1);
+            let Some(number) = olc::parse_i32_input(g, conn, arg, -1) else {
+                return;
+            };
             if number < 0 || number as usize >= num_room_sectors() {
                 send(g, conn, "Invalid choice!");
                 disp_sector_menu(g, conn);
@@ -935,7 +949,9 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         ReditMode::ExitMenu => parse_exit_menu(g, conn, arg),
 
         ReditMode::ExitNumber => {
-            let number: i32 = arg.parse().unwrap_or(NOWHERE);
+            let Some(number) = olc::parse_i32_input(g, conn, arg, NOWHERE) else {
+                return;
+            };
             if number != -1 && g.real_room(number).is_none() {
                 send(g, conn, "That room does not exist, try again : ");
                 return;
@@ -958,7 +974,11 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                         .map(|zr| crate::olc::can_edit_zone(g, conn_char(g, conn).unwrap(), zr))
                         .unwrap_or(false);
                     if !owned {
-                        send(g, conn, "You don't have permissions to that zone, try again (-1 for none) : ");
+                        send(
+                            g,
+                            conn,
+                            "You don't have permissions to that zone, try again (-1 for none) : ",
+                        );
                         return;
                     }
                 }
@@ -1001,7 +1021,9 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
 
         ReditMode::ExitKey => {
-            let key: i32 = arg.parse().unwrap_or(NOTHING);
+            let Some(key) = olc::parse_i32_input(g, conn, arg, NOTHING) else {
+                return;
+            };
             with_state(conn, |s| {
                 if let Some(e) = s.room.exits[s.cur_exit].as_mut() {
                     e.key = key;
@@ -1012,7 +1034,9 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
 
         ReditMode::ExitDoorflags => {
-            let number: i32 = arg.parse().unwrap_or(-1);
+            let Some(number) = olc::parse_i32_input(g, conn, arg, -1) else {
+                return;
+            };
             if !(0..=3).contains(&number) {
                 send(g, conn, "That's not a valid choice!\r\n");
                 disp_exit_flag_menu(g, conn);
@@ -1270,7 +1294,9 @@ fn parse_exit_menu(g: &mut GameState, conn: ConnId, arg: &str) {
 }
 
 fn parse_extradesc_menu(g: &mut GameState, conn: ConnId, arg: &str) {
-    let number: i32 = arg.parse().unwrap_or(-1);
+    let Some(number) = olc::parse_i32_input(g, conn, arg, -1) else {
+        return;
+    };
     match number {
         0 => {
             // Drop the current extra desc if incomplete.
@@ -1402,8 +1428,11 @@ fn finish(g: &mut GameState, conn: ConnId) {
 // file_loader::load_room_file). Writes every room in the zone's vnum band.
 // ===========================================================================
 pub fn redit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
-    let (zone_number, top) = match g.zones.get(zone_rnum) {
-        Some(z) => (z.number, z.top),
+    let (zone_number, start, top) = match g.zones.get(zone_rnum) {
+        Some(z) => match z.vnum_start() {
+            Some(start) => (z.number, start, z.top),
+            None => return,
+        },
         None => return,
     };
     // C redit.c:379-381 MAP_ACTIVE guard: the synthetic surface-map zone's
@@ -1411,12 +1440,13 @@ pub fn redit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
     // otherwise write every generated map cell into 20000.wld (#264).
     if let Some(start_rnum) = g.map_start_rnum {
         if g.rooms.get(start_rnum).map(|room| room.number / 100) == Some(zone_number) {
-            log::warn!("SYSERR: refused OLC write of the surface-map zone {}.", zone_number);
+            log::warn!(
+                "SYSERR: refused OLC write of the surface-map zone {}.",
+                zone_number
+            );
             return;
         }
     }
-    let start = zone_number * 100;
-
     let mut out = String::new();
     for vnum in start..=top {
         let rnum = match g.real_room(vnum) {
@@ -1554,16 +1584,17 @@ mod tests {
     use crate::character::Character;
     use crate::config::Config;
     use crate::connection::Descriptor;
-    use crate::world::Zone;
+    use crate::world::{Zone, zone_vnum_bounds};
 
     fn zone(number: i32) -> Zone {
+        let (_, top) = zone_vnum_bounds(number).expect("valid test zone number");
         Zone {
             number,
             name: format!("Zone {}", number),
             builders: "Root".to_string(),
             lifespan: 30,
             age: 0,
-            top: number * 100 + 99,
+            top,
             reset_mode: 2,
             min_level: 0,
             max_level: 60,
@@ -1597,9 +1628,7 @@ mod tests {
         let out = &g.descriptors.get(&conn).unwrap().outbuf;
         // C redit.c:1015-1023: refusal, not a silent purge (#292).
         assert!(out.contains("Please specify an exit number or purge the exit."));
-        let kept = crate::lock_ok::lock(&states())[&conn]
-            .room
-            .exits[NORTH]
+        let kept = crate::lock_ok::lock(&states())[&conn].room.exits[NORTH]
             .as_ref()
             .map(|e| e.to_room)
             .unwrap();
@@ -1617,18 +1646,33 @@ mod tests {
     }
 
     #[test]
+    fn room_name_cap_preserves_multibyte_character_boundaries() {
+        let (mut g, _ch, conn) = setup(104, ConnId(74));
+        for scalar in ['é', '€', '🦀'] {
+            redit_parse(&mut g, conn, "1");
+            let input = format!("{}{scalar}", "a".repeat(MAX_ROOM_NAME - 1));
+            redit_parse(&mut g, conn, &input);
+            let name = crate::lock_ok::lock(&states())[&conn].room.name.clone();
+            assert_eq!(name.len(), MAX_ROOM_NAME - 1);
+            assert!(name.is_char_boundary(name.len()));
+            assert!(!name.contains(scalar));
+        }
+    }
+
+    #[test]
     fn special_exit_editor_round_trips_the_o_block() {
         // A real room to point the exit at.
         let (mut g, _ch, conn) = setup(103, ConnId(73));
         g.add_room(Room::new(105, 1, "Target".to_string(), String::new()));
         redit_parse(&mut g, conn, "b"); // special-exit menu (creates scratch)
         redit_parse(&mut g, conn, "0"); // refuses: no name, no target (#268)
-        assert!(g
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("Please specify an exit name and a target room"));
+        assert!(
+            g.descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("Please specify an exit name and a target room")
+        );
 
         redit_parse(&mut g, conn, "4"); // door command
         redit_parse(&mut g, conn, "portal");
@@ -1636,7 +1680,11 @@ mod tests {
         redit_parse(&mut g, conn, "105");
         redit_parse(&mut g, conn, "5"); // leave message
         redit_parse(&mut g, conn, "$n steps through the portal!");
-        let se = crate::lock_ok::lock(&states())[&conn].room.special_exit.clone().unwrap();
+        let se = crate::lock_ok::lock(&states())[&conn]
+            .room
+            .special_exit
+            .clone()
+            .unwrap();
         assert_eq!(se.to_room, 105);
         assert_eq!(se.ex_name.as_deref(), Some("portal"));
         assert_eq!(
@@ -1646,6 +1694,11 @@ mod tests {
 
         // Purge path clears the scratch and returns to the main menu.
         redit_parse(&mut g, conn, "8");
-        assert!(crate::lock_ok::lock(&states())[&conn].room.special_exit.is_none());
+        assert!(
+            crate::lock_ok::lock(&states())[&conn]
+                .room
+                .special_exit
+                .is_none()
+        );
     }
 }

@@ -24,7 +24,7 @@
 // We expose the same values as `LogType` so callers read 1:1 against the C.
 
 use crate::state::GameState;
-use crate::types::{CharId, Level, LVL_IMMORT};
+use crate::types::{CharId, LVL_IMMORT, Level};
 use chrono::Local;
 use std::fs::OpenOptions;
 use std::io::Write;

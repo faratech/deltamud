@@ -8,7 +8,7 @@
 // power/defense/mpower/mdefense combat ratings. These live here as the
 // canonical `pub fn`s; magic.rs and cmd_offensive.rs both call them (no fork).
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::character::Affect;
 use crate::constants::ATTACK_HIT_TEXT;
 use crate::flags::{
@@ -16,7 +16,7 @@ use crate::flags::{
     MOB_WIMPY,
 };
 use crate::object::{ObjLoc, Object, ObjectType};
-use crate::room::{RoomFlags, SectorType, EX_CLOSED};
+use crate::room::{EX_CLOSED, RoomFlags, SectorType};
 use crate::spell_parser::{
     MAX_SPELLS, SKILL_ADRENALINE, SKILL_BLOODLUST, SKILL_CARNALRAGE, SPELL_REDIRECT_CHARGE,
     SPELL_SLEEP, TYPE_UNDEFINED,
@@ -183,7 +183,10 @@ pub fn perform_violence(g: &mut GameState) {
                 .get_char(ch)
                 .map(|c| c.is_npc && c.act_flags & (1 << 24) != 0)
                 .unwrap_or(false);
-            let v_pos = g.get_char(victim).map(|c| c.position).unwrap_or(Position::Dead);
+            let v_pos = g
+                .get_char(victim)
+                .map(|c| c.position)
+                .unwrap_or(Position::Dead);
             if mercy && v_pos < Position::Sleeping {
                 stop_fighting(g, victim);
                 stop_fighting(g, ch);
@@ -314,7 +317,6 @@ fn damage_worn_equipment_after_hit(g: &mut GameState, ch: CharId) {
                 victim,
                 &format!("{} crumbles to dust as it wears out!\r\n", short),
             );
-            g.obj_from_anywhere(oid);
             g.extract_obj(oid);
         }
     }
@@ -394,11 +396,7 @@ pub fn dam_multi(g: &GameState, ch: CharId, vict: CharId, ty: i32) -> f32 {
         // C: p = 1 - (2/300)*p; 2/300 == 0 in integer math, so this is 1.
         p = 1.0 - (0.0 * p);
     }
-    if p < 0.0 {
-        0.0
-    } else {
-        p
-    }
+    if p < 0.0 { 0.0 } else { p }
 }
 
 /// GET_ATTACKTYPE(ch) (utils.h): the weapon attack-type for ch — the wielded
@@ -931,7 +929,10 @@ fn do_actual_damage(
             .get_char(ch)
             .map(|c| !c.is_npc && c.prf2_flags & PRF2_MERCY != 0)
             .unwrap_or(false);
-        let v_below = g.get_char(victim).map(|c| c.points.hit < 0).unwrap_or(false);
+        let v_below = g
+            .get_char(victim)
+            .map(|c| c.points.hit < 0)
+            .unwrap_or(false);
         if mercy && v_below && !deathblow && attacktype < SELF_DAMAGE {
             act(
                 g,
@@ -1147,15 +1148,15 @@ fn do_actual_damage(
             .get_char(ch)
             .map(|c| !c.is_npc && c.prf2_flags & PRF2_MERCY != 0)
             .unwrap_or(false);
-        let v_below = g.get_char(victim).map(|c| c.points.hit < 0).unwrap_or(false);
+        let v_below = g
+            .get_char(victim)
+            .map(|c| c.points.hit < 0)
+            .unwrap_or(false);
         if mercy && v_below && !deathblow && attacktype < SELF_DAMAGE {
             stop_fighting(g, ch);
             stop_fighting(g, victim);
             let hr = crate::act::hshr(g, victim);
-            let mut buf = format!(
-                "You have mercy on $N, and spare {} life... for now.",
-                hr
-            );
+            let mut buf = format!("You have mercy on $N, and spare {} life... for now.", hr);
             act(g, &buf, true, ch, None, ActArg::Char(victim), To::Char);
             buf.clear();
             act(
@@ -1228,7 +1229,11 @@ fn do_actual_damage(
         let local_buf = local_gold.to_string();
         let mut gold_before;
         let mut gold_after;
-        if v_npc && g.get_char(ch).map(|c| c.prf2_flags & PRF_AUTOLOOT != 0).unwrap_or(false) {
+        if v_npc
+            && g.get_char(ch)
+                .map(|c| c.prf2_flags & PRF_AUTOLOOT != 0)
+                .unwrap_or(false)
+        {
             gold_before = g.get_char(ch).map(|c| c.points.gold).unwrap_or(0);
             crate::cmd_item::do_get(g, ch, "all corpse", 0);
             gold_after = g.get_char(ch).map(|c| c.points.gold).unwrap_or(0);
@@ -1236,24 +1241,22 @@ fn do_actual_damage(
             gold_before = 0;
             gold_after = 0;
         }
-        if ch_grouped
-            && local_gold > 0
-            && ch_prf & PRF_AUTOSPLIT != 0
-            && ch_prf & PRF_AUTOLOOT != 0
+        if ch_grouped && local_gold > 0 && ch_prf & PRF_AUTOSPLIT != 0 && ch_prf & PRF_AUTOLOOT != 0
         {
             if gold_after > gold_before {
                 crate::cmd_other::do_split(g, ch, &local_buf, 0);
             }
         }
-        if v_npc && g.get_char(ch).map(|c| c.prf2_flags & PRF_AUTOGOLD != 0).unwrap_or(false) {
+        if v_npc
+            && g.get_char(ch)
+                .map(|c| c.prf2_flags & PRF_AUTOGOLD != 0)
+                .unwrap_or(false)
+        {
             gold_before = g.get_char(ch).map(|c| c.points.gold).unwrap_or(0);
             crate::cmd_item::do_get(g, ch, "coins corpse", 0);
             gold_after = g.get_char(ch).map(|c| c.points.gold).unwrap_or(0);
         }
-        if ch_grouped
-            && local_gold > 0
-            && ch_prf & PRF_AUTOSPLIT != 0
-            && ch_prf & PRF_AUTOGOLD != 0
+        if ch_grouped && local_gold > 0 && ch_prf & PRF_AUTOSPLIT != 0 && ch_prf & PRF_AUTOGOLD != 0
         {
             if gold_after > gold_before {
                 crate::cmd_other::do_split(g, ch, &local_buf, 0);
@@ -1324,13 +1327,7 @@ fn send_position_feedback(g: &mut GameState, ch: CharId, victim: CharId, dmg: i3
             // return - die() is never reached; everyone else gets R.I.P.
             // (die() itself prints nothing in C - the port printed both, #104).
             if crate::arena::is_arena_combatant(victim) {
-                crate::arena::match_over(
-                    g,
-                    Some(ch),
-                    Some(victim),
-                    "(Fatality)",
-                    true,
-                );
+                crate::arena::match_over(g, Some(ch), Some(victim), "(Fatality)", true);
             } else {
                 act(
                     g,
@@ -1679,7 +1676,10 @@ pub(crate) fn die(g: &mut GameState, killer: Option<CharId>, victim: CharId) {
             award_kill_experience(g, k, victim);
             // C fight.c:1196-1198: a MOB_MEMORY killer forgets the victim
             // when the victim dies, so it does not re-aggro on return (#185).
-            if g.get_char(k).map(|m| m.is_npc && m.act_flags & (1 << 11) != 0).unwrap_or(false) {
+            if g.get_char(k)
+                .map(|m| m.is_npc && m.act_flags & (1 << 11) != 0)
+                .unwrap_or(false)
+            {
                 crate::mobact::forget(g, k, victim);
             }
         }
@@ -1768,7 +1768,7 @@ pub(crate) fn make_corpse_for_victim(g: &mut GameState, victim: CharId) {
             g.obj_to_obj(money, corpse);
         }
         if let Some(c) = g.get_char_mut(victim) {
-            c.points.gold = 0;
+            crate::gold::set(c, crate::gold::Account::Carried, 0);
         }
     }
 
@@ -2006,7 +2006,6 @@ pub(crate) fn numdisplay(val: i64) -> String {
     out
 }
 
-
 /// C fight.c:296-318 corpse metadata: keywords are just "corpse"-suffixed
 /// GET_NAME, wear TAKE, extra ITEM_NODONATE, rent 100000, and the corpse
 /// weighs the dead character plus their load (so get/drop/carry math works).
@@ -2043,9 +2042,9 @@ fn make_corpse(g: &mut GameState, who: &str, victim: CharId) -> ObjId {
     obj.obj_type = ObjectType::Container;
     apply_corpse_metadata(&mut obj, g, victim);
     // C fight.c:315-318: GET_OBJ_TIMER(corpse) = IS_NPC(ch) ?
-// max_npc_corpse_time (5) : max_pc_corpse_time (10) (config.c:120-121),
-// decremented once per mud hour by point_update. The flat 60 made
-// corpses persist 6-12x longer than C (#102).
+    // max_npc_corpse_time (5) : max_pc_corpse_time (10) (config.c:120-121),
+    // decremented once per mud hour by point_update. The flat 60 made
+    // corpses persist 6-12x longer than C (#102).
     obj.timer = if g.get_char(victim).map(|c| c.is_npc).unwrap_or(true) {
         5
     } else {
@@ -2107,8 +2106,8 @@ pub(crate) fn create_money(g: &mut GameState, amount: i32) -> ObjId {
         let md = money_desc(amount);
         // CAP() the long description's first character.
         let mut long = format!("{} is lying here.", md);
-        if let Some(first) = long.get(0..1) {
-            long = format!("{}{}", first.to_uppercase(), &long[1..]);
+        if let Some(first) = long.chars().next() {
+            long = format!("{}{}", first.to_uppercase(), &long[first.len_utf8()..]);
         }
         ("coins gold".to_string(), md.to_string(), long)
     };
@@ -2121,7 +2120,11 @@ pub(crate) fn create_money(g: &mut GameState, amount: i32) -> ObjId {
     obj.loc = ObjLoc::Nowhere;
     // handler.c:1386-1432: the ex_description 'look coin(s)' shows a
     // progressively vaguer count the larger the pile (#112).
-    let kw = if amount == 1 { "coin gold" } else { "coins gold" };
+    let kw = if amount == 1 {
+        "coin gold"
+    } else {
+        "coins gold"
+    };
     let ex = if amount == 1 {
         "It's just one miserable little gold coin.".to_string()
     } else if amount < 10 {
@@ -2168,10 +2171,9 @@ fn ghost_pc(g: &mut GameState, victim: CharId) {
     // file that would resurrect old gear on next login (#115).
     if let Some(ch) = g.get_char(victim) {
         if !ch.is_npc {
-            // Restore arena-backed-up state (wimpy/recall/affects) BEFORE the
-            // save, or the zeroed combatant snapshot persists to SQL (#390).
-            crate::arena::restore_bup_affects(g, victim);
-            g.request_player_save(victim);
+            // The ghost path requests persistence before its eventual room
+            // placement, so run the shared arena departure teardown first.
+            crate::arena::arena_departure_on_relocation(g, victim, None);
             crate::objsave::crash_delete_crashfile(g, victim);
         }
     }
@@ -2349,8 +2351,8 @@ mod tests {
     use crate::config::Config;
     use crate::connection::Descriptor;
     use crate::dg_handler::{
-        self, add_trigger, install_trig, ScriptKey, TrigData, DG_TEST_LOCK, MOB_TRIGGER,
-        MTRIG_FIGHT, MTRIG_HITPRCNT, OBJ_TRIGGER, OTRIG_FIGHT,
+        self, DG_TEST_LOCK, MOB_TRIGGER, MTRIG_FIGHT, MTRIG_HITPRCNT, OBJ_TRIGGER, OTRIG_FIGHT,
+        ScriptKey, TrigData, add_trigger, install_trig,
     };
     use crate::flags::{AFF_CHARM, AFF_GROUP, MOB_DBLATTACK, MOB_SPEC};
     use crate::room::{Exit, Room};
@@ -2421,6 +2423,75 @@ mod tests {
         assert_eq!(v.points.hit, 1);
         assert_eq!(v.position, Position::Resting);
         assert_eq!(v.in_room, Some(start));
+    }
+
+    #[test]
+    fn raw_kill_departure_restores_arena_state_before_respawn() {
+        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
+        crate::arena::reset_for_tests();
+        let mut g = GameState::new(Config::default());
+        let home = g.add_room(Room::new(
+            3001,
+            30,
+            "Temple".to_string(),
+            "A safe temple.".to_string(),
+        ));
+        let arena_room = g.add_room(Room::new(4801, 48, "Arena Prep".to_string(), String::new()));
+        let mut victim =
+            Character::new_player("ArenaVictim".to_string(), Class::Warrior, Race::Human);
+        victim.player.level = 20;
+        victim.player.hometown = 3001;
+        victim.wimp_level = 12;
+        victim.recall_level = 34;
+        victim.affect_flags = AFF_INVISIBLE;
+        let victim = g.create_char(victim);
+        g.char_to_room(victim, arena_room);
+        crate::arena::set_stat_for_test(victim, crate::arena::ARENA_COMBATANT1);
+        crate::arena::bup_affects(&mut g, victim);
+        g.get_char_mut(victim).unwrap().affect_flags = AFF_SLEEP;
+
+        raw_kill(&mut g, victim, None);
+
+        let state = g.get_char(victim).unwrap();
+        assert_eq!(state.in_room, Some(home));
+        assert_eq!(state.affect_flags, AFF_INVISIBLE);
+        assert_eq!(state.wimp_level, 12);
+        assert_eq!(state.recall_level, 34);
+        assert_eq!(crate::arena::arena_stat(victim), crate::arena::ARENA_NOT);
+        assert_eq!(g.player_save_requests, vec![victim]);
+        crate::arena::reset_for_tests();
+    }
+
+    #[test]
+    fn raw_kill_departure_restores_arena_state_before_ghosting() {
+        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
+        crate::arena::reset_for_tests();
+        let mut g = GameState::new(Config::default());
+        let limbo = g.add_room(Room::new(99, 0, "Ghost Limbo".to_string(), String::new()));
+        let arena_room = g.add_room(Room::new(4801, 48, "Arena Prep".to_string(), String::new()));
+        let mut victim =
+            Character::new_player("ArenaGhost".to_string(), Class::Warrior, Race::Human);
+        victim.player.level = 30;
+        victim.wimp_level = 12;
+        victim.recall_level = 34;
+        victim.affect_flags = AFF_INVISIBLE;
+        let victim = g.create_char(victim);
+        g.char_to_room(victim, arena_room);
+        crate::arena::set_stat_for_test(victim, crate::arena::ARENA_COMBATANT1);
+        crate::arena::bup_affects(&mut g, victim);
+        g.get_char_mut(victim).unwrap().affect_flags = AFF_SLEEP;
+
+        raw_kill(&mut g, victim, None);
+
+        let state = g.get_char(victim).unwrap();
+        assert_eq!(state.in_room, Some(limbo));
+        assert_eq!(state.affect_flags, AFF_INVISIBLE);
+        assert_eq!(state.wimp_level, 12);
+        assert_eq!(state.recall_level, 34);
+        assert_ne!(state.prf2_flags & PRF2_INTANGIBLE, 0);
+        assert_eq!(crate::arena::arena_stat(victim), crate::arena::ARENA_NOT);
+        assert_eq!(g.player_save_requests, vec![victim]);
+        crate::arena::reset_for_tests();
     }
 
     #[test]
@@ -2545,10 +2616,12 @@ mod tests {
 
         let attacker = g.get_char(ch).unwrap();
         assert_eq!(attacker.affect_flags & AFF_R_CHARGED, 0);
-        assert!(attacker
-            .affected
-            .iter()
-            .all(|af| af.spell_type != SPELL_REDIRECT_CHARGE));
+        assert!(
+            attacker
+                .affected
+                .iter()
+                .all(|af| af.spell_type != SPELL_REDIRECT_CHARGE)
+        );
         assert!(g.get_char(victim).unwrap().points.hit <= 59);
     }
 
@@ -2599,12 +2672,13 @@ mod tests {
 
         assert_eq!(g.get_char(victim).unwrap().points.hit, 20);
         assert_eq!(g.get_char(attacker).unwrap().fighting, None);
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("Ack! But he's a newbie!\r\n"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("Ack! But he's a newbie!\r\n")
+        );
     }
 
     #[test]
@@ -2626,12 +2700,11 @@ mod tests {
 
         assert_eq!(g.get_char(victim).unwrap().points.hit, 20);
         assert_eq!(g.get_char(attacker).unwrap().fighting, None);
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("Wait till you're level 10 at least before becoming a PLAYER KILLER.\r\n"));
+        assert!(
+            g.descriptors.get(&ConnId(1)).unwrap().outbuf.contains(
+                "Wait till you're level 10 at least before becoming a PLAYER KILLER.\r\n"
+            )
+        );
     }
 
     #[test]
@@ -2658,12 +2731,13 @@ mod tests {
         assert_eq!(af.modifier, 2);
         assert_eq!(af.duration, 2);
         assert_eq!(v.points.power, 2);
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("You feel a surge of &RADRENALINE&n!\r\n"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("You feel a surge of &RADRENALINE&n!\r\n")
+        );
     }
 
     #[test]
@@ -2682,12 +2756,13 @@ mod tests {
         damage_type(&mut g, attacker, victim, 10, TYPE_HIT);
 
         assert_eq!(g.get_char(victim).unwrap().points.power, 2);
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("You &rlust&n for more &RBLOOD&n!!\r\n"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("You &rlust&n for more &RBLOOD&n!!\r\n")
+        );
     }
 
     #[test]
@@ -2724,12 +2799,13 @@ mod tests {
         assert_eq!(af.duration, 199);
         assert_eq!(af.modifier, 200);
         assert_eq!(v.points.power, 200);
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("You feel the &RCarnal &rRage&n build within you!!!\r\n"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("You feel the &RCarnal &rRage&n build within you!!!\r\n")
+        );
     }
 
     #[test]
@@ -2744,12 +2820,13 @@ mod tests {
         damage_worn_equipment_after_hit(&mut g, attacker);
 
         assert_eq!(g.get_obj(armor).unwrap().curr_slots, 2);
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("A test breastplate just got DAMAGED during the combat!\r\n"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("A test breastplate just got DAMAGED during the combat!\r\n")
+        );
         assert_ne!(
             g.get_char(victim).unwrap().act_flags & crate::objsave::PLR_CRASH,
             0
@@ -2868,12 +2945,13 @@ mod tests {
 
         perform_violence(&mut g);
 
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("Snake bites you!\r\n"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("Snake bites you!\r\n")
+        );
     }
 
     #[test]
@@ -2909,12 +2987,13 @@ mod tests {
         assert_eq!(g.get_char(mob).unwrap().mob_wait, 0);
         assert_eq!(g.get_char(mob).unwrap().position, Position::Fighting);
         assert_eq!(g.get_char(victim).unwrap().points.hit, 100);
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("Bruiser scrambles to its feet!\r\n"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("Bruiser scrambles to its feet!\r\n")
+        );
 
         perform_violence(&mut g);
 
@@ -3136,12 +3215,13 @@ mod tests {
         let k = g.get_char(killer).unwrap();
         assert_eq!(k.points.exp, 199);
         assert_eq!(k.alignment, 62);
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("You receive 199 experience points.\r\n"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("You receive 199 experience points.\r\n")
+        );
     }
 
     #[test]
@@ -3177,18 +3257,20 @@ mod tests {
 
         assert_eq!(g.get_char(leader).unwrap().points.exp, 150);
         assert_eq!(g.get_char(follower).unwrap().points.exp, 150);
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("You receive your share of experience -- 150 points.\r\n"));
-        assert!(g
-            .descriptors
-            .get(&ConnId(2))
-            .unwrap()
-            .outbuf
-            .contains("You receive your share of experience -- 150 points.\r\n"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("You receive your share of experience -- 150 points.\r\n")
+        );
+        assert!(
+            g.descriptors
+                .get(&ConnId(2))
+                .unwrap()
+                .outbuf
+                .contains("You receive your share of experience -- 150 points.\r\n")
+        );
     }
 
     #[test]
@@ -3267,12 +3349,13 @@ mod tests {
         assert_eq!(v.points.mana, 1);
         assert_eq!(v.points.move_points, 1);
         assert_eq!(v.death_timer, 96);
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("You suddenly find yourself floating in space... you feel nothing.\r\n"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("You suddenly find yourself floating in space... you feel nothing.\r\n")
+        );
     }
 
     #[test]
@@ -3325,24 +3408,27 @@ mod tests {
         assert_eq!(k.prf_flags & PRF_SUMMONABLE, 0);
         assert_eq!(k.prf_flags & PRF_NOAUCT, PRF_NOAUCT);
         assert_eq!(k.alignment, -1000);
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("Oh now you've really gone and done it!\r\n"));
-        assert!(g
-            .descriptors
-            .get(&ConnId(2))
-            .unwrap()
-            .outbuf
-            .contains("&m[&YINFO&m]&n Victim was killed by Killer (jailed).\r\n"));
-        assert!(g
-            .descriptors
-            .get(&ConnId(3))
-            .unwrap()
-            .outbuf
-            .contains("[ Victim killed by Killer at Pit ]\r\n"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("Oh now you've really gone and done it!\r\n")
+        );
+        assert!(
+            g.descriptors
+                .get(&ConnId(2))
+                .unwrap()
+                .outbuf
+                .contains("&m[&YINFO&m]&n Victim was killed by Killer (jailed).\r\n")
+        );
+        assert!(
+            g.descriptors
+                .get(&ConnId(3))
+                .unwrap()
+                .outbuf
+                .contains("[ Victim killed by Killer at Pit ]\r\n")
+        );
     }
 
     #[test]
@@ -3370,12 +3456,13 @@ mod tests {
 
         die(&mut g, Some(killer), victim);
 
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("&m[&YINFO&m]&n Outlaw was killed by Defender (defending).\r\n"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("&m[&YINFO&m]&n Outlaw was killed by Defender (defending).\r\n")
+        );
     }
 
     #[test]
@@ -3416,12 +3503,13 @@ mod tests {
             g.get_char(attacker).unwrap().affect_flags & (AFF_HIDE | AFF_INVISIBLE),
             0
         );
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("Attacker slowly fades into existence.\r\n"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("Attacker slowly fades into existence.\r\n")
+        );
     }
 
     #[test]
@@ -3438,18 +3526,20 @@ mod tests {
         damage_type(&mut g, attacker, victim, 21, TYPE_UNDEFINED);
 
         assert_eq!(g.get_char(victim).unwrap().position, Position::Stunned);
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("You're stunned, but will probably regain consciousness again.\r\n"));
-        assert!(g
-            .descriptors
-            .get(&ConnId(2))
-            .unwrap()
-            .outbuf
-            .contains("Victim is stunned, but will probably regain consciousness again.\r\n"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("You're stunned, but will probably regain consciousness again.\r\n")
+        );
+        assert!(
+            g.descriptors
+                .get(&ConnId(2))
+                .unwrap()
+                .outbuf
+                .contains("Victim is stunned, but will probably regain consciousness again.\r\n")
+        );
     }
 
     #[test]
@@ -3464,12 +3554,13 @@ mod tests {
         }
 
         damage_type(&mut g, attacker, victim, 30, TYPE_UNDEFINED);
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("That really did HURT!\r\n"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("That really did HURT!\r\n")
+        );
 
         g.descriptors.get_mut(&ConnId(1)).unwrap().outbuf.clear();
         {
@@ -3479,12 +3570,13 @@ mod tests {
             v.position = Position::Standing;
         }
         damage_type(&mut g, attacker, victim, 10, TYPE_UNDEFINED);
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("&RYou wish that your wounds would stop BLEEDING so much!&n\r\n"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("&RYou wish that your wounds would stop BLEEDING so much!&n\r\n")
+        );
     }
 
     #[test]
@@ -3636,12 +3728,13 @@ mod tests {
 
         assert_eq!(g.get_char(victim).unwrap().in_room, Some(safe));
         assert_eq!(g.get_char(victim).unwrap().fighting, None);
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("You wimp out, and attempt to flee!\r\n"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("You wimp out, and attempt to flee!\r\n")
+        );
     }
 
     #[test]
@@ -3670,12 +3763,13 @@ mod tests {
 
         assert_eq!(g.get_char(victim).unwrap().in_room, Some(room));
         assert!(!g.rooms[safe].people.contains(&victim));
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("You are in pretty bad shape, unable to flee!\r\n"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("You are in pretty bad shape, unable to flee!\r\n")
+        );
     }
 
     #[test]
@@ -3707,12 +3801,13 @@ mod tests {
 
         assert_eq!(g.get_char(victim).unwrap().in_room, Some(room));
         assert!(!g.rooms[death].people.contains(&victim));
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("PANIC!  You couldn't escape!\r\n"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("PANIC!  You couldn't escape!\r\n")
+        );
     }
 
     #[test]
@@ -3751,12 +3846,13 @@ mod tests {
 
         assert_eq!(g.get_char(victim).unwrap().in_room, Some(safe));
         assert_eq!(g.get_char(victim).unwrap().points.exp, 900);
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("You lost 100 experience points for fleeing"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("You lost 100 experience points for fleeing")
+        );
     }
 
     #[test]

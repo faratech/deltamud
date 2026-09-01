@@ -7,7 +7,7 @@
 // table. Without it, offensive skills (backstab, kick, bash, ...) and offensive
 // spells fall back to the generic dam_message weapon verbs.
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::state::GameState;
 use crate::types::*;
 use std::sync::OnceLock;

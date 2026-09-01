@@ -29,6 +29,7 @@ deltamud/bin/wld2html
 *.log
 syslog
 syslog*
+/USRCNT
 # ...but never the Rust source module swallowed by the glob above
 !rust-mud/src/syslog.rs
 *.tmp

@@ -1,0 +1,137 @@
+name: Rust MUD CI
+
+on:
+  push:
+    paths:
+      - "rust-mud/**"
+      - ".github/workflows/rust-mud-ci.yml"
+  pull_request:
+    paths:
+      - "rust-mud/**"
+      - ".github/workflows/rust-mud-ci.yml"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: rust-mud
+
+jobs:
+  build-test-clippy:
+    name: build / test / clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: rust-mud
+
+      - name: Check
+        run: cargo check --all-targets
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Test in the default parallel mode
+        run: cargo test
+
+      - name: Prove an injected test failure is rejected
+        run: |
+          set +e
+          MUD_CI_FORCE_TEST_FAILURE=1 cargo test --test ci_negative_control
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "injected test failure was incorrectly accepted" >&2
+            exit 1
+          fi
+
+      # The port still has known dead-code/style warnings. Keep clippy visible
+      # without pretending that the existing warning baseline is clean.
+      - name: Clippy
+        run: cargo clippy --all-targets
+
+      - name: Validate release tools
+        run: |
+          python3 -m py_compile scripts/soak_combat.py scripts/soak_combat_test.py scripts/parity/driver.py scripts/parity/test_driver.py
+          python3 scripts/soak_combat_test.py
+          python3 scripts/parity/test_driver.py
+          bash -n scripts/canary.sh scripts/parity-check.sh
+
+      - name: Prove the parity driver fails closed
+        run: |
+          set +e
+          python3 scripts/parity/driver.py --force-driver-error
+          status=$?
+          set -e
+          if [ "$status" -ne 97 ]; then
+            echo "parity driver negative control returned $status, expected 97" >&2
+            exit 1
+          fi
+
+      - name: Run bounded live canary
+        timeout-minutes: 5
+        run: >-
+          bash scripts/canary.sh --seconds 5 --players 1
+          --artifacts "${{ runner.temp }}/canary-happy"
+
+      - name: Prove live-gate negative controls are rejected
+        timeout-minutes: 12
+        run: |
+          expect_red() {
+            control=$1
+            set +e
+            bash scripts/canary.sh --seconds 1 --players 1 \
+              --negative-control "$control" \
+              --artifacts "${{ runner.temp }}/canary-$control"
+            status=$?
+            set -e
+            if [ "$status" -eq 0 ]; then
+              echo "negative control $control was incorrectly green" >&2
+              exit 1
+            fi
+          }
+          expect_red kill-server
+          expect_red freeze-pulses
+          expect_red driver
+
+      - name: Archive canary evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-mud-canary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/canary-*
+          if-no-files-found: error
+
+  mysql-persistence:
+    name: MariaDB persistence
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: rust-mud
+
+      - name: Install MariaDB tools
+        run: sudo apt-get update && sudo apt-get install --yes mariadb-server mariadb-client
+
+      - name: Run isolated persistence gate
+        run: scripts/db-check.sh

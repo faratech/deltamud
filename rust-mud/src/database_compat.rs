@@ -265,8 +265,16 @@ pub fn player_main_to_character(row: &Row) -> Character {
     ch.points.max_hit = col::<i32>(row, "max_hit");
     ch.points.move_points = col::<i32>(row, "move");
     ch.points.max_move = col::<i32>(row, "max_move");
-    ch.points.gold = clamp_corrupt_gold(col::<i32>(row, "gold"));
-    ch.points.bank_gold = clamp_corrupt_gold(col::<i32>(row, "bank_gold"));
+    crate::gold::set(
+        &mut ch,
+        crate::gold::Account::Carried,
+        i64::from(col::<i32>(row, "gold")),
+    );
+    crate::gold::set(
+        &mut ch,
+        crate::gold::Account::Bank,
+        i64::from(col::<i32>(row, "bank_gold")),
+    );
     ch.points.exp = col::<i64>(row, "exp");
     ch.points.power = col::<i32>(row, "power") as i16;
     ch.points.mpower = col::<i32>(row, "mpower") as i16;
@@ -340,11 +348,7 @@ pub fn player_main_to_character(row: &Row) -> Character {
 }
 
 fn clamp_corrupt_gold(value: i32) -> i32 {
-    if !(-1_000_000_000..=1_000_000_000).contains(&value) {
-        0
-    } else {
-        value
-    }
+    crate::gold::normalize(i64::from(value))
 }
 
 /// Build the `player_affects` rows for a character (mirrors
@@ -427,6 +431,8 @@ mod tests {
     #[test]
     fn player_main_values_clamps_corrupt_gold_and_bank_gold() {
         let mut ch = Character::new_player("Goldy".to_string(), Class::Warrior, Race::Human);
+        // Deliberate invariant bypass: exercise the persistence repair path for
+        // legacy/corrupt in-memory values. Production mutations use gold.rs.
         ch.points.gold = 1_000_000_001;
         ch.points.bank_gold = -1_000_000_001;
         let values = player_main_values(&ch, "hash", "");
@@ -439,10 +445,10 @@ mod tests {
             .position(|column| *column == "bank_gold")
             .unwrap();
 
-        assert_eq!(values[gold_idx], Value::from(0));
+        assert_eq!(values[gold_idx], Value::from(1_000_000_000));
         assert_eq!(values[bank_idx], Value::from(0));
         assert_eq!(clamp_corrupt_gold(1_000_000_000), 1_000_000_000);
-        assert_eq!(clamp_corrupt_gold(-1_000_000_000), -1_000_000_000);
+        assert_eq!(clamp_corrupt_gold(-1_000_000_000), 0);
     }
 
     #[test]
@@ -466,12 +472,7 @@ mod tests {
         });
 
         let values = player_main_values(&ch, "hash", "");
-        let idx = |name: &str| {
-            PLAYER_MAIN_COLUMNS
-                .iter()
-                .position(|c| *c == name)
-                .unwrap()
-        };
+        let idx = |name: &str| PLAYER_MAIN_COLUMNS.iter().position(|c| *c == name).unwrap();
         assert_eq!(values[idx("max_hit")], Value::from(100), "bare max_hit");
         assert_eq!(
             values[idx("affected_by")],
@@ -509,8 +510,11 @@ mod schema_parity_tests {
                     in_player_main = false;
                     continue;
                 }
-                let name: String =
-                    trimmed.split(|c: char| c.is_whitespace() || c == '(').next().unwrap_or("").to_string();
+                let name: String = trimmed
+                    .split(|c: char| c.is_whitespace() || c == '(')
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
                 if !name.is_empty()
                     && !matches!(name.as_str(), "UNIQUE" | "INDEX" | "KEY" | "PRIMARY")
                     && !name.starts_with("--")

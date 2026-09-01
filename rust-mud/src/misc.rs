@@ -24,20 +24,21 @@
 // re-read. do_pfileclean logs + reports as in C, then queues the async database
 // cleanup for game.rs to drain and reflect into player_table.
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::constants::DIRS;
 use crate::dg_db_scripts::{
     add_proto_trigger, clear_proto_triggers, read_trigger, real_trigger, remove_proto_trigger,
 };
 use crate::dg_handler::{
-    self, add_trigger, extract_script, remove_trigger, trigger_ids, with_trig, ScriptKey,
+    self, ScriptKey, add_trigger, extract_script, remove_trigger, trigger_ids, with_trig,
 };
 use crate::interpreter::{is_abbrev, one_argument};
 use crate::object::{ObjLoc, ObjectAffect};
 use crate::room::EX_CLOSED;
-use crate::spell_parser::{get_char_world_vis, get_obj_world_vis, SKILL_LISTEN, SKILL_SPEED};
+use crate::spell_parser::{SKILL_LISTEN, SKILL_SPEED, get_char_world_vis, get_obj_world_vis};
 use crate::state::GameState;
 use crate::types::*;
+use crate::world::zone_vnum_bounds;
 
 const OK: &str = "Ok.\r\n";
 
@@ -327,6 +328,17 @@ fn mudlog_imp(g: &mut GameState, line: &str) {
     crate::syslog::mudlog(g, line, crate::syslog::NRM, LVL_IMPL);
 }
 
+fn command_atoi(g: &mut GameState, ch: CharId, value: &str) -> Option<i32> {
+    match crate::text::parse_i32_atoi(value) {
+        Ok(value) => Some(value),
+        Err(crate::text::ParseIntError::Overflow) => {
+            g.send_to_char(ch, "That number is outside the supported 32-bit range.\r\n");
+            None
+        }
+        Err(_) => unreachable!("parse_i32_atoi maps nonnumeric input to zero"),
+    }
+}
+
 // ===========================================================================
 // do_attach (dg_scripts.c) — bind trigger vnum -> mob/obj/room target.
 //   attach { mtr | otr | wtr } { trigger } { name } [ location ]
@@ -349,12 +361,17 @@ pub fn do_attach(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
 
-    let tn: i32 = trig_name.parse().unwrap_or(0);
+    let Some(tn) = command_atoi(g, ch, &trig_name) else {
+        return;
+    };
     // loc = (*loc_name) ? atoi(loc_name) : -1;
     let loc: i32 = if loc_name.is_empty() {
         -1
     } else {
-        loc_name.parse().unwrap_or(0)
+        let Some(location) = command_atoi(g, ch, &loc_name) else {
+            return;
+        };
+        location
     };
 
     if is_abbrev(&kind, "mtr") {
@@ -399,7 +416,9 @@ pub fn do_attach(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             .unwrap_or(false);
         if first_digit && !targ_name.contains('.') {
             // find_target_room reduces to a room-vnum lookup for digit input.
-            let vnum: RoomVnum = targ_name.parse().unwrap_or(NOWHERE);
+            let Some(vnum) = command_atoi(g, ch, &targ_name) else {
+                return;
+            };
             match g.real_room(vnum) {
                 Some(room) => {
                     let rvnum = g.room(room).number;
@@ -741,12 +760,30 @@ pub fn do_tlist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         );
         return;
     }
-    let mut first: i32 = a.parse().unwrap_or(0);
-    let last: i32 = if !b.is_empty() {
-        b.parse().unwrap_or(0)
+    let Some(parsed_first) = command_atoi(g, ch, &a) else {
+        return;
+    };
+    let (first, last): (i32, i32) = if !b.is_empty() {
+        let Some(last) = command_atoi(g, ch, &b) else {
+            return;
+        };
+        (parsed_first, last)
     } else {
-        first *= 100;
-        first + 99
+        let Some(first) = parsed_first.checked_mul(100) else {
+            g.send_to_char(
+                ch,
+                "That trigger range is outside the supported 32-bit range.\r\n",
+            );
+            return;
+        };
+        let Some(last) = first.checked_add(99) else {
+            g.send_to_char(
+                ch,
+                "That trigger range is outside the supported 32-bit range.\r\n",
+            );
+            return;
+        };
+        (first, last)
     };
     if first < 0 || last < 0 {
         g.send_to_char(
@@ -792,7 +829,9 @@ pub fn do_tstat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "Usage: tstat <vnum>\r\n");
         return;
     }
-    let vnum: i32 = s.parse().unwrap_or(-1);
+    let Some(vnum) = command_atoi(g, ch, &s) else {
+        return;
+    };
     let rnum = crate::dg_db_scripts::real_trigger(vnum);
     if rnum < 0 {
         g.send_to_char(ch, "That vnum does not exist.\r\n");
@@ -841,14 +880,25 @@ pub fn do_rebalance(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "Balance mobs or objects?\r\n");
         return;
     };
-    let znum: i32 = match znum_s.parse() {
-        Ok(v) => v,
+    let znum = match crate::text::parse_i32_strict(&znum_s) {
+        Ok(value) => value,
+        Err(crate::text::ParseIntError::Overflow) => {
+            g.send_to_char(ch, "That zone number is outside the supported range.\r\n");
+            return;
+        }
         Err(_) => {
             g.send_to_char(ch, "Invalid zone number.\r\n");
             return;
         }
     };
-    let zone_idx = match crate::olc::real_zone(g, znum * 100) {
+    let zone_vnum = match zone_vnum_bounds(znum) {
+        Some((value, _)) => value,
+        None => {
+            g.send_to_char(ch, "That zone number is outside the supported range.\r\n");
+            return;
+        }
+    };
+    let zone_idx = match crate::olc::real_zone(g, zone_vnum) {
         Some(z) => z,
         None => {
             g.send_to_char(ch, "Invalid zone number.\r\n");
@@ -860,7 +910,10 @@ pub fn do_rebalance(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
     let zone_number = g.zones[zone_idx].number;
-    let zone_start = zone_number * 100;
+    let Some(zone_start) = g.zones[zone_idx].vnum_start() else {
+        g.send_to_char(ch, "Invalid zone number.\r\n");
+        return;
+    };
     let zone_end = g.zones[zone_idx].top;
     if tobalance == 1 {
         for proto in g.obj_protos.values_mut() {
@@ -930,9 +983,11 @@ fn rebalance_object_proto(proto: &mut crate::world::ObjectProto) {
 fn rebalance_mobile_proto(proto: &mut crate::world::MobileProto) {
     let level = proto.level as f64;
     // Same medit.c:1442-1447 double-math fix as set_mob_stats (#265).
-    proto.defense = ((level * 7.5 * 7.0 / 10.0) as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    proto.defense =
+        ((level * 7.5 * 7.0 / 10.0) as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
     proto.mdefense = proto.defense;
-    proto.power = ((level * 7.5 * 8.0 / 10.0) as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    proto.power =
+        ((level * 7.5 * 8.0 / 10.0) as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
     proto.mpower = proto.defense;
     proto.technique = proto.defense;
     proto.damnodice = 1;
@@ -1063,12 +1118,13 @@ mod tests {
         assert_eq!(proto.affects[3].location, crate::flags::APPLY_MDEFENSE);
         assert_eq!(proto.affects[4].location, crate::flags::APPLY_TECHNIQUE);
         assert!(g.obj_protos.get(&250).unwrap().affects.is_empty());
-        assert!(g
-            .descriptors
-            .get(&ConnId(1))
-            .unwrap()
-            .outbuf
-            .contains("Rebalancing objects in zone 1"));
+        assert!(
+            g.descriptors
+                .get(&ConnId(1))
+                .unwrap()
+                .outbuf
+                .contains("Rebalancing objects in zone 1")
+        );
         crate::olc::olc_remove_from_save_list(1, crate::olc::OLC_SAVE_OBJ);
     }
 
@@ -1095,5 +1151,29 @@ mod tests {
         assert!(proto.experience > 0);
         assert_eq!(g.mob_protos.get(&250).unwrap().power, 0);
         crate::olc::olc_remove_from_save_list(1, crate::olc::OLC_SAVE_MOB);
+    }
+
+    #[test]
+    fn dg_admin_commands_reject_numeric_overflow_before_lookup_or_mutation() {
+        let mut g = GameState::new(Config::default());
+        let ch = connected_player(&mut g, ConnId(77), "Imm", LVL_IMMORT);
+
+        do_attach(&mut g, ch, "wtr 2147483648 100", 0);
+        do_tlist(&mut g, ch, "2147483648", 0);
+        do_tlist(&mut g, ch, "21474837", 0);
+        do_tstat(&mut g, ch, "-2147483649", 0);
+        do_rebalance(&mut g, ch, "mob 21474837", 0);
+
+        let output = &g.descriptors[&ConnId(77)].outbuf;
+        assert_eq!(
+            output.matches("outside the supported 32-bit range").count(),
+            4
+        );
+        assert_eq!(
+            output
+                .matches("zone number is outside the supported range")
+                .count(),
+            1
+        );
     }
 }

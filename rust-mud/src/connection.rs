@@ -5,11 +5,69 @@
 
 use crate::types::{CharId, ConnId};
 use anyhow::Result;
-use std::net::SocketAddr;
+use std::ffi::CStr;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::os::unix::io::{AsRawFd, RawFd};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc, oneshot};
+
+/// C `LARGE_BUFSIZE` after protocol/header slack. A descriptor can never grow
+/// beyond this many queued text bytes within one game pulse.
+pub const DESCRIPTOR_OUTPUT_LIMIT: usize = 12_056;
+pub(crate) const OUTPUT_OVERFLOW_MARKER: &str = "\r\n**OVERFLOW**\r\n";
+
+/// C `HOST_LENGTH`. Keep the operator/player-facing descriptor host compatible
+/// while retaining the complete verified hostname separately for ban matching.
+const C_HOST_LENGTH: usize = 30;
+
+/// Runtime reverse-DNS policy. The whole PTR + forward-confirmation operation
+/// has one deadline, and libc resolver concurrency is bounded by the semaphore
+/// supplied to `handle_client`.
+#[derive(Debug, Clone, Copy)]
+pub struct ReverseDnsConfig {
+    pub enabled: bool,
+    pub timeout: Duration,
+}
+
+impl ReverseDnsConfig {
+    #[cfg(test)]
+    fn disabled() -> Self {
+        Self {
+            enabled: false,
+            timeout: Duration::from_millis(1),
+        }
+    }
+}
+
+/// Trusted connection identity. `peer_ip` always comes directly from the
+/// accepted socket. `verified_hostname` is populated only when PTR lookup is
+/// followed by an A/AAAA lookup containing that exact peer IP (FCrDNS).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PeerIdentity {
+    pub peer_ip: IpAddr,
+    pub verified_hostname: Option<String>,
+}
+
+impl PeerIdentity {
+    pub(crate) fn numeric(peer_ip: IpAddr) -> Self {
+        Self {
+            peer_ip,
+            verified_hostname: None,
+        }
+    }
+
+    fn descriptor_host(&self) -> String {
+        let mut host = self
+            .verified_hostname
+            .clone()
+            .unwrap_or_else(|| self.peer_ip.to_string());
+        crate::text::truncate_utf8_bytes(&mut host, C_HOST_LENGTH);
+        host
+    }
+}
 
 // --- Telnet protocol constants (RFC 854 / 1073 / 1091) ---
 const IAC: u8 = 255; // Interpret As Command
@@ -316,7 +374,17 @@ impl QueuedInput {
 
 pub struct Descriptor {
     pub id: ConnId,
+    /// Operator-facing C-compatible host: the verified hostname (capped to C's
+    /// HOST_LENGTH) when available, otherwise the canonical socket peer IP.
     pub host: String,
+    /// Canonical address captured directly from the accepted socket. Live
+    /// descriptors always retain this even when reverse DNS succeeds, so an IP
+    /// ban can never be bypassed by a PTR record.
+    pub peer_ip: String,
+    /// Complete forward-confirmed PTR hostname used for hostname ban matching.
+    /// This is separate from `host` because the C display/persistence field is
+    /// only HOST_LENGTH bytes.
+    pub verified_hostname: Option<String>,
     /// Raw OS file descriptor of the underlying TCP socket. Captured before the
     /// stream is split (connection.rs handle_client) so do_copyover can write a
     /// final flush, clear FD_CLOEXEC, and inherit the live socket across execv —
@@ -333,6 +401,8 @@ pub struct Descriptor {
     pub original: Option<CharId>, // for `switch`
     /// Output accumulated this pulse; flushed by the Game task.
     pub outbuf: String,
+    /// At least one append was dropped after `outbuf` reached its hard limit.
+    pub output_overflowed: bool,
     /// True when a fresh prompt should be sent after flushing.
     pub need_prompt: bool,
     /// C comm.c d->idle_tics: 15-second heartbeat ticks spent sitting at a
@@ -379,9 +449,24 @@ impl Descriptor {
     }
 
     pub fn with_fd(id: ConnId, host: String, raw_fd: RawFd) -> Self {
+        let parsed_ip = host.parse::<IpAddr>().ok();
+        let peer_ip = parsed_ip.map(|ip| ip.to_string()).unwrap_or_default();
+        let verified_hostname = parsed_ip.is_none().then(|| host.to_ascii_lowercase());
+        Self::with_identity(id, host, peer_ip, verified_hostname, raw_fd)
+    }
+
+    pub fn with_identity(
+        id: ConnId,
+        host: String,
+        peer_ip: String,
+        verified_hostname: Option<String>,
+        raw_fd: RawFd,
+    ) -> Self {
         Descriptor {
             id,
             host,
+            peer_ip,
+            verified_hostname,
             raw_fd,
             state: ConState::QAnsi,
             editors: Vec::new(),
@@ -389,6 +474,7 @@ impl Descriptor {
             character: None,
             original: None,
             outbuf: String::new(),
+            output_overflowed: false,
             idle_tics: 0,
             need_prompt: true,
             wait: 1,
@@ -405,7 +491,34 @@ impl Descriptor {
     }
 
     pub fn write(&mut self, msg: &str) {
-        self.outbuf.push_str(msg);
+        if msg.is_empty() || self.output_overflowed {
+            return;
+        }
+        if self.outbuf.len().saturating_add(msg.len()) <= DESCRIPTOR_OUTPUT_LIMIT {
+            self.outbuf.push_str(msg);
+        } else {
+            self.output_overflowed = true;
+        }
+    }
+
+    /// Take one bounded pulse of output and reset the overflow state. The
+    /// marker itself is kept inside the same byte ceiling.
+    pub fn take_output_status(&mut self) -> (String, bool) {
+        let overflowed = self.output_overflowed;
+        let mut output = std::mem::take(&mut self.outbuf);
+        if overflowed {
+            crate::text::truncate_utf8_bytes(
+                &mut output,
+                DESCRIPTOR_OUTPUT_LIMIT.saturating_sub(OUTPUT_OVERFLOW_MARKER.len()),
+            );
+            output.push_str(OUTPUT_OVERFLOW_MARKER);
+        }
+        self.output_overflowed = false;
+        (output, overflowed)
+    }
+
+    pub fn take_output(&mut self) -> String {
+        self.take_output_status().0
     }
 }
 
@@ -487,14 +600,88 @@ pub fn strip_color(text: &str) -> String {
     result
 }
 
+/// One ordered writer-queue item. A barrier has empty bytes and an ack sender;
+/// the writer acknowledges it only after every preceding frame was written and
+/// flushed to the socket.
+#[derive(Debug)]
+pub struct OutputFrame {
+    pub bytes: Vec<u8>,
+    pub ack: Option<oneshot::Sender<bool>>,
+    /// Flush, half-close the socket, acknowledge, and terminate the writer.
+    pub close_after: bool,
+}
+
+impl OutputFrame {
+    pub fn data(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            ack: None,
+            close_after: false,
+        }
+    }
+
+    pub fn shutdown_barrier(ack: oneshot::Sender<bool>) -> Self {
+        Self {
+            bytes: Vec::new(),
+            ack: Some(ack),
+            close_after: true,
+        }
+    }
+
+    /// Ordered non-closing flush used immediately before copyover hands the
+    /// socket fd to synchronous exec preparation.
+    pub fn flush_barrier(ack: oneshot::Sender<bool>) -> Self {
+        Self {
+            bytes: Vec::new(),
+            ack: Some(ack),
+            close_after: false,
+        }
+    }
+}
+
+async fn run_output_writer<W>(
+    mut writer: W,
+    mut output_rx: mpsc::Receiver<OutputFrame>,
+) -> WriterEnd
+where
+    W: AsyncWrite + Unpin,
+{
+    while let Some(frame) = output_rx.recv().await {
+        let mut ok = (frame.bytes.is_empty() || writer.write_all(&frame.bytes).await.is_ok())
+            && writer.flush().await.is_ok();
+        if ok && frame.close_after {
+            ok = writer.shutdown().await.is_ok();
+        }
+        if let Some(ack) = frame.ack {
+            let _ = ack.send(ok);
+        }
+        if !ok {
+            return WriterEnd::IoFailure;
+        }
+        if frame.close_after {
+            return WriterEnd::ShutdownBarrier;
+        }
+    }
+    WriterEnd::OutputChannelClosed
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriterEnd {
+    IoFailure,
+    ShutdownBarrier,
+    OutputChannelClosed,
+}
+
 // Messages from connection tasks to the single Game task.
 #[derive(Debug)]
 pub enum GameMessage {
     NewConnection {
         id: ConnId,
         host: String,
+        peer_ip: String,
+        verified_hostname: Option<String>,
         raw_fd: RawFd,
-        output_tx: mpsc::Sender<Vec<u8>>,
+        output_tx: mpsc::Sender<OutputFrame>,
     },
     /// Re-attach a player whose live socket was inherited across a copyover
     /// execv (comm.c copyover_recover). The Game loads the named player straight
@@ -502,9 +689,11 @@ pub enum GameMessage {
     Recover {
         id: ConnId,
         host: String,
+        peer_ip: String,
+        verified_hostname: Option<String>,
         raw_fd: RawFd,
         name: String,
-        output_tx: mpsc::Sender<Vec<u8>>,
+        output_tx: mpsc::Sender<OutputFrame>,
     },
     Input {
         conn_id: ConnId,
@@ -523,68 +712,319 @@ pub enum GameMessage {
     Disconnect {
         conn_id: ConnId,
     },
+    #[cfg(test)]
+    PanicForTest {
+        conn_id: ConnId,
+    },
 }
 
-/// Per-connection task: split the stream, register with the Game, pump input
-/// lines into the game channel, and run a writer task draining output.
+impl GameMessage {
+    pub fn conn_id(&self) -> Option<ConnId> {
+        match self {
+            GameMessage::NewConnection { id, .. } | GameMessage::Recover { id, .. } => Some(*id),
+            GameMessage::Input { conn_id, .. }
+            | GameMessage::EnableGmcp { conn_id }
+            | GameMessage::SendMssp { conn_id }
+            | GameMessage::Disconnect { conn_id } => Some(*conn_id),
+            #[cfg(test)]
+            GameMessage::PanicForTest { conn_id } => Some(*conn_id),
+        }
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            GameMessage::NewConnection { .. } => "new-connection",
+            GameMessage::Recover { .. } => "recover",
+            GameMessage::Input { .. } => "input",
+            GameMessage::EnableGmcp { .. } => "enable-gmcp",
+            GameMessage::SendMssp { .. } => "send-mssp",
+            GameMessage::Disconnect { .. } => "disconnect",
+            #[cfg(test)]
+            GameMessage::PanicForTest { .. } => "panic-test",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionEnd {
+    Reader,
+    Writer(WriterEnd),
+}
+
+/// Drive both socket halves in the owning connection task. Keeping both loops
+/// in this `select!` means the losing half is dropped before this function
+/// returns; there is no nested writer task whose `JoinHandle` can be detached.
+/// Writer errors and shutdown barriers therefore terminate a blocked reader in
+/// exactly the same way reader EOF terminates a blocked writer.
+async fn supervise_connection<R, W>(
+    reader: &mut R,
+    writer: W,
+    conn_id: ConnId,
+    game_tx: &mpsc::Sender<GameMessage>,
+    output_tx: &mpsc::Sender<OutputFrame>,
+    output_rx: mpsc::Receiver<OutputFrame>,
+) -> ConnectionEnd
+where
+    R: AsyncReadExt + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let ended = tokio::select! {
+        biased;
+        // A queued shutdown barrier must win a simultaneous read EOF so the
+        // final output can be acknowledged instead of being cancelled.
+        writer_end = run_output_writer(writer, output_rx) => ConnectionEnd::Writer(writer_end),
+        _ = run_input_loop(reader, conn_id, game_tx, output_tx) => ConnectionEnd::Reader,
+    };
+
+    let disconnect = GameMessage::Disconnect { conn_id };
+    match ended {
+        // During graceful shutdown the Game has already closed the socket and
+        // may no longer be draining its input queue. Do not let this redundant
+        // cleanup notice extend the global shutdown bound.
+        ConnectionEnd::Writer(WriterEnd::ShutdownBarrier | WriterEnd::OutputChannelClosed) => {
+            let _ = game_tx.try_send(disconnect);
+        }
+        ConnectionEnd::Reader | ConnectionEnd::Writer(WriterEnd::IoFailure) => {
+            let _ = game_tx.send(disconnect).await;
+        }
+    }
+    ended
+}
+
+fn normalize_ptr_hostname(raw: &str) -> Option<String> {
+    let hostname = raw.trim_end_matches('.').to_ascii_lowercase();
+    if hostname.is_empty() || hostname.len() > 253 || !hostname.is_ascii() {
+        return None;
+    }
+    let valid = hostname.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    });
+    valid.then_some(hostname)
+}
+
+fn gai_error(code: libc::c_int) -> String {
+    // SAFETY: gai_strerror returns either a process-lifetime C string or null
+    // for the supplied getnameinfo status code.
+    let ptr = unsafe { libc::gai_strerror(code) };
+    if ptr.is_null() {
+        return format!("resolver error {code}");
+    }
+    // SAFETY: non-null gai_strerror results are NUL-terminated C strings.
+    unsafe { CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn getnameinfo_hostname(
+    address: *const libc::sockaddr,
+    address_len: libc::socklen_t,
+) -> std::result::Result<String, String> {
+    let mut hostname = [0 as libc::c_char; 1_025];
+    // SAFETY: `address` points at a fully initialized sockaddr of
+    // `address_len`; `hostname` is a writable buffer whose exact length is
+    // supplied. No service buffer is requested.
+    let status = unsafe {
+        libc::getnameinfo(
+            address,
+            address_len,
+            hostname.as_mut_ptr(),
+            hostname.len() as libc::socklen_t,
+            std::ptr::null_mut(),
+            0,
+            libc::NI_NAMEREQD,
+        )
+    };
+    if status != 0 {
+        return Err(gai_error(status));
+    }
+    // SAFETY: successful getnameinfo NUL-terminates the host buffer.
+    let raw = unsafe { CStr::from_ptr(hostname.as_ptr()) }
+        .to_str()
+        .map_err(|_| "resolver returned a non-UTF-8 hostname".to_string())?;
+    normalize_ptr_hostname(raw).ok_or_else(|| "resolver returned an invalid hostname".to_string())
+}
+
+fn reverse_lookup_system(peer: SocketAddr) -> std::result::Result<String, String> {
+    match peer {
+        SocketAddr::V4(peer) => {
+            let address = libc::sockaddr_in {
+                sin_family: libc::AF_INET as libc::sa_family_t,
+                sin_port: 0,
+                // s_addr is stored in network byte order; from_ne_bytes makes
+                // the in-memory bytes exactly the IPv4 octets on every target.
+                sin_addr: libc::in_addr {
+                    s_addr: u32::from_ne_bytes(peer.ip().octets()),
+                },
+                sin_zero: [0; 8],
+            };
+            getnameinfo_hostname(
+                (&raw const address).cast::<libc::sockaddr>(),
+                std::mem::size_of_val(&address) as libc::socklen_t,
+            )
+        }
+        SocketAddr::V6(peer) => {
+            let address = libc::sockaddr_in6 {
+                sin6_family: libc::AF_INET6 as libc::sa_family_t,
+                sin6_port: 0,
+                sin6_flowinfo: peer.flowinfo(),
+                sin6_addr: libc::in6_addr {
+                    s6_addr: peer.ip().octets(),
+                },
+                sin6_scope_id: peer.scope_id(),
+            };
+            getnameinfo_hostname(
+                (&raw const address).cast::<libc::sockaddr>(),
+                std::mem::size_of_val(&address) as libc::socklen_t,
+            )
+        }
+    }
+}
+
+fn forward_addresses_confirm_peer(
+    peer_ip: IpAddr,
+    addresses: impl IntoIterator<Item = SocketAddr>,
+) -> bool {
+    addresses.into_iter().any(|address| address.ip() == peer_ip)
+}
+
+fn resolve_and_forward_confirm_system(
+    peer: SocketAddr,
+) -> std::result::Result<Option<String>, String> {
+    let hostname = reverse_lookup_system(peer)?;
+    let addresses = (hostname.as_str(), 0)
+        .to_socket_addrs()
+        .map_err(|error| format!("forward lookup failed: {error}"))?;
+    Ok(forward_addresses_confirm_peer(peer.ip(), addresses).then_some(hostname))
+}
+
+/// Perform reverse DNS entirely at the connection edge, then forward-confirm
+/// the PTR result against the socket's original address. Any disabled lookup,
+/// queue closure, resolver error, unconfirmed PTR, or deadline expiry falls
+/// back to the canonical peer IP.
+pub(crate) async fn resolve_peer_identity(
+    peer: SocketAddr,
+    config: ReverseDnsConfig,
+    resolver_slots: Arc<Semaphore>,
+) -> PeerIdentity {
+    let numeric = PeerIdentity::numeric(peer.ip());
+    if !config.enabled {
+        return numeric;
+    }
+
+    let lookup = async {
+        let permit = resolver_slots.acquire_owned().await.ok()?;
+        let resolved = tokio::task::spawn_blocking(move || {
+            // Moving the permit into the blocking closure is intentional: if
+            // the async caller times out, uncancellable libc reverse OR forward
+            // calls still occupy one bounded resolver slot until both return.
+            let result = resolve_and_forward_confirm_system(peer);
+            (permit, result)
+        })
+        .await
+        .ok()?;
+        let (_permit, resolved) = resolved;
+        resolved.ok().flatten()
+    };
+
+    match tokio::time::timeout(config.timeout, lookup).await {
+        Ok(Some(hostname)) => PeerIdentity {
+            peer_ip: peer.ip(),
+            verified_hostname: Some(hostname),
+        },
+        Ok(None) => {
+            log::debug!(
+                "reverse DNS for {} failed or was not forward-confirmed",
+                peer.ip()
+            );
+            numeric
+        }
+        Err(_) => {
+            log::debug!(
+                "reverse DNS for {} exceeded {}ms; using canonical IP",
+                peer.ip(),
+                config.timeout.as_millis()
+            );
+            numeric
+        }
+    }
+}
+
+/// The actual BAN_ALL socket gate, shared by the immediate numeric-IP check and
+/// the post-FCrDNS check. Returns true after writing the C rejection and closing
+/// the stream.
+pub(crate) async fn reject_ban_all<W>(stream: &mut W, identity: &PeerIdentity) -> bool
+where
+    W: AsyncWrite + Unpin,
+{
+    let ban_type = crate::ban::isbanned_connection(
+        &identity.peer_ip.to_string(),
+        identity.verified_hostname.as_deref(),
+    );
+    if ban_type != crate::ban::BanType::All {
+        return false;
+    }
+
+    match identity.verified_hostname.as_deref() {
+        Some(hostname) => log::warn!(
+            "Rejected banned peer {} (verified hostname {})",
+            identity.peer_ip,
+            hostname
+        ),
+        None => log::warn!("Rejected banned peer {}", identity.peer_ip),
+    }
+    let _ = stream.write_all(b"Your site is BANNED!\r\n").await;
+    let _ = stream.shutdown().await;
+    true
+}
+
+/// Per-connection task: split the stream, register with the Game, then
+/// supervise the input and output loops together.
 pub async fn handle_client(
-    stream: TcpStream,
+    mut stream: TcpStream,
     addr: SocketAddr,
     conn_id: ConnId,
     game_tx: mpsc::Sender<GameMessage>,
+    reverse_dns: ReverseDnsConfig,
+    resolver_slots: Arc<Semaphore>,
 ) -> Result<()> {
+    let identity = resolve_peer_identity(addr, reverse_dns, resolver_slots).await;
+    if reject_ban_all(&mut stream, &identity).await {
+        return Ok(());
+    }
+
     // Capture the raw fd BEFORE into_split() consumes the stream. do_copyover
     // needs this to inherit the live socket across execv (FD_CLOEXEC dance).
     let fd = stream.as_raw_fd();
-    let host = addr.ip().to_string();
+    let host = identity.descriptor_host();
 
-    let (mut reader, mut writer) = stream.into_split();
+    let (mut reader, writer) = stream.into_split();
 
-    let (output_tx, mut output_rx) = mpsc::channel::<Vec<u8>>(256);
+    let (output_tx, output_rx) = mpsc::channel::<OutputFrame>(256);
 
     game_tx
         .send(GameMessage::NewConnection {
             id: conn_id,
             host,
+            peer_ip: identity.peer_ip.to_string(),
+            verified_hostname: identity.verified_hostname,
             raw_fd: fd,
             output_tx: output_tx.clone(),
         })
         .await?;
 
-    // The writer's death (socket error) must drive cleanup just like the
-    // reader's EOF does — otherwise a peer that vanished without RST leaves a
-    // zombie descriptor, a leaked connection slot, and a permanently deaf
-    // client. select! over both halves: whichever finishes first disconnects.
-    let mut write_handle = tokio::spawn(async move {
-        while let Some(msg) = output_rx.recv().await {
-            if writer.write_all(&msg).await.is_err() {
-                break;
-            }
-            if writer.flush().await.is_err() {
-                break;
-            }
-        }
-    });
-
-    let reader = run_input_loop(&mut reader, conn_id, &game_tx, &output_tx);
-    // Bias the select toward the reader: on simultaneous completion the
-    // reader's own Disconnect path is the well-tested one.
-    let writer_dead = async {
-        let _ = (&mut write_handle).await;
-    };
-    tokio::select! {
-        biased;
-        _ = reader => {},
-        _ = writer_dead => {
-            // Writer died mid-session: tell the Game this connection is gone.
-            let _ = game_tx
-                .send(GameMessage::Disconnect { conn_id })
-                .await;
-            return Ok(());
-        }
-    }
-
-    let _ = game_tx.send(GameMessage::Disconnect { conn_id }).await;
+    supervise_connection(
+        &mut reader,
+        writer,
+        conn_id,
+        &game_tx,
+        &output_tx,
+        output_rx,
+    )
+    .await;
     Ok(())
 }
 
@@ -595,7 +1035,7 @@ async fn run_input_loop<R: AsyncReadExt + Unpin>(
     reader: &mut R,
     conn_id: ConnId,
     game_tx: &mpsc::Sender<GameMessage>,
-    output_tx: &mpsc::Sender<Vec<u8>>,
+    output_tx: &mpsc::Sender<OutputFrame>,
 ) {
     let mut filter = TelnetFilter::new();
     let mut buf = [0u8; 4096];
@@ -616,7 +1056,11 @@ async fn run_input_loop<R: AsyncReadExt + Unpin>(
         // waiting for a reply. The channel carries raw bytes: telnet frames
         // are NOT valid UTF-8 (IAC = 0xFF), so a String here would be UB.
         if !reply.is_empty() {
-            if output_tx.send(std::mem::take(&mut reply)).await.is_err() {
+            if output_tx
+                .send(OutputFrame::data(std::mem::take(&mut reply)))
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -659,36 +1103,97 @@ pub async fn handle_recovered(
     host: String,
     game_tx: mpsc::Sender<GameMessage>,
 ) -> Result<()> {
-    let (mut reader, mut writer) = stream.into_split();
+    let peer_ip = stream
+        .peer_addr()
+        .map(|peer| peer.ip().to_string())
+        .unwrap_or_default();
+    // The hostname in a durable copyover snapshot came from the already-live,
+    // previously FCrDNS-confirmed descriptor. Numeric hosts remain numeric.
+    let verified_hostname = host
+        .parse::<IpAddr>()
+        .is_err()
+        .then(|| host.to_ascii_lowercase());
+    let (mut reader, writer) = stream.into_split();
 
-    let (output_tx, mut output_rx) = mpsc::channel::<Vec<u8>>(256);
+    let (output_tx, output_rx) = mpsc::channel::<OutputFrame>(256);
 
     game_tx
         .send(GameMessage::Recover {
             id: conn_id,
             host,
+            peer_ip,
+            verified_hostname,
             raw_fd,
             name,
             output_tx: output_tx.clone(),
         })
         .await?;
 
-    let mut write_handle = tokio::spawn(async move {
-        while let Some(msg) = output_rx.recv().await {
-            if writer.write_all(&msg).await.is_err() {
-                break;
-            }
-            if writer.flush().await.is_err() {
-                break;
-            }
-        }
-    });
-
-    run_input_loop(&mut reader, conn_id, &game_tx, &output_tx).await;
-
-    let _ = game_tx.send(GameMessage::Disconnect { conn_id }).await;
-    write_handle.abort();
+    supervise_connection(
+        &mut reader,
+        writer,
+        conn_id,
+        &game_tx,
+        &output_tx,
+        output_rx,
+    )
+    .await;
     Ok(())
+}
+
+#[cfg(test)]
+mod reverse_dns_tests {
+    use super::*;
+
+    #[test]
+    fn ptr_hostname_validation_is_log_safe_and_canonical() {
+        assert_eq!(
+            normalize_ptr_hostname("Dialup.Example.TEST.").as_deref(),
+            Some("dialup.example.test")
+        );
+        assert_eq!(normalize_ptr_hostname("bad\nname.example"), None);
+        assert_eq!(normalize_ptr_hostname("empty..label.example"), None);
+        assert_eq!(
+            normalize_ptr_hostname(&format!("{}.test", "x".repeat(64))),
+            None
+        );
+    }
+
+    #[test]
+    fn forward_confirmation_requires_the_original_peer_address() {
+        let peer: IpAddr = "192.0.2.10".parse().unwrap();
+        let matching = vec!["192.0.2.10:0".parse().unwrap()];
+        let rebound = vec!["198.51.100.20:0".parse().unwrap()];
+        assert!(forward_addresses_confirm_peer(peer, matching));
+        assert!(!forward_addresses_confirm_peer(peer, rebound));
+    }
+
+    #[tokio::test]
+    async fn disabled_and_timed_out_resolution_retain_canonical_peer_ip() {
+        let peer: SocketAddr = "192.0.2.25:4000".parse().unwrap();
+        let disabled = resolve_peer_identity(
+            peer,
+            ReverseDnsConfig::disabled(),
+            Arc::new(Semaphore::new(1)),
+        )
+        .await;
+        assert_eq!(disabled, PeerIdentity::numeric(peer.ip()));
+
+        // No resolver slot can become available; the whole-operation deadline
+        // must fire and return the same canonical identity.
+        let started = tokio::time::Instant::now();
+        let timed_out = resolve_peer_identity(
+            peer,
+            ReverseDnsConfig {
+                enabled: true,
+                timeout: Duration::from_millis(10),
+            },
+            Arc::new(Semaphore::new(0)),
+        )
+        .await;
+        assert_eq!(timed_out, PeerIdentity::numeric(peer.ip()));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 }
 
 #[cfg(test)]
@@ -732,7 +1237,10 @@ mod telnet_tests {
         // (comm.c:1955-1960): the run from a previous read does NOT extend,
         // so a standalone \n in the next read is a fresh EMPTY line — the
         // input the parity battery and RETURN-style prompts rely on.
-        assert_eq!(lines_of(&[b"hi\r", b"\nthere\r\n"]), vec!["hi", "", "there"]);
+        assert_eq!(
+            lines_of(&[b"hi\r", b"\nthere\r\n"]),
+            vec!["hi", "", "there"]
+        );
         // A genuine \r\n pair within one read still collapses to one break.
         assert_eq!(lines_of(&[b"hi\r\nthere\r\n"]), vec!["hi", "there"]);
     }
@@ -764,6 +1272,428 @@ mod telnet_tests {
         let seq: &[u8] = &[b'x', b'\r', b'\n', IAC, WILL, TELOPT_GMCP, b'\r', b'\n'];
         assert_eq!(lines_of(&[seq]), vec!["x", ""]);
     }
+
+    #[test]
+    fn descriptor_output_is_bounded_and_resets_after_flush() {
+        let mut descriptor = Descriptor::new(ConnId(1), "example.test".to_string());
+        descriptor.write(&"x".repeat(DESCRIPTOR_OUTPUT_LIMIT));
+        let (exact, overflowed) = descriptor.take_output_status();
+        assert_eq!(exact.len(), DESCRIPTOR_OUTPUT_LIMIT);
+        assert!(!overflowed);
+
+        descriptor.write(&"x".repeat(DESCRIPTOR_OUTPUT_LIMIT));
+        descriptor.write("x");
+
+        let (output, overflowed) = descriptor.take_output_status();
+        assert!(output.len() <= DESCRIPTOR_OUTPUT_LIMIT);
+        assert!(output.ends_with(OUTPUT_OVERFLOW_MARKER));
+        assert!(overflowed);
+
+        descriptor.write("next pulse");
+        assert_eq!(descriptor.take_output(), "next pulse");
+    }
+
+    #[test]
+    fn descriptor_overflow_truncation_preserves_utf8_boundaries() {
+        for (index, character) in ["é", "€", "🦀"].into_iter().enumerate() {
+            let mut descriptor =
+                Descriptor::new(ConnId(2 + index as u64), "example.test".to_string());
+            let prefix = "x".repeat(DESCRIPTOR_OUTPUT_LIMIT - 1);
+            descriptor.write(&prefix);
+            descriptor.write(character);
+
+            let output = descriptor.take_output();
+            assert!(output.len() <= DESCRIPTOR_OUTPUT_LIMIT);
+            assert!(output.ends_with(OUTPUT_OVERFLOW_MARKER));
+            assert!(std::str::from_utf8(output.as_bytes()).is_ok());
+        }
+    }
+
+    #[test]
+    fn one_huge_write_and_many_small_writes_emit_only_one_marker() {
+        let mut huge = Descriptor::new(ConnId(10), "example.test".to_string());
+        huge.write(&"x".repeat(DESCRIPTOR_OUTPUT_LIMIT * 8));
+        huge.write("ignored after overflow");
+        let output = huge.take_output();
+        assert_eq!(output, OUTPUT_OVERFLOW_MARKER);
+
+        let mut small = Descriptor::new(ConnId(11), "example.test".to_string());
+        for _ in 0..DESCRIPTOR_OUTPUT_LIMIT {
+            small.write("x");
+        }
+        small.write("x");
+        small.write("x");
+        let output = small.take_output();
+        assert_eq!(output.matches(OUTPUT_OVERFLOW_MARKER).count(), 1);
+        assert!(output.len() <= DESCRIPTOR_OUTPUT_LIMIT);
+    }
+}
+
+#[cfg(test)]
+mod output_writer_tests {
+    use super::*;
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::task::{Context, Poll};
+    use std::time::Duration;
+    use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn shutdown_barrier_acknowledges_only_after_flush_and_socket_shutdown() {
+        let (mut client, server) = tokio::io::duplex(64);
+        let (tx, rx) = mpsc::channel(4);
+        let writer = tokio::spawn(run_output_writer(server, rx));
+        tx.send(OutputFrame::data(b"final notice".to_vec()))
+            .await
+            .unwrap();
+        let (ack_tx, ack_rx) = oneshot::channel();
+        tx.send(OutputFrame::shutdown_barrier(ack_tx))
+            .await
+            .unwrap();
+
+        assert!(ack_rx.await.unwrap());
+        writer.await.unwrap();
+        let mut received = Vec::new();
+        client.read_to_end(&mut received).await.unwrap();
+        assert_eq!(received, b"final notice");
+    }
+
+    struct PartialThenError {
+        wrote_once: bool,
+    }
+
+    impl AsyncWrite for PartialThenError {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.wrote_once {
+                Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "injected partial-write failure",
+                )))
+            } else {
+                self.wrote_once = true;
+                Poll::Ready(Ok(bytes.len().min(2)))
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct PendingReader;
+
+    impl AsyncRead for PendingReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    struct EofReader;
+
+    impl AsyncRead for EofReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct DropAwareWriter {
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Drop for DropAwareWriter {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl AsyncWrite for DropAwareWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Pending
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    struct ImmediateWriter {
+        shutdown: Arc<AtomicBool>,
+    }
+
+    impl AsyncWrite for ImmediateWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(bytes.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.shutdown.store(true, Ordering::SeqCst);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    async fn tcp_pair() -> (TcpStream, TcpStream, SocketAddr) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (client, accepted) = tokio::join!(TcpStream::connect(address), listener.accept());
+        let (server, peer) = accepted.unwrap();
+        (client.unwrap(), server, peer)
+    }
+
+    async fn close_registered_writer(output_tx: mpsc::Sender<OutputFrame>) {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        output_tx
+            .send(OutputFrame::shutdown_barrier(ack_tx))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), ack_rx)
+                .await
+                .expect("writer did not process shutdown barrier")
+                .expect("writer dropped shutdown acknowledgement")
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_write_error_drops_the_later_barrier_without_false_ack() {
+        let (tx, rx) = mpsc::channel(4);
+        let writer = tokio::spawn(run_output_writer(
+            PartialThenError { wrote_once: false },
+            rx,
+        ));
+        tx.send(OutputFrame::data(b"cannot finish".to_vec()))
+            .await
+            .unwrap();
+        let (ack_tx, ack_rx) = oneshot::channel();
+        tx.send(OutputFrame::shutdown_barrier(ack_tx))
+            .await
+            .unwrap();
+
+        writer.await.unwrap();
+        assert!(ack_rx.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn non_reading_peer_cannot_produce_a_premature_acknowledgement() {
+        let (_client, server) = tokio::io::duplex(1);
+        let (tx, rx) = mpsc::channel(4);
+        let writer = tokio::spawn(run_output_writer(server, rx));
+        tx.send(OutputFrame::data(vec![b'x'; 1024])).await.unwrap();
+        let (ack_tx, ack_rx) = oneshot::channel();
+        tx.send(OutputFrame::shutdown_barrier(ack_tx))
+            .await
+            .unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), ack_rx)
+                .await
+                .is_err()
+        );
+        writer.abort();
+        let _ = writer.await;
+    }
+
+    #[tokio::test]
+    async fn writer_failure_terminates_a_blocked_reader_and_notifies_game() {
+        let conn_id = ConnId(41);
+        let mut reader = PendingReader;
+        let (game_tx, mut game_rx) = mpsc::channel(4);
+        let (output_tx, output_rx) = mpsc::channel(4);
+        output_tx
+            .send(OutputFrame::data(b"writer fails".to_vec()))
+            .await
+            .unwrap();
+
+        let ended = tokio::time::timeout(
+            Duration::from_secs(1),
+            supervise_connection(
+                &mut reader,
+                PartialThenError { wrote_once: false },
+                conn_id,
+                &game_tx,
+                &output_tx,
+                output_rx,
+            ),
+        )
+        .await
+        .expect("writer failure left the connection reader running");
+
+        assert_eq!(ended, ConnectionEnd::Writer(WriterEnd::IoFailure));
+        assert!(matches!(
+            game_rx.recv().await,
+            Some(GameMessage::Disconnect { conn_id: id }) if id == conn_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn reader_eof_drops_the_writer_before_supervisor_returns() {
+        let conn_id = ConnId(42);
+        let mut reader = EofReader;
+        let dropped = Arc::new(AtomicBool::new(false));
+        let writer = DropAwareWriter {
+            dropped: Arc::clone(&dropped),
+        };
+        let (game_tx, mut game_rx) = mpsc::channel(4);
+        let (output_tx, output_rx) = mpsc::channel(4);
+
+        let ended = supervise_connection(
+            &mut reader,
+            writer,
+            conn_id,
+            &game_tx,
+            &output_tx,
+            output_rx,
+        )
+        .await;
+
+        assert_eq!(ended, ConnectionEnd::Reader);
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the writer outlived its owning connection supervisor"
+        );
+        assert!(matches!(
+            game_rx.recv().await,
+            Some(GameMessage::Disconnect { conn_id: id }) if id == conn_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn shutdown_barrier_wins_a_simultaneous_reader_eof() {
+        let conn_id = ConnId(43);
+        let mut reader = EofReader;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let writer = ImmediateWriter {
+            shutdown: Arc::clone(&shutdown),
+        };
+        let (game_tx, mut game_rx) = mpsc::channel(4);
+        let (output_tx, output_rx) = mpsc::channel(4);
+        output_tx
+            .send(OutputFrame::data(b"final output".to_vec()))
+            .await
+            .unwrap();
+        let (ack_tx, ack_rx) = oneshot::channel();
+        output_tx
+            .send(OutputFrame::shutdown_barrier(ack_tx))
+            .await
+            .unwrap();
+
+        let ended = supervise_connection(
+            &mut reader,
+            writer,
+            conn_id,
+            &game_tx,
+            &output_tx,
+            output_rx,
+        )
+        .await;
+
+        assert_eq!(ended, ConnectionEnd::Writer(WriterEnd::ShutdownBarrier));
+        assert!(ack_rx.await.unwrap());
+        assert!(shutdown.load(Ordering::SeqCst));
+        assert!(matches!(
+            game_rx.recv().await,
+            Some(GameMessage::Disconnect { conn_id: id }) if id == conn_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn fresh_connection_shutdown_ends_the_outer_task() {
+        let (_client, server, peer) = tcp_pair().await;
+        let conn_id = ConnId(44);
+        let (game_tx, mut game_rx) = mpsc::channel(4);
+        let task = tokio::spawn(handle_client(
+            server,
+            peer,
+            conn_id,
+            game_tx,
+            ReverseDnsConfig::disabled(),
+            Arc::new(Semaphore::new(1)),
+        ));
+
+        let output_tx = match game_rx.recv().await {
+            Some(GameMessage::NewConnection { id, output_tx, .. }) if id == conn_id => output_tx,
+            other => panic!("unexpected registration: {other:?}"),
+        };
+        close_registered_writer(output_tx).await;
+
+        assert!(matches!(
+            game_rx.recv().await,
+            Some(GameMessage::Disconnect { conn_id: id }) if id == conn_id
+        ));
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("fresh connection task outlived its writer")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovered_connection_shutdown_ends_the_outer_task() {
+        let (_client, server, _peer) = tcp_pair().await;
+        let raw_fd = server.as_raw_fd();
+        let conn_id = ConnId(45);
+        let (game_tx, mut game_rx) = mpsc::channel(4);
+        let task = tokio::spawn(handle_recovered(
+            server,
+            conn_id,
+            raw_fd,
+            "Recovered".to_string(),
+            "127.0.0.1".to_string(),
+            game_tx,
+        ));
+
+        let output_tx = match game_rx.recv().await {
+            Some(GameMessage::Recover { id, output_tx, .. }) if id == conn_id => output_tx,
+            other => panic!("unexpected registration: {other:?}"),
+        };
+        close_registered_writer(output_tx).await;
+
+        assert!(matches!(
+            game_rx.recv().await,
+            Some(GameMessage::Disconnect { conn_id: id }) if id == conn_id
+        ));
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("recovered connection task outlived its writer")
+            .unwrap()
+            .unwrap();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -774,7 +1704,7 @@ mod telnet_tests {
 // ---------------------------------------------------------------------------
 
 const COLOURLIST: [&str; 30] = [
-    "\x1B[0;0m", // 0 CNRM
+    "\x1B[0;0m",  // 0 CNRM
     "\x1B[0;31m", // 1 CRED
     "\x1B[0;32m", // 2 CGRN
     "\x1B[0;33m", // 3 CYEL
@@ -797,7 +1727,7 @@ const COLOURLIST: [&str; 30] = [
     "\x1B[46m",   // 20 BKCYN
     "\x1B[47m",   // 21 BKWHT
     "&",          // 22 CAMP
-    "\\",        // 23 CSLH
+    "\\",         // 23 CSLH
     "\x1B[40m",   // 24 BKBLK
     "\x1B[0;30m", // 25 CBLK (&k)
     "\x1B[5m",    // 26 CFSH (&f)

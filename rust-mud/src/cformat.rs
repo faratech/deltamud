@@ -25,6 +25,8 @@
 // unsafe, no #[repr(C)].
 
 use crate::object::{ExtraFlags, ObjectAffect, ObjectType, WearFlags};
+use std::io::Write;
+use std::path::Path;
 
 pub const C_MAX_OBJ_AFFECT: usize = 6;
 pub const C_MAX_GUESTS: usize = 100;
@@ -34,6 +36,25 @@ pub const C_MAX_CLANS: usize = 300;
 pub const C_MAX_BOARD_MESSAGES: usize = 60;
 /// structs.h:583 MAX_ROOM_VNUM - the C loader stops at this vnum.
 pub const C_MAX_ROOM_VNUM: i64 = 500000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistenceFormat {
+    Rust,
+    C,
+}
+
+/// Selection for a brand-new or intrinsically ambiguous empty runtime file.
+/// Once a non-empty file is detected, callers retain that detected format.
+pub fn default_persistence_format() -> PersistenceFormat {
+    if std::env::var("MUD_CFORMAT_FILES")
+        .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
+        .unwrap_or(false)
+    {
+        PersistenceFormat::C
+    } else {
+        PersistenceFormat::Rust
+    }
+}
 
 // ---- little-endian primitives ---------------------------------------------
 
@@ -49,12 +70,41 @@ fn put_u8(out: &mut Vec<u8>, v: u8) {
 fn put_i8(out: &mut Vec<u8>, v: i8) {
     out.push(v as u8);
 }
-/// Fixed NUL-padded char field; truncates silently like C's strncpy.
+/// Fixed NUL-padded char field; copies at most `width` bytes like C's
+/// `strncpy`. A source that fills the field exactly is intentionally not
+/// terminated, matching the raw struct layout.
 fn put_char_field(out: &mut Vec<u8>, s: &str, width: usize) {
+    if width == 0 {
+        return;
+    }
     let bytes = s.as_bytes();
-    let n = bytes.len().min(width - 1); // C strlen semantics: keep room for NUL
+    let n = bytes.len().min(width);
     out.extend_from_slice(&bytes[..n]);
     out.resize(out.len() + (width - n), 0);
+}
+
+/// Atomically replace a persistence file with durable bytes. All runtime
+/// stores use a sibling temporary file so rename stays on the same filesystem.
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension(format!(
+        "{}.tmp",
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("new")
+    ));
+    let result = (|| {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn get_i32(src: &[u8], off: usize) -> Option<i32> {
@@ -394,31 +444,30 @@ pub fn encode_rent_file(rent: &CRentInfo, objs: &[CObjFileElem]) -> Vec<u8> {
 
 /// Returns (rent, elems) or None when the buffer is not a C rent file.
 pub fn decode_rent_file(src: &[u8]) -> Option<(CRentInfo, Vec<CObjFileElem>)> {
+    if src.len() < C_RENT_INFO_SIZE || (src.len() - C_RENT_INFO_SIZE) % C_OBJ_FILE_ELEM_SIZE != 0 {
+        return None;
+    }
     let rent = decode_rent_info(src)?;
-    let nitems = rent.nitems.max(0) as usize;
     let mut elems = Vec::new();
     let mut off = C_RENT_INFO_SIZE;
-    // C relies on the nitems counter but Crash_load reads until EOF when the
-    // counter is untrustworthy; we parse as many whole records as remain.
+    // The C writers do not initialise nitems on every save path; Crash_load
+    // reads records until EOF. Do the same rather than truncating to garbage.
     while off + C_OBJ_FILE_ELEM_SIZE <= src.len() {
-        match decode_obj_file_elem(&src[off..]) {
-            Some(e) => {
-                elems.push(e);
-                off += C_OBJ_FILE_ELEM_SIZE;
-            }
-            None => break,
-        }
-    }
-    if nitems > 0 && elems.len() > nitems {
-        elems.truncate(nitems);
+        elems.push(decode_obj_file_elem(&src[off..])?);
+        off += C_OBJ_FILE_ELEM_SIZE;
     }
     Some((rent, elems))
 }
 
 /// lib/etc/hcontrol: a bare array of house_control_rec records.
-pub fn decode_hcontrol(src: &[u8]) -> Vec<CHouseControlRec> {
+pub fn decode_hcontrol(src: &[u8]) -> Option<Vec<CHouseControlRec>> {
+    if src.len() % C_HOUSE_CONTROL_REC_SIZE != 0
+        || src.len() / C_HOUSE_CONTROL_REC_SIZE > C_MAX_HOUSES
+    {
+        return None;
+    }
     src.chunks_exact(C_HOUSE_CONTROL_REC_SIZE)
-        .filter_map(decode_house_control_rec)
+        .map(decode_house_control_rec)
         .collect()
 }
 
@@ -431,23 +480,23 @@ pub fn encode_hcontrol(houses: &[CHouseControlRec]) -> Vec<u8> {
 }
 
 /// lib/etc/clans.dat: i32 count + count × clan_info records.
-pub fn decode_clans_dat(src: &[u8]) -> Vec<CClanInfo> {
+pub fn decode_clans_dat(src: &[u8]) -> Option<Vec<CClanInfo>> {
     if src.len() < 4 {
-        return Vec::new();
+        return None;
     }
-    let count = get_i32(src, 0).unwrap_or(0).max(0) as usize;
-    let mut out = Vec::new();
+    let count = usize::try_from(get_i32(src, 0)?).ok()?;
+    if count > C_MAX_CLANS
+        || src.len() != 4usize.checked_add(count.checked_mul(C_CLAN_INFO_SIZE)?)?
+    {
+        return None;
+    }
+    let mut out = Vec::with_capacity(count);
     let mut off = 4;
-    for _ in 0..count.min(C_MAX_CLANS) {
-        if off + C_CLAN_INFO_SIZE > src.len() {
-            break;
-        }
-        if let Some(c) = decode_clan_info(&src[off..]) {
-            out.push(c);
-        }
+    for _ in 0..count {
+        out.push(decode_clan_info(&src[off..])?);
         off += C_CLAN_INFO_SIZE;
     }
-    out
+    Some(out)
 }
 
 pub fn encode_clans_dat(clans: &[CClanInfo]) -> Vec<u8> {
@@ -455,6 +504,24 @@ pub fn encode_clans_dat(clans: &[CClanInfo]) -> Vec<u8> {
     put_i32(&mut out, clans.len() as i32);
     for c in clans {
         out.extend_from_slice(&encode_clan_info(c));
+    }
+    out
+}
+
+/// A bare sequence of obj_file_elem records (house object files).
+pub fn decode_obj_file(src: &[u8]) -> Option<Vec<CObjFileElem>> {
+    if src.len() % C_OBJ_FILE_ELEM_SIZE != 0 {
+        return None;
+    }
+    src.chunks_exact(C_OBJ_FILE_ELEM_SIZE)
+        .map(decode_obj_file_elem)
+        .collect()
+}
+
+pub fn encode_obj_file(objs: &[CObjFileElem]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(objs.len() * C_OBJ_FILE_ELEM_SIZE);
+    for obj in objs {
+        out.extend_from_slice(&encode_obj_file_elem(obj));
     }
     out
 }
@@ -482,10 +549,16 @@ pub fn decode_board_file(src: &[u8]) -> Option<Vec<CBoardMsg>> {
     let mut off = 4;
     for _ in 0..count {
         let (m, used) = decode_board_msg(&src[off..])?;
+        if m.heading.is_empty() || *m.heading.last()? != 0 {
+            return None;
+        }
+        if !m.message.is_empty() && *m.message.last()? != 0 {
+            return None;
+        }
         out.push(m);
         off += used;
     }
-    Some(out)
+    (off == src.len()).then_some(out)
 }
 
 // ---- helpers bridging to the Rust object model -------------------------------
@@ -684,5 +757,103 @@ mod tests {
         assert_eq!(rent_back.rentcode, 1);
         assert_eq!(elems.len(), 2);
         assert_eq!(elems[1].value[0], 9);
+    }
+
+    #[test]
+    fn exact_c_house_control_fixture_decodes_and_reencodes() {
+        let mut fixture = vec![0u8; C_HOUSE_CONTROL_REC_SIZE];
+        fixture[0..8].copy_from_slice(&30290i64.to_le_bytes());
+        fixture[8..16].copy_from_slice(&30280i64.to_le_bytes());
+        fixture[16..24].copy_from_slice(&1i64.to_le_bytes());
+        fixture[24..32].copy_from_slice(&1_700_000_000i64.to_le_bytes());
+        fixture[32..36].copy_from_slice(&1i32.to_le_bytes());
+        fixture[40..48].copy_from_slice(&77i64.to_le_bytes());
+        fixture[48..52].copy_from_slice(&2i32.to_le_bytes());
+        fixture[56..64].copy_from_slice(&88i64.to_le_bytes());
+        fixture[64..72].copy_from_slice(&99i64.to_le_bytes());
+        fixture[856..864].copy_from_slice(&1_700_000_100i64.to_le_bytes());
+
+        let records = decode_hcontrol(&fixture).expect("C hcontrol fixture");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].vnum, 30290);
+        assert_eq!(records[0].guests, vec![88, 99]);
+        assert_eq!(encode_hcontrol(&records), fixture);
+    }
+
+    #[test]
+    fn exact_c_clan_fixture_decodes_and_reencodes() {
+        let mut fixture = vec![0u8; 4 + C_CLAN_INFO_SIZE];
+        fixture[0..4].copy_from_slice(&1i32.to_le_bytes());
+        let record = &mut fixture[4..];
+        record[0..4].copy_from_slice(&7i32.to_le_bytes());
+        record[4..8].copy_from_slice(&12i32.to_le_bytes());
+        record[8..12].copy_from_slice(&9i32.to_le_bytes());
+        for (index, value) in [1i32, 2, 3, 4, 5, 6].into_iter().enumerate() {
+            record[12 + index * 4..16 + index * 4].copy_from_slice(&value.to_le_bytes());
+        }
+        record[36..40].copy_from_slice(&5400i32.to_le_bytes());
+        record[40..48].copy_from_slice(&123_456_789i64.to_le_bytes());
+        record[48..54].copy_from_slice(b"Member");
+        record[228..234].copy_from_slice(b"Mulder");
+        record[251..262].copy_from_slice(b"The Wardens");
+        record[283..290].copy_from_slice(b"Wardens");
+
+        let clans = decode_clans_dat(&fixture).expect("C clans.dat fixture");
+        assert_eq!(clans.len(), 1);
+        assert_eq!(clans[0].rank_name[0], "Member");
+        assert_eq!(clans[0].gold, 123_456_789);
+        assert_eq!(encode_clans_dat(&clans), fixture);
+    }
+
+    #[test]
+    fn exact_c_board_fixture_ignores_dead_pointer_and_writes_valid_zero_pointer() {
+        let heading = b"Tue Sep  1 (Tester)     :: fixture\0";
+        let body = b"raw body\r\n\0";
+        let mut fixture = vec![0u8; 4 + C_BOARD_MSGINFO_SIZE];
+        fixture[0..4].copy_from_slice(&1i32.to_le_bytes());
+        fixture[4..8].copy_from_slice(&37i32.to_le_bytes());
+        fixture[12..20].copy_from_slice(&0x1122_3344_5566_7788i64.to_le_bytes());
+        fixture[20..24].copy_from_slice(&55i32.to_le_bytes());
+        fixture[24..28].copy_from_slice(&(heading.len() as i32).to_le_bytes());
+        fixture[28..32].copy_from_slice(&(body.len() as i32).to_le_bytes());
+        fixture.extend_from_slice(heading);
+        fixture.extend_from_slice(body);
+
+        let msgs = decode_board_file(&fixture).expect("C board fixture");
+        assert_eq!(msgs[0].slot_num, 37);
+        assert_eq!(msgs[0].heading, heading);
+        assert_eq!(msgs[0].message, body);
+
+        let rewritten = encode_board_file(&msgs);
+        assert_eq!(&rewritten[12..20], &[0; 8]);
+        assert_eq!(decode_board_file(&rewritten).unwrap()[0].message, body);
+    }
+
+    #[test]
+    fn exact_c_rent_fixture_reads_records_to_eof_despite_bad_nitems() {
+        let mut fixture = vec![0u8; C_RENT_INFO_SIZE + C_OBJ_FILE_ELEM_SIZE];
+        fixture[0..4].copy_from_slice(&1_700_000_000i32.to_le_bytes());
+        fixture[4..8].copy_from_slice(&1i32.to_le_bytes());
+        fixture[20..24].copy_from_slice(&(-77i32).to_le_bytes());
+        let record = &mut fixture[C_RENT_INFO_SIZE..];
+        record[0..8].copy_from_slice(&1234i64.to_le_bytes());
+        record[8..16].copy_from_slice(&(-2i64).to_le_bytes());
+        record[16..20].copy_from_slice(&7i32.to_le_bytes());
+        record[20..24].copy_from_slice(&42i32.to_le_bytes());
+        record[24..28].copy_from_slice(&11i32.to_le_bytes());
+        record[40..44].copy_from_slice(&0x40i32.to_le_bytes());
+        record[44..48].copy_from_slice(&33i32.to_le_bytes());
+        record[48..52].copy_from_slice(&(-1i32).to_le_bytes());
+        record[56..64].copy_from_slice(&0x4000_0000i64.to_le_bytes());
+        record[64..68].copy_from_slice(&17i32.to_le_bytes());
+        record[68] = 3;
+        record[69] = (-5i8) as u8;
+
+        let (rent, objects) = decode_rent_file(&fixture).expect("C rent fixture");
+        assert_eq!(rent.nitems, -77);
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].locate, -2);
+        assert_eq!(objects[0].affected[0], (3, -5));
+        assert_eq!(encode_rent_file(&rent, &objects), fixture);
     }
 }

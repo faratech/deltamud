@@ -391,14 +391,28 @@ pub fn remove_trigger(key: ScriptKey, name: &str) -> bool {
     let (mut num, search_name, by_string): (i32, String, bool) = if let Some(dot) = name.find('.') {
         let (n, rest) = name.split_at(dot);
         let rest = &rest[1..];
-        (n.parse().unwrap_or(0), rest.to_string(), true)
+        let num = match crate::text::parse_i32_atoi(n) {
+            Ok(num) => num,
+            Err(error) => {
+                log::warn!("DG remove_trigger rejected invalid ordinal {n:?}: {error:?}");
+                return false;
+            }
+        };
+        (num, rest.to_string(), true)
     } else if name
         .chars()
         .next()
         .map(|c| c.is_ascii_digit())
         .unwrap_or(false)
     {
-        (name.parse().unwrap_or(0), String::new(), false)
+        let num = match crate::text::parse_i32_atoi(name) {
+            Ok(num) => num,
+            Err(error) => {
+                log::warn!("DG remove_trigger rejected invalid ordinal {name:?}: {error:?}");
+                return false;
+            }
+        };
+        (num, String::new(), false)
     } else {
         (0, name.to_string(), true)
     };
@@ -503,3 +517,45 @@ pub fn on_obj_extracted(g: &mut GameState, obj: ObjId) {
 // can't clear another test's triggers mid-run.
 #[cfg(test)]
 pub static DG_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn trigger(name: &str) -> TrigData {
+        TrigData {
+            nr: 0,
+            vnum: 9000,
+            attach_type: WLD_TRIGGER,
+            name: name.to_string(),
+            trigger_type: WTRIG_COMMAND,
+            narg: 0,
+            arglist: String::new(),
+            cmdlist: Vec::new(),
+            curr_line: 0,
+            depth: 0,
+            loops: 0,
+            wait_event: None,
+            var_list: Vec::new(),
+            purged: false,
+            loop_origin: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn overflowing_detach_ordinal_cannot_remove_the_first_trigger() {
+        let _guard = crate::lock_ok::lock(&DG_TEST_LOCK);
+        boot_handler();
+        let key = ScriptKey::Room(987_654);
+        let first = install_trig(trigger("first"));
+        let second = install_trig(trigger("second"));
+        add_trigger(key, first, -1);
+        add_trigger(key, second, -1);
+
+        assert!(!remove_trigger(key, "2147483648"));
+        assert!(!remove_trigger(key, "2147483648.first"));
+        assert_eq!(trigger_ids(key), vec![first, second]);
+
+        extract_script(key);
+    }
+}

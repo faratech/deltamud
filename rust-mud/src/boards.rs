@@ -22,15 +22,11 @@
 // PERSISTENCE / ON-DISK FORMAT
 // ----------------------------
 // The C `Board_save_board`/`Board_load_board` dump a raw `int num_of_msgs`
-// followed by, per message, a `struct board_msginfo` (which embeds a live
-// 64-bit `char *heading` pointer that is pure garbage on disk and ignored on
-// load), then the heading bytes, then the body bytes. Re-reading that exact
-// byte layout across architectures is fragile (struct padding + the junk
-// pointer width differs aarch64/x86_64). We therefore persist a clean,
-// self-describing little-endian binary with a 4-byte magic so old/foreign
-// files are detected and skipped rather than mis-parsed. See `gaps` in the
-// manifest. Files live under `<lib>/etc/board/...` exactly as the C `filename`
-// fields specify, so the directory tree is identical.
+// followed by, per message, a `struct board_msginfo` (including a dead pointer
+// ignored on load), then NUL-terminated heading/body bytes. The port now
+// auto-detects that exact x86-64 LP64 layout and its existing `DBRD` format,
+// retains raw message bytes, and preserves the detected format on atomic
+// rewrites. Files live under `<lib>/etc/board/...` exactly as in C.
 //
 // THE WRITE EDITOR
 // ----------------
@@ -45,14 +41,15 @@
 // that hook is wired the heading still shows on the board with an empty body —
 // graceful degradation identical to a player who never finishes typing in C.
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::handler::isname;
 use crate::interpreter::one_argument;
 use crate::state::GameState;
 use crate::types::*;
 
+use std::borrow::Cow;
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
@@ -194,9 +191,21 @@ const BOARD_INFO: [BoardInfo; NUM_OF_BOARDS] = [
 /// One stored message (C: board_msginfo.heading + msg_storage[slot]).
 #[derive(Clone)]
 struct BoardMsg {
-    heading: String,
-    message: String,
+    /// Bytes excluding the C file's required trailing NUL. Keeping bytes here
+    /// prevents a load/save cycle from normalising non-UTF-8 legacy text.
+    heading: Vec<u8>,
+    message: Vec<u8>,
     level: i32,
+}
+
+impl BoardMsg {
+    fn heading_text(&self) -> Cow<'_, str> {
+        String::from_utf8_lossy(&self.heading)
+    }
+
+    fn message_text(&self) -> Cow<'_, str> {
+        String::from_utf8_lossy(&self.message)
+    }
 }
 
 struct BoardRuntime {
@@ -204,6 +213,7 @@ struct BoardRuntime {
     /// number shown to players is `index + 1`, newest appended last — exactly
     /// like C's `msg_index[board][0..num_of_msgs]`.
     boards: Vec<Vec<BoardMsg>>,
+    formats: Vec<crate::cformat::PersistenceFormat>,
     /// Pending bodies being composed, keyed by the writer's ConnId. Maps to
     /// (board_type, message_index) so the editor-completion hook knows where
     /// to drop the finished text.
@@ -218,6 +228,7 @@ fn boards() -> &'static Mutex<BoardRuntime> {
     BOARDS.get_or_init(|| {
         Mutex::new(BoardRuntime {
             boards: vec![Vec::new(); NUM_OF_BOARDS],
+            formats: vec![crate::cformat::default_persistence_format(); NUM_OF_BOARDS],
             pending: HashMap::new(),
             lib_path: "./lib".to_string(),
         })
@@ -239,12 +250,16 @@ pub fn boot_boards(lib_path: &str) {
     guard.pending.clear();
     for b in 0..NUM_OF_BOARDS {
         guard.boards[b].clear();
+        guard.formats[b] = crate::cformat::default_persistence_format();
     }
     // Load each board file from disk.
     for b in 0..NUM_OF_BOARDS {
         let path = board_file_path(&guard.lib_path, b);
         match load_board_file(&path) {
-            Ok(Some(msgs)) => guard.boards[b] = msgs,
+            Ok(Some((msgs, format))) => {
+                guard.boards[b] = msgs;
+                guard.formats[b] = format;
+            }
             Ok(None) => {} // missing file == empty board (C: ENOENT is silent)
             Err(e) => {
                 eprintln!(
@@ -370,14 +385,7 @@ pub fn board_write(g: &mut GameState, board_type: usize, ch: CharId, arg: &str) 
     // ("arg[81] = '\0'" in C — keep at most 81 bytes).
     let mut headline = arg.trim_start().to_string();
     headline = delete_doubledollar(&headline);
-    if headline.len() > 81 {
-        // Truncate on a char boundary at or before byte index 81.
-        let mut end = 81;
-        while end > 0 && !headline.is_char_boundary(end) {
-            end -= 1;
-        }
-        headline.truncate(end);
-    }
+    crate::text::truncate_utf8_bytes(&mut headline, 81);
 
     if headline.is_empty() {
         g.send_to_char(ch, "We must have a headline!\r\n");
@@ -401,8 +409,8 @@ pub fn board_write(g: &mut GameState, board_type: usize, ch: CharId, arg: &str) 
         let rt = boards();
         let mut guard = crate::lock_ok::lock(&rt);
         guard.boards[board_type].push(BoardMsg {
-            heading,
-            message: String::new(),
+            heading: heading.into_bytes(),
+            message: Vec::new(),
             level,
         });
         msg_index = guard.boards[board_type].len() - 1;
@@ -465,7 +473,7 @@ pub fn board_finish_write(g: &mut GameState, conn: ConnId, body: &str, save: boo
     }
     if save {
         if let Some(msg) = guard.boards[board_type].get_mut(msg_index) {
-            msg.message = body.to_string();
+            msg.message = body.as_bytes().to_vec();
         }
     } else {
         // C boards.c:270-271 keeps the committed heading + slot on abort:
@@ -479,14 +487,29 @@ pub fn board_finish_write(g: &mut GameState, conn: ConnId, body: &str, save: boo
     }
     let path = board_file_path(&guard.lib_path, board_type);
     let msgs = guard.boards[board_type].clone();
+    let format = guard.formats[board_type];
     drop(guard);
-    if let Err(e) = save_board_file(&path, &msgs) {
+    if let Err(e) = save_board_file(&path, &msgs, format) {
         eprintln!(
             "SYSERR: Error writing board '{}': {}",
             BOARD_INFO[board_type].filename, e
         );
     }
     true
+}
+
+#[cfg(test)]
+pub(crate) fn seed_pending_write_for_test(conn: ConnId) {
+    crate::lock_ok::lock(&boards())
+        .pending
+        .insert(conn.0, (usize::MAX, usize::MAX));
+}
+
+#[cfg(test)]
+pub(crate) fn has_pending_write_for_test(conn: ConnId) -> bool {
+    crate::lock_ok::lock(&boards())
+        .pending
+        .contains_key(&conn.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -538,7 +561,7 @@ pub fn board_show(g: &mut GameState, board_type: usize, ch: CharId, arg: &str) -
                 g.send_to_char(ch, "Sorry, the board isn't working.\r\n");
                 return true;
             }
-            buf.push_str(&format!("{:<2} : {}\r\n", i + 1, m.heading));
+            buf.push_str(&format!("{:<2} : {}\r\n", i + 1, m.heading_text()));
         }
     }
     // C boards.c:324: page_string(ch->desc, buf, 1) (#168).
@@ -575,7 +598,17 @@ pub fn board_display(g: &mut GameState, board_type: usize, ch: CharId, arg: &str
     {
         return false;
     }
-    let msg: i32 = atoi(&number);
+    let msg = match crate::text::parse_i32_atoi(&number) {
+        Ok(msg) => msg,
+        Err(crate::text::ParseIntError::Overflow) => {
+            g.send_to_char(
+                ch,
+                "That message number is outside the supported range.\r\n",
+            );
+            return true;
+        }
+        Err(_) => return false,
+    };
     if msg == 0 {
         return false;
     }
@@ -606,7 +639,12 @@ pub fn board_display(g: &mut GameState, board_type: usize, ch: CharId, arg: &str
         return true;
     }
 
-    let buffer = format!("Message {} : {}\r\n\r\n{}\r\n", msg, m.heading, m.message);
+    let buffer = format!(
+        "Message {} : {}\r\n\r\n{}\r\n",
+        msg,
+        m.heading_text(),
+        m.message_text()
+    );
     // C boards.c:382: page_string(ch->desc, buffer, 1) (#168).
     if let Some(conn) = g.get_char(ch).and_then(|c| c.desc) {
         crate::modify::page_string(g, conn, &buffer);
@@ -635,7 +673,17 @@ pub fn board_remove(g: &mut GameState, board_type: usize, ch: CharId, arg: &str)
     {
         return false;
     }
-    let msg = atoi(&number);
+    let msg = match crate::text::parse_i32_atoi(&number) {
+        Ok(msg) => msg,
+        Err(crate::text::ParseIntError::Overflow) => {
+            g.send_to_char(
+                ch,
+                "That message number is outside the supported range.\r\n",
+            );
+            return true;
+        }
+        Err(_) => return false,
+    };
     if msg == 0 {
         return false;
     }
@@ -668,7 +716,8 @@ pub fn board_remove(g: &mut GameState, board_type: usize, ch: CharId, arg: &str)
     // Author match runs against the FIXED author column (bytes 11..23) only:
     // the old whole-heading substring match let a player's name inside a
     // player-typed headline ("I saw (Bob) cheating") bypass the level gate.
-    let author_col = m.heading.get(11..23).unwrap_or("").trim().to_string();
+    let heading = m.heading_text();
+    let author_col = heading.get(11..23).unwrap_or("").trim().to_string();
     let own_message = author_col == namebuf || author_col.starts_with(&namebuf);
     if level < REMOVE_LVL(board_type) as i32 && !own_message {
         g.send_to_char(
@@ -718,8 +767,9 @@ pub fn board_remove(g: &mut GameState, board_type: usize, ch: CharId, arg: &str)
         }
         let path = board_file_path(&guard.lib_path, board_type);
         let snapshot = guard.boards[board_type].clone();
+        let format = guard.formats[board_type];
         drop(guard);
-        if let Err(e) = save_board_file(&path, &snapshot) {
+        if let Err(e) = save_board_file(&path, &snapshot, format) {
             eprintln!(
                 "SYSERR: Error writing board '{}': {}",
                 BOARD_INFO[board_type].filename, e
@@ -734,12 +784,16 @@ pub fn board_remove(g: &mut GameState, board_type: usize, ch: CharId, arg: &str)
 }
 
 // ---------------------------------------------------------------------------
-// Save / load (Board_save_board / Board_load_board) — portable binary.
+// Save / load (Board_save_board / Board_load_board).
 // ---------------------------------------------------------------------------
 
 /// Board_save_board(): write the board's messages to disk, or remove the file
 /// when the board is empty (C unlinks the file in that case).
-fn save_board_file(path: &str, msgs: &[BoardMsg]) -> std::io::Result<()> {
+fn save_board_file(
+    path: &str,
+    msgs: &[BoardMsg],
+    format: crate::cformat::PersistenceFormat,
+) -> std::io::Result<()> {
     if msgs.is_empty() {
         // unlink(FILENAME) — ignore "not found".
         match std::fs::remove_file(path) {
@@ -750,35 +804,51 @@ fn save_board_file(path: &str, msgs: &[BoardMsg]) -> std::io::Result<()> {
         return Ok(());
     }
 
-    if let Some(parent) = std::path::Path::new(path).parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let mut out: Vec<u8> = Vec::new();
-    out.extend_from_slice(BOARD_FILE_MAGIC);
-    out.extend_from_slice(&(msgs.len() as u32).to_le_bytes());
-    for m in msgs {
-        write_blob(&mut out, &(m.level as i32).to_le_bytes());
-        write_str(&mut out, &m.heading);
-        write_str(&mut out, &m.message);
-    }
-
-    let tmp = format!("{}.tmp", path);
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&out)?;
-        f.flush()?;
-    }
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    let out = match format {
+        crate::cformat::PersistenceFormat::C => {
+            let records: Vec<_> = msgs
+                .iter()
+                .enumerate()
+                .map(|(index, msg)| {
+                    let mut heading = msg.heading.clone();
+                    heading.push(0);
+                    let message = if msg.message.is_empty() {
+                        Vec::new()
+                    } else {
+                        let mut bytes = msg.message.clone();
+                        bytes.push(0);
+                        bytes
+                    };
+                    crate::cformat::CBoardMsg {
+                        slot_num: index as i32,
+                        level: msg.level,
+                        heading,
+                        message,
+                    }
+                })
+                .collect();
+            crate::cformat::encode_board_file(&records)
+        }
+        crate::cformat::PersistenceFormat::Rust => {
+            let mut out = Vec::new();
+            out.extend_from_slice(BOARD_FILE_MAGIC);
+            out.extend_from_slice(&(msgs.len() as u32).to_le_bytes());
+            for msg in msgs {
+                write_blob(&mut out, &msg.level.to_le_bytes());
+                write_bytes(&mut out, &msg.heading);
+                write_bytes(&mut out, &msg.message);
+            }
+            out
+        }
+    };
+    crate::cformat::atomic_write(std::path::Path::new(path), &out)
 }
 
 fn write_blob(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
-fn write_str(out: &mut Vec<u8>, s: &str) {
-    let bytes = s.as_bytes();
+fn write_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(bytes);
 }
@@ -788,7 +858,9 @@ fn write_str(out: &mut Vec<u8>, s: &str) {
 /// file (bad magic, truncated, absurd counts) is treated like C's
 /// "Board file corrupt. Resetting." — we log and return an empty board so the
 /// stale file is overwritten on the next save.
-fn load_board_file(path: &str) -> std::io::Result<Option<Vec<BoardMsg>>> {
+fn load_board_file(
+    path: &str,
+) -> std::io::Result<Option<(Vec<BoardMsg>, crate::cformat::PersistenceFormat)>> {
     let mut f = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -797,11 +869,39 @@ fn load_board_file(path: &str) -> std::io::Result<Option<Vec<BoardMsg>>> {
     let mut data = Vec::new();
     f.read_to_end(&mut data)?;
 
-    match parse_board_blob(&data) {
-        Some(msgs) => Ok(Some(msgs)),
+    let decoded = if data.starts_with(BOARD_FILE_MAGIC) {
+        parse_board_blob(&data).map(|msgs| (msgs, crate::cformat::PersistenceFormat::Rust))
+    } else {
+        crate::cformat::decode_board_file(&data).map(|records| {
+            let msgs = records
+                .into_iter()
+                .map(|record| {
+                    let mut heading = record.heading;
+                    heading.pop(); // strict decoder proved the trailing NUL
+                    let mut message = record.message;
+                    if !message.is_empty() {
+                        message.pop();
+                    }
+                    BoardMsg {
+                        heading,
+                        message,
+                        level: record.level,
+                    }
+                })
+                .collect();
+            (msgs, crate::cformat::PersistenceFormat::C)
+        })
+    };
+    match decoded {
+        Some(result) => Ok(Some(result)),
         None => {
             eprintln!("SYSERR: Board file '{}' corrupt. Resetting.", path);
-            Ok(Some(Vec::new()))
+            let format = if data.starts_with(BOARD_FILE_MAGIC) {
+                crate::cformat::PersistenceFormat::Rust
+            } else {
+                crate::cformat::PersistenceFormat::C
+            };
+            Ok(Some((Vec::new(), format)))
         }
     }
 }
@@ -819,8 +919,8 @@ fn parse_board_blob(data: &[u8]) -> Option<Vec<BoardMsg>> {
     let mut msgs = Vec::with_capacity(count);
     for _ in 0..count {
         let level = read_i32(data, &mut pos)?;
-        let heading = read_string(data, &mut pos)?;
-        let message = read_string(data, &mut pos)?;
+        let heading = read_bytes(data, &mut pos)?;
+        let message = read_bytes(data, &mut pos)?;
         // C resets the board if a heading_len is zero (heading required).
         if heading.is_empty() {
             return None;
@@ -831,7 +931,7 @@ fn parse_board_blob(data: &[u8]) -> Option<Vec<BoardMsg>> {
             level,
         });
     }
-    Some(msgs)
+    (pos == data.len()).then_some(msgs)
 }
 
 fn take<'a>(data: &'a [u8], pos: &mut usize, n: usize) -> Option<&'a [u8]> {
@@ -852,13 +952,13 @@ fn read_i32(data: &[u8], pos: &mut usize) -> Option<i32> {
     read_u32(data, pos).map(|v| v as i32)
 }
 
-fn read_string(data: &[u8], pos: &mut usize) -> Option<String> {
+fn read_bytes(data: &[u8], pos: &mut usize) -> Option<Vec<u8>> {
     let len = read_u32(data, pos)? as usize;
     if len > MAX_MESSAGE_LENGTH * 2 {
         return None;
     }
     let bytes = take(data, pos, len)?;
-    Some(String::from_utf8_lossy(bytes).into_owned())
+    Some(bytes.to_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -888,30 +988,6 @@ fn board_msgs(board_type: usize) -> Vec<BoardMsg> {
 
 fn char_level_i32(g: &GameState, ch: CharId) -> i32 {
     g.get_char(ch).map(|c| c.player.level as i32).unwrap_or(0)
-}
-
-/// atoi(): leading-digit integer parse (stops at first non-digit), matching C.
-fn atoi(s: &str) -> i32 {
-    let s = s.trim_start();
-    let mut chars = s.chars().peekable();
-    let mut sign = 1i64;
-    if let Some(&c) = chars.peek() {
-        if c == '-' {
-            sign = -1;
-            chars.next();
-        } else if c == '+' {
-            chars.next();
-        }
-    }
-    let mut val: i64 = 0;
-    for c in chars {
-        if let Some(d) = c.to_digit(10) {
-            val = val.saturating_mul(10).saturating_add(d as i64);
-        } else {
-            break;
-        }
-    }
-    (sign * val).clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
 /// delete_doubledollar(): collapse "$$" to "$" (interpreter.c). Boards run this
@@ -951,4 +1027,72 @@ fn board_timestamp() -> String {
         now.second(),
         now.year()
     )
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    fn temp_file(name: &str) -> String {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!(
+                "deltamud-board-{}-{}-{}",
+                std::process::id(),
+                name,
+                stamp
+            ))
+            .join("board")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn c_board_load_and_rewrite_preserve_format_and_raw_text_bytes() {
+        let path = temp_file("c-format");
+        let records = [crate::cformat::CBoardMsg {
+            slot_num: 41,
+            level: 55,
+            heading: vec![b'(', 0xff, b')', 0],
+            message: vec![b'A', 0xfe, b'B', 0],
+        }];
+        crate::cformat::atomic_write(
+            std::path::Path::new(&path),
+            &crate::cformat::encode_board_file(&records),
+        )
+        .unwrap();
+
+        let (messages, format) = load_board_file(&path).unwrap().unwrap();
+        assert_eq!(format, crate::cformat::PersistenceFormat::C);
+        assert_eq!(messages[0].heading, vec![b'(', 0xff, b')']);
+        assert_eq!(messages[0].message, vec![b'A', 0xfe, b'B']);
+
+        save_board_file(&path, &messages, format).unwrap();
+        let rewritten = std::fs::read(&path).unwrap();
+        assert!(!rewritten.starts_with(BOARD_FILE_MAGIC));
+        let decoded = crate::cformat::decode_board_file(&rewritten).unwrap();
+        assert_eq!(decoded[0].heading, records[0].heading);
+        assert_eq!(decoded[0].message, records[0].message);
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
+    #[test]
+    fn existing_rust_board_format_remains_rust_on_rewrite() {
+        let path = temp_file("rust-format");
+        let messages = [BoardMsg {
+            heading: b"Rust heading".to_vec(),
+            message: b"Rust body".to_vec(),
+            level: 12,
+        }];
+        save_board_file(&path, &messages, crate::cformat::PersistenceFormat::Rust).unwrap();
+
+        let (loaded, format) = load_board_file(&path).unwrap().unwrap();
+        assert_eq!(format, crate::cformat::PersistenceFormat::Rust);
+        save_board_file(&path, &loaded, format).unwrap();
+        assert!(std::fs::read(&path).unwrap().starts_with(BOARD_FILE_MAGIC));
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
 }

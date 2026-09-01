@@ -23,7 +23,7 @@
 //     inside set_fighting/damage, flagging PLR_KILLER in jurisdicted areas.
 //   * command_interpreter is reused for `order` (charmed pets execute orders).
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::character::Affect;
 use crate::combat::{self, chance, check_killer, damage_type, hit, hit_type, set_fighting};
 use crate::flags::*;
@@ -161,11 +161,7 @@ fn numdisplay(val: i64) -> String {
         }
         out.push(*b as char);
     }
-    if neg {
-        format!("-{}", out)
-    } else {
-        out
-    }
+    if neg { format!("-{}", out) } else { out }
 }
 
 /// stop_fighting(ch) (fight.c): clear the fight target, drop out of POS_FIGHTING.
@@ -817,8 +813,6 @@ pub fn do_flee(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
     }
     g.send_to_char(ch, "PANIC!  You couldn't escape!\r\n");
 }
-
-
 
 // ===========================================================================
 // CHAIN FOOTING

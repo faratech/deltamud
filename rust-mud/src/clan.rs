@@ -12,10 +12,8 @@
 //   * Holds the runtime clan table in a module static (OnceLock<Mutex<..>>),
 //     loaded by `boot_clans(lib_path)` and re-saved (via `save_clans`) on
 //     every mutation, exactly mirroring the C call sites.
-//   * Reads/writes `clans.dat` with std::fs in a fixed little-endian binary
-//     layout (documented below) so the file round-trips across reboots. It is
-//     NOT byte-compatible with the C struct dump (which is padding/endian/
-//     pointer-width dependent); see `gaps`.
+//   * Auto-detects the existing Rust binary layout and the C server's exact
+//     x86-64 LP64 struct dump, retaining the detected format on atomic writes.
 //   * Operates on the live Character.clan / Character.clan_rank fields for the
 //     actor and any ONLINE victim — the analogue of C's `is_playing()` branch.
 //     The boot-loaded GameState.player_table resolves a player's NAME<->IDNUM
@@ -29,11 +27,11 @@
 // time; emit room/target broadcasts through act(); send direct text through
 // send_to_char.
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::class::class_abbrev;
 use crate::interpreter::{half_chop, is_abbrev};
 use crate::room::RoomFlags;
-use crate::state::GameState;
+use crate::state::{GameState, OfflineOpAuthority};
 use crate::types::*;
 use std::sync::{Mutex, OnceLock};
 
@@ -106,11 +104,7 @@ impl ClanInfo {
     fn rank_label(&self, rank: i32) -> &str {
         if rank >= 1 && (rank as usize) <= MAX_RANKS - 1 {
             let s = &self.rank_name[(rank - 1) as usize];
-            if s.is_empty() {
-                "N/A"
-            } else {
-                s.as_str()
-            }
+            if s.is_empty() { "N/A" } else { s.as_str() }
         } else {
             "N/A"
         }
@@ -123,6 +117,7 @@ impl ClanInfo {
 struct ClanTable {
     clans: Vec<ClanInfo>,
     lib_path: String,
+    format: crate::cformat::PersistenceFormat,
 }
 
 static CLANS: OnceLock<Mutex<ClanTable>> = OnceLock::new();
@@ -140,6 +135,7 @@ fn table() -> &'static Mutex<ClanTable> {
         Mutex::new(ClanTable {
             clans: Vec::new(),
             lib_path: "lib".to_string(),
+            format: crate::cformat::default_persistence_format(),
         })
     })
 }
@@ -159,8 +155,7 @@ fn table() -> &'static Mutex<ClanTable> {
 //     { u16 len; len bytes utf8 }        name
 //     { u16 len; len bytes utf8 }        who_name
 // Strings are length-prefixed (C used fixed-width char arrays; we store the
-// trimmed contents). Documented in `gaps` as intentionally NOT C-binary-
-// compatible.
+// trimmed contents). The exact C layout lives in cformat.rs.
 // ---------------------------------------------------------------------------
 
 const CLAN_FILE_REL: &str = "etc/clans.dat";
@@ -195,45 +190,56 @@ fn convert_c_clan(cc: crate::cformat::CClanInfo) -> ClanInfo {
     }
 }
 
+fn convert_to_c_clan(clan: &ClanInfo) -> crate::cformat::CClanInfo {
+    crate::cformat::CClanInfo {
+        number: clan.number,
+        members: clan.members,
+        ranks: clan.ranks,
+        privilege: clan.privilege,
+        clan_room: clan.clan_room,
+        gold: clan.gold,
+        rank_name: clan.rank_name.to_vec(),
+        leader: clan.leader.clone(),
+        name: clan.name.clone(),
+        who_name: clan.who_name.clone(),
+    }
+}
+
 pub fn boot_clans(lib_path: &str) {
     let path = clan_file_path(lib_path);
-    let clans = match std::fs::read(&path) {
+    let (clans, format) = match std::fs::read(&path) {
         Ok(bytes) => {
-            // Issue #95: a C-written clans.dat is i32 count + 304-byte
-            // clan_info records. Try the C layout first (file size exactly
-            // 4 + count*304); fall back to the Rust self-describing format.
-            let c_format = bytes.len() >= 4
-                && bytes.len() == 4
-                    + i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize
-                        * crate::cformat::C_CLAN_INFO_SIZE;
-            if c_format {
-                crate::cformat::decode_clans_dat(&bytes)
-                    .into_iter()
-                    .map(|cc| convert_c_clan(cc))
-                    .collect()
+            // Prefer the self-describing Rust decoder when it consumes the
+            // complete file. A zero-count file is byte-identical in both
+            // formats, so the configured default is the only possible choice.
+            if bytes == [0, 0, 0, 0] {
+                (Vec::new(), crate::cformat::default_persistence_format())
+            } else if let Some(clans) = decode_clans(&bytes) {
+                (clans, crate::cformat::PersistenceFormat::Rust)
+            } else if let Some(c_clans) = crate::cformat::decode_clans_dat(&bytes) {
+                (
+                    c_clans.into_iter().map(convert_c_clan).collect(),
+                    crate::cformat::PersistenceFormat::C,
+                )
             } else {
-                match decode_clans(&bytes) {
-                    Some(v) => v,
-                    None => {
-                        eprintln!(
-                            "SYSERR: clans.dat at '{}' is corrupt; starting empty.",
-                            path
-                        );
-                        Vec::new()
-                    }
-                }
+                eprintln!(
+                    "SYSERR: clans.dat at '{}' is corrupt; starting empty.",
+                    path
+                );
+                (Vec::new(), crate::cformat::default_persistence_format())
             }
         }
         Err(_) => {
             // C logs "Clan file doesn't exist, a new one will be created."
             eprintln!("Clan file doesn't exist, a new one will be created.");
-            Vec::new()
+            (Vec::new(), crate::cformat::default_persistence_format())
         }
     };
 
     let new_table = ClanTable {
         clans,
         lib_path: lib_path.to_string(),
+        format,
     };
 
     // Install (or, on a double-boot, replace the contents of) the static.
@@ -277,12 +283,15 @@ pub fn recount_member_counts(counts: &[(i32, i32)]) {
 /// CircleMUD save_clans(): serialize the whole table to clans.dat.
 fn save_clans() {
     let t = crate::lock_ok::lock(&table());
-    let bytes = encode_clans(&t.clans);
+    let bytes = match t.format {
+        crate::cformat::PersistenceFormat::C => {
+            let clans: Vec<_> = t.clans.iter().map(convert_to_c_clan).collect();
+            crate::cformat::encode_clans_dat(&clans)
+        }
+        crate::cformat::PersistenceFormat::Rust => encode_clans(&t.clans),
+    };
     let path = clan_file_path(&t.lib_path);
-    if let Some(parent) = std::path::Path::new(&path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Err(e) = std::fs::write(&path, bytes) {
+    if let Err(e) = crate::cformat::atomic_write(std::path::Path::new(&path), &bytes) {
         eprintln!("SYSERR: Error writing to clan file '{}': {}", path, e);
     }
 }
@@ -341,7 +350,7 @@ fn decode_clans(bytes: &[u8]) -> Option<Vec<ClanInfo>> {
         c.who_name = cur.string()?;
         clans.push(c);
     }
-    Some(clans)
+    (cur.pos == bytes.len()).then_some(clans)
 }
 
 struct Cursor<'a> {
@@ -458,7 +467,7 @@ fn defer_offline_clan_op(g: &mut GameState, ch: CharId, target: &str, command: &
             ch,
             &format!("[ Loading {} from the player file... ]\r\n", first),
         );
-        g.queue_offline_op(ch, first, command);
+        g.queue_offline_op(ch, first, command, OfflineOpAuthority::ReplayHandler);
         return true;
     }
     false
@@ -660,7 +669,9 @@ fn clan_destroy(g: &mut GameState, ch: CharId, arg: &str) {
         send_clan_format(g, ch);
         return;
     }
-    let i: i32 = arg.trim().parse().unwrap_or(0);
+    let Some(i) = clan_i32(g, ch, arg, 0) else {
+        return;
+    };
     let n = num_of_clans();
     if i < 0 || i > n - 1 {
         g.send_to_char(ch, "Unknown clan.\r\n");
@@ -799,7 +810,9 @@ fn set_priv(g: &mut GameState, ch: CharId, arg: &str) {
         return;
     }
 
-    let level: i32 = arg2.trim().parse().unwrap_or(0);
+    let Some(level) = clan_i32(g, ch, &arg2, 0) else {
+        return;
+    };
     if level < 1 || level > ranks {
         g.send_to_char(ch, "Invalid level.\r\n");
         return;
@@ -858,7 +871,9 @@ fn handle_rank(g: &mut GameState, ch: CharId, arg: &str) {
         send_clan_format(g, ch);
         return;
     }
-    let n: i32 = arg2.trim().parse().unwrap_or(0);
+    let Some(n) = clan_i32(g, ch, &arg2, 0) else {
+        return;
+    };
     let ranks = with_clan(cl, |c| c.ranks).unwrap_or(0);
 
     if is_abbrev(&arg1, "raise") {
@@ -955,7 +970,9 @@ fn clan_rank_name(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, "Ranks must be no more than 20 characters long.\r\n");
         return;
     }
-    let lvl: i32 = arg1.trim().parse().unwrap_or(0);
+    let Some(lvl) = clan_i32(g, ch, &arg1, 0) else {
+        return;
+    };
     if lvl < 1 || lvl > 9 || lvl > ranks {
         g.send_to_char(ch, "Rank number does not exist.\r\n");
         return;
@@ -991,7 +1008,9 @@ fn clan_apply(g: &mut GameState, ch: CharId, arg: &str) {
         send_clan_format(g, ch);
         return;
     }
-    let num: i32 = atoi_like_c(&arg1);
+    let Some(num) = clan_atoi(g, ch, &arg1) else {
+        return;
+    };
     if num >= 0 && num < num_of_clans() {
         g.send_to_char(
             ch,
@@ -1354,7 +1373,9 @@ fn clan_who_title(g: &mut GameState, ch: CharId, arg: &str) {
         send_clan_format(g, ch);
         return;
     }
-    let num: i32 = atoi_like_c(&arg1);
+    let Some(num) = clan_atoi(g, ch, &arg1) else {
+        return;
+    };
     if num < 0 || num > num_of_clans() - 1 {
         g.send_to_char(ch, "That clan number does not exist.\r\n");
         return;
@@ -1446,7 +1467,9 @@ fn clan_info_list(g: &mut GameState, ch: CharId, arg: &str) {
         send_clan_format(g, ch);
         return;
     }
-    let num: i32 = arg.trim().parse().unwrap_or(-1);
+    let Some(num) = clan_i32(g, ch, arg, -1) else {
+        return;
+    };
     if num < 0 || num > num_of_clans() - 1 {
         g.send_to_char(ch, "That clan doesn't exist.\r\n");
         return;
@@ -1609,7 +1632,9 @@ fn clan_new_owner(g: &mut GameState, ch: CharId, arg: &str) {
             return;
         }
     };
-    let num: i32 = atoi_like_c(&arg1);
+    let Some(num) = clan_atoi(g, ch, &arg1) else {
+        return;
+    };
     if num < 0 || num > num_of_clans() - 1 {
         g.send_to_char(ch, "That clan doesn't exist.\r\n");
         return;
@@ -1650,12 +1675,16 @@ fn set_clanroom(g: &mut GameState, ch: CharId, arg: &str) {
         send_clan_format(g, ch);
         return;
     }
-    let num: i32 = atoi_like_c(&arg1);
+    let Some(num) = clan_atoi(g, ch, &arg1) else {
+        return;
+    };
     if num < 0 || num > num_of_clans() - 1 {
         g.send_to_char(ch, "No such clan.\r\n");
         return;
     }
-    let room_vnum: i32 = arg2.trim().parse().unwrap_or(NOWHERE);
+    let Some(room_vnum) = clan_i32(g, ch, &arg2, NOWHERE) else {
+        return;
+    };
     if g.real_room(room_vnum).is_none() {
         g.send_to_char(ch, "Invalid room number!\r\n");
         return;
@@ -1721,7 +1750,9 @@ fn do_clan_withdraw(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, "You need to be in your clanroom to do that!\r\n");
         return;
     }
-    let amount: i32 = arg.trim().parse().unwrap_or(0);
+    let Some(amount) = clan_i32(g, ch, arg, 0) else {
+        return;
+    };
     if arg.trim().is_empty() || amount < 1 {
         g.send_to_char(ch, "Don't you want to withdraw something?\r\n");
         return;
@@ -1729,6 +1760,14 @@ fn do_clan_withdraw(g: &mut GameState, ch: CharId, arg: &str) {
     let clan_gold = with_clan(cl, |c| c.gold).unwrap_or(0);
     if amount as i64 > clan_gold {
         g.send_to_char(ch, "Your clan doesn't have that much gold!\r\n");
+        return;
+    }
+    let player_gold = g
+        .get_char(ch)
+        .map(|c| crate::gold::balance(c, crate::gold::Account::Carried))
+        .unwrap_or(0);
+    if player_gold + i64::from(amount) > crate::gold::GOLD_CAP {
+        g.send_to_char(ch, "You cannot carry that much gold.\r\n");
         return;
     }
 
@@ -1739,7 +1778,7 @@ fn do_clan_withdraw(g: &mut GameState, ch: CharId, arg: &str) {
         }
     }
     if let Some(c) = g.get_char_mut(ch) {
-        c.points.gold += amount;
+        crate::gold::credit(c, crate::gold::Account::Carried, i64::from(amount));
     }
     save_clans();
     g.send_to_char(
@@ -1770,7 +1809,9 @@ fn do_clan_deposit(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, "You need to be in your clanroom to do that!\r\n");
         return;
     }
-    let amount: i32 = arg.trim().parse().unwrap_or(0);
+    let Some(amount) = clan_i32(g, ch, arg, 0) else {
+        return;
+    };
     if arg.trim().is_empty() || amount < 1 {
         g.send_to_char(ch, "Don't you want to deposit something?\r\n");
         return;
@@ -1780,15 +1821,20 @@ fn do_clan_deposit(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, "You don't have that much!\r\n");
         return;
     }
+    let clan_gold = with_clan(cl, |c| c.gold).unwrap_or(0);
+    if clan_gold.checked_add(i64::from(amount)).is_none() {
+        g.send_to_char(ch, "Your clan account cannot hold that much gold.\r\n");
+        return;
+    }
 
     {
         let mut t = crate::lock_ok::lock(&table());
         if let Some(c) = t.clans.get_mut(cl as usize) {
-            c.gold += amount as i64;
+            c.gold = c.gold.saturating_add(i64::from(amount));
         }
     }
     if let Some(c) = g.get_char_mut(ch) {
-        c.points.gold -= amount;
+        crate::gold::debit(c, crate::gold::Account::Carried, i64::from(amount));
     }
     save_clans();
     g.send_to_char(
@@ -2027,6 +2073,55 @@ mod tests {
     }
 
     #[test]
+    fn c_clan_file_is_loaded_and_rewritten_in_c_format() {
+        let _guard = test_clan_guard();
+        let lib = temp_lib("c-format");
+        let path = clan_file_path(&lib);
+        let fixture = crate::cformat::CClanInfo {
+            number: 7,
+            members: 99,
+            ranks: 3,
+            privilege: [1, 2, 3, 4, 5, 6],
+            clan_room: 5400,
+            gold: 123_456_789,
+            rank_name: vec![
+                "Member".into(),
+                "Officer".into(),
+                "Leader".into(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ],
+            leader: "Mulder".into(),
+            name: "The Wardens".into(),
+            who_name: "Wardens".into(),
+        };
+        std::fs::write(&path, crate::cformat::encode_clans_dat(&[fixture])).unwrap();
+
+        boot_clans(&lib);
+        assert_eq!(
+            with_clan(0, |clan| clan.name.clone()),
+            Some("The Wardens".into())
+        );
+        assert_eq!(
+            crate::lock_ok::lock(&table()).format,
+            crate::cformat::PersistenceFormat::C
+        );
+        recount_member_counts(&[(0, 2)]);
+
+        let saved = std::fs::read(&path).unwrap();
+        assert_eq!(saved.len(), 4 + crate::cformat::C_CLAN_INFO_SIZE);
+        let decoded = crate::cformat::decode_clans_dat(&saved).unwrap();
+        assert_eq!(decoded[0].members, 2);
+        assert_eq!(decoded[0].gold, 123_456_789);
+        assert!(decode_clans(&saved).is_none());
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
+    #[test]
     fn clan_roster_lists_indexed_offline_members_with_class_and_rank() {
         let _guard = test_clan_guard();
         let lib = temp_lib("offline-roster");
@@ -2135,11 +2230,28 @@ mod tests {
     }
 }
 
-
 /// C atoi semantics: leading digits only, no digits => 0 (clan.c:515/1292
 /// apply to clan 0 for any non-numeric argument; #173).
-fn atoi_like_c(s: &str) -> i32 {
-    let t = s.trim();
-    let digits: String = t.chars().take_while(|c| c.is_ascii_digit() || *c == '-').collect();
-    digits.parse().unwrap_or(0)
+fn clan_atoi(g: &mut GameState, ch: CharId, s: &str) -> Option<i32> {
+    match crate::text::parse_i32_atoi(s) {
+        Ok(value) => Some(value),
+        Err(crate::text::ParseIntError::Overflow) => {
+            g.send_to_char(ch, "That number is outside the supported range.\r\n");
+            None
+        }
+        Err(_) => unreachable!("parse_i32_atoi maps nonnumeric input to zero"),
+    }
+}
+
+fn clan_i32(g: &mut GameState, ch: CharId, s: &str, invalid_fallback: i32) -> Option<i32> {
+    match crate::text::parse_i32_strict(s) {
+        Ok(value) => Some(value),
+        Err(crate::text::ParseIntError::Empty | crate::text::ParseIntError::Invalid) => {
+            Some(invalid_fallback)
+        }
+        Err(crate::text::ParseIntError::Overflow) => {
+            g.send_to_char(ch, "That number is outside the supported range.\r\n");
+            None
+        }
+    }
 }

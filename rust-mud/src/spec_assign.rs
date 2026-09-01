@@ -130,13 +130,13 @@ fn assign_mobiles(mobs: &mut HashMap<MobVnum, SpecFn>) {
     //
     // Limbo.
     ASSIGNMOB(mobs, 1, crate::spec_procs::puff as SpecFn); // ASSIGNMOB(1, puff)
-                                                           // Immortal Zone.
+    // Immortal Zone.
     ASSIGNMOB(mobs, 1200, crate::objsave::receptionist as SpecFn); // ASSIGNMOB(1200, receptionist)
     ASSIGNMOB(mobs, 1201, crate::mail::postmaster as SpecFn);
     ASSIGNMOB(mobs, 1202, crate::spec_procs::janitor as SpecFn); // immortal-zone janitor
-                                                                 // Battle Arena (Thargor 7/25-28/98). arenaentrancemaster lives in arena.rs
-                                                                 // (the full arena subsystem); temple_healer / temple_mana_regenerator in
-                                                                 // spec_procs.rs.
+    // Battle Arena (Thargor 7/25-28/98). arenaentrancemaster lives in arena.rs
+    // (the full arena subsystem); temple_healer / temple_mana_regenerator in
+    // spec_procs.rs.
     ASSIGNMOB(mobs, 4800, crate::arena::arenaentrancemaster as SpecFn);
     ASSIGNMOB(mobs, 4801, crate::spec_procs::temple_healer as SpecFn);
     ASSIGNMOB(
@@ -196,11 +196,11 @@ fn assign_objects(objs: &mut HashMap<ObjVnum, ObjSpecFn>) {
     ASSIGNOBJ(objs, 1207, gen_board as ObjSpecFn); // bugs board
     ASSIGNOBJ(objs, 1208, gen_board as ObjSpecFn); // reimbursement board
     ASSIGNOBJ(objs, 1209, gen_board as ObjSpecFn); // builders board
-                                                   // SPECIAL(bank) is declared in DeltaMUD's spec_assign.c (a forward prototype
-                                                   // so OLC can reference it) but it is never DEFINED in any .c file and never
-                                                   // ASSIGNOBJ'd to a vnum — it is a dangling no-op in the C source. There is
-                                                   // nothing to port and nothing to assign; banking is handled by the BANKER
-                                                   // mob flag path (act.other.c), not an object spec. Left intentionally absent.
+    // SPECIAL(bank) is declared in DeltaMUD's spec_assign.c (a forward prototype
+    // so OLC can reference it) but it is never DEFINED in any .c file and never
+    // ASSIGNOBJ'd to a vnum — it is a dangling no-op in the C source. There is
+    // nothing to port and nothing to assign; banking is handled by the BANKER
+    // mob flag path (act.other.c), not an object spec. Left intentionally absent.
 }
 
 fn assign_rooms(rooms: &mut HashMap<RoomVnum, RoomSpecFn>) {
@@ -296,8 +296,6 @@ pub fn get_room_spec(vnum: RoomVnum) -> Option<RoomSpecFn> {
     tables().rooms.get(&vnum).copied()
 }
 
-
-
 // ---------------------------------------------------------------------------
 // special() — the central dispatcher (interpreter.c::special).
 // ---------------------------------------------------------------------------
@@ -350,7 +348,10 @@ pub fn special(g: &mut GameState, ch: CharId, cmd: &str, arg: &str) -> bool {
             log::warn!(
                 "SYSERR: spec proc re-entry exceeded depth {} (mob in room {}); skipping nested dispatch",
                 MAX_SPEC_DEPTH,
-                g.get_char(ch).and_then(|c| c.in_room).map(|r| g.rooms[r].number).unwrap_or(-1)
+                g.get_char(ch)
+                    .and_then(|c| c.in_room)
+                    .map(|r| g.rooms[r].number)
+                    .unwrap_or(-1)
             );
         }
         return false;
@@ -361,7 +362,6 @@ pub fn special(g: &mut GameState, ch: CharId, cmd: &str, arg: &str) -> bool {
 }
 
 fn special_inner(g: &mut GameState, ch: CharId, cmd: &str, arg: &str) -> bool {
-
     // The actor's room. If the actor is nowhere (just extracted / between
     // rooms) there is nothing to dispatch against — C dereferences
     // ch->in_room unconditionally, but our arena guards it.

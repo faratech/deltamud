@@ -15,10 +15,10 @@ The Rust port has the broad DeltaMUD feature surface in place, including the sta
 - **Content & economy**: shops, clans, boards, mail, houses, quests, auction, arena, the castle/special procedures.
 - **DG Scripts**: full VM (`script_driver` with depth + loop guards), mob/obj/wld trigger command sets, and fire-hooks (greet/command/speech/death/load/timer/random).
 - **OLC**: redit / oedit / medit / zedit / sedit / aedit / hedit / trigedit, with central save dispatch for room/object/mobile/zone/shop data and DG attachment editing in the main prototype editors.
-- **Persistence**: 83-column `player_main` + `player_affects` + `player_skills` (MySQL), Rust-format object rent/crash files, crypt-compatible passwords; offline-player immortal ops via an async bridge.
+- **Persistence**: 83-column `player_main` + `player_affects` + `player_skills` (MySQL), auto-detected C/Rust runtime files, crypt-compatible passwords; offline-player immortal ops via an async bridge.
 - **Immortal tooling**: the full `act.wizard` command set, god-command (GCMD) permission bits, `can_edit_zone`, autowiz, on-disk syslog, the player-index table.
 
-No open fidelity-gap issues remain (epic #348). Deliberate divergences — places where the C oracle is buggy and the port repairs it — are listed in the `COMPATIBILITY.md` divergence register. C-format runtime persistence files (plrobjs rent/crash, hcontrol, clans.dat, boards) are read automatically and can be written with `MUD_CFORMAT_FILES=true` (#95).
+No open fidelity-gap issues remain (epic #348). Deliberate divergences — places where the C oracle is buggy and the port repairs it — are listed in the `COMPATIBILITY.md` divergence register. C-format runtime persistence files (plrobjs rent/crash, hcontrol, house objects, clans.dat, boards) are auto-detected and retain their detected format on atomic rewrite; `MUD_CFORMAT_FILES=true` selects C format only for new or intrinsically ambiguous empty files (#95).
 
 ### Modern improvements over the C version
 - **Idiomatic Rust core**: a single-owner `GameState` (id-indexed `IndexMap`/`Vec` arenas, `Copy` ids instead of locked pointers) — deadlock-free, with async (Tokio) only at the socket edge. No `Arc<RwLock>` entity graph.
@@ -26,7 +26,7 @@ No open fidelity-gap issues remain (epic #348). Deliberate divergences — place
 - **Crash isolation**: a panic in any command or heartbeat handler is contained (`catch_unwind`) and logged with a backtrace, instead of killing the server.
 - **Modern client protocols**: telnet IAC negotiation, password echo suppression, **GMCP** (`Char.Vitals`/`Room.Info` — Mudlet gauges + auto-map) and **MSSP** (server status for MUD listings).
 - **Observability**: optional Prometheus `/metrics` + `/health` endpoint (heartbeat tick-timing, player/mob/obj gauges, command/connection counters), syslog rotation.
-- **Hardening**: IP ban at accept, connection rate-limit + max-connections, graceful SIGTERM/Ctrl-C shutdown with save-all.
+- **Hardening**: IP/hostname ban gates (bounded forward-confirmed reverse DNS), connection rate-limit + max-connections, graceful SIGTERM/Ctrl-C shutdown with save-all.
 
 ## Building & running
 
@@ -56,23 +56,33 @@ Connect with any telnet/MUD client: `telnet <host> 4000` (or `nc` for scripts). 
 | `MUD_MOCK_DB` | `false` | `true` = in-memory DB (dev). Unset/`false` → real MySQL. |
 | `DATABASE_URL` | `mysql://root:password@localhost/deltamud` | Used when not mocking. Tables auto-create. |
 | `MUD_METRICS_PORT` | *(off)* | Enables `/metrics` + `/health`. **Avoid 9200/9201** — Elasticsearch on this host owns them; use e.g. `19595`. |
+| `MUD_METRICS_BIND` | `127.0.0.1` | Metrics bind IP. Keep loopback unless access is restricted by a firewall or reverse proxy. |
 | `MUD_RNG_SEED` | *(clock)* | Pins the Lehmer PRNG for reproducible/golden runs. |
 | `MUD_NO_SPECIALS` / `-s` | off | Skip special-procedure assignment (C's `-s` flag). `-q` is not treated as no-specials. |
 | `MUD_MAX_CONN` | `256` | Concurrent-connection cap; `MUD_CONN_BURST`/`MUD_CONN_WINDOW_MS` add per-IP rate limiting. |
+| `MUD_REVERSE_DNS` | `true` | Resolve peer PTR names at the socket edge; only forward-confirmed names are trusted. Set `false`/`0` to use canonical IPs only. |
+| `MUD_REVERSE_DNS_TIMEOUT_MS` | `1000` | Whole PTR + forward-confirmation deadline per connection (clamped to 1–10000 ms); timeout falls back to the canonical peer IP. |
+| `MUD_REVERSE_DNS_MAX_INFLIGHT` | `16` | Maximum simultaneous blocking system-resolver calls (clamped to 1–256). |
 | `RUST_LOG` | `info` | Log level. |
 
 ### Control / ops
 - **Copyover** (`copyover` command, immortal): re-execs the binary keeping players connected.
 - **Graceful shutdown**: `SIGTERM` / `Ctrl-C` saves all players and exits cleanly.
-- **CI**: `.github/workflows/ci.yml` runs `cargo build --release`, `cargo test`, `cargo clippy` on push.
+- **CI**: repository-root `.github/workflows/rust-mud-ci.yml` runs formatting, build, tests, clippy, MariaDB persistence, and bounded live canaries on push.
 
 ## Testing
 
 ```bash
-cargo test                 # 221 unit tests across commands, combat, DG, OLC, login/nanny, persistence, and protocol helpers
+cargo test                 # unit tests across commands, combat, DG, OLC, login/nanny, persistence, and protocol helpers
 cargo test <substring>     # a single test
 ```
-A 3-player concurrent soak script lives at `/tmp/soak.py <port>` (expects 0 panics). World source files are broadly compatible with the C MUD, but runtime persistence formats still have parity caveats; use the C build (`/web/deltamud/bin/circle`) side-by-side as the comparison oracle when proving exact parity.
+The tracked `scripts/canary.sh` runner creates isolated state and enforces
+bounded semantic health/combat checks; `scripts/parity-check.sh` compares the C
+and Rust servers with acknowledged command transcripts. See
+`docs/RUNBOOK.md` for smoke and longer-cadence commands. World source files are
+broadly compatible with the C MUD, but runtime persistence formats still have
+parity caveats; use the C build (`/web/deltamud/bin/circle`) side-by-side as the
+comparison oracle when proving exact parity.
 
 ## Architecture (in brief)
 

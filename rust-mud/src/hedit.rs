@@ -153,7 +153,18 @@ fn load_help_file(lib_path: &str) -> Vec<HelpEntry> {
         // line starts with '#': min_level = atoi(line+1).
         let mut min_level = 0i32;
         if line.len() > 1 {
-            min_level = line[1..].trim().parse::<i32>().unwrap_or(0);
+            min_level = match crate::text::parse_i32_atoi(&line[1..]) {
+                Ok(value) => value,
+                Err(crate::text::ParseIntError::Overflow) => {
+                    log::warn!(
+                        "SYSERR: help min-level overflow in {}; clamped to {}",
+                        path,
+                        LVL_IMPL
+                    );
+                    LVL_IMPL as i32
+                }
+                Err(_) => 0,
+            };
         }
         min_level = min_level.clamp(0, LVL_IMPL as i32);
 
@@ -389,20 +400,6 @@ fn hedit_keyword_busy(rnum: Option<usize>, exclude: ConnId) -> bool {
     }
 }
 
-/// C stdlib atoi(): parse the leading numeric prefix, 0 on no digits.
-fn atoi(s: &str) -> i32 {
-    let t = s.trim();
-    let mut end = 0;
-    let bytes = t.as_bytes();
-    if !bytes.is_empty() && (bytes[0] == b'-' || bytes[0] == b'+') {
-        end = 1;
-    }
-    while end < bytes.len() && bytes[end].is_ascii_digit() {
-        end += 1;
-    }
-    t[..end].parse().unwrap_or(0)
-}
-
 // ---------------------------------------------------------------------------
 // Menu rendering (hedit_disp_menu).
 // ---------------------------------------------------------------------------
@@ -525,7 +522,7 @@ pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         HeditMode::Keywords => {
             let mut new_kw = arg.to_string();
             if new_kw.len() > MAX_HELP_KEYWORDS {
-                new_kw.truncate(MAX_HELP_KEYWORDS - 1);
+                crate::text::truncate_utf8_bytes(&mut new_kw, MAX_HELP_KEYWORDS - 1);
             }
             let kw = if new_kw.is_empty() {
                 "UNDEFINED".to_string()
@@ -549,9 +546,24 @@ pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         HeditMode::MinLevel => {
             // C hedit.c:317: atoi() semantics — a non-numeric line becomes 0,
             // which passes the range check and resets min_level to 0 (#298).
-            let number = atoi(arg);
+            let number = match crate::text::parse_i32_atoi(arg) {
+                Ok(number) => number,
+                Err(crate::text::ParseIntError::Overflow) => {
+                    send(
+                        g,
+                        ch,
+                        "That number is outside the supported range.\r\nEnter min level:-\r\n] ",
+                    );
+                    return;
+                }
+                Err(_) => unreachable!("parse_i32_atoi maps nonnumeric input to zero"),
+            };
             if number < 0 || number > LVL_IMPL as i32 {
-                send(g, ch, "That is not a valid choice!\r\nEnter min level:-\r\n] ");
+                send(
+                    g,
+                    ch,
+                    "That is not a valid choice!\r\nEnter min level:-\r\n] ",
+                );
             } else {
                 with_state(conn, |st| {
                     st.help.min_level = number;
@@ -743,6 +755,31 @@ mod tests {
         // A genuine out-of-range number is still rejected.
         hedit_parse(&mut g, conn, "-4");
         assert_eq!(with_state(conn, |st| st.help.min_level), Some(0));
+        cleanup(conn);
+    }
+
+    #[test]
+    fn keyword_editor_truncates_multibyte_scalars_on_character_boundaries() {
+        let mut g = GameState::new(Config::default());
+        let mut ch = Character::new_player("Root".into(), Class::Cleric, Race::Human);
+        ch.player.level = LVL_IMPL;
+        let ch = g.create_char(ch);
+        let conn = ConnId(92);
+        g.get_char_mut(ch).unwrap().desc = Some(conn);
+        let mut d = Descriptor::new(conn, "example.test".to_string());
+        d.character = Some(ch);
+        g.descriptors.insert(conn, d);
+
+        do_hedit(&mut g, ch, "utf8boundarykeyword", 0);
+        for scalar in ['é', '€', '🦀'] {
+            hedit_parse(&mut g, conn, "1");
+            let input = format!("{}{scalar}", "a".repeat(MAX_HELP_KEYWORDS - 1));
+            hedit_parse(&mut g, conn, &input);
+            let keyword = with_state(conn, |state| state.help.keywords.clone()).unwrap();
+            assert_eq!(keyword.len(), MAX_HELP_KEYWORDS - 1);
+            assert!(keyword.is_char_boundary(keyword.len()));
+            assert!(!keyword.contains(scalar));
+        }
         cleanup(conn);
     }
 }

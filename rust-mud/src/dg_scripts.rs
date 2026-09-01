@@ -18,13 +18,13 @@
 // behind mutexes; the VM pulls a *clone* of the running trigger's cmdlist and
 // reads vars by id, never holding a lock across a command_interpreter call.
 
-use crate::dg_event::{add_event, WaitEvent};
+use crate::dg_event::{WaitEvent, add_event};
 use crate::dg_handler::{
-    self, add_var_in, remove_var_in, ScriptKey, TrigId, MAX_SCRIPT_DEPTH, MOB_TRIGGER,
-    MTRIG_GLOBAL, MTRIG_RANDOM, OBJ_TRIGGER, OTRIG_RANDOM, ROOM_ID_BASE, TRIG_NEW, TRIG_RESTART,
-    WLD_TRIGGER, WTRIG_GLOBAL, WTRIG_RANDOM,
+    self, MAX_SCRIPT_DEPTH, MOB_TRIGGER, MTRIG_GLOBAL, MTRIG_RANDOM, OBJ_TRIGGER, OTRIG_RANDOM,
+    ROOM_ID_BASE, ScriptKey, TRIG_NEW, TRIG_RESTART, TrigId, WLD_TRIGGER, WTRIG_GLOBAL,
+    WTRIG_RANDOM, add_var_in, remove_var_in,
 };
-use crate::object::ObjLoc;
+use crate::object::{ObjLoc, ObjectGraphOrder, walk_object_graph};
 use crate::state::GameState;
 use crate::types::*;
 use std::cell::Cell;
@@ -208,12 +208,23 @@ fn get_object_in_equip(g: &GameState, ch: CharId, name: &str) -> Option<ObjId> {
 }
 
 fn obj_room(g: &GameState, o: ObjId) -> Option<RoomRnum> {
-    match g.get_obj(o)?.loc {
-        ObjLoc::Room(r) => Some(r),
-        ObjLoc::Carried(c) | ObjLoc::Worn(c, _) => g.get_char(c).and_then(|x| x.in_room),
-        ObjLoc::Contained(parent) => obj_room(g, parent),
-        ObjLoc::Nowhere => None,
+    let walk = walk_object_graph([o], ObjectGraphOrder::Preorder, "DG obj_room", |id| {
+        g.get_obj(id).map(|object| match object.loc {
+            ObjLoc::Contained(parent) => vec![parent],
+            _ => Vec::new(),
+        })
+    });
+    for visit in walk.visits {
+        match g.get_obj(visit.id).map(|object| object.loc) {
+            Some(ObjLoc::Room(room)) => return Some(room),
+            Some(ObjLoc::Carried(ch) | ObjLoc::Worn(ch, _)) => {
+                return g.get_char(ch).and_then(|character| character.in_room);
+            }
+            Some(ObjLoc::Contained(_)) => {}
+            Some(ObjLoc::Nowhere) | None => return None,
+        }
     }
+    None
 }
 
 /// trgvar_in_room(vnum): number of people in room vnum, or -1 if no such room.
@@ -356,7 +367,14 @@ fn find_replacement(
             GoRef::Room(r) => Resolved::Room(r),
         }
     } else if var.eq_ignore_ascii_case("people") {
-        let num: i32 = field.trim().parse().unwrap_or(0);
+        let num = match crate::text::parse_i32_strict(field) {
+            Ok(value) => value,
+            Err(crate::text::ParseIntError::Overflow) => {
+                script_log("people index outside supported 32-bit range");
+                0
+            }
+            Err(_) => 0,
+        };
         return if num > 0 {
             trgvar_in_room(g, num).to_string()
         } else {
@@ -592,7 +610,14 @@ fn resolve_random(g: &GameState, go: GoRef, field: &str) -> String {
         let ch = (96 + n) as u8 as char;
         ch.to_string()
     } else {
-        let num: i32 = field.trim().parse().unwrap_or(0);
+        let num = match crate::text::parse_i32_strict(field) {
+            Ok(value) => value,
+            Err(crate::text::ParseIntError::Overflow) => {
+                script_log("random upper bound outside supported 32-bit range");
+                0
+            }
+            Err(_) => 0,
+        };
         if num > 0 {
             rng_number(1, num).to_string()
         } else {
@@ -727,28 +752,28 @@ fn find_eq_pos(arg: &str) -> Option<usize> {
     // a positional keyword table with !RESERVED! holes, matched by
     // search_block-style PREFIX match, THEN a numeric fallback (#154).
     const KEYWORDS: [[&str; 2]; 22] = [
-        ["!RESERVED!", ""],   // 0  light
-        ["finger", ""],       // 1
-        ["!RESERVED!", ""],   // 2
-        ["neck", ""],         // 3
-        ["!RESERVED!", ""],   // 4
-        ["body", ""],         // 5
-        ["head", ""],         // 6
-        ["legs", ""],         // 7
-        ["feet", ""],         // 8
-        ["hands", ""],        // 9
-        ["arms", ""],         // 10
-        ["shield", ""],       // 11
-        ["about", ""],        // 12
-        ["waist", ""],        // 13
-        ["wrist", ""],        // 14
-        ["!RESERVED!", ""],   // 15
-        ["!RESERVED!", ""],   // 16
-        ["!RESERVED!", ""],   // 17
-        ["shoulders", ""],    // 18
-        ["ankle", ""],        // 19
-        ["face", ""],         // 20
-        ["!RESERVED!", ""],   // 21
+        ["!RESERVED!", ""], // 0  light
+        ["finger", ""],     // 1
+        ["!RESERVED!", ""], // 2
+        ["neck", ""],       // 3
+        ["!RESERVED!", ""], // 4
+        ["body", ""],       // 5
+        ["head", ""],       // 6
+        ["legs", ""],       // 7
+        ["feet", ""],       // 8
+        ["hands", ""],      // 9
+        ["arms", ""],       // 10
+        ["shield", ""],     // 11
+        ["about", ""],      // 12
+        ["waist", ""],      // 13
+        ["wrist", ""],      // 14
+        ["!RESERVED!", ""], // 15
+        ["!RESERVED!", ""], // 16
+        ["!RESERVED!", ""], // 17
+        ["shoulders", ""],  // 18
+        ["ankle", ""],      // 19
+        ["face", ""],       // 20
+        ["!RESERVED!", ""], // 21
     ];
     let a = arg.trim().to_lowercase();
     for (i, kw) in KEYWORDS.iter().enumerate() {
@@ -958,16 +983,21 @@ const OPS: &[&str] = &[
 ];
 
 fn atoi(s: &str) -> i64 {
-    let s = s.trim_start();
-    let mut end = 0;
-    let bytes = s.as_bytes();
-    if !bytes.is_empty() && (bytes[0] == b'-' || bytes[0] == b'+') {
-        end = 1;
+    match crate::text::parse_i64_atoi(s) {
+        Ok(value) => value,
+        Err(crate::text::ParseIntError::Overflow) => {
+            let clamped = if s.trim_start().starts_with('-') {
+                i64::MIN
+            } else {
+                i64::MAX
+            };
+            script_log(&format!(
+                "numeric value outside supported 64-bit range; clamped to {clamped}"
+            ));
+            clamped
+        }
+        Err(_) => unreachable!("parse_i64_atoi maps nonnumeric input to zero"),
     }
-    while end < bytes.len() && bytes[end].is_ascii_digit() {
-        end += 1;
-    }
-    s[..end].parse::<i64>().unwrap_or(0)
 }
 
 /// str_cmp returns 0 if equal (case-insensitive), used to mirror C signs.
@@ -1041,13 +1071,18 @@ fn eval_op(op: &str, lhs: &str, rhs: &str) -> String {
             }
         }
         "/=" => if str_str(lhs, rhs) { "1" } else { "0" }.to_string(),
-        "*" => (atoi(lhs) * atoi(rhs)).to_string(),
+        "*" => atoi(lhs).saturating_mul(atoi(rhs)).to_string(),
         "/" => {
             let n = atoi(rhs);
-            if n != 0 { atoi(lhs) / n } else { 0 }.to_string()
+            if n != 0 {
+                atoi(lhs).checked_div(n).unwrap_or(i64::MAX)
+            } else {
+                0
+            }
+            .to_string()
         }
-        "+" => (atoi(lhs) + atoi(rhs)).to_string(),
-        "-" => (atoi(lhs) - atoi(rhs)).to_string(),
+        "+" => atoi(lhs).saturating_add(atoi(rhs)).to_string(),
+        "-" => atoi(lhs).saturating_sub(atoi(rhs)).to_string(),
         "!" => {
             if is_num(rhs) {
                 ((atoi(rhs) == 0) as i32).to_string()
@@ -1346,7 +1381,7 @@ fn process_context(go: GoRef, trig: TrigId, cmd: &str) {
         log_cmd_err(trig, "context", cmd);
         return;
     }
-    dg_handler::set_context(go.key(), var.parse::<i64>().unwrap_or(0));
+    dg_handler::set_context(go.key(), atoi(var));
 }
 
 fn process_remote(g: &GameState, go: GoRef, trig: TrigId, cmd: &str) {
@@ -1423,7 +1458,14 @@ fn process_return(trig: TrigId, cmd: &str) -> i32 {
         log_cmd_err(trig, "return", cmd);
         return 1;
     }
-    atoi(&a2) as i32
+    match crate::text::parse_i32_atoi(&a2) {
+        Ok(value) => value,
+        Err(crate::text::ParseIntError::Overflow) => {
+            log_cmd_err(trig, "return", "value outside supported 32-bit range");
+            0
+        }
+        Err(_) => unreachable!("parse_i32_atoi maps nonnumeric input to zero"),
+    }
 }
 
 /// process_wait: schedule a wait event and park the trigger at the next line.
@@ -1450,8 +1492,8 @@ fn process_wait(g: &mut GameState, go: GoRef, trig: TrigId, cmd: &str, cur_line:
         let mut it = arg.split_whitespace();
         let n = atoi(it.next().unwrap_or("0"));
         match it.next() {
-            Some("t") => n * 75 * PASSES_PER_SEC as i64,
-            Some("s") => n * PASSES_PER_SEC as i64,
+            Some("t") => n.saturating_mul(75).saturating_mul(PASSES_PER_SEC as i64),
+            Some("s") => n.saturating_mul(PASSES_PER_SEC as i64),
             _ => n,
         }
     };
@@ -1475,14 +1517,18 @@ fn wait_until_delay(g: &GameState, hr: i64, min: i64) -> i64 {
 }
 
 fn wait_until_delay_from(pulse: u64, current_mud_min: i64, hr: i64, min: i64) -> i64 {
-    let target_min = min + hr * 60;
+    let target_min = min.saturating_add(hr.saturating_mul(60));
     let pulses_per_hour = 75 * PASSES_PER_SEC as i64; // SECS_PER_MUD_HOUR=75
-    let ntime = target_min * pulses_per_hour / 60;
-    let now = (pulse as i64 % pulses_per_hour) + current_mud_min * pulses_per_hour / 60;
+    let ntime = target_min.saturating_mul(pulses_per_hour) / 60;
+    let now = (pulse as i64 % pulses_per_hour)
+        .saturating_add(current_mud_min.saturating_mul(pulses_per_hour) / 60);
     if now >= ntime {
-        pulses_per_hour * 24 - now + ntime
+        pulses_per_hour
+            .saturating_mul(24)
+            .saturating_sub(now)
+            .saturating_add(ntime)
     } else {
-        ntime - now
+        ntime.saturating_sub(now)
     }
 }
 
@@ -1558,11 +1604,25 @@ pub fn script_driver(g: &mut GameState, go: GoRef, trig: TrigId, type_: i32, mod
     // act() lines do not re-trigger act_mtrigger (#138).
     let prev_check = g.dg_act_check;
     g.dg_act_check = false;
-    let result = script_driver_inner(g, go, trig, type_, mode);
+    // The Game boundary contains command panics, so this layer must restore
+    // every process/thread-local re-entry latch before the panic reaches it.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        script_driver_inner(g, go, trig, type_, mode)
+    }));
     g.dg_act_check = prev_check;
-
-    SCRIPT_DEPTH.with(|d| d.set(d.get() - 1));
-    result
+    SCRIPT_DEPTH.with(|d| d.set(depth));
+    match result {
+        Ok(result) => result,
+        Err(payload) => {
+            OWNER_PURGED.with(|purged| purged.set(false));
+            dg_handler::with_trig_mut(trig, |trigger| {
+                trigger.depth = 0;
+                trigger.curr_line = 0;
+                trigger.var_list.clear();
+            });
+            std::panic::resume_unwind(payload)
+        }
+    }
 }
 
 fn script_driver_inner(g: &mut GameState, go: GoRef, trig: TrigId, type_: i32, mode: i32) -> i32 {
@@ -1665,9 +1725,7 @@ fn script_driver_inner(g: &mut GameState, go: GoRef, trig: TrigId, type_: i32, m
             // MAX_INPUT_LENGTH (256) buffer - long substitutions are clipped
             // (#160).
             let mut cmd = var_subst(g, go, trig, p);
-            if cmd.len() > 256 {
-                cmd.truncate(256);
-            }
+            crate::text::truncate_utf8_bytes(&mut cmd, 256);
             let lc = cmd.trim_start();
 
             if let Some(rest) = strip_kw(lc, "eval ") {
@@ -1698,7 +1756,12 @@ fn script_driver_inner(g: &mut GameState, go: GoRef, trig: TrigId, type_: i32, m
             } else if lc.starts_with("version") {
                 // C dg_scripts.c:2378-2379: 'version' mudlogs the DG banner
                 // to immortals (#161).
-                crate::syslog::mudlog(g, "DG Scripts Version 0.99 Patch Level 5a    8/98", crate::syslog::NRM, LVL_GOD);
+                crate::syslog::mudlog(
+                    g,
+                    "DG Scripts Version 0.99 Patch Level 5a    8/98",
+                    crate::syslog::NRM,
+                    LVL_GOD,
+                );
             } else {
                 // Real command — dispatch by trigger type. The DG command
                 // modules (dg_mobcmd / dg_objcmd / dg_wldcmd) own the m*/o*/w*
@@ -1725,8 +1788,10 @@ fn script_driver_inner(g: &mut GameState, go: GoRef, trig: TrigId, type_: i32, m
 }
 
 fn strip_kw<'a>(s: &'a str, kw: &str) -> Option<&'a str> {
-    if s.len() >= kw.len() && s[..kw.len()].eq_ignore_ascii_case(kw) {
-        Some(&s[kw.len()..])
+    if s.get(..kw.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(kw))
+    {
+        s.get(kw.len()..)
     } else {
         None
     }
@@ -1747,6 +1812,10 @@ pub fn set_owner_purged() {
 // dg_scripts.c does. Returns true if the owner was purged.
 // ===========================================================================
 fn run_one_command(g: &mut GameState, go: GoRef, type_: i32, cmd: &str) -> bool {
+    #[cfg(test)]
+    if cmd == "__panic_for_test" {
+        panic!("injected DG script panic");
+    }
     match type_ {
         MOB_TRIGGER => {
             if let GoRef::Mob(c) = go {
@@ -1824,11 +1893,12 @@ pub fn script_trigger_check(g: &mut GameState) {
             crate::dg_triggers::random_otrigger(g, o);
         }
     }
-    // Only real rooms can carry triggers. The ~9,800 synthetic surface-map cells
-    // (rnum >= map_start_rnum) never have a WTRIG, so stop the per-pulse scan at
-    // the real-room boundary instead of walking all ~10,400 rooms each time.
-    let nrooms = g.map_start_rnum.unwrap_or_else(|| g.rooms.len());
-    for r in 0..nrooms {
+    // Synthetic surface-map cells cannot carry WTRIGs. GameState maintains an
+    // append-only index of ordinary rooms, including OLC additions made after
+    // the map splice, so this hot path is O(real rooms), not O(map cells).
+    // Snapshot it because a fired trigger mutably borrows the whole game.
+    let rooms = g.non_map_room_rnums().to_vec();
+    for r in rooms {
         let ty = dg_handler::script_types(ScriptKey::Room(r));
         if ty & WTRIG_RANDOM != 0 && ((ty & WTRIG_GLOBAL != 0) || !zone_empty_for_room(g, r)) {
             crate::dg_triggers::random_wtrigger(g, r);
@@ -1936,6 +2006,59 @@ mod eval_tests {
     }
 
     #[test]
+    fn random_room_scan_includes_real_rooms_appended_after_map_cells() {
+        use crate::config::Config;
+        use crate::room::Room;
+
+        let mut g = GameState::new(Config::default());
+        let real_before = g.add_room(Room::new(100, 0, "Before".into(), "".into()));
+        let mut map = Room::new(2_000_000, 0, "Map".into(), "".into());
+        map.map_x = Some(1);
+        map.map_y = Some(1);
+        let map_room = g.add_room(map);
+        g.map_start_rnum = Some(map_room);
+        let real_after = g.add_room(Room::new(101, 0, "After".into(), "".into()));
+
+        assert_eq!(g.non_map_room_rnums(), &[real_before, real_after]);
+        assert!(!g.non_map_room_rnums().contains(&map_room));
+    }
+
+    #[test]
+    fn random_room_scan_work_does_not_scale_with_surface_map_cells() {
+        use crate::config::Config;
+        use crate::room::Room;
+
+        const MAP_CELLS: usize = 50_000;
+
+        let mut g = GameState::new(Config::default());
+        let real_before = g.add_room(Room::new(100, 0, String::new(), String::new()));
+        for offset in 0..MAP_CELLS {
+            let mut map = Room::new(2_000_000 + offset as i32, 0, String::new(), String::new());
+            map.map_x = Some((offset + 1) as i32);
+            map.map_y = Some(1);
+            g.add_room(map);
+        }
+        let real_after = g.add_room(Room::new(101, 0, String::new(), String::new()));
+
+        assert_eq!(g.rooms.len(), MAP_CELLS + 2);
+        assert_eq!(g.non_map_room_rnums(), &[real_before, real_after]);
+    }
+
+    #[test]
+    fn dg_variable_object_room_lookup_rejects_a_containment_cycle() {
+        use crate::config::Config;
+        use crate::object::{ObjLoc, Object};
+
+        let mut g = GameState::new(Config::default());
+        let first = g.create_obj(Object::new(NOTHING, "first".into(), "first".into()));
+        let second = g.create_obj(Object::new(NOTHING, "second".into(), "second".into()));
+        g.get_obj_mut(first).unwrap().loc = ObjLoc::Contained(second);
+        g.get_obj_mut(second).unwrap().loc = ObjLoc::Contained(first);
+
+        assert_eq!(obj_room(&g, first), None);
+    }
+
+    #[test]
     fn wait_until_uses_current_mud_hour_plus_hour_pulse_offset() {
         let pulses_per_hour = 75 * PASSES_PER_SEC as i64;
         let pulse_offset = pulses_per_hour / 2;
@@ -1962,7 +2085,7 @@ mod vm_tests {
     use super::*;
     use crate::character::Character;
     use crate::config::Config;
-    use crate::dg_handler::{add_trigger, install_trig, TrigData, DG_TEST_LOCK};
+    use crate::dg_handler::{DG_TEST_LOCK, TrigData, add_trigger, install_trig};
     use crate::room::Room;
     use std::collections::HashMap;
     use std::sync::MutexGuard;
@@ -2001,6 +2124,30 @@ mod vm_tests {
             narg: 100,
             arglist: String::new(),
             cmdlist: cmds.iter().map(|s| s.to_string()).collect(),
+            curr_line: 0,
+            depth: 0,
+            loops: 0,
+            wait_event: None,
+            var_list: Vec::new(),
+            purged: false,
+            loop_origin: HashMap::new(),
+        })
+    }
+
+    fn make_world_random_trig(global: bool, marker: &str) -> TrigId {
+        install_trig(TrigData {
+            nr: 0,
+            vnum: 10_000,
+            attach_type: WLD_TRIGGER,
+            name: format!("random room {marker}"),
+            trigger_type: WTRIG_RANDOM | if global { WTRIG_GLOBAL } else { 0 },
+            narg: 100,
+            arglist: String::new(),
+            cmdlist: vec![
+                format!("set {marker} yes"),
+                format!("global {marker}"),
+                "halt".into(),
+            ],
             curr_line: 0,
             depth: 0,
             loops: 0,
@@ -2057,6 +2204,85 @@ mod vm_tests {
     }
 
     #[test]
+    fn panicking_trigger_restores_all_reentry_latches() {
+        let (_lock, mut g, cid) = world();
+        g.dg_act_check = true;
+        let trig = make_trig(&["__panic_for_test"]);
+        add_trigger(ScriptKey::Mob(cid), trig, -1);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            script_driver(&mut g, GoRef::Mob(cid), trig, MOB_TRIGGER, TRIG_NEW)
+        }));
+        assert!(result.is_err());
+        assert!(g.dg_act_check, "act-trigger gate must be restored");
+        assert_eq!(SCRIPT_DEPTH.with(|depth| depth.get()), 0);
+        assert_eq!(dg_handler::with_trig(trig, |t| t.depth), Some(0));
+        assert_eq!(dg_handler::with_trig(trig, |t| t.curr_line), Some(0));
+
+        // A subsequent trigger on the same thread must execute normally.
+        let followup = make_trig(&["set survived yes", "global survived", "halt"]);
+        add_trigger(ScriptKey::Mob(cid), followup, -1);
+        assert_eq!(
+            script_driver(&mut g, GoRef::Mob(cid), followup, MOB_TRIGGER, TRIG_NEW),
+            1
+        );
+        assert_eq!(read_global(&g, cid, "survived").as_deref(), Some("yes"));
+    }
+
+    #[test]
+    fn heartbeat_fires_random_triggers_on_real_rooms_added_after_the_map() {
+        let _lock = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        dg_handler::boot_handler();
+        let mut g = GameState::new(Config::default());
+        g.add_room(Room::new(100, 1, "Before map".into(), String::new()));
+        let mut map = Room::new(2_000_000, 2, "Synthetic map".into(), String::new());
+        map.map_x = Some(10);
+        map.map_y = Some(20);
+        let map_room = g.add_room(map);
+        g.map_start_rnum = Some(map_room);
+        let local_room = g.add_room(Room::new(101, 3, "OLC local".into(), String::new()));
+        let global_room = g.add_room(Room::new(102, 4, "OLC global".into(), String::new()));
+
+        let local = make_world_random_trig(false, "local_fired");
+        let global = make_world_random_trig(true, "global_fired");
+        let synthetic = make_world_random_trig(true, "map_fired");
+        add_trigger(ScriptKey::Room(local_room), local, -1);
+        add_trigger(ScriptKey::Room(global_room), global, -1);
+        add_trigger(ScriptKey::Room(map_room), synthetic, -1);
+
+        // With no connected player in either zone, only GLOBAL may fire.
+        script_trigger_check(&mut g);
+        assert_eq!(
+            dg_handler::get_global_var(ScriptKey::Room(global_room), "global_fired").as_deref(),
+            Some("yes")
+        );
+        assert_eq!(
+            dg_handler::get_global_var(ScriptKey::Room(local_room), "local_fired"),
+            None
+        );
+        assert_eq!(
+            dg_handler::get_global_var(ScriptKey::Room(map_room), "map_fired"),
+            None
+        );
+
+        let mut player = Character::new_player("Watcher".into(), Class::Warrior, Race::Human);
+        player.desc = Some(ConnId(77));
+        let player = g.create_char(player);
+        g.char_to_room(player, local_room);
+
+        // The next eligible heartbeat includes the real post-map room.
+        script_trigger_check(&mut g);
+        assert_eq!(
+            dg_handler::get_global_var(ScriptKey::Room(local_room), "local_fired").as_deref(),
+            Some("yes")
+        );
+        assert_eq!(
+            dg_handler::get_global_var(ScriptKey::Room(map_room), "map_fired"),
+            None
+        );
+    }
+
+    #[test]
     fn double_or_pattern_left_to_right() {
         // The `%x% == 1 || 2 || 3` idiom from 2190.trg: with C left-to-right
         // eval, the trailing non-zero literals make the whole thing truthy.
@@ -2080,5 +2306,20 @@ mod vm_tests {
         let trig = make_trig(&["* noop"]);
         let s = var_subst(&g, GoRef::Mob(CharId(1)), trig, "value=%random.0%");
         assert_eq!(s, "value=0");
+    }
+
+    #[test]
+    fn multibyte_substitution_is_clipped_on_a_char_boundary() {
+        let (_lock, mut g, cid) = world();
+        let expanded = "€".repeat(100);
+        dg_handler::add_global_var(ScriptKey::Mob(cid), "source", &expanded, 0);
+        let trig = make_trig(&["set payload %source%", "global payload", "halt"]);
+        add_trigger(ScriptKey::Mob(cid), trig, -1);
+
+        script_driver(&mut g, GoRef::Mob(cid), trig, MOB_TRIGGER, TRIG_NEW);
+
+        let payload = read_global(&g, cid, "payload").expect("payload promoted to global");
+        assert_eq!(payload, "€".repeat(81));
+        assert_eq!(payload.len(), 243);
     }
 }

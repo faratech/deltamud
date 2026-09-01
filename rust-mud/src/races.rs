@@ -187,7 +187,9 @@ mod tests {
     fn race_abbrevs_match_races_c() {
         assert_eq!(
             &RACE_ABBREVS[..NUM_RACES],
-            &["Hum", "Elf", "Gno", "Dwa", "Tro", "Gob", "Dro", "Orc", "Min"]
+            &[
+                "Hum", "Elf", "Gno", "Dwa", "Tro", "Gob", "Dro", "Orc", "Min"
+            ]
         );
         assert_eq!(race_abbrev(RACE_GOBLIN, false), "Gob");
         assert_eq!(race_abbrev(RACE_DROW, false), "Dro");

@@ -32,7 +32,7 @@
 // stock-Circle extras named in some docs (mzoneecho/mdamage/mfollow) are not in
 // this codebase's source and are intentionally absent.
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::character::Character;
 use crate::flags::AFF_CHARM;
 use crate::handler::isname;
@@ -232,7 +232,7 @@ fn find_target_room(g: &GameState, mob: CharId, raw: &str) -> Option<RoomRnum> {
         .map(|c| c.is_ascii_digit())
         .unwrap_or(false);
     if first_is_digit && !roomstr.contains('.') {
-        let vnum: RoomVnum = roomstr.parse().unwrap_or(NOWHERE);
+        let vnum = crate::text::parse_i32_strict(&roomstr).ok()?;
         // C act.wizard.c:238-261 find_target_room permission gates: a
         // sub-immortal script cannot target GODROOM/IMPROOM, occupied
         // PRIVATE rooms, or houses it may not enter (#148).
@@ -244,12 +244,11 @@ fn find_target_room(g: &GameState, mob: CharId, raw: &str) -> Option<RoomRnum> {
             {
                 return None;
             }
-            if flags.contains(crate::room::RoomFlags::PRIVATE)
-                && room.people.len() > 1
-            {
+            if flags.contains(crate::room::RoomFlags::PRIVATE) && room.people.len() > 1 {
                 return None;
             }
-            if flags.contains(crate::room::RoomFlags::HOUSE) && !crate::house::house_can_enter(g, mob, room.number)
+            if flags.contains(crate::room::RoomFlags::HOUSE)
+                && !crate::house::house_can_enter(g, mob, room.number)
             {
                 return None;
             }
@@ -309,23 +308,20 @@ struct SubTemplate {
 /// C any_one_name: lowercase first word, stopping at whitespace or punctuation
 /// (but '#' and '-' are allowed inside a word — needed for negative ids/UIDs).
 fn any_one_name(argument: &str) -> (String, &str) {
-    let bytes = argument.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() && (bytes[i] as char).is_whitespace() {
-        i += 1;
-    }
-    let start = i;
-    while i < bytes.len() {
-        let c = bytes[i] as char;
+    let trimmed = argument.trim_start_matches(char::is_whitespace);
+    let start = argument.len() - trimmed.len();
+    let mut end = argument.len();
+    for (relative, c) in trimmed.char_indices() {
         if c.is_whitespace() {
+            end = start + relative;
             break;
         }
         if c.is_ascii_punctuation() && c != '#' && c != '-' {
+            end = start + relative;
             break;
         }
-        i += 1;
     }
-    (argument[start..i].to_ascii_lowercase(), &argument[i..])
+    (argument[start..end].to_ascii_lowercase(), &argument[end..])
 }
 
 /// Parse the sub_write template (C: the big tokenising loop in sub_write).
@@ -342,8 +338,8 @@ fn parse_sub_template(arg: &str) -> SubTemplate {
                 let rest: String = chars.clone().collect();
                 let (name, tail) = any_one_name(&rest);
                 // Advance the iterator past what any_one_name consumed.
-                let consumed = rest.len() - tail.len();
-                for _ in 0..consumed {
+                let consumed_chars = rest[..rest.len() - tail.len()].chars().count();
+                for _ in 0..consumed_chars {
                     chars.next();
                 }
                 toks.push((Tok::Char(c), name));
@@ -352,8 +348,8 @@ fn parse_sub_template(arg: &str) -> SubTemplate {
                 literals.push(std::mem::take(&mut cur));
                 let rest: String = chars.clone().collect();
                 let (name, tail) = any_one_name(&rest);
-                let consumed = rest.len() - tail.len();
-                for _ in 0..consumed {
+                let consumed_chars = rest[..rest.len() - tail.len()].chars().count();
+                for _ in 0..consumed_chars {
                     chars.next();
                 }
                 toks.push((Tok::Obj, name));
@@ -708,8 +704,7 @@ fn do_mjunk(g: &mut GameState, ch: CharId, argument: &str) {
     if !is_all_dot && !arg.eq_ignore_ascii_case("all") {
         // FIND_INDIV branch: try a worn item first (by name), else an inventory
         // item; destroy at most one.
-        if let Some((oid, pos)) = find_obj_in_equip_vis(g, ch, &arg) {
-            g.unequip_char(ch, pos);
+        if let Some((oid, _pos)) = find_obj_in_equip_vis(g, ch, &arg) {
             detach_and_extract_obj(g, oid);
             return;
         }
@@ -741,9 +736,10 @@ fn do_mjunk(g: &mut GameState, ch: CharId, argument: &str) {
         }
     }
     // Then strip any matching worn items.
-    while let Some((oid, pos)) = find_obj_in_equip_vis(g, ch, &arg) {
-        g.unequip_char(ch, pos);
-        detach_and_extract_obj(g, oid);
+    while let Some((oid, _pos)) = find_obj_in_equip_vis(g, ch, &arg) {
+        if !detach_and_extract_obj(g, oid) {
+            break;
+        }
     }
 }
 
@@ -866,7 +862,13 @@ fn do_mload(g: &mut GameState, ch: CharId, argument: &str) {
         mob_log(g, ch, "mload: bad syntax");
         return;
     }
-    let number: i32 = arg2.parse().unwrap_or(-1);
+    let number = match crate::text::parse_i32_strict(&arg2) {
+        Ok(number) => number,
+        Err(_) => {
+            mob_log(g, ch, "mload: number outside supported range");
+            return;
+        }
+    };
     if number < 0 {
         mob_log(g, ch, "mload: bad syntax");
         return;
@@ -1232,7 +1234,14 @@ fn do_mexp(g: &mut GameState, ch: CharId, argument: &str) {
             }
         }
     };
-    let gain: i64 = amount.parse().unwrap_or(0);
+    let gain = match crate::text::parse_i64_strict(&amount) {
+        Ok(gain) => gain,
+        Err(crate::text::ParseIntError::Overflow) => {
+            mob_log(g, ch, "mexp: amount outside supported range");
+            return;
+        }
+        Err(_) => 0,
+    };
     crate::limits::gain_exp(g, victim, gain);
 }
 
@@ -1274,13 +1283,22 @@ fn do_mgold(g: &mut GameState, ch: CharId, argument: &str) {
             }
         }
     };
-    let delta: i32 = amount.parse().unwrap_or(0);
+    let delta = match crate::text::parse_i64_strict(&amount) {
+        Ok(delta) => delta,
+        Err(crate::text::ParseIntError::Overflow) => {
+            mob_log(g, ch, "mgold: amount outside supported range");
+            return;
+        }
+        Err(_) => 0,
+    };
     let mut underflow = false;
     if let Some(c) = g.get_char_mut(victim) {
-        c.points.gold += delta;
-        if c.points.gold < 0 {
-            c.points.gold = 0;
-            underflow = true;
+        if delta >= 0 {
+            crate::gold::credit(c, crate::gold::Account::Carried, delta);
+        } else {
+            let requested = delta.saturating_abs();
+            underflow =
+                crate::gold::debit_up_to(c, crate::gold::Account::Carried, requested) < requested;
         }
     }
     if underflow {
@@ -1461,7 +1479,14 @@ fn do_mtransform(g: &mut GameState, ch: CharId, argument: &str) {
         mob_log(g, ch, "mtransform: bad argument");
         return;
     }
-    let vnum: i32 = arg.parse().unwrap_or(-1);
+    let vnum = match crate::text::parse_i32_strict(&arg) {
+        Ok(vnum) => vnum,
+        Err(crate::text::ParseIntError::Overflow) => {
+            mob_log(g, ch, "mtransform: vnum outside supported range");
+            return;
+        }
+        Err(_) => -1,
+    };
 
     // Load the destination prototype into the world to read its proto fields.
     let m = match g.load_mobile(vnum) {
@@ -1529,11 +1554,9 @@ fn do_mtransform(g: &mut GameState, ch: CharId, argument: &str) {
 // Shared helpers: object extraction, equip lookup, all-dots, script memory.
 // ===========================================================================
 
-/// Detach an object from wherever it lives, then extract it from the arena.
-/// (C extract_obj() unlinks first; GameState::extract_obj requires detachment.)
-fn detach_and_extract_obj(g: &mut GameState, oid: ObjId) {
-    g.obj_from_anywhere(oid);
-    g.extract_obj(oid);
+/// Atomically detach and extract a validated object graph from the arena.
+fn detach_and_extract_obj(g: &mut GameState, oid: ObjId) -> bool {
+    g.extract_obj(oid)
 }
 
 /// get_object_in_equip_vis: first worn item matching `name`, with its slot.
@@ -1578,7 +1601,9 @@ fn is_number(s: &str) -> bool {
         return false;
     }
     let body = s.strip_prefix('-').unwrap_or(s);
-    !body.is_empty() && body.chars().all(|c| c.is_ascii_digit())
+    !body.is_empty()
+        && body.chars().all(|c| c.is_ascii_digit())
+        && crate::text::parse_i32_strict(s).is_ok()
 }
 
 /// CircleMUD two_arguments(): two successive one_argument() calls (fill-word
@@ -1728,5 +1753,28 @@ fn stop_fighting(g: &mut GameState, ch: CharId) {
         if c.position == Position::Fighting {
             c.position = Position::Standing;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dg_target_tokenizer_never_slices_a_multibyte_scalar() {
+        for input in ["Ġtarget tail", "ƅtarget tail", "🦀target tail"] {
+            let (name, tail) = any_one_name(input);
+            assert_eq!(name, input.split_once(' ').unwrap().0.to_ascii_lowercase());
+            assert_eq!(tail, " tail");
+        }
+    }
+
+    #[test]
+    fn dg_template_consumes_unicode_target_names_by_character_count() {
+        let parsed = parse_sub_template("~Ġtarget waves");
+
+        assert_eq!(parsed.toks.len(), 1);
+        assert_eq!(parsed.toks[0].1, "Ġtarget".to_ascii_lowercase());
+        assert_eq!(parsed.literals, vec![String::new(), " waves".to_string()]);
     }
 }

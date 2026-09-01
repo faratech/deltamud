@@ -19,19 +19,16 @@
 //     room and running the same logic, so the commands work the moment the
 //     command table points "mail"/"check"/"receive" here (see manifest).
 //
-// PERSISTENCE / ON-DISK FORMAT (documented deviation, see `gaps`)
-// ---------------------------------------------------------------
+// PERSISTENCE / ON-DISK FORMAT
+// ----------------------------
 //   The C code fwrite()s native `header_block_type` / `data_block_type` structs
 //   straight to disk, so the byte layout depends on the compiler's struct
-//   padding and the host's `sizeof(long)`/`sizeof(time_t)`. That is not a
-//   stable, portable format and cannot be reproduced byte-for-byte from Rust
-//   without committing to one specific ABI. We instead use an explicit,
-//   self-describing little-endian layout that preserves the *semantics*
-//   exactly — BLOCK_SIZE(100)-aligned blocks, HEADER/DATA/DELETED typing,
-//   free-list reuse of deleted blocks, and the next-block FAT chain — so the
-//   file the Rust MUD writes round-trips through the Rust MUD identically and
-//   survives reboots. It is byte-compatible with the C 100-B block format on LP64 (verified; see #95)
-//   one-shot migration would re-key by (to,from,time,text). Block layout:
+//   padding and the host's `sizeof(long)`/`sizeof(time_t)`. DeltaMUD's deployed
+//   C ABI is little-endian LP64 (`long` and `time_t` are both eight bytes).
+//   This module commits to that migration ABI explicitly, making its 100-byte
+//   blocks byte-compatible with the C server while avoiding native Rust struct
+//   layout. Exact generated C-layout fixtures cover both import and rewrite
+//   (#95). Block layout:
 //       offset 0  : i64  block_type   (HEADER=-1 / LAST=-2 / DELETED=-3 / >=0 link)
 //       offset 8  : i64  next_block   (header only; junk in data blocks)
 //       offset 16 : i64  from         (header only)
@@ -39,11 +36,10 @@
 //       offset 32 : i64  mail_time    (header only; unix seconds)
 //       offset 40 : 60 bytes text     (header: 59 usable + NUL; data: 91 usable)
 //   Header text capacity = BLOCK_SIZE - 40 - 1 = 59; data text capacity =
-//   BLOCK_SIZE - 8 - 1 = 91. (C's HEADER_BLOCK_DATASIZE/DATA_BLOCK_DATASIZE are
-//   derived the same way from the struct sizes; the values differ because the
-//   layouts differ, but every store/read pairs against the same constants here.)
+//   BLOCK_SIZE - 8 - 1 = 91, exactly C's HEADER_BLOCK_DATASIZE and
+//   DATA_BLOCK_DATASIZE on that ABI.
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::object::{ObjectType, WearFlags};
 use crate::state::GameState;
 use crate::types::*;
@@ -259,6 +255,11 @@ pub fn mail_register_player(idnum: i64, name: &str) {
     }
     let lname = name.to_lowercase();
     let mut m = crate::lock_ok::lock(&sys());
+    // Re-registration is also the rename path.  Drop every stale name which
+    // still points at this identity before publishing the new one; otherwise
+    // an old renamed name could continue resolving through mail's fallback
+    // registry after GameState's authoritative index stopped recognizing it.
+    m.name_to_id.retain(|_, stored_id| *stored_id != idnum);
     m.id_to_name.insert(idnum, lname.clone());
     m.name_to_id.insert(lname, idnum);
 }
@@ -288,7 +289,7 @@ fn get_id_by_name(g: &GameState, name: &str) -> i64 {
 }
 
 /// get_name_by_id(): prefer a live player's display name, then the table.
-fn get_name_by_id(g: &GameState, id: i64) -> String {
+fn get_name_by_id(g: &GameState, m: &MailSystem, id: i64) -> String {
     // Live player first (preserves original casing).
     for &cid in g.players_by_name.values() {
         if let Some(c) = g.get_char(cid) {
@@ -301,7 +302,6 @@ fn get_name_by_id(g: &GameState, id: i64) -> String {
     if let Some(n) = g.get_name_by_id(id) {
         return n;
     }
-    let m = crate::lock_ok::lock(&sys());
     m.id_to_name
         .get(&id)
         .map(|s| cap_first(s))
@@ -448,11 +448,15 @@ fn write_text(dst: &mut [u8], txt: &str, cap: usize) {
     // dst[n] is the NUL (already zero from the zeroed block).
 }
 
-/// Read the NUL-terminated text from a block region of length `cap+1`.
-fn read_text(src: &[u8], cap: usize) -> String {
+/// Borrow the NUL-terminated payload bytes from one C mail block.
+///
+/// Decoding must happen only after every block in the chain is concatenated:
+/// the C writer splits raw bytes at its fixed 59/91-byte capacities, including
+/// in the middle of a UTF-8 scalar (#95/#395).
+fn read_text_bytes(src: &[u8], cap: usize) -> &[u8] {
     let region = &src[..cap.min(src.len())];
     let end = region.iter().position(|&c| c == 0).unwrap_or(region.len());
-    String::from_utf8_lossy(&region[..end]).into_owned()
+    &region[..end]
 }
 
 // ===========================================================================
@@ -495,7 +499,11 @@ pub fn store_mail(to: i64, from: i64, message: &str) {
         return; // whole message fit in the header.
     }
 
-    let mut bytes_written = HEADER_TEXT_CAP;
+    // Advance by the bytes actually stored, not the nominal block capacity.
+    // A UTF-8 scalar which would straddle the header boundary makes
+    // `header_txt` shorter than HEADER_TEXT_CAP; starting at the nominal cap
+    // would skip one of its bytes (and lossy decoding would corrupt the body).
+    let mut bytes_written = header_txt.len();
     let mut last_address = target;
 
     // Allocate the first data block and rewrite the header to point at it.
@@ -570,13 +578,15 @@ pub fn read_delete(g: &GameState, recipient: i64) -> Option<String> {
     let next_block = i64::from_le_bytes(header[8..16].try_into().unwrap());
     let from = i64::from_le_bytes(header[16..24].try_into().unwrap());
     let mail_time = i64::from_le_bytes(header[32..40].try_into().unwrap());
-    let header_txt = read_text(&header[40..], HEADER_TEXT_CAP);
+    let mut body = read_text_bytes(&header[40..], HEADER_TEXT_CAP).to_vec();
 
     // Compose the formatted header (matches mail.c sprintf, colour codes and
     // all). asctime() with the trailing newline stripped.
     let tmstr = fmt_asctime(mail_time);
-    let to_name = get_name_by_id(g, recipient);
-    let from_name = get_name_by_id(g, from);
+    // Reuse the already-held mail-system guard. Re-locking the same
+    // non-reentrant Mutex here deadlocked every successful receive.
+    let to_name = get_name_by_id(g, &m, recipient);
+    let from_name = get_name_by_id(g, &m, from);
     let mut message = format!(
         " &b-&c=&y Deltanian Postal Service&c =&b-&n\r\n\
          &GD&gate&c:&n {}\r\n\
@@ -584,8 +594,6 @@ pub fn read_delete(g: &GameState, recipient: i64) -> Option<String> {
          &GF&grom&c:&n {}\r\n\r\n",
         tmstr, to_name, from_name
     );
-    message.push_str(&header_txt);
-
     // Mark the header DELETED and free it.
     let deleted = retype_block(&header, DELETED_BLOCK);
     write_to_file(&mut m, &deleted, mail_address);
@@ -599,13 +607,14 @@ pub fn read_delete(g: &GameState, recipient: i64) -> Option<String> {
             Some(d) => d,
             None => break,
         };
-        let data_txt = read_text(&data[8..], DATA_TEXT_CAP);
-        message.push_str(&data_txt);
+        body.extend_from_slice(read_text_bytes(&data[8..], DATA_TEXT_CAP));
         following = i64::from_le_bytes(data[0..8].try_into().unwrap());
         let deleted = retype_block(&data, DELETED_BLOCK);
         write_to_file(&mut m, &deleted, addr);
         push_free_list(&mut m, addr);
     }
+
+    message.push_str(&String::from_utf8_lossy(&body));
 
     Some(message)
 }
@@ -819,7 +828,7 @@ fn postmaster_send_mail(g: &mut GameState, ch: CharId, mailman: CharId, arg: &st
     // Charge the stamp (immortals exempt) and open the compose editor.
     if ch_level < LVL_IMMORT {
         if let Some(c) = g.get_char_mut(ch) {
-            c.points.gold -= STAMP_PRICE;
+            crate::gold::debit(c, crate::gold::Account::Carried, i64::from(STAMP_PRICE));
         }
     }
 
@@ -947,6 +956,11 @@ pub fn has_pending_mail(conn_id: ConnId) -> bool {
     crate::lock_ok::lock(&pending()).contains_key(&conn_id)
 }
 
+#[cfg(test)]
+pub(crate) fn seed_pending_mail_for_test(conn_id: ConnId) {
+    crate::lock_ok::lock(&pending()).insert(conn_id, PendingMail { to: 2, from: 1 });
+}
+
 // ===========================================================================
 // Small helpers.
 // ===========================================================================
@@ -986,14 +1000,7 @@ fn now_secs() -> i64 {
 /// The first `cap` bytes of `s` as a &str (on a UTF-8 boundary, never past
 /// the end). Used to slice the header payload.
 fn take_prefix(s: &str, cap: usize) -> &str {
-    if s.len() <= cap {
-        return s;
-    }
-    let mut end = cap;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
+    crate::text::utf8_prefix(s, cap)
 }
 
 /// `cap` bytes of `s` starting at byte offset `start`, clamped to UTF-8
@@ -1002,13 +1009,13 @@ fn take_window(s: &str, start: usize, cap: usize) -> String {
     if start >= s.len() {
         return String::new();
     }
-    // Back UP to the char boundary: a multi-byte character straddling the
-    // block seam would otherwise be DROPPED (its head in the previous block,
-    // its tail skipped here). Re-reading the few seam bytes in both blocks
-    // duplicates at most one character instead of losing it.
+    // Cursor advancement in store_mail always preserves a boundary. For a
+    // defensive caller which supplies a byte in the middle of a scalar, move
+    // forward to the next boundary; moving backward would duplicate data from
+    // the preceding block.
     let mut begin = start.min(s.len());
-    while begin > 0 && !s.is_char_boundary(begin) {
-        begin -= 1;
+    while begin < s.len() && !s.is_char_boundary(begin) {
+        begin += 1;
     }
     let mut end = (begin + cap).min(s.len());
     while end > begin && !s.is_char_boundary(end) {
@@ -1025,5 +1032,158 @@ fn fmt_asctime(secs: i64) -> String {
     match Utc.timestamp_opt(secs, 0).single() {
         Some(dt) => dt.format("%a %b %e %H:%M:%S %Y").to_string(),
         None => "Wed Dec 31 00:00:00 1969".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    fn mail_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        crate::lock_ok::lock(LOCK.get_or_init(|| Mutex::new(())))
+    }
+
+    #[test]
+    fn utf8_crossing_header_and_data_seams_round_trips_without_loss() {
+        let _guard = mail_test_lock();
+        let root = std::env::temp_dir().join(format!(
+            "deltamud-mail-utf8-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(root.join("etc")).unwrap();
+        assert!(boot_mail(root.to_str().unwrap()));
+        mail_register_player(700_001, "Sender");
+        mail_register_player(700_002, "Recipient");
+
+        // The first scalar straddles the 59-byte header seam. The crab near a
+        // later 91-byte data seam exercises chained block cursor advancement.
+        let body = format!("{}é{}🦀{}", "a".repeat(58), "b".repeat(89), "c".repeat(200));
+        store_mail(700_002, 700_001, &body);
+
+        let g = GameState::new(Config::default());
+        let rendered = read_delete(&g, 700_002).expect("stored mail is readable");
+        assert!(
+            rendered.ends_with(&body),
+            "mail body changed across block seams"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn imported_c_blocks_decode_utf8_only_after_reassembling_the_raw_chain() {
+        let _guard = mail_test_lock();
+        let root = std::env::temp_dir().join(format!(
+            "deltamud-mail-c-split-utf8-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(root.join("etc")).unwrap();
+        let path = root.join("etc/plrmail");
+
+        let from = 700_021i64;
+        let to = 700_022i64;
+        let body = format!("{}é from C", "a".repeat(58));
+        let body_bytes = body.as_bytes();
+        assert_eq!(body_bytes[58], 0xc3);
+        assert_eq!(body_bytes[59], 0xa9);
+
+        // Reproduce C mail.c's raw fixed-capacity split: the leading byte of
+        // `é` is the last header byte and its continuation begins data block 1.
+        let mut header = [0u8; BLOCK_SIZE as usize];
+        header[0..8].copy_from_slice(&HEADER_BLOCK.to_le_bytes());
+        header[8..16].copy_from_slice(&(BLOCK_SIZE as i64).to_le_bytes());
+        header[16..24].copy_from_slice(&from.to_le_bytes());
+        header[24..32].copy_from_slice(&to.to_le_bytes());
+        header[32..40].copy_from_slice(&1_700_000_000i64.to_le_bytes());
+        header[40..40 + HEADER_TEXT_CAP].copy_from_slice(&body_bytes[..HEADER_TEXT_CAP]);
+
+        let mut data = [0u8; BLOCK_SIZE as usize];
+        data[0..8].copy_from_slice(&LAST_BLOCK.to_le_bytes());
+        data[8..8 + body_bytes.len() - HEADER_TEXT_CAP]
+            .copy_from_slice(&body_bytes[HEADER_TEXT_CAP..]);
+
+        let mut fixture = Vec::from(header);
+        fixture.extend_from_slice(&data);
+        std::fs::write(&path, fixture).unwrap();
+
+        assert!(boot_mail(root.to_str().unwrap()));
+        mail_register_player(from, "Sender");
+        mail_register_player(to, "Recipient");
+        let g = GameState::new(Config::default());
+        let rendered = read_delete(&g, to).expect("C split-scalar fixture is readable");
+        assert!(rendered.ends_with(&body));
+        assert!(!rendered.contains('\u{fffd}'));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn exact_c_lp64_header_fixture_imports_and_rewrites_byte_for_byte() {
+        let _guard = mail_test_lock();
+        let root = std::env::temp_dir().join(format!(
+            "deltamud-mail-c-fixture-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(root.join("etc")).unwrap();
+        let path = root.join("etc/plrmail");
+
+        let from = 700_011i64;
+        let to = 700_012i64;
+        let timestamp = 1_700_000_000i64;
+        let body = "C ABI fixture";
+        let mut fixture = [0u8; BLOCK_SIZE as usize];
+        fixture[0..8].copy_from_slice(&HEADER_BLOCK.to_le_bytes());
+        fixture[8..16].copy_from_slice(&LAST_BLOCK.to_le_bytes());
+        fixture[16..24].copy_from_slice(&from.to_le_bytes());
+        fixture[24..32].copy_from_slice(&to.to_le_bytes());
+        fixture[32..40].copy_from_slice(&timestamp.to_le_bytes());
+        fixture[40..40 + body.len()].copy_from_slice(body.as_bytes());
+        assert_eq!(
+            make_header_block(LAST_BLOCK, from, to, timestamp, body),
+            fixture,
+            "Rust's fixed-time writer must match the independent C ABI fixture"
+        );
+        std::fs::write(&path, fixture).unwrap();
+
+        assert!(boot_mail(root.to_str().unwrap()));
+        mail_register_player(from, "Sender");
+        mail_register_player(to, "Recipient");
+        let g = GameState::new(Config::default());
+        assert!(has_mail(to));
+        let rendered = read_delete(&g, to).expect("C fixture is readable");
+        assert!(rendered.ends_with(body));
+
+        // The deleted block is reused at the same offset. Apart from the new
+        // current timestamp, the public Rust rewrite must reproduce the
+        // independently assembled C bytes.
+        store_mail(to, from, body);
+        let rewritten = std::fs::read(&path).unwrap();
+        assert_eq!(rewritten.len(), BLOCK_SIZE as usize);
+        let mut expected = fixture;
+        expected[32..40].copy_from_slice(&rewritten[32..40]);
+        assert_eq!(rewritten, expected);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn re_registering_an_id_for_rename_removes_the_stale_old_name() {
+        let _guard = mail_test_lock();
+        let idnum = 9_413_777;
+        mail_register_player(idnum, "Oldmailname");
+        mail_register_player(idnum, "Newmailname");
+
+        let registry = crate::lock_ok::lock(&sys());
+        assert_eq!(
+            registry.id_to_name.get(&idnum).map(String::as_str),
+            Some("newmailname")
+        );
+        assert_eq!(registry.name_to_id.get("newmailname"), Some(&idnum));
+        assert!(!registry.name_to_id.contains_key("oldmailname"));
     }
 }

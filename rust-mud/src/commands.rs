@@ -2,7 +2,7 @@
 // matching CircleMUD ACMD(ch, argument, cmd, subcmd). Output strings track
 // the C source; byte-parity is tuned against the live C MUD by the harness.
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::combat;
 use crate::constants;
 use crate::object::{ObjLoc, WearFlags};

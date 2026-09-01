@@ -2,7 +2,7 @@
 // data-driven command_interpreter that abbreviation-matches against the
 // 343-entry CMD_INFO table, gates on level/position, and dispatches.
 
-use crate::command_table::{HandlerId, CMD_INFO};
+use crate::command_table::{CMD_INFO, HandlerId};
 use crate::flags::{AFF_HIDE, PLR_FROZEN, PRF2_INTANGIBLE, PRF2_LOCKOUT, PRF2_MBUILDING};
 use crate::state::GameState;
 use crate::types::*;
@@ -13,8 +13,7 @@ const CMD_FROZEN_MSG: &str = "You try, but the mind-numbing cold prevents you...
 const CMD_MBUILDING_BLOCK_MSG: &str = "You may not use that command in build mode.\r\n";
 const CMD_INTANGIBLE_BLOCK_MSG: &str = "The intangible have no need for such abilities.\r\n";
 
-const CMDS_MORTAL_BUILDERS_CANT_USE: &str =
-    "sacrifice trigedit tlist tstat auction brew buy carve cast deposit \
+const CMDS_MORTAL_BUILDERS_CANT_USE: &str = "sacrifice trigedit tlist tstat auction brew buy carve cast deposit \
 donate drink drop eat fill fillet forge give group mount quaff recite sacrafice scribe school \
 sell sip steal take tan taste train use withdraw nosummon chain";
 
@@ -211,7 +210,6 @@ pub(crate) fn run_command(g: &mut GameState, ch: CharId, input: &str) {
         break;
     }
 
-    
     let entry = match found {
         Some(e) => e,
         None => {

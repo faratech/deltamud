@@ -186,7 +186,7 @@ pub fn random_mtrigger(g: &mut GameState, ch: CharId) {
 
 /// bribe_mtrigger: coins given to a mob.
 /// Fired from: cmd_item give-gold path (do_give / perform_give_gold), with the
-/// gold `amount`, BEFORE the mob actually pockets the coins.
+/// gold `amount`, after the mob pockets the coins (C act.item.c ordering).
 pub fn bribe_mtrigger(g: &mut GameState, ch: CharId, actor: CharId, amount: i32) {
     let key = ScriptKey::Mob(ch);
     if !dh::script_check(key, MTRIG_BRIBE) || charmed(g, ch) {
@@ -362,7 +362,7 @@ pub fn command_mtrigger(g: &mut GameState, actor: CharId, cmd: &str, argument: &
             continue;
         }
         for t in dh::trigger_ids(key) {
-            if !is_set(trig_type(t), MTRIG_COMMAND) {
+            if !is_set(trig_type(t), MTRIG_COMMAND) || trig_depth(t) != 0 {
                 continue;
             }
             let targ = trig_arg(t);
@@ -409,7 +409,7 @@ pub fn speech_mtrigger(g: &mut GameState, actor: CharId, str_: &str) {
             continue;
         }
         for t in dh::trigger_ids(key) {
-            if !is_set(trig_type(t), MTRIG_SPEECH) {
+            if !is_set(trig_type(t), MTRIG_SPEECH) || trig_depth(t) != 0 {
                 continue;
             }
             let targ = trig_arg(t);
@@ -452,7 +452,7 @@ pub fn act_mtrigger(
         return;
     }
     for t in dh::trigger_ids(key) {
-        if !is_set(trig_type(t), MTRIG_ACT) {
+        if !is_set(trig_type(t), MTRIG_ACT) || trig_depth(t) != 0 {
             continue;
         }
         let targ = trig_arg(t);
@@ -658,7 +658,7 @@ fn cmd_otrig(
         return false;
     }
     for t in dh::trigger_ids(key) {
-        if !is_set(trig_type(t), OTRIG_COMMAND) {
+        if !is_set(trig_type(t), OTRIG_COMMAND) || trig_depth(t) != 0 {
             continue;
         }
         // narg here is the OCMD_ placement bitvector, not a percent.
@@ -905,7 +905,7 @@ pub fn command_wtrigger(g: &mut GameState, actor: CharId, cmd: &str, argument: &
         return false;
     }
     for t in dh::trigger_ids(key) {
-        if !is_set(trig_type(t), WTRIG_COMMAND) {
+        if !is_set(trig_type(t), WTRIG_COMMAND) || trig_depth(t) != 0 {
             continue;
         }
         let targ = trig_arg(t);
@@ -939,7 +939,7 @@ pub fn speech_wtrigger(g: &mut GameState, actor: CharId, str_: &str) {
         return;
     }
     for t in dh::trigger_ids(key) {
-        if !is_set(trig_type(t), WTRIG_SPEECH) {
+        if !is_set(trig_type(t), WTRIG_SPEECH) || trig_depth(t) != 0 {
             continue;
         }
         let targ = trig_arg(t);
@@ -1068,6 +1068,56 @@ fn word_check(str_: &str, wordlist: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::dg_handler::{DG_TEST_LOCK, TrigData};
+    use crate::object::Object;
+    use crate::room::Room;
+    use std::collections::HashMap;
+
+    fn install_active_trigger(attach_type: i32, trigger_type: i64, narg: i32) -> TrigId {
+        dh::install_trig(TrigData {
+            nr: 0,
+            vnum: 9999,
+            attach_type,
+            name: "active reentry test".into(),
+            trigger_type,
+            narg,
+            arglist: "*".into(),
+            cmdlist: vec!["return 1".into()],
+            curr_line: 0,
+            depth: 1,
+            loops: 0,
+            wait_event: None,
+            var_list: Vec::new(),
+            purged: false,
+            loop_origin: HashMap::new(),
+        })
+    }
+
+    fn install_command_trigger(name: &str, commands: &[&str]) -> TrigId {
+        dh::install_trig(TrigData {
+            nr: 0,
+            vnum: 10_001,
+            attach_type: MOB_TRIGGER,
+            name: name.into(),
+            trigger_type: MTRIG_COMMAND,
+            narg: 0,
+            arglist: "*".into(),
+            cmdlist: commands.iter().map(|command| (*command).into()).collect(),
+            curr_line: 0,
+            depth: 0,
+            loops: 0,
+            wait_event: None,
+            var_list: Vec::new(),
+            purged: false,
+            loop_origin: HashMap::new(),
+        })
+    }
+
+    fn assert_still_active(trigger: TrigId) {
+        assert_eq!(dh::with_trig(trigger, |t| t.depth), Some(1));
+    }
 
     #[test]
     fn substring_is_whole_word() {
@@ -1123,5 +1173,111 @@ mod tests {
         let buf = format!("{}{}", UID_CHAR, CharId(4242).0);
         assert_eq!(buf.as_bytes()[0], 0x1b);
         assert_eq!(&buf[1..], "4242");
+    }
+
+    #[test]
+    fn active_command_speech_and_act_triggers_do_not_reenter() {
+        let _lock = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        dh::boot_handler();
+
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(
+            3001,
+            0,
+            "Trigger Test Room".into(),
+            "A trigger test room.".into(),
+        ));
+        let actor = g.create_char(Character::new_player(
+            "Actor".into(),
+            crate::types::Class::Warrior,
+            crate::types::Race::Human,
+        ));
+        let mob = g.create_char(Character::new_npc(2001));
+        g.char_to_room(actor, room);
+        g.char_to_room(mob, room);
+        let obj = g.create_obj(Object::new(4001, "token".into(), "a token".into()));
+
+        let mob_trigger =
+            install_active_trigger(MOB_TRIGGER, MTRIG_COMMAND | MTRIG_SPEECH | MTRIG_ACT, 1);
+        dh::add_trigger(ScriptKey::Mob(mob), mob_trigger, -1);
+        assert!(!command_mtrigger(&mut g, actor, "look", ""));
+        assert_still_active(mob_trigger);
+        speech_mtrigger(&mut g, actor, "hello");
+        assert_still_active(mob_trigger);
+        act_mtrigger(&mut g, mob, "hello", Some(actor), None, None, None, None);
+        assert_still_active(mob_trigger);
+
+        let obj_trigger = install_active_trigger(OBJ_TRIGGER, OTRIG_COMMAND, OCMD_INVEN);
+        dh::add_trigger(ScriptKey::Obj(obj), obj_trigger, -1);
+        assert!(!cmd_otrig(&mut g, obj, actor, "look", "", OCMD_INVEN));
+        assert_still_active(obj_trigger);
+
+        let world_trigger = install_active_trigger(WLD_TRIGGER, WTRIG_COMMAND | WTRIG_SPEECH, 1);
+        dh::add_trigger(ScriptKey::Room(room), world_trigger, -1);
+        assert!(!command_wtrigger(&mut g, actor, "look", ""));
+        assert_still_active(world_trigger);
+        speech_wtrigger(&mut g, actor, "hello");
+        assert_still_active(world_trigger);
+    }
+
+    #[test]
+    fn self_caused_command_runs_once_while_a_different_trigger_may_nest() {
+        let _lock = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        dh::boot_handler();
+
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(
+            3001,
+            0,
+            "Nested trigger room".into(),
+            String::new(),
+        ));
+        let mut player = Character::new_player(
+            "Actor".into(),
+            crate::types::Class::Warrior,
+            crate::types::Race::Human,
+        );
+        player.player.level = 10;
+        let actor = g.create_char(player);
+        let mut npc = Character::new_npc(2001);
+        npc.player.level = 20;
+        let mob = g.create_char(npc);
+        g.char_to_room(actor, room);
+        g.char_to_room(mob, room);
+
+        let owner = ScriptKey::Mob(mob);
+        dh::add_global_var(owner, "outer_runs", "0", 0);
+        dh::add_global_var(owner, "nested_runs", "0", 0);
+        let outer = install_command_trigger(
+            "self-causing outer",
+            &[
+                "eval outer_runs %outer_runs% + 1",
+                "global outer_runs",
+                "mforce %actor% look",
+                "return 1",
+            ],
+        );
+        let nested = install_command_trigger(
+            "independent nested",
+            &[
+                "eval nested_runs %nested_runs% + 1",
+                "global nested_runs",
+                "return 1",
+            ],
+        );
+        dh::add_trigger(owner, outer, -1);
+        dh::add_trigger(owner, nested, -1);
+
+        assert!(command_mtrigger(&mut g, actor, "look", ""));
+        assert_eq!(
+            dh::get_global_var(owner, "outer_runs").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            dh::get_global_var(owner, "nested_runs").as_deref(),
+            Some("1")
+        );
+        assert_eq!(dh::with_trig(outer, |trigger| trigger.depth), Some(0));
+        assert_eq!(dh::with_trig(nested, |trigger| trigger.depth), Some(0));
     }
 }

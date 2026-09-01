@@ -6,8 +6,8 @@ DeltaMUD tree (`/web/deltamud/src`, `/web/deltamud/lib`) and the Rust port in
 
 The old early-port guidance in this file is no longer accurate: the Rust port
 now has the full command table, most major subsystems, crypt-compatible
-password verification, and an 83-column `player_main` mapping. The remaining
-high-risk caveat is on-disk runtime persistence compatibility.
+password verification, an 83-column `player_main` mapping, and byte-compatible
+runtime persistence on the deployed C ABI.
 
 The latest tracker-backed parity pass resolved the previously open high-risk
 runtime/editor items for complex alias queue timing, creation nanny/do_start,
@@ -39,12 +39,19 @@ against gcc-computed struct layouts: `rent_info` (56 B) + `obj_file_elem`
 `board_msginfo` (32 B) + NUL-blob bodies. Player mail was already byte
 compatible.
 
-- **Reads:** C-format files are auto-detected and loaded (rent/crash plrobjs,
-  hcontrol, clans.dat, boards). Rust text formats remain readable.
-- **Writes:** setting `MUD_CFORMAT_FILES=true` makes the Rust server WRITE the
-  C formats; the default remains the Rust text formats. Do not mix writers on
-  the same live files without backups (a file written by one format family is
-  still readable by the other at boot, but prefer one writer).
+- **Reads:** raw bytes are auto-detected before UTF-8 decoding for C-format
+  rent/crash plrobjs, hcontrol, house object files, clans.dat, and boards. The
+  prior Rust text/variable-binary/`DBRD` formats remain readable.
+- **Writes:** every loaded store retains its detected C or Rust format on
+  atomic replacement. `MUD_CFORMAT_FILES=true` (or `1`) selects C only for a
+  brand-new file, or for an empty file whose two representations are
+  byte-identical; otherwise the existing on-disk format wins. The default for
+  such new/ambiguous files remains Rust.
+- **Migration:** back up the runtime `lib` tree, set the environment choice,
+  and create new files through the desired server. Merely toggling the setting
+  does not convert existing files. An empty house object file and a zero-clan
+  `clans.dat` contain no format signature, so a cold boot necessarily uses the
+  configured default for those two cases.
 
 ## SQL Player Data
 

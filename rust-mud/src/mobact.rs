@@ -31,7 +31,7 @@
 // locals before any send/act/hit, and re-look-up entities by id afterward,
 // because act()/hit()/perform_move() all take `&mut GameState`.
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::cmd_movement::perform_move;
 use crate::combat::hit;
 use crate::flags::*;
@@ -1016,7 +1016,12 @@ mod tests {
         // Linear corridor: 300(north)<- 301 <- 302 <- 303 <- 304.
         let rooms: Vec<usize> = (0..5)
             .map(|i| {
-                g.add_room(Room::new(300 + i as i32, 3, format!("R{}", i), String::new()))
+                g.add_room(Room::new(
+                    300 + i as i32,
+                    3,
+                    format!("R{}", i),
+                    String::new(),
+                ))
             })
             .collect();
         for w in rooms.windows(2) {

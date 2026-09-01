@@ -8,12 +8,11 @@
 // does once per SECS_PER_MUD_HOUR (75 real seconds).
 //
 // GameState owns no time/weather fields and we may not add any, so the clock
-// lives in a module static (OnceLock<Mutex<TimeWeather>>), initialized on the
-// first heartbeat call the same way C's reset_time() seeds it, then advanced
-// each subsequent call. `weather_and_time(g)` is the per-mud-hour entry point;
-// `time_now()` exposes the current clock for `do_time`.
+// lives in a module static (OnceLock<Mutex<TimeWeather>>). Main explicitly
+// seeds it from the effective configured lib path before world construction.
+// A defensive, path-free fallback exists only so isolated unit tests do not
+// panic; it is loudly logged and explicit initialization replaces it.
 
-use crate::config::Config;
 use crate::connection::ConState;
 use crate::room::RoomFlags;
 use crate::state::GameState;
@@ -50,6 +49,25 @@ pub struct TimeWeather {
 }
 
 static CLOCK: OnceLock<Mutex<TimeWeather>> = OnceLock::new();
+
+fn uninitialized_fallback() -> TimeWeather {
+    TimeWeather {
+        hours: 0,
+        day: 0,
+        month: 0,
+        year: 1000,
+        sunlight: SUN_DARK,
+    }
+}
+
+fn clock_or_fallback(clock: &OnceLock<Mutex<TimeWeather>>) -> &Mutex<TimeWeather> {
+    clock.get_or_init(|| {
+        warn!(
+            "SYSERR: mud clock accessed before explicit configured initialization; using path-free epoch fallback"
+        );
+        Mutex::new(uninitialized_fallback())
+    })
+}
 
 /// CircleMUD mud_time_passed(t2, t1): break a real-seconds span into mud
 /// hours/day/month/year. Ported verbatim (integer division, modular wrap).
@@ -98,28 +116,70 @@ fn reset_time(now: i64, lib_path: &str) -> TimeWeather {
     tw
 }
 
+/// Install a clock seeded from the selected library. If an accessor raced
+/// ahead and created a fallback clock, explicit initialization replaces it.
+fn initialize_clock_at(clock: &OnceLock<Mutex<TimeWeather>>, now: i64, lib_path: &str) {
+    let configured = reset_time(now, lib_path);
+    if let Some(mtx) = clock.get() {
+        *crate::lock_ok::lock(mtx) = configured;
+    } else if clock.set(Mutex::new(configured)).is_err() {
+        if let Some(mtx) = clock.get() {
+            *crate::lock_ok::lock(mtx) = configured;
+        }
+    }
+}
+
+/// Seed the process-global mud clock from the effective configured lib path.
+pub fn initialize_clock(lib_path: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    initialize_clock_at(&CLOCK, now, lib_path);
+}
+
 fn read_mud_date_from_file(lib_path: &str, tw: &mut TimeWeather) {
     let path = Path::new(lib_path).join("etc").join("date_record");
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
-        Err(_) => {
-            warn!("SYSERR: File etc/date_record not found, mud date will be reset to default!");
+        Err(error) => {
+            warn!(
+                "SYSERR: could not read mud date {} ({}); using seeded epoch fallback",
+                path.display(),
+                error
+            );
             return;
         }
     };
     if bytes.len() < 12 {
-        warn!("SYSERR: File etc/date_record is too short, mud date will be reset to default!");
+        warn!(
+            "SYSERR: mud date {} is corrupt ({} bytes); using seeded epoch fallback",
+            path.display(),
+            bytes.len()
+        );
         return;
     }
     let year = i32::from_ne_bytes(bytes[0..4].try_into().unwrap());
     let month = i32::from_ne_bytes(bytes[4..8].try_into().unwrap());
     let day = i32::from_ne_bytes(bytes[8..12].try_into().unwrap());
+    if !(0..17).contains(&month) || !(0..35).contains(&day) {
+        warn!(
+            "SYSERR: mud date {} contains invalid month/day ({month}/{day}); using seeded epoch fallback",
+            path.display()
+        );
+        return;
+    }
     tw.year = year as i64;
     tw.month = month;
     tw.day = day;
 }
 
-pub fn write_mud_date_to_file(g: &GameState) {
+/// Persist the current MUD calendar to the configured library root.
+///
+/// Copyover uses the fallible form so an exec can be aborted instead of
+/// restarting from a stale `date_record`. Normal shutdown retains the legacy
+/// log-and-continue wrapper below.
+pub fn try_write_mud_date_to_file(g: &GameState) -> std::io::Result<()> {
     let mtx = CLOCK.get_or_init(|| {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -139,9 +199,13 @@ pub fn write_mud_date_to_file(g: &GameState) {
         .join("etc")
         .join("date_record");
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)?;
     }
-    if let Err(e) = std::fs::write(&path, bytes) {
+    std::fs::write(path, bytes)
+}
+
+pub fn write_mud_date_to_file(g: &GameState) {
+    if let Err(e) = try_write_mud_date_to_file(g) {
         warn!("SYSERR: Could not write etc/date_record: {}", e);
     }
 }
@@ -266,21 +330,17 @@ pub fn weather_and_time(g: &mut GameState) {
 }
 
 /// Current mud clock for `do_time` (CircleMUD time_info.{hours,day,month,year}).
-/// Initializes the clock on first access if the heartbeat hasn't run yet, so a
-/// `time` command issued before the first mud-hour still reports a sane value.
-pub fn time_now() -> (i32, i32, i32, i64) {
-    let mtx = CLOCK.get_or_init(|| {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        Mutex::new(reset_time(now, &Config::default().lib_path))
-    });
+fn time_from(clock: &OnceLock<Mutex<TimeWeather>>) -> (i32, i32, i32, i64) {
+    let mtx = clock_or_fallback(clock);
     let tw = match mtx.lock() {
         Ok(g) => *g,
         Err(p) => *p.into_inner(),
     };
     (tw.hours, tw.day, tw.month, tw.year)
+}
+
+pub fn time_now() -> (i32, i32, i32, i64) {
+    time_from(&CLOCK)
 }
 
 pub fn mud_minute_of_day() -> i64 {
@@ -289,18 +349,16 @@ pub fn mud_minute_of_day() -> i64 {
 }
 
 /// Current sun state (utils.h weather_info.sunlight), for IS_DARK / look logic.
-pub fn sunlight() -> i32 {
-    let mtx = CLOCK.get_or_init(|| {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        Mutex::new(reset_time(now, &Config::default().lib_path))
-    });
+fn sunlight_from(clock: &OnceLock<Mutex<TimeWeather>>) -> i32 {
+    let mtx = clock_or_fallback(clock);
     match mtx.lock() {
         Ok(g) => g.sunlight,
         Err(p) => p.into_inner().sunlight,
     }
+}
+
+pub fn sunlight() -> i32 {
+    sunlight_from(&CLOCK)
 }
 
 #[cfg(test)]
@@ -330,6 +388,78 @@ mod tests {
         assert_eq!(tw.day, 14);
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn explicit_initialization_replaces_an_earlier_fallback_clock() {
+        let mut dir = std::env::temp_dir();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        dir.push(format!(
+            "deltamud-clock-init-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        let etc = dir.join("etc");
+        std::fs::create_dir_all(&etc).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&4242i32.to_ne_bytes());
+        bytes.extend_from_slice(&7i32.to_ne_bytes());
+        bytes.extend_from_slice(&23i32.to_ne_bytes());
+        std::fs::write(etc.join("date_record"), bytes).unwrap();
+
+        let clock = OnceLock::new();
+        clock
+            .set(Mutex::new(TimeWeather {
+                hours: 1,
+                day: 2,
+                month: 3,
+                year: 4,
+                sunlight: SUN_DARK,
+            }))
+            .unwrap();
+        initialize_clock_at(&clock, 1_000_000, dir.to_str().unwrap());
+
+        let tw = *crate::lock_ok::lock(clock.get().unwrap());
+        assert_eq!((tw.year, tw.month, tw.day), (4242, 7, 23));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn accessor_order_never_selects_a_different_library_root() {
+        fn fixture(label: &str, year: i32, month: i32, day: i32) -> std::path::PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "deltamud-clock-order-{label}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::create_dir_all(dir.join("etc")).unwrap();
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&year.to_ne_bytes());
+            bytes.extend_from_slice(&month.to_ne_bytes());
+            bytes.extend_from_slice(&day.to_ne_bytes());
+            std::fs::write(dir.join("etc/date_record"), bytes).unwrap();
+            dir
+        }
+
+        let first = fixture("first", 4101, 4, 10);
+        let second = fixture("second", 5202, 5, 20);
+
+        let access_first = OnceLock::new();
+        assert_eq!(time_from(&access_first), (0, 0, 0, 1000));
+        assert_eq!(sunlight_from(&access_first), SUN_DARK);
+        initialize_clock_at(&access_first, 1_000_000, first.to_str().unwrap());
+        assert_eq!(time_from(&access_first), (0, 10, 4, 4101));
+
+        let initialize_first = OnceLock::new();
+        initialize_clock_at(&initialize_first, 1_000_000, second.to_str().unwrap());
+        assert_eq!(sunlight_from(&initialize_first), SUN_DARK);
+        assert_eq!(time_from(&initialize_first), (0, 20, 5, 5202));
+
+        let _ = std::fs::remove_dir_all(first);
+        let _ = std::fs::remove_dir_all(second);
+    }
 }
 
 #[cfg(test)]
@@ -339,13 +469,7 @@ pub mod test_clock {
     /// Force the mud hour for tests that drive hour-gated behaviour
     /// (town_life schedules and caravans).
     pub fn set_hour(h: i32) {
-        let mtx = CLOCK.get_or_init(|| {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            Mutex::new(reset_time(now, &Config::default().lib_path))
-        });
+        let mtx = clock_or_fallback(&CLOCK);
         let mut tw = crate::lock_ok::lock(&mtx);
         tw.hours = h;
     }

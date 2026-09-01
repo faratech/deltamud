@@ -9,7 +9,7 @@
 // grats / arena / quest) iterates the connected-player set, mirroring C's
 // descriptor_list walk.
 
-use crate::act::{act, act_sleep, ActArg, To};
+use crate::act::{ActArg, To, act, act_sleep};
 use crate::character::IgnoreEntry;
 use crate::flags::*;
 use crate::interpreter::half_chop;
@@ -152,19 +152,11 @@ fn color_lev(g: &GameState, id: CharId) -> i32 {
 
 /// CCRED(ch, lvl): "&R" if the char's colour level >= lvl, else "".
 fn ccred(g: &GameState, id: CharId, lvl: i32) -> &'static str {
-    if color_lev(g, id) >= lvl {
-        "&R"
-    } else {
-        ""
-    }
+    if color_lev(g, id) >= lvl { "&R" } else { "" }
 }
 /// CCNRM(ch, lvl): "&n" if the char's colour level >= lvl, else "".
 fn ccnrm(g: &GameState, id: CharId, lvl: i32) -> &'static str {
-    if color_lev(g, id) >= lvl {
-        "&n"
-    } else {
-        ""
-    }
+    if color_lev(g, id) >= lvl { "&n" } else { "" }
 }
 
 /// PERS(ch, vict): visible name, else immortal/"someone" fallback — used to
@@ -1130,11 +1122,7 @@ fn a_or_an(word: &str) -> &'static str {
         .next()
         .unwrap_or('x')
         .to_ascii_lowercase();
-    if "aeiou".contains(first) {
-        "an"
-    } else {
-        "a"
-    }
+    if "aeiou".contains(first) { "an" } else { "a" }
 }
 
 // ---------------------------------------------------------------------------
@@ -1473,7 +1461,9 @@ pub fn check_multiplaying(g: &GameState, hostname: &str) -> bool {
                 if c.map(|c| c.player.level >= LVL_IMPL).unwrap_or(false) {
                     continue;
                 }
-                if c.map(|c| c.act_flags & crate::flags::PLR_MULTIOK != 0).unwrap_or(false) {
+                if c.map(|c| c.act_flags & crate::flags::PLR_MULTIOK != 0)
+                    .unwrap_or(false)
+                {
                     continue;
                 }
             }
@@ -1611,7 +1601,8 @@ mod tests {
         let r = g.add_room(Room::new(1001, 0, "R".to_string(), "R.".to_string()));
         let a = player(&mut g, ConnId(1), "Scribbler", 10);
         g.char_to_room(a, r);
-        g.obj_protos.insert(3001, proto(3001, "sword", ObjectType::Weapon));
+        g.obj_protos
+            .insert(3001, proto(3001, "sword", ObjectType::Weapon));
         let sword = g.load_object(3001).unwrap();
         g.obj_to_char(sword, a);
 
@@ -1634,9 +1625,12 @@ mod tests {
         let r = g.add_room(Room::new(1001, 0, "R".to_string(), "R.".to_string()));
         let a = player(&mut g, ConnId(1), "Scribbler", 10);
         g.char_to_room(a, r);
-        g.obj_protos.insert(3002, proto(3002, "quill pen", ObjectType::Pen));
-        g.obj_protos.insert(3003, proto(3003, "parchment note", ObjectType::Note));
-        g.obj_protos.insert(3004, proto(3004, "sword", ObjectType::Weapon));
+        g.obj_protos
+            .insert(3002, proto(3002, "quill pen", ObjectType::Pen));
+        g.obj_protos
+            .insert(3003, proto(3003, "parchment note", ObjectType::Note));
+        g.obj_protos
+            .insert(3004, proto(3004, "sword", ObjectType::Weapon));
 
         // Held note + named pen: C pairs them and starts the editor.
         let note = g.load_object(3003).unwrap();
@@ -1661,11 +1655,7 @@ mod tests {
 
         do_write(&mut g, a, "note sword", 0);
         let buf = out(&g, ConnId(1));
-        assert!(
-            buf.contains("is no good for writing with."),
-            "{}",
-            buf
-        );
+        assert!(buf.contains("is no good for writing with."), "{}", buf);
         assert!(!buf.contains("Write your note."), "{}", buf);
     }
 

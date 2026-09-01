@@ -35,13 +35,13 @@
 // take &mut GameState), and re-look-up entities by id afterwards. No GameState
 // methods are added here; private helpers stay in-module.
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::flags::*;
 use crate::object::ObjectType;
 use crate::spell_parser::{
-    cast_spell, find_skill_num, skill_name, spell_info, SPELL_BLINDNESS, SPELL_CURE_BLIND,
-    SPELL_HEAL, SPELL_POISON, SPELL_REGEN_MANA, SPELL_REMOVE_CURSE, SPELL_REMOVE_POISON,
-    SPELL_SLEEP,
+    SPELL_BLINDNESS, SPELL_CURE_BLIND, SPELL_HEAL, SPELL_POISON, SPELL_REGEN_MANA,
+    SPELL_REMOVE_CURSE, SPELL_REMOVE_POISON, SPELL_SLEEP, cast_spell, find_skill_num, skill_name,
+    spell_info,
 };
 use crate::state::GameState;
 use crate::types::*;
@@ -473,7 +473,6 @@ pub fn dump(g: &mut GameState, ch: CharId, _me: RoomRnum, cmd: &str, arg: &str) 
         );
         let cost = g.get_obj(k).map(|o| o.cost).unwrap_or(0);
         value += 1.max(50.min(cost / 10));
-        g.obj_from_anywhere(k);
         g.extract_obj(k);
     }
 
@@ -500,7 +499,7 @@ pub fn dump(g: &mut GameState, ch: CharId, _me: RoomRnum, cmd: &str, arg: &str) 
         if get_level(g, ch) < 3 {
             crate::limits::gain_exp(g, ch, value as i64);
         } else if let Some(c) = g.get_char_mut(ch) {
-            c.points.gold += value;
+            crate::gold::credit(c, crate::gold::Account::Carried, i64::from(value));
         }
     }
     true
@@ -565,10 +564,6 @@ pub fn pet_shops(g: &mut GameState, ch: CharId, _me: RoomRnum, cmd: &str, arg: &
             g.send_to_char(ch, "You don't have enough gold!\r\n");
             return true;
         }
-        if let Some(c) = g.get_char_mut(ch) {
-            c.points.gold -= price;
-        }
-
         // read_mobile(GET_MOB_RNUM(pet)): spawn a fresh charmed copy.
         let proto_vnum = g.get_char(pet).map(|c| c.nr).unwrap_or(NOBODY);
         let newpet = match g.load_mobile(proto_vnum) {
@@ -578,6 +573,9 @@ pub fn pet_shops(g: &mut GameState, ch: CharId, _me: RoomRnum, cmd: &str, arg: &
                 return true;
             }
         };
+        if let Some(c) = g.get_char_mut(ch) {
+            crate::gold::debit(c, crate::gold::Account::Carried, i64::from(price));
+        }
 
         if let Some(c) = g.get_char_mut(newpet) {
             c.points.exp = 0;
@@ -773,14 +771,16 @@ fn npc_steal(g: &mut GameState, ch: CharId, victim: CharId) {
         // Steal some gold coins.
         let vgold = get_gold(g, victim);
         let pct = number(g, 1, 10);
-        let gold = (vgold * pct) / 100;
+        let gold = (i64::from(vgold) * i64::from(pct)) / 100;
         if gold > 0 {
-            if let Some(c) = g.get_char_mut(ch) {
-                c.points.gold += gold;
-            }
-            if let Some(v) = g.get_char_mut(victim) {
-                v.points.gold -= gold;
-            }
+            crate::gold::transfer_between(
+                g,
+                victim,
+                crate::gold::Account::Carried,
+                ch,
+                crate::gold::Account::Carried,
+                gold,
+            );
         }
     }
 }
@@ -1208,7 +1208,6 @@ pub fn fido(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &str) -
                 g.obj_from_anywhere(temp);
                 g.obj_to_room(temp, rnum);
             }
-            g.obj_from_anywhere(i);
             g.extract_obj(i);
             return true;
         }
@@ -1353,245 +1352,241 @@ pub fn librarian(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &s
         None => return false,
     };
     // C `for (vict = world[ch->in_room].people; vict; vict = vict->next_in_room)`
-    // executes the switch once *per* person in the room, returning on the first
-    // non-default case. With number() re-rolled each iteration the practical
-    // effect is "emote on a low roll while anyone is present"; `vict` (the wink
-    // target) is whichever person the body is currently on. We iterate the people
-    // list and roll per-person, exactly matching the C control flow.
+    // executes the switch for the first person. Every switch arm, including
+    // default, returns from the special, so the C loop cannot advance. Preserve
+    // that exact control flow while avoiding a misleading never-repeating loop.
     let people = g
         .room_opt(rnum)
         .map(|r| r.people.clone())
         .unwrap_or_default();
-    for vict in people {
-        match number(g, 0, 72) {
-            0 => {
-                act(
-                    g,
-                    "$n says, 'I sell books from all over the land, why not buy one?'",
-                    false,
-                    ch,
-                    None,
-                    ActArg::None,
-                    To::Room,
-                );
-                return true;
-            }
-            1 => {
-                act(
-                    g,
-                    "$n turns a page in the book she's reading.",
-                    false,
-                    ch,
-                    None,
-                    ActArg::None,
-                    To::Room,
-                );
-                return true;
-            }
-            2 => {
-                act(
-                    g,
-                    "$n drinks a glass of wine.",
-                    false,
-                    ch,
-                    None,
-                    ActArg::None,
-                    To::Room,
-                );
-                return true;
-            }
-            3 => {
-                act(
-                    g,
-                    "$n says, 'I'm reading a book about ancient Midgaard.'",
-                    false,
-                    ch,
-                    None,
-                    ActArg::None,
-                    To::Room,
-                );
-                return true;
-            }
-            4 => {
-                act(
-                    g,
-                    "$n says, 'Thanks for being quiet in the library.'",
-                    false,
-                    ch,
-                    None,
-                    ActArg::None,
-                    To::Room,
-                );
-                return true;
-            }
-            5 => {
-                act(
-                    g,
-                    "$n winks at $N suggestively.",
-                    true,
-                    ch,
-                    None,
-                    ActArg::Char(vict),
-                    To::Room,
-                );
-                return true;
-            }
-            6 => {
-                act(
-                    g,
-                    "$n starts sorting new books.",
-                    false,
-                    ch,
-                    None,
-                    ActArg::None,
-                    To::Room,
-                );
-                return true;
-            }
-            7 => {
-                act(
-                    g,
-                    "$n points at the sign on the wall.",
-                    false,
-                    ch,
-                    None,
-                    ActArg::None,
-                    To::Room,
-                );
-                act(
-                    g,
-                    "$n says, 'If you're looking for books just type: list'",
-                    false,
-                    ch,
-                    None,
-                    ActArg::None,
-                    To::Room,
-                );
-                return true;
-            }
-            8 => {
-                act(
-                    g,
-                    "$n says, 'I need a vacation. I'd love to see Jhaden'",
-                    false,
-                    ch,
-                    None,
-                    ActArg::None,
-                    To::Room,
-                );
-                return true;
-            }
-            9 => {
-                act(
-                    g,
-                    "$n puts several books on a shelf.",
-                    false,
-                    ch,
-                    None,
-                    ActArg::None,
-                    To::Room,
-                );
-                return true;
-            }
-            10 => {
-                act(
-                    g,
-                    "$n snickers softly.",
-                    false,
-                    ch,
-                    None,
-                    ActArg::None,
-                    To::Room,
-                );
-                return true;
-            }
-            11 => {
-                act(
-                    g,
-                    "$n says, 'I wish people like you would write books.'",
-                    false,
-                    ch,
-                    None,
-                    ActArg::None,
-                    To::Room,
-                );
-                return true;
-            }
-            12 => {
-                act(
-                    g,
-                    "$n says, 'I once met AJ Trfiante here long ago.'",
-                    false,
-                    ch,
-                    None,
-                    ActArg::None,
-                    To::Room,
-                );
-                act(
-                    g,
-                    "$n says, 'It was at the debute of his restraunt'",
-                    false,
-                    ch,
-                    None,
-                    ActArg::None,
-                    To::Room,
-                );
-                return true;
-            }
-            13 => {
-                act(
-                    g,
-                    "$n seems to be getting tired.",
-                    false,
-                    ch,
-                    None,
-                    ActArg::None,
-                    To::Room,
-                );
-                return true;
-            }
-            14 => {
-                act(
-                    g,
-                    "$n leaves to a back room.",
-                    false,
-                    ch,
-                    None,
-                    ActArg::None,
-                    To::Room,
-                );
-                act(
-                    g,
-                    "$n returns with a new pile of books.",
-                    false,
-                    ch,
-                    None,
-                    ActArg::None,
-                    To::Room,
-                );
-                return true;
-            }
-            15 => {
-                act(
-                    g,
-                    "$n says, 'I love to read. It makes you smart, you know.'",
-                    false,
-                    ch,
-                    None,
-                    ActArg::None,
-                    To::Room,
-                );
-                return true;
-            }
-            _ => {
-                // default: return 0 (the C switch breaks out of the loop body via
-                // `return (0)`), so a default roll stops the whole proc — no more
-                // people are considered. Replicate with an early return.
-                return false;
-            }
+    let Some(vict) = people.first().copied() else {
+        return false;
+    };
+    match number(g, 0, 72) {
+        0 => {
+            act(
+                g,
+                "$n says, 'I sell books from all over the land, why not buy one?'",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            return true;
+        }
+        1 => {
+            act(
+                g,
+                "$n turns a page in the book she's reading.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            return true;
+        }
+        2 => {
+            act(
+                g,
+                "$n drinks a glass of wine.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            return true;
+        }
+        3 => {
+            act(
+                g,
+                "$n says, 'I'm reading a book about ancient Midgaard.'",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            return true;
+        }
+        4 => {
+            act(
+                g,
+                "$n says, 'Thanks for being quiet in the library.'",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            return true;
+        }
+        5 => {
+            act(
+                g,
+                "$n winks at $N suggestively.",
+                true,
+                ch,
+                None,
+                ActArg::Char(vict),
+                To::Room,
+            );
+            return true;
+        }
+        6 => {
+            act(
+                g,
+                "$n starts sorting new books.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            return true;
+        }
+        7 => {
+            act(
+                g,
+                "$n points at the sign on the wall.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            act(
+                g,
+                "$n says, 'If you're looking for books just type: list'",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            return true;
+        }
+        8 => {
+            act(
+                g,
+                "$n says, 'I need a vacation. I'd love to see Jhaden'",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            return true;
+        }
+        9 => {
+            act(
+                g,
+                "$n puts several books on a shelf.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            return true;
+        }
+        10 => {
+            act(
+                g,
+                "$n snickers softly.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            return true;
+        }
+        11 => {
+            act(
+                g,
+                "$n says, 'I wish people like you would write books.'",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            return true;
+        }
+        12 => {
+            act(
+                g,
+                "$n says, 'I once met AJ Trfiante here long ago.'",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            act(
+                g,
+                "$n says, 'It was at the debute of his restraunt'",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            return true;
+        }
+        13 => {
+            act(
+                g,
+                "$n seems to be getting tired.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            return true;
+        }
+        14 => {
+            act(
+                g,
+                "$n leaves to a back room.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            act(
+                g,
+                "$n returns with a new pile of books.",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            return true;
+        }
+        15 => {
+            act(
+                g,
+                "$n says, 'I love to read. It makes you smart, you know.'",
+                false,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            return true;
+        }
+        _ => {
+            // C's default returns from the whole special.
+            false
         }
     }
-    false
 }
 
 // ===========================================================================
@@ -1942,11 +1937,7 @@ fn close_other_connections(g: &mut GameState, ch: CharId) {
             }
             let cid = d.character?;
             let idnum = g.get_char(cid).map(|c| c.idnum)?;
-            if idnum == my_idnum {
-                Some(id)
-            } else {
-                None
-            }
+            if idnum == my_idnum { Some(id) } else { None }
         })
         .collect();
     for id in to_close {
@@ -2056,7 +2047,7 @@ mod tests {
     use crate::config::Config;
     use crate::connection::Descriptor;
     use crate::dg_db_scripts::TrigProto;
-    use crate::dg_handler::{ScriptKey, DG_TEST_LOCK, MOB_TRIGGER, MTRIG_LOAD};
+    use crate::dg_handler::{DG_TEST_LOCK, MOB_TRIGGER, MTRIG_LOAD, ScriptKey};
     use crate::room::Room;
     use crate::world::MobileProto;
 
@@ -2115,7 +2106,7 @@ mod tests {
             .insert(conn, Descriptor::new(conn, "test".to_string()));
         let mut buyer = Character::new_player("Buyer".to_string(), Class::Warrior, Race::Human);
         buyer.desc = Some(conn);
-        buyer.points.gold = 1000;
+        crate::gold::set(&mut buyer, crate::gold::Account::Carried, 1000);
         let buyer = g.create_char(buyer);
         g.char_to_room(buyer, shop_room);
         g.mob_protos.insert(6200, mobile_proto(6200, "puppy"));

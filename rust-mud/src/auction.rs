@@ -23,9 +23,9 @@
 // object lives in GameState.objs with ObjLoc::Nowhere while it is up for sale,
 // exactly as C's detached `auction.obj` pointer.
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::state::GameState;
-use crate::syslog::{mudlog, CMP};
+use crate::syslog::{CMP, mudlog};
 use crate::types::*;
 use std::sync::{Mutex, OnceLock};
 
@@ -292,11 +292,7 @@ fn going_phase(ticks: i32) -> &'static str {
 // the cascade lines, but "s"/"" in the bid/list lines; we reproduce each at the
 // call site to stay byte-faithful.
 fn coin_s(bid: i64) -> &'static str {
-    if bid != 1 {
-        "s"
-    } else {
-        ""
-    }
+    if bid != 1 { "s" } else { "" }
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +320,7 @@ pub fn auction_update(g: &mut GameState) {
         if bid > 0 {
             if let Some(b) = get_ch_by_id(g, bidder_id) {
                 if let Some(c) = g.get_char_mut(b) {
-                    c.points.gold = c.points.gold.saturating_add(bid as i32);
+                    crate::gold::credit(c, crate::gold::Account::Carried, bid);
                 }
                 g.send_to_char(
                     b,
@@ -390,7 +386,9 @@ pub fn auction_update(g: &mut GameState) {
             Some(sid) => {
                 g.obj_to_char(oid, sid);
             }
-            None => g.extract_obj(oid),
+            None => {
+                g.extract_obj(oid);
+            }
         }
         auction_reset();
         return;
@@ -448,7 +446,7 @@ pub fn auction_update(g: &mut GameState) {
                 mudlog(g, &watch, CMP, LVL_IMPL);
             }
             if let Some(c) = g.get_char_mut(sid) {
-                c.points.gold += bid as i32;
+                crate::gold::credit(c, crate::gold::Account::Carried, bid);
             }
             act(
                 g,
@@ -509,7 +507,14 @@ pub fn do_bid(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     }
 
     let (word, _) = crate::interpreter::one_argument(argument);
-    let bid: i64 = word.parse::<i64>().unwrap_or(0);
+    let bid = match crate::text::parse_i64_strict(&word) {
+        Ok(bid) => bid,
+        Err(crate::text::ParseIntError::Overflow) => {
+            g.send_to_char(ch, "That bid is outside the supported range.\r\n");
+            return;
+        }
+        Err(_) => 0,
+    };
 
     // No argument — report the current bid.
     if word.is_empty() {
@@ -561,7 +566,7 @@ pub fn do_bid(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     if bidder_id >= 0 {
         if let Some(prev) = get_ch_by_id(g, bidder_id) {
             if let Some(c) = g.get_char_mut(prev) {
-                c.points.gold = c.points.gold.saturating_add(cur_bid as i32);
+                crate::gold::credit(c, crate::gold::Account::Carried, cur_bid);
             }
         }
     }
@@ -575,7 +580,7 @@ pub fn do_bid(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         a.ticks = AUC_BID;
     }
     if let Some(c) = g.get_char_mut(ch) {
-        c.points.gold = c.points.gold.saturating_sub(bid as i32);
+        crate::gold::debit(c, crate::gold::Account::Carried, bid);
     }
 
     let bname = get_name(g, ch);
@@ -660,12 +665,15 @@ pub fn do_auction(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
     // It's valid: list it. Minimum can not drop below 1 coin.
     let minimum = {
-        let v = arg2.parse::<i64>().unwrap_or(0);
-        if v > 0 {
-            v
-        } else {
-            1
-        }
+        let v = match crate::text::parse_i64_strict(&arg2) {
+            Ok(value) => value,
+            Err(crate::text::ParseIntError::Overflow) => {
+                g.send_to_char(ch, "That minimum is outside the supported range.\r\n");
+                return;
+            }
+            Err(_) => 0,
+        };
+        if v > 0 { v } else { 1 }
     };
     let seller_idnum = get_idnum(g, ch);
 
@@ -725,7 +733,9 @@ pub fn do_stop_auction(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: 
     if let Some(oid) = obj {
         match get_ch_by_id(g, seller_id) {
             Some(sid) => g.obj_to_char(oid, sid),
-            None => g.extract_obj(oid),
+            None => {
+                g.extract_obj(oid);
+            }
         }
     }
 
@@ -733,7 +743,7 @@ pub fn do_stop_auction(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: 
     if bid != 0 {
         if let Some(bid_ch) = get_ch_by_id(g, bidder_id) {
             if let Some(c) = g.get_char_mut(bid_ch) {
-                c.points.gold += bid as i32;
+                crate::gold::credit(c, crate::gold::Account::Carried, bid);
             }
         }
     }
@@ -750,4 +760,64 @@ fn two_arguments(argument: &str) -> (String, String) {
     let (a1, rest) = crate::interpreter::one_argument(argument);
     let (a2, _) = crate::interpreter::one_argument(rest);
     (a1, a2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::object::Object;
+
+    #[test]
+    fn sold_lot_caps_seller_payout_without_overflowing() {
+        let mut g = GameState::new(Config::default());
+
+        let mut seller = Character::new_player(
+            "Seller".to_string(),
+            crate::types::Class::Warrior,
+            crate::types::Race::Human,
+        );
+        seller.idnum = 10_001;
+        crate::gold::set(
+            &mut seller,
+            crate::gold::Account::Carried,
+            crate::gold::GOLD_CAP - 5,
+        );
+        let seller = g.create_char(seller);
+
+        let mut bidder = Character::new_player(
+            "Bidder".to_string(),
+            crate::types::Class::Warrior,
+            crate::types::Race::Human,
+        );
+        bidder.idnum = 10_002;
+        let bidder = g.create_char(bidder);
+
+        let lot = g.create_obj(Object::new(
+            77_001,
+            "test lot".to_string(),
+            "a test lot".to_string(),
+        ));
+        {
+            let mut a = crate::lock_ok::lock(&auction());
+            *a = AuctionData {
+                seller: 10_001,
+                bidder: 10_002,
+                obj: Some(lot),
+                bid: 100,
+                ticks: AUC_SOLD,
+                auctioneer: DEFAULT_AUCTIONEER.to_string(),
+            };
+        }
+
+        auction_update(&mut g);
+
+        assert_eq!(
+            crate::gold::balance(g.get_char(seller).unwrap(), crate::gold::Account::Carried),
+            crate::gold::GOLD_CAP
+        );
+        assert!(g.get_char(bidder).unwrap().carrying.contains(&lot));
+        assert_eq!(crate::lock_ok::lock(&auction()).ticks, AUC_NONE);
+    }
 }

@@ -34,7 +34,7 @@
 // persisted with the player record by the (future) player save. boot_quest
 // therefore only resets the runtime questgiver table.
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::state::GameState;
 use crate::types::*;
 use std::collections::HashMap;
@@ -60,7 +60,7 @@ const QUEST_ITEM7: ObjVnum = 3160; // Belt of Invisibility       10,000qp
 const QUEST_ITEM8: ObjVnum = 9000; // Black-eyed Ringstone        5,000qp
 const QUEST_ITEM9: ObjVnum = 9001; // Black-eyed Infinite Loop     4,000qp
 const QUEST_ITEM10: ObjVnum = 6814; // A golden claw               3,000qp
-                                    // items 11..13 are gold / training / practices (no object)
+// items 11..13 are gold / training / practices (no object)
 const QUEST_ITEM14: ObjVnum = 18702; // Boots of Water Walking       800qp
 const QUEST_ITEM15: ObjVnum = 9010; // A gold brick (50,000)          500qp
 
@@ -545,7 +545,7 @@ fn do_quest_buy(g: &mut GameState, ch: CharId, questman: CharId, arg2: &str) {
         }
         Reward::Gold(amount) => {
             if let Some(c) = g.get_char_mut(ch) {
-                c.points.gold += *amount;
+                crate::gold::credit(c, crate::gold::Account::Carried, i64::from(*amount));
             }
             act(
                 g,
@@ -679,9 +679,9 @@ fn do_quest_complete(g: &mut GameState, ch: CharId, questman: CharId) {
         if qmob < 0 && cd > 0 {
             let mut reward = g.rng.number(1000, 3000);
             let mut pointreward = g.rng.number(20, 80);
-            let mult = qmob.abs();
-            reward *= mult;
-            pointreward *= mult;
+            let mult = qmob.saturating_abs();
+            reward = reward.saturating_mul(mult);
+            pointreward = pointreward.saturating_mul(mult);
 
             questman_tell(g, questman, ch, "Congratulations on completing your quest!");
             let m = format!(
@@ -701,7 +701,7 @@ fn do_quest_complete(g: &mut GameState, ch: CharId, questman: CharId) {
 
             clear_quest(g, ch, 15);
             if let Some(c) = g.get_char_mut(ch) {
-                c.points.gold += reward;
+                crate::gold::credit(c, crate::gold::Account::Carried, i64::from(reward));
                 c.quest_points += pointreward;
             }
             return;
@@ -755,7 +755,7 @@ fn do_quest_complete(g: &mut GameState, ch: CharId, questman: CharId) {
 
             clear_quest(g, ch, 30);
             if let Some(c) = g.get_char_mut(ch) {
-                c.points.gold += reward;
+                crate::gold::credit(c, crate::gold::Account::Carried, i64::from(reward));
                 c.quest_points += pointreward;
             }
             return;
@@ -798,11 +798,7 @@ fn do_quest_complete(g: &mut GameState, ch: CharId, questman: CharId) {
                     To::Room,
                 );
 
-                // obj_from_char + extract_obj.
-                g.obj_from_anywhere(oid);
-                if let Some(c) = g.get_char_mut(ch) {
-                    c.carry_items = c.carry_items.saturating_sub(1);
-                }
+                // extract_obj owns its fail-closed unlink + recursive removal.
                 g.extract_obj(oid);
 
                 questman_tell(g, questman, ch, "Congratulations on completing your quest!");
@@ -823,7 +819,7 @@ fn do_quest_complete(g: &mut GameState, ch: CharId, questman: CharId) {
 
                 clear_quest(g, ch, 30);
                 if let Some(c) = g.get_char_mut(ch) {
-                    c.points.gold += reward;
+                    crate::gold::credit(c, crate::gold::Account::Carried, i64::from(reward));
                     c.quest_points += pointreward;
                 }
                 return;
@@ -1224,10 +1220,6 @@ pub fn quest_deliver_give(g: &mut GameState, ch: CharId, obj: ObjId, vict: CharI
     );
 
     // Consume the pouch and mark the quest delivered.
-    g.obj_from_anywhere(obj);
-    if let Some(c) = g.get_char_mut(ch) {
-        c.carry_items = c.carry_items.saturating_sub(1);
-    }
     g.extract_obj(obj);
     if let Some(c) = g.get_char_mut(ch) {
         c.quest_mob = 0;
@@ -1566,6 +1558,12 @@ mod deliver_tests {
                 .any(|&oid| g.get_obj(oid).map(|o| o.item_number) == Some(DELIVER_TOKEN_VNUM)),
             "pouch must be consumed"
         );
+        assert_eq!(c.carry_items, 0, "giver item count must remain in sync");
+        assert_eq!(
+            g.get_char(recip).unwrap().carry_items,
+            0,
+            "recipient item count must return to zero after consumption"
+        );
 
         // Back at the questmaster: claim the scaled reward.
         let gold_before = g.get_char(player).unwrap().points.gold;
@@ -1573,7 +1571,10 @@ mod deliver_tests {
         do_autoquest(&mut g, player, "complete", 0);
         let c = g.get_char(player).unwrap();
         assert!(c.points.gold > gold_before, "reward gold must be paid");
-        assert!(c.quest_points > qp_before, "reward quest points must be paid");
+        assert!(
+            c.quest_points > qp_before,
+            "reward quest points must be paid"
+        );
         assert!(c.act_flags & PLR_QUESTOR == 0, "quest must be cleared");
     }
 
@@ -1661,8 +1662,10 @@ mod deliver_tests {
         g.mob_protos.insert(300, proto);
 
         let conn = ConnId(901);
-        g.descriptors
-            .insert(conn, crate::connection::Descriptor::new(conn, "test".into()));
+        g.descriptors.insert(
+            conn,
+            crate::connection::Descriptor::new(conn, "test".into()),
+        );
         g.get_char_mut(player).unwrap().desc = Some(conn);
 
         do_autoquest(&mut g, player, "info", 0);

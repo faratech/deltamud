@@ -8,7 +8,7 @@
 // not yet ported; in the C they return TRUE on the common path, so they are
 // treated here as always-true no-ops.
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::character::Affect;
 use crate::flags::*;
 use crate::object::{ExtraFlags, ObjLoc, ObjectType, WearFlags};
@@ -623,7 +623,9 @@ fn get_check_money(g: &mut GameState, ch: CharId, obj: ObjId) {
             .get_obj(obj)
             .map(|o| o.short_description.clone())
             .unwrap_or_default();
-        g.obj_from_anywhere(obj);
+        if !g.extract_obj(obj) {
+            return;
+        }
         let mbuilding = g
             .get_char(ch)
             .map(|c| c.prf2_flags & PRF2_MBUILDING != 0)
@@ -634,13 +636,12 @@ fn get_check_money(g: &mut GameState, ch: CharId, obj: ObjId) {
                 msg = format!("There were {} coins.\r\n", amount);
             }
             if let Some(c) = g.get_char_mut(ch) {
-                c.points.gold += amount;
+                crate::gold::credit(c, crate::gold::Account::Carried, i64::from(amount));
             }
         } else {
             msg = format!("{} disintegrates in your hands.\r\n", short);
         }
         g.send_to_char(ch, &msg);
-        g.extract_obj(obj);
     }
 }
 
@@ -692,11 +693,12 @@ fn boxkill(g: &mut GameState, ch: CharId, obj: ObjId) {
     // accompany the box death; the port skipped all three (#132). Dead code
     // in practice (Pandora's Box never loads) - ported for fidelity.
     crate::combat::death_cry(g, ch);
-    g.obj_from_anywhere(obj);
     g.extract_obj(obj);
     let (rname, is_npc) = match g.get_char(ch) {
         Some(c) => (
-            c.in_room.map(|r| g.room(r).name.clone()).unwrap_or_default(),
+            c.in_room
+                .map(|r| g.room(r).name.clone())
+                .unwrap_or_default(),
             c.is_npc,
         ),
         None => (String::new(), false),
@@ -850,7 +852,14 @@ fn perform_get_from_room(g: &mut GameState, ch: CharId, obj: ObjId) -> bool {
             watchdog_mudlog(
                 g,
                 ch,
-                format!("[WATCHDOG] {} gets {} ({}) in {} ({})", name_of(g, ch), on, ovnum, rn, rvnum),
+                format!(
+                    "[WATCHDOG] {} gets {} ({}) in {} ({})",
+                    name_of(g, ch),
+                    on,
+                    ovnum,
+                    rn,
+                    rvnum
+                ),
             );
         }
         get_check_money(g, ch, obj);
@@ -1019,7 +1028,6 @@ fn is_killer(g: &GameState, ch: CharId) -> bool {
         .unwrap_or(false)
 }
 
-
 /// Immortal item-flow audit trail (C act.item.c WATCHDOG mudlogs, #131):
 /// `mudlog(buf, CMP, LVL_IMPL, TRUE)` whenever an immortal manipulates
 /// items/gold.
@@ -1123,7 +1131,7 @@ fn perform_drop_gold(g: &mut GameState, ch: CharId, amount: i32, mode: i32, rdr:
             ),
         );
         if let Some(c) = g.get_char_mut(ch) {
-            c.points.gold -= amount;
+            crate::gold::debit(c, crate::gold::Account::Carried, i64::from(amount));
         }
     }
 }
@@ -1219,7 +1227,6 @@ fn perform_drop(
         SCMD_JUNK => {
             let cost = g.get_obj(obj).map(|o| o.cost).unwrap_or(0);
             let value = (cost >> 4).clamp(1, 200);
-            g.obj_from_anywhere(obj);
             g.extract_obj(obj);
             value
         }
@@ -1287,7 +1294,14 @@ pub fn do_drop(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
     }
 
     if is_number(&arg) {
-        amount = arg.parse::<i32>().unwrap_or(0);
+        amount = match crate::text::parse_i32_strict(&arg) {
+            Ok(value) => value,
+            Err(crate::text::ParseIntError::Overflow) => {
+                g.send_to_char(ch, "That amount is out of range.\r\n");
+                return;
+            }
+            Err(_) => return,
+        };
         // Second token after the amount.
         let (rest_first, _) = crate::interpreter::one_argument(rest);
         if rest_first == "coins" || rest_first == "coin" {
@@ -1334,7 +1348,7 @@ pub fn do_drop(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
             g.send_to_char(ch, "You don't seem to be carrying anything.\r\n");
         } else {
             for obj in inv {
-                amount += perform_drop(g, ch, obj, mode, sname, rdr);
+                amount = amount.saturating_add(perform_drop(g, ch, obj, mode, sname, rdr));
             }
         }
     } else if dotmode == FIND_ALLDOT {
@@ -1357,7 +1371,7 @@ pub fn do_drop(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
             .unwrap_or_default();
         for obj in inv {
             if obj_isname(g, &name, obj) {
-                amount += perform_drop(g, ch, obj, mode, sname, rdr);
+                amount = amount.saturating_add(perform_drop(g, ch, obj, mode, sname, rdr));
             }
         }
     } else {
@@ -1372,7 +1386,7 @@ pub fn do_drop(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
                     &format!("You don't seem to have {} {}.\r\n", an(&arg), arg),
                 );
             }
-            Some(obj) => amount += perform_drop(g, ch, obj, mode, sname, rdr),
+            Some(obj) => amount = amount.saturating_add(perform_drop(g, ch, obj, mode, sname, rdr)),
         }
     }
 
@@ -1388,7 +1402,7 @@ pub fn do_drop(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
             To::Room,
         );
         if let Some(c) = g.get_char_mut(ch) {
-            c.points.gold += amount;
+            crate::gold::credit(c, crate::gold::Account::Carried, i64::from(amount));
         }
     }
 }
@@ -1545,6 +1559,38 @@ fn perform_give_gold(g: &mut GameState, ch: CharId, vict: CharId, amount: i32) {
         g.send_to_char(ch, "You don't have that many coins!\r\n");
         return;
     }
+    let debited = is_npc || level < LVL_GOD;
+    let moved = if debited {
+        crate::gold::transfer_between(
+            g,
+            ch,
+            crate::gold::Account::Carried,
+            vict,
+            crate::gold::Account::Carried,
+            i64::from(amount),
+        )
+    } else {
+        g.get_char_mut(vict)
+            .map(|v| {
+                let amount = i64::from(amount);
+                if crate::gold::balance(v, crate::gold::Account::Carried).saturating_add(amount)
+                    > crate::gold::GOLD_CAP
+                {
+                    false
+                } else {
+                    crate::gold::credit(v, crate::gold::Account::Carried, amount) == amount
+                }
+            })
+            .unwrap_or(false)
+    };
+    if !moved {
+        g.send_to_char(
+            ch,
+            "That transfer would exceed the recipient's gold limit.\r\n",
+        );
+        return;
+    }
+
     g.send_to_char(ch, "&YOkay.&n\r\n");
     let line = format!(
         "$n gives you {} gold coin{}.",
@@ -1554,10 +1600,7 @@ fn perform_give_gold(g: &mut GameState, ch: CharId, vict: CharId, amount: i32) {
     act(g, &line, false, ch, None, ActArg::Char(vict), To::Vict);
     let line = format!("$n gives {} to $N.", money_desc(amount));
     act(g, &line, true, ch, None, ActArg::Char(vict), To::NotVict);
-    // C act.item.c:823: MTRIG_BRIBE fires after the gold changes hands (#142).
-    crate::dg_triggers::bribe_mtrigger(g, vict, ch, amount);
-
-    if is_npc || level < LVL_GOD {
+    if debited {
         watchdog_mudlog(
             g,
             ch,
@@ -1568,13 +1611,9 @@ fn perform_give_gold(g: &mut GameState, ch: CharId, vict: CharId, amount: i32) {
                 name_of(g, vict)
             ),
         );
-        if let Some(c) = g.get_char_mut(ch) {
-            c.points.gold -= amount;
-        }
     }
-    if let Some(v) = g.get_char_mut(vict) {
-        v.points.gold += amount;
-    }
+    // C act.item.c:823: MTRIG_BRIBE fires after the gold changes hands (#142).
+    crate::dg_triggers::bribe_mtrigger(g, vict, ch, amount);
 }
 
 pub fn do_give(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
@@ -1583,7 +1622,14 @@ pub fn do_give(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     if arg.is_empty() {
         g.send_to_char(ch, "Give what to who?\r\n");
     } else if is_number(&arg) {
-        let amount = arg.parse::<i32>().unwrap_or(0);
+        let amount = match crate::text::parse_i32_strict(&arg) {
+            Ok(value) => value,
+            Err(crate::text::ParseIntError::Overflow) => {
+                g.send_to_char(ch, "That amount is out of range.\r\n");
+                return;
+            }
+            Err(_) => return,
+        };
         let (kw, rest2) = crate::interpreter::one_argument(rest);
         if kw == "coins" || kw == "coin" {
             let (who, _) = crate::interpreter::one_argument(rest2);
@@ -1969,7 +2015,6 @@ pub fn do_eat(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
     }
 
     if subcmd == SCMD_EAT {
-        g.obj_from_anywhere(food);
         g.extract_obj(food);
     } else {
         let left = obj_val(g, food, 0) - 1;
@@ -1978,7 +2023,6 @@ pub fn do_eat(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
         }
         if left == 0 {
             g.send_to_char(ch, "There's nothing left now.\r\n");
-            g.obj_from_anywhere(food);
             g.extract_obj(food);
         }
     }
@@ -2994,7 +3038,6 @@ pub fn do_sac(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
             c.points.exp += 1;
         }
     }
-    g.obj_from_anywhere(obj);
     g.extract_obj(obj);
 }
 
@@ -3101,7 +3144,6 @@ pub fn do_repair(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
             ActArg::None,
             To::Room,
         );
-        g.obj_from_anywhere(repair);
         g.extract_obj(repair);
         return;
     }
@@ -3198,7 +3240,7 @@ mod tests {
     use crate::config::Config;
     use crate::connection::Descriptor;
     use crate::dg_handler::{
-        self, add_trigger, install_trig, ScriptKey, TrigData, DG_TEST_LOCK, OBJ_TRIGGER, OTRIG_WEAR,
+        self, DG_TEST_LOCK, OBJ_TRIGGER, OTRIG_WEAR, ScriptKey, TrigData, add_trigger, install_trig,
     };
     use crate::object::Object;
     use std::collections::HashMap;
@@ -3226,18 +3268,42 @@ mod tests {
         (g, ch, obj, conn)
     }
 
+    #[test]
+    fn currency_commands_reject_signed_i32_overflow_at_the_entry_point() {
+        for (input, command) in [
+            ("2147483648 coins", "drop"),
+            ("-2147483649 coins Nobody", "give"),
+        ] {
+            let (mut g, ch, _obj, conn) = wearable_game(ExtraFlags::empty(), 0);
+            match command {
+                "drop" => do_drop(&mut g, ch, input, SCMD_DROP),
+                "give" => do_give(&mut g, ch, input, 0),
+                _ => unreachable!(),
+            }
+            assert!(
+                g.descriptors
+                    .get(&conn)
+                    .unwrap()
+                    .outbuf
+                    .contains("That amount is out of range."),
+                "command={command}, input={input:?}"
+            );
+        }
+    }
+
     fn assert_zapped(mut g: GameState, ch: CharId, obj: ObjId, conn: ConnId) {
         perform_wear(&mut g, ch, obj, W_BODY);
 
         let c = g.get_char(ch).unwrap();
         assert_eq!(c.equipment[W_BODY], None);
         assert_eq!(g.get_obj(obj).unwrap().loc, ObjLoc::Carried(ch));
-        assert!(g
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("You are zapped by a test armor and instantly let go of it.\r\n"));
+        assert!(
+            g.descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("You are zapped by a test armor and instantly let go of it.\r\n")
+        );
     }
 
     fn make_obj_trigger(cmds: &[&str]) -> crate::dg_handler::TrigId {
@@ -3307,12 +3373,13 @@ mod tests {
         );
         assert_eq!(g.get_char(ch).unwrap().equipment[W_BODY], None);
         assert_eq!(g.get_obj(obj).unwrap().loc, ObjLoc::Carried(ch));
-        assert!(!g
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("You wear a test armor on your body.\r\n"));
+        assert!(
+            !g.descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("You wear a test armor on your body.\r\n")
+        );
 
         // Remove the veto: the script store is process-global and obj ids are
         // per-GameState, so a leftover veto would zap another test's armor.

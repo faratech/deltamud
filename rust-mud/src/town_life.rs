@@ -24,7 +24,7 @@
 // mobile_activity consults is_directed() and hands these mobs to drive()
 // BEFORE scavenging/wandering/aggression, so the tables own their entire day.
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::state::GameState;
 use crate::types::*;
 use std::collections::{HashMap, VecDeque};
@@ -48,8 +48,18 @@ pub struct ScheduleEntry {
     pub barks: &'static [&'static str],
 }
 
-const fn sched(mob_vnum: MobVnum, day_post: RoomVnum, night_post: RoomVnum, barks: &'static [&'static str]) -> ScheduleEntry {
-    ScheduleEntry { mob_vnum, day_post, night_post, barks }
+const fn sched(
+    mob_vnum: MobVnum,
+    day_post: RoomVnum,
+    night_post: RoomVnum,
+    barks: &'static [&'static str],
+) -> ScheduleEntry {
+    ScheduleEntry {
+        mob_vnum,
+        day_post,
+        night_post,
+        barks,
+    }
 }
 
 /// The Newbie School faculty walks from the square to its classroom every
@@ -66,12 +76,7 @@ static SCHEDULES: &[ScheduleEntry] = &[
             "$n says, \"Another day, another dozen wide eyes to teach.\"",
         ],
     ),
-    sched(
-        201,
-        201,
-        210,
-        &["$n mutters star charts under $s breath."],
-    ),
+    sched(201, 201, 210, &["$n mutters star charts under $s breath."]),
     sched(
         205,
         210,
@@ -239,8 +244,7 @@ fn neighbours(g: &GameState, r: RoomRnum) -> Vec<RoomRnum> {
             for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
                 if let Some(n) = g.map_coords_to_rnum(x + dx, y + dy) {
                     if let Some(nr) = g.room_opt(n) {
-                        if nr.mapmv > 0 && nr.sector_type != crate::room::SectorType::WaterNoSwim
-                        {
+                        if nr.mapmv > 0 && nr.sector_type != crate::room::SectorType::WaterNoSwim {
                             out.push(n);
                         }
                     }
@@ -326,11 +330,7 @@ fn drive_caravan(g: &mut GameState, ch: CharId, nr: MobVnum) {
 
     let hours = crate::weather::time_now().0;
     let away = (CARAVAN_DEPART_HOUR..CARAVAN_RETURN_HOUR).contains(&hours);
-    let target_rnum = if away {
-        path[path.len() - 1]
-    } else {
-        path[0]
-    };
+    let target_rnum = if away { path[path.len() - 1] } else { path[0] };
 
     let here = match g.get_char(ch).and_then(|c| c.in_room) {
         Some(r) => r,
@@ -354,20 +354,33 @@ fn drive_caravan(g: &mut GameState, ch: CharId, nr: MobVnum) {
     // Announce, transfer, announce. The caravan steps one cell per mobile
     // pulse; the routes run 60-80 cells, so a crossing takes a couple of mud
     // hours of steady travel.
-    act(g, "$n continues on $s way.", true, ch, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n continues on $s way.",
+        true,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
     g.char_from_room(ch);
     g.char_to_room(ch, next);
-    act(g, "$n arrives, road-worn and busy.", true, ch, None, ActArg::None, To::Room);
+    act(
+        g,
+        "$n arrives, road-worn and busy.",
+        true,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
 }
 
 /// find_first_step + perform_move: one room per mobile pulse. Falls silent
 /// (no move) when the BFS finds no route — commuters only ever walk interior
 /// room graphs, where a route always exists.
 fn step_toward(g: &mut GameState, ch: CharId, post: RoomVnum) {
-    let (here, target) = match (
-        g.get_char(ch).and_then(|c| c.in_room),
-        g.real_room(post),
-    ) {
+    let (here, target) = match (g.get_char(ch).and_then(|c| c.in_room), g.real_room(post)) {
         (Some(h), Some(t)) => (h, t),
         _ => return,
     };
@@ -474,7 +487,9 @@ mod tests {
         }
         let mut g = crate::state::GameState::new(Config::default());
         g.config.lib_path = lib.to_string();
-        crate::file_loader::FileLoader::load_world(&mut g, lib).await.unwrap();
+        crate::file_loader::FileLoader::load_world(&mut g, lib)
+            .await
+            .unwrap();
         crate::maputils::integrate_map_rooms(&mut g);
         boot_town_life(&g);
 
@@ -494,7 +509,11 @@ mod tests {
             let mut seen = std::collections::HashSet::new();
             for &r in path {
                 assert!(g.room_opt(r).is_some(), "route room must exist");
-                assert!(seen.insert(r), "route must not revisit room {}", g.rooms[r].number);
+                assert!(
+                    seen.insert(r),
+                    "route must not revisit room {}",
+                    g.rooms[r].number
+                );
             }
         }
     }
@@ -509,7 +528,9 @@ mod tests {
         crate::weather::test_clock::set_hour(12); // away hours
         let mut g = crate::state::GameState::new(Config::default());
         g.config.lib_path = lib.to_string();
-        crate::file_loader::FileLoader::load_world(&mut g, lib).await.unwrap();
+        crate::file_loader::FileLoader::load_world(&mut g, lib)
+            .await
+            .unwrap();
         crate::maputils::integrate_map_rooms(&mut g);
         boot_town_life(&g);
 

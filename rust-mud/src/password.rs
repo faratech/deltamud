@@ -388,13 +388,7 @@ const ZERO: usize = usize::MAX;
 /// the low six bits first.
 fn b64_from_24bit(buf: &[u8], calls: &[(usize, usize, usize, u8)]) -> String {
     let mut out = String::new();
-    let fetch = |idx: usize| -> u32 {
-        if idx == ZERO {
-            0
-        } else {
-            buf[idx] as u32
-        }
-    };
+    let fetch = |idx: usize| -> u32 { if idx == ZERO { 0 } else { buf[idx] as u32 } };
     for &(b2, b1, b0, n) in calls {
         let mut w = (fetch(b2) << 16) | (fetch(b1) << 8) | fetch(b0);
         for _ in 0..n {
@@ -650,7 +644,7 @@ fn permute(input: u64, table: &[u8]) -> u64 {
 fn des_set_key(keyblock: &[u8; 8]) -> [u64; 16] {
     let key = u64::from_be_bytes(*keyblock);
     let permuted = permute(key, &PC1); // 56 bits
-                                       // Split into C (left 28) and D (right 28).
+    // Split into C (left 28) and D (right 28).
     let mut c = (permuted >> 28) & 0x0fff_ffff;
     let mut d = permuted & 0x0fff_ffff;
     let mut subkeys = [0u64; 16];

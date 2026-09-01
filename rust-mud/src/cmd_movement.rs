@@ -16,14 +16,14 @@
 // collision). Pieces with no representable backing are handled the way the
 // surrounding C code degrades (e.g. an absent door keyword -> "door").
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::constants;
 use crate::flags::*;
 use crate::handler::isname;
 use crate::interpreter::{one_argument, search_block};
 use crate::object::{ObjLoc, ObjectType};
-use crate::room::{RoomFlags, SectorType};
 use crate::room::{EX_CLOSED, EX_HIDDEN, EX_ISDOOR, EX_LOCKED, EX_PICKPROOF};
+use crate::room::{RoomFlags, SectorType};
 use crate::spell_parser::{SKILL_PICK_LOCK, SKILL_RAM_DOOR};
 use crate::state::GameState;
 use crate::types::*;
@@ -116,7 +116,6 @@ fn has_boat(g: &GameState, ch: CharId) -> bool {
     false
 }
 
-
 /// C act.movement.c:470-485 pick_rdir_fog: pick a random exit whose
 /// destination cell is magic fog (biased toward deeper fog); no fogged
 /// neighbours -> a fully random direction (#120).
@@ -128,7 +127,8 @@ fn pick_rdir_fog(g: &mut GameState, rnum: RoomRnum) -> usize {
                 .and_then(|e| g.real_room(e.to_room))
                 .map(|dest| {
                     let d = g.room(dest);
-                    crate::maputils::room_weather_type(g, d) == crate::maputils::WEATHER_MAGICFOG as i32
+                    crate::maputils::room_weather_type(g, d)
+                        == crate::maputils::WEATHER_MAGICFOG as i32
                 })
                 .unwrap_or(false)
         })
@@ -165,13 +165,12 @@ pub fn perform_move(g: &mut GameState, ch: CharId, dir: i32, need_specials_check
         .get_char(ch)
         .and_then(|c| c.in_room)
         .and_then(|r| g.room_opt(r))
-        .map(|room| crate::maputils::room_weather_type(g, room) == crate::maputils::WEATHER_MAGICFOG as i32)
+        .map(|room| {
+            crate::maputils::room_weather_type(g, room) == crate::maputils::WEATHER_MAGICFOG as i32
+        })
         .unwrap_or(false);
     let mut dir = dir;
-    if !g.get_char(ch).map(|c| c.is_npc).unwrap_or(true)
-        && ch_lvl < LVL_IMMORT
-        && standing_fog
-    {
+    if !g.get_char(ch).map(|c| c.is_npc).unwrap_or(true) && ch_lvl < LVL_IMMORT && standing_fog {
         g.send_to_char(ch, "You have no idea where you're going!\r\n");
         dir = pick_rdir_fog(g, rnum); // &mut g in scope
     }
@@ -241,7 +240,12 @@ pub fn perform_move(g: &mut GameState, ch: CharId, dir: i32, need_specials_check
 /// do_simple_move: assumes the direction exists and is open. Charges movement
 /// by sector loss, applies the leave/arrive broadcasts (suppressed by sneak),
 /// relocates the char, and shows the new room. Returns true on success.
-pub(crate) fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check: bool) -> bool {
+pub(crate) fn do_simple_move(
+    g: &mut GameState,
+    ch: CharId,
+    dir: usize,
+    need_specials_check: bool,
+) -> bool {
     // C act.movement.c:151: `if (need_specials_check && special(ch, dir + 1,
     // "")) return 0;` - a room spec proc can veto the move (followers path).
     // C passes the REAL command number (dir+1), which is non-zero: specs that
@@ -679,7 +683,6 @@ fn death_trap_effect(g: &mut GameState, ch: CharId) -> bool {
     true
 }
 
-
 /// C act.movement.c:260-321: the pre-move death-trap veto in do_simple_move.
 /// A mortal entering a ROOM_DEATH destination is stopped: with max WIS+INT
 /// they spot the trap (broadcast + random gear drop); a THIEF/KILLER is
@@ -687,7 +690,10 @@ fn death_trap_effect(g: &mut GameState, ch: CharId) -> bool {
 fn dt_precheck(g: &mut GameState, ch: CharId, to_rnum: RoomRnum, dir: usize) -> bool {
     const PLR_KILLER: i64 = 1 << 0;
     const PLR_THIEF: i64 = 1 << 1;
-    let mortal = g.get_char(ch).map(|c| c.player.level < LVL_IMMORT).unwrap_or(false);
+    let mortal = g
+        .get_char(ch)
+        .map(|c| c.player.level < LVL_IMMORT)
+        .unwrap_or(false);
     if !mortal {
         return false;
     }
@@ -713,8 +719,14 @@ fn dt_precheck(g: &mut GameState, ch: CharId, to_rnum: RoomRnum, dir: usize) -> 
                 && g.rng.number(1, 10) > g.rng.number(8, 10);
             if drop {
                 if let Some(oid) = g.unequip_char(ch, p) {
-                    let sname = g.get_obj(oid).map(|o| o.short_description.clone()).unwrap_or_default();
-                    let line = format!("In your frantic panic to avoid the trap you accidentally lose {}\r\n", sname);
+                    let sname = g
+                        .get_obj(oid)
+                        .map(|o| o.short_description.clone())
+                        .unwrap_or_default();
+                    let line = format!(
+                        "In your frantic panic to avoid the trap you accidentally lose {}\r\n",
+                        sname
+                    );
                     g.send_to_char(ch, &line);
                     let r = g.get_char(ch).and_then(|c| c.in_room);
                     if let Some(r) = r {
@@ -725,8 +737,14 @@ fn dt_precheck(g: &mut GameState, ch: CharId, to_rnum: RoomRnum, dir: usize) -> 
         }
         if g.rng.number(1, 10) > g.rng.number(6, 10) {
             if let Some(first) = g.get_char(ch).and_then(|c| c.carrying.first().copied()) {
-                let sname = g.get_obj(first).map(|o| o.short_description.clone()).unwrap_or_default();
-                let line = format!("In your frantic panic to avoid the trap you accidentally lose {}\r\n", sname);
+                let sname = g
+                    .get_obj(first)
+                    .map(|o| o.short_description.clone())
+                    .unwrap_or_default();
+                let line = format!(
+                    "In your frantic panic to avoid the trap you accidentally lose {}\r\n",
+                    sname
+                );
                 g.send_to_char(ch, &line);
                 g.obj_from_anywhere(first);
             }
@@ -1313,7 +1331,10 @@ pub fn special_exit_command(g: &mut GameState, ch: CharId, cmd: &str) -> bool {
     }
     // C: strn_cmp(cmd, ex_name, strlen(ex_name)) — the typed word must begin
     // with the full ex_name.
-    if cmd.len() >= ex_name.len() && cmd[..ex_name.len()].eq_ignore_ascii_case(&ex_name) {
+    if cmd
+        .get(..ex_name.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&ex_name))
+    {
         perform_special_move(g, ch, true);
         return true;
     }
@@ -1500,7 +1521,7 @@ fn do_special_move(g: &mut GameState, ch: CharId) -> bool {
     // ROOM_IMPROOM (LVL_GRGOD). The port checked GODROOM (wrong flag) with a
     // wrong string and never checked IMPROOM, so impl-only rooms were open
     // and god rooms were blocked (#118).
-    
+
     if (level as u8) < LVL_GRGOD && g.room(to_rnum).room_flags.contains(RoomFlags::IMPROOM) {
         g.send_to_char(ch, "You are not godly enough to use that room!\r\n");
         return false;
@@ -2758,11 +2779,7 @@ fn an(word: &str) -> &'static str {
         .next()
         .unwrap_or('x')
         .to_ascii_lowercase();
-    if "aeiou".contains(first) {
-        "an"
-    } else {
-        "a"
-    }
+    if "aeiou".contains(first) { "an" } else { "a" }
 }
 
 /// Uppercase the first character in place (CircleMUD CAP).
@@ -2796,8 +2813,6 @@ mod tests {
     use crate::connection::Descriptor;
     use crate::object::Object;
     use crate::room::{Exit, Room, SpecialExit};
-
-    static ARENA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn arena_exit_game() -> (GameState, CharId, CharId, RoomRnum, RoomRnum, RoomRnum) {
         crate::arena::reset_for_tests();
@@ -2848,8 +2863,8 @@ mod tests {
         ch.desc = Some(conn);
         ch.idnum = 1;
         ch.player.level = 10;
-        ch.points.gold = 20_000;
-        ch.points.bank_gold = 5_000;
+        crate::gold::set(&mut ch, crate::gold::Account::Carried, 20_000);
+        crate::gold::set(&mut ch, crate::gold::Account::Bank, 5_000);
         ch.points.mana = 77;
         ch.points.move_points = 77;
         ch.wimp_level = 12;
@@ -2863,7 +2878,7 @@ mod tests {
 
     #[test]
     fn arena_combatant_exit_runs_prep_room_cleanup() {
-        let _guard = crate::lock_ok::lock(&ARENA_TEST_LOCK);
+        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
         let (mut g, ch, master, entrance, prep, _observer) = arena_exit_game();
 
         assert!(crate::arena::arenaentrancemaster(
@@ -2885,6 +2900,7 @@ mod tests {
         assert_eq!(c.points.move_points, 1);
         assert_eq!(c.points.gold, 9_000);
         assert_eq!(c.points.bank_gold, 5_000);
+        assert_eq!(c.affect_flags, AFF_INVISIBLE);
         assert_eq!(c.wimp_level, 12);
         assert_eq!(c.recall_level, 34);
         assert_eq!(g.player_save_requests, vec![ch]);
@@ -2896,7 +2912,7 @@ mod tests {
 
     #[test]
     fn arena_observer_exit_detaches_observer_state() {
-        let _guard = crate::lock_ok::lock(&ARENA_TEST_LOCK);
+        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
         let (mut g, combatant, master, entrance, _prep, observer_room) = arena_exit_game();
         assert!(crate::arena::arenaentrancemaster(
             &mut g,
@@ -2914,7 +2930,7 @@ mod tests {
         observer.desc = Some(conn);
         observer.idnum = 2;
         observer.player.level = 10;
-        observer.points.gold = 1_000;
+        crate::gold::set(&mut observer, crate::gold::Account::Carried, 1_000);
         let observer = g.create_char(observer);
         g.char_to_room(observer, entrance);
 
@@ -2933,6 +2949,111 @@ mod tests {
         assert_eq!(g.get_char(observer).unwrap().in_room, Some(entrance));
         assert_eq!(crate::arena::arena_stat(observer), crate::arena::ARENA_NOT);
         assert_eq!(crate::arena::arena_observing(observer), None);
+        assert_eq!(g.player_save_requests, vec![observer]);
+        crate::arena::reset_for_tests();
+    }
+
+    #[test]
+    fn forced_arena_relocation_restores_once_without_exit_penalty() {
+        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
+        let (mut g, ch, master, _entrance, _prep, _observer) = arena_exit_game();
+        let outside = g.add_room(Room::new(
+            3001,
+            30,
+            "Temple".to_string(),
+            "A safe temple.".to_string(),
+        ));
+        assert!(crate::arena::arenaentrancemaster(
+            &mut g,
+            ch,
+            master,
+            "arena",
+            "combatant",
+        ));
+
+        // Model affects acquired inside the arena; departure must discard them
+        // and restore the pre-entry flags/wimp/recall values.
+        if let Some(c) = g.get_char_mut(ch) {
+            c.affect_flags = AFF_BLIND;
+            c.wimp_level = 0;
+            c.recall_level = 0;
+        }
+        g.char_from_room(ch);
+        g.char_to_room(ch, outside);
+
+        let c = g.get_char(ch).unwrap();
+        assert_eq!(c.in_room, Some(outside));
+        assert_eq!(c.affect_flags, AFF_INVISIBLE);
+        assert_eq!(c.wimp_level, 12);
+        assert_eq!(c.recall_level, 34);
+        assert_eq!(
+            c.points.gold, 10_000,
+            "forced moves do not charge the exit penalty"
+        );
+        assert_eq!(c.points.mana, 77);
+        assert_eq!(c.points.move_points, 77);
+        assert_eq!(crate::arena::arena_stat(ch), crate::arena::ARENA_NOT);
+        assert_eq!(g.player_save_requests, vec![ch]);
+
+        // A duplicate cleanup must not consume the restored state or erase
+        // affects acquired later in the normal world.
+        if let Some(c) = g.get_char_mut(ch) {
+            c.affect_flags = AFF_SANCTUARY;
+            c.wimp_level = 55;
+            c.recall_level = 66;
+        }
+        crate::arena::restore_bup_affects(&mut g, ch);
+        crate::arena::arena_departure_on_relocation(&mut g, ch, None);
+        let c = g.get_char(ch).unwrap();
+        assert_eq!(c.affect_flags, AFF_SANCTUARY);
+        assert_eq!(c.wimp_level, 55);
+        assert_eq!(c.recall_level, 66);
+        assert_eq!(g.player_save_requests, vec![ch]);
+        crate::arena::reset_for_tests();
+    }
+
+    #[test]
+    fn forced_departure_detaches_observers_and_clears_default() {
+        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
+        let (mut g, combatant, master, entrance, _prep, observer_room) = arena_exit_game();
+        let outside = g.add_room(Room::new(
+            3001,
+            30,
+            "Temple".to_string(),
+            "A safe temple.".to_string(),
+        ));
+        assert!(crate::arena::arenaentrancemaster(
+            &mut g,
+            combatant,
+            master,
+            "arena",
+            "combatant",
+        ));
+        assert_eq!(crate::arena::default_observe_for_test(), Some(combatant));
+
+        let mut watcher = Character::new_player("Watcher".to_string(), Class::Warrior, Race::Human);
+        watcher.idnum = 2;
+        watcher.player.level = 10;
+        let watcher = g.create_char(watcher);
+        g.char_to_room(watcher, entrance);
+        assert!(crate::arena::arenaentrancemaster(
+            &mut g, watcher, master, "arena", "observer",
+        ));
+        assert_eq!(g.get_char(watcher).unwrap().in_room, Some(observer_room));
+        assert_eq!(crate::arena::arena_observing(watcher), Some(combatant));
+
+        g.char_from_room(combatant);
+        g.char_to_room(combatant, outside);
+        assert_eq!(crate::arena::arena_stat(combatant), crate::arena::ARENA_NOT);
+        assert_eq!(crate::arena::arena_observing(watcher), None);
+        assert_eq!(crate::arena::default_observe_for_test(), None);
+
+        g.char_from_room(watcher);
+        g.char_to_room(watcher, outside);
+        assert_eq!(crate::arena::arena_stat(watcher), crate::arena::ARENA_NOT);
+        assert_eq!(crate::arena::arena_observing(watcher), None);
+        assert!(g.player_save_requests.contains(&combatant));
+        assert!(g.player_save_requests.contains(&watcher));
         crate::arena::reset_for_tests();
     }
 
@@ -3086,12 +3207,13 @@ mod tests {
 
         assert!(!perform_move(&mut g, ch, NORTH as i32, false));
         assert!(!g.char_exists(ch));
-        assert!(g
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("You have hit a death trap. Sorry!"));
+        assert!(
+            g.descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("You have hit a death trap. Sorry!")
+        );
     }
 
     #[test]

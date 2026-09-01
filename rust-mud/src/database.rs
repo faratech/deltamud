@@ -9,7 +9,7 @@
 use crate::character::Character;
 use crate::database_compat as compat;
 use anyhow::Result;
-use mysql_async::{params, prelude::*, Pool, Row, Value};
+use mysql_async::{Pool, Row, Value, params, prelude::*};
 
 pub struct Database {
     pool: Pool,
@@ -220,6 +220,49 @@ impl Database {
         Ok(conn.affected_rows())
     }
 
+    /// Delete the exact PLR_DELETED identities whose name-keyed sidecars were
+    /// already cleaned by pfileclean. Each row is rechecked under the DELETE;
+    /// an admin who cleared the tombstone in the meantime keeps the row and
+    /// its child records. The transaction prevents partial child/main removal.
+    pub async fn delete_deleted_players_by_idnums(&self, idnums: Vec<i64>) -> Result<u64> {
+        if idnums.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.pool.get_conn().await?;
+        let mut transaction = conn
+            .start_transaction(mysql_async::TxOpts::default())
+            .await?;
+        let bit = crate::flags::PLR_DELETED;
+        let mut deleted = 0u64;
+        for idnum in idnums {
+            transaction
+                .exec_drop(
+                    r"DELETE pa FROM player_affects pa
+                      JOIN player_main pm ON pm.idnum = pa.idnum
+                      WHERE pm.idnum = ? AND (pm.act & ?) <> 0",
+                    (idnum, bit),
+                )
+                .await?;
+            transaction
+                .exec_drop(
+                    r"DELETE ps FROM player_skills ps
+                      JOIN player_main pm ON pm.idnum = ps.idnum
+                      WHERE pm.idnum = ? AND (pm.act & ?) <> 0",
+                    (idnum, bit),
+                )
+                .await?;
+            transaction
+                .exec_drop(
+                    "DELETE FROM player_main WHERE idnum = ? AND (act & ?) <> 0",
+                    (idnum, bit),
+                )
+                .await?;
+            deleted = deleted.saturating_add(transaction.affected_rows());
+        }
+        transaction.commit().await?;
+        Ok(deleted)
+    }
+
     /// C boot_clans() recounts from player_main on every boot.
     pub async fn clan_member_counts(&self) -> Result<Vec<(i32, i32)>> {
         let mut conn = self.pool.get_conn().await?;
@@ -312,6 +355,69 @@ impl Database {
         Ok(())
     }
 
+    /// Rename only the durable identity column, guarded by both sides of the
+    /// operation.  Unlike the ordinary 83-column REPLACE save, this cannot
+    /// delete/recreate `player_main` or disturb the skills/affects child rows.
+    /// The row and destination-name key are locked in one transaction so a
+    /// concurrent rename/create is either observed here or rejected by the
+    /// unique name constraint; `false` always means no change was committed.
+    pub async fn rename_player_if_current(
+        &self,
+        idnum: i64,
+        expected_old_name: &str,
+        new_name: &str,
+    ) -> Result<bool> {
+        let mut conn = self.pool.get_conn().await?;
+        let mut transaction = conn
+            .start_transaction(mysql_async::TxOpts::default())
+            .await?;
+
+        let current_name: Option<String> = transaction
+            .exec_first(
+                "SELECT name FROM player_main WHERE idnum = ? FOR UPDATE",
+                (idnum,),
+            )
+            .await?;
+        if !current_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case(expected_old_name))
+        {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+
+        let destination_owner: Option<i64> = transaction
+            .exec_first(
+                "SELECT idnum FROM player_main WHERE name = ? FOR UPDATE",
+                (new_name,),
+            )
+            .await?;
+        if destination_owner.is_some_and(|owner| owner != idnum) {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+
+        transaction
+            .exec_drop(
+                "UPDATE player_main SET name = ? WHERE idnum = ? AND name = ?",
+                (new_name, idnum, expected_old_name),
+            )
+            .await?;
+        if transaction.affected_rows() != 1 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        transaction.commit().await?;
+        Ok(true)
+    }
+
+    pub async fn player_name_by_id(&self, idnum: i64) -> Result<Option<String>> {
+        let mut conn = self.pool.get_conn().await?;
+        Ok(conn
+            .exec_first("SELECT name FROM player_main WHERE idnum = ?", (idnum,))
+            .await?)
+    }
+
     // ---- internal write helpers ----------------------------------------
 
     /// INSERT-or-UPDATE all 83 player_main columns (REPLACE keyed on the unique
@@ -339,8 +445,13 @@ impl Database {
 
     /// DELETE + re-INSERT skills>0 (dbmodify_player_skills MODE_DELETE/STORE).
     async fn write_skills(&self, ch: &Character) -> Result<()> {
+        // Transaction (issue #387): a failure between DELETE and INSERT used
+        // to persist an empty skills set permanently.
         let mut conn = self.pool.get_conn().await?;
-        conn.exec_drop("DELETE FROM player_skills WHERE idnum = ?", (ch.idnum,))
+        let mut tx = conn
+            .start_transaction(mysql_async::TxOpts::default())
+            .await?;
+        tx.exec_drop("DELETE FROM player_skills WHERE idnum = ?", (ch.idnum,))
             .await?;
         let rows = compat::skill_rows(ch);
         if !rows.is_empty() {
@@ -350,19 +461,24 @@ impl Database {
                     params! { "idnum" => ch.idnum, "skill" => skill, "learned" => learned }
                 })
                 .collect();
-            conn.exec_batch(
+            tx.exec_batch(
                 "INSERT INTO player_skills (idnum,skill,learned) VALUES (:idnum,:skill,:learned)",
                 params,
             )
             .await?;
         }
+        tx.commit().await?;
         Ok(())
     }
 
     /// DELETE + re-INSERT affects (dbmodify_player_affects MODE_DELETE/STORE).
     async fn write_affects(&self, ch: &Character) -> Result<()> {
+        // Transaction (issue #387), same rationale as write_skills.
         let mut conn = self.pool.get_conn().await?;
-        conn.exec_drop("DELETE FROM player_affects WHERE idnum = ?", (ch.idnum,))
+        let mut tx = conn
+            .start_transaction(mysql_async::TxOpts::default())
+            .await?;
+        tx.exec_drop("DELETE FROM player_affects WHERE idnum = ?", (ch.idnum,))
             .await?;
         let rows = compat::affect_rows(ch);
         if !rows.is_empty() {
@@ -375,13 +491,14 @@ impl Database {
                     }
                 })
                 .collect();
-            conn.exec_batch(
+            tx.exec_batch(
                 r"INSERT INTO player_affects (idnum,type,duration,modifier,location,bitvector)
                   VALUES (:idnum,:type,:duration,:modifier,:location,:bitvector)",
                 params,
             )
             .await?;
         }
+        tx.commit().await?;
         Ok(())
     }
 }
@@ -396,7 +513,7 @@ impl Database {
 #[cfg(test)]
 mod mysql_integration {
     use super::*;
-    use crate::character::Character;
+    use crate::character::{Affect, Character};
     use crate::types::{Class, Race};
 
     fn test_db() -> Option<Database> {
@@ -434,8 +551,8 @@ mod mysql_integration {
         ch.real_points.hitroll = 9;
         ch.real_points.damroll = 11;
         ch.points = ch.real_points.clone();
-        ch.points.gold = 12_345;
-        ch.points.bank_gold = 98_765;
+        crate::gold::set(&mut ch, crate::gold::Account::Carried, 12_345);
+        crate::gold::set(&mut ch, crate::gold::Account::Bank, 98_765);
         ch.points.exp = 4_242_424;
         ch.real_abils.str = 18;
         ch.real_abils.str_add = 30;
@@ -467,7 +584,9 @@ mod mysql_integration {
         let idnum = db.create_player(&ch, "s3cretpw").await.unwrap();
         ch.idnum = idnum;
         ch.act_flags |= 0;
-        db.save_player_with_host(&ch, "courier.example.test").await.unwrap();
+        db.save_player_with_host(&ch, "courier.example.test")
+            .await
+            .unwrap();
 
         let loaded = db.load_player(&name).await.unwrap();
         assert_eq!(loaded.idnum, idnum);
@@ -530,7 +649,7 @@ mod mysql_integration {
         let mut ch = rich_player(&name);
         let idnum = db.create_player(&ch, "pw").await.unwrap();
         ch.idnum = idnum;
-        ch.points.gold = 1;
+        crate::gold::set(&mut ch, crate::gold::Account::Carried, 1);
         ch.player.level = 61;
         ch.quest_mob = 0;
         ch.quest_obj = 0;
@@ -540,5 +659,129 @@ mod mysql_integration {
         assert_eq!(loaded.points.gold, 1);
         assert_eq!(loaded.quest_mob, 0);
         assert_eq!(loaded.quest_obj, 0);
+    }
+
+    #[tokio::test]
+    async fn skills_and_affects_replace_and_clear() {
+        let Some(db) = test_db() else { return };
+        db.init_tables().await.unwrap();
+
+        let name = unique_name("SideRows");
+        let mut ch = rich_player(&name);
+        ch.skills.insert(7, 42);
+        ch.skills.insert(19, 88);
+        ch.affected.push(Affect {
+            spell_type: 17,
+            duration: 9,
+            modifier: -3,
+            location: 4,
+            bitvector: 1 << 12,
+            caster: None,
+        });
+        let idnum = db.create_player(&ch, "pw").await.unwrap();
+        ch.idnum = idnum;
+
+        let loaded = db.load_player(&name).await.unwrap();
+        assert_eq!(loaded.skills.get(&7), Some(&42));
+        assert_eq!(loaded.skills.get(&19), Some(&88));
+        assert_eq!(loaded.affected.len(), 1);
+        assert_eq!(loaded.affected[0].spell_type, 17);
+        assert_eq!(loaded.affected[0].duration, 9);
+        assert_eq!(loaded.affected[0].modifier, -3);
+        assert_eq!(loaded.affected[0].location, 4);
+        assert_eq!(loaded.affected[0].bitvector, 1 << 12);
+
+        ch.skills.clear();
+        ch.skills.insert(23, 61);
+        ch.affected.clear();
+        ch.affected.push(Affect {
+            spell_type: 29,
+            duration: 3,
+            modifier: 5,
+            location: 2,
+            bitvector: 1 << 20,
+            caster: None,
+        });
+        db.save_player(&ch).await.unwrap();
+
+        let replaced = db.load_player(&name).await.unwrap();
+        assert_eq!(replaced.skills.len(), 1);
+        assert_eq!(replaced.skills.get(&23), Some(&61));
+        assert_eq!(replaced.affected.len(), 1);
+        assert_eq!(replaced.affected[0].spell_type, 29);
+        assert_eq!(replaced.affected[0].duration, 3);
+        assert_eq!(replaced.affected[0].modifier, 5);
+        assert_eq!(replaced.affected[0].location, 2);
+        assert_eq!(replaced.affected[0].bitvector, 1 << 20);
+
+        ch.skills.clear();
+        ch.affected.clear();
+        db.save_player(&ch).await.unwrap();
+
+        let cleared = db.load_player(&name).await.unwrap();
+        assert!(cleared.skills.is_empty());
+        assert!(cleared.affected.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_affect_insert_rolls_back_the_delete() {
+        let Some(db) = test_db() else { return };
+        db.init_tables().await.unwrap();
+
+        let name = unique_name("AffectRollback");
+        let mut ch = rich_player(&name);
+        ch.affected.push(Affect {
+            spell_type: 11,
+            duration: 8,
+            modifier: 2,
+            location: 1,
+            bitvector: 1 << 6,
+            caster: None,
+        });
+        let idnum = db.create_player(&ch, "pw").await.unwrap();
+        ch.idnum = idnum;
+
+        // Fail only this player's replacement INSERT. If DELETE and INSERT are
+        // not one transaction, the original row is permanently lost.
+        let trigger = format!("test_affect_rollback_{idnum}");
+        let mut conn = db.pool.get_conn().await.unwrap();
+        conn.query_drop(format!(
+            "CREATE TRIGGER `{trigger}` BEFORE INSERT ON player_affects \
+             FOR EACH ROW BEGIN \
+             IF NEW.idnum = {idnum} THEN \
+             SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'forced affect insert failure'; \
+             END IF; END"
+        ))
+        .await
+        .unwrap();
+        drop(conn);
+
+        ch.affected.clear();
+        ch.affected.push(Affect {
+            spell_type: 99,
+            duration: 1,
+            modifier: 7,
+            location: 3,
+            bitvector: 1 << 18,
+            caster: None,
+        });
+        let write_result = db.write_affects(&ch).await;
+
+        let mut conn = db.pool.get_conn().await.unwrap();
+        conn.query_drop(format!("DROP TRIGGER `{trigger}`"))
+            .await
+            .unwrap();
+        assert!(
+            write_result.is_err(),
+            "the test trigger must reject the INSERT"
+        );
+
+        let loaded = db.load_player(&name).await.unwrap();
+        assert_eq!(loaded.affected.len(), 1);
+        assert_eq!(loaded.affected[0].spell_type, 11);
+        assert_eq!(loaded.affected[0].duration, 8);
+        assert_eq!(loaded.affected[0].modifier, 2);
+        assert_eq!(loaded.affected[0].location, 1);
+        assert_eq!(loaded.affected[0].bitvector, 1 << 6);
     }
 }

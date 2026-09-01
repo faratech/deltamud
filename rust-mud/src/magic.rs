@@ -8,7 +8,7 @@
 // spell_parser.rs; the manual spells live in spells.rs. This module imports
 // both.
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::character::Affect;
 use crate::combat;
 use crate::flags::{
@@ -1055,7 +1055,6 @@ pub fn mag_summons(g: &mut GameState, _level: i32, ch: CharId, obj: Option<ObjId
                 g.obj_from_anywhere(c);
                 g.obj_to_char(c, mob);
             }
-            g.obj_from_anywhere(corpse);
             g.extract_obj(corpse);
         }
     }
@@ -1279,13 +1278,19 @@ fn affect_update_char(g: &mut GameState, cid: CharId) {
                     c.position = Position::Standing;
                 }
                 2 => {
-                    g.send_to_char(cid, "Your &Radrenaline&n rush completely wears off, leaving you exhausted.\r\n");
+                    g.send_to_char(
+                        cid,
+                        "Your &Radrenaline&n rush completely wears off, leaving you exhausted.\r\n",
+                    );
                     let c = g.get_char_mut(cid).unwrap();
                     c.points.hit = (c.points.hit - new_dur * 100).max(10);
                     c.points.move_points = (c.points.move_points - new_dur * 15).max(10);
                 }
                 3 => {
-                    g.send_to_char(cid, "Your &Radrenaline&n rush slowly wears off, leaving you tired.\r\n");
+                    g.send_to_char(
+                        cid,
+                        "Your &Radrenaline&n rush slowly wears off, leaving you tired.\r\n",
+                    );
                     let c = g.get_char_mut(cid).unwrap();
                     c.points.hit = (c.points.hit - 100).max(10);
                     c.points.move_points = (c.points.move_points - 15).max(0);
@@ -1345,8 +1350,8 @@ mod affect_update_tests {
     use crate::character::Character;
     use crate::config::Config;
     use crate::connection::Descriptor;
-    use crate::types::ConnId;
     use crate::types::Class;
+    use crate::types::ConnId;
 
     fn spell_affect(stype: i32, duration: i32) -> Affect {
         Affect {
@@ -1381,12 +1386,13 @@ mod affect_update_tests {
         let c = g.get_char(cid).unwrap();
         assert_eq!(c.affected.len(), 1);
         assert_eq!(c.affected[0].duration, 0);
-        assert!(!g
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("less protected"));
+        assert!(
+            !g.descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("less protected")
+        );
 
         crate::magic::affect_update(&mut g);
 
@@ -1402,8 +1408,11 @@ mod affect_update_tests {
     #[test]
     fn permanent_affect_never_expires() {
         let mut g = GameState::new(Config::default());
-        let mut ch =
-            Character::new_player("Perm".to_string(), Class::Warrior, crate::types::Race::Human);
+        let mut ch = Character::new_player(
+            "Perm".to_string(),
+            Class::Warrior,
+            crate::types::Race::Human,
+        );
         ch.affected.push(spell_affect(SPELL_ARMOR, -1));
         ch.affected.push(spell_affect(SPELL_BLESS, 3));
         let cid = g.create_char(ch);
@@ -1411,7 +1420,11 @@ mod affect_update_tests {
         crate::magic::affect_update(&mut g);
 
         let c = g.get_char(cid).unwrap();
-        assert_eq!(c.affected.len(), 2, "permanent stays; ticking only decrements");
+        assert_eq!(
+            c.affected.len(),
+            2,
+            "permanent stays; ticking only decrements"
+        );
         assert_eq!(c.affected[0].duration, -1);
         assert_eq!(c.affected[1].spell_type, SPELL_BLESS);
         assert_eq!(c.affected[1].duration, 2);
@@ -1420,8 +1433,11 @@ mod affect_update_tests {
     #[test]
     fn ticking_affect_only_decrements() {
         let mut g = GameState::new(Config::default());
-        let mut ch =
-            Character::new_player("Tick".to_string(), Class::Warrior, crate::types::Race::Human);
+        let mut ch = Character::new_player(
+            "Tick".to_string(),
+            Class::Warrior,
+            crate::types::Race::Human,
+        );
         ch.affected.push(spell_affect(SPELL_BLESS, 5));
         let cid = g.create_char(ch);
 
@@ -1432,4 +1448,3 @@ mod affect_update_tests {
         assert_eq!(c.affected.len(), 1);
     }
 }
-

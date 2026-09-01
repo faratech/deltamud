@@ -26,7 +26,7 @@
 // entity vnum + kind. assign_triggers() instantiates them onto a live entity.
 
 use crate::dg_handler::{
-    self, add_trigger, install_trig, ScriptKey, TrigData, MOB_TRIGGER, OBJ_TRIGGER, WLD_TRIGGER,
+    self, MOB_TRIGGER, OBJ_TRIGGER, ScriptKey, TrigData, WLD_TRIGGER, add_trigger, install_trig,
 };
 use crate::state::GameState;
 use crate::types::*;
@@ -67,6 +67,18 @@ fn proto_scripts() -> &'static Mutex<HashMap<(i32, i32), Vec<i32>>> {
 /// asciiflag_conv (db.c): letters a..z => bits 0..25, A..Z => bits 26..51;
 /// if the whole token is digits, it's parsed as a decimal number instead.
 pub fn asciiflag_conv(flag: &str) -> i64 {
+    match asciiflag_conv_checked(flag) {
+        Ok(flags) => flags,
+        Err(error) => {
+            log::warn!(
+                "SYSERR: DG numeric flag {flag:?} is invalid: {error:?}; clamped to i64::MAX"
+            );
+            i64::MAX
+        }
+    }
+}
+
+fn asciiflag_conv_checked(flag: &str) -> Result<i64, crate::text::ParseIntError> {
     let mut flags: i64 = 0;
     let mut is_number = true;
     for c in flag.chars() {
@@ -79,10 +91,10 @@ pub fn asciiflag_conv(flag: &str) -> i64 {
             is_number = false;
         }
     }
-    if is_number {
-        flags = flag.trim().parse().unwrap_or(0);
+    if is_number && !flag.trim().is_empty() {
+        flags = crate::text::parse_i64_strict(flag)?;
     }
-    flags
+    Ok(flags)
 }
 
 /// real_trigger(vnum): vnum -> rnum, or -1.
@@ -218,12 +230,12 @@ fn parse_trg_file(data: &str) {
             break;
         }
         if let Some(rest) = t.strip_prefix('#') {
-            let vnum: i32 = rest.trim().parse().unwrap_or(-1);
             i += 1;
-            if vnum >= 0 {
-                parse_trigger(vnum, &lines, &mut i);
-            } else {
-                // malformed header; skip line
+            match crate::text::parse_i32_strict(rest) {
+                Ok(vnum) if vnum >= 0 => parse_trigger(vnum, &lines, &mut i),
+                Ok(_) | Err(_) => {
+                    log::warn!("SYSERR: rejected invalid DG trigger header {t:?}");
+                }
             }
         } else {
             i += 1;
@@ -239,14 +251,42 @@ fn parse_trigger(vnum: i32, lines: &[&str], i: &mut usize) {
     // flag line: "attach_type flags narg"
     let flag_line = next_nonblank(lines, i).unwrap_or_default();
     let parts: Vec<&str> = flag_line.split_whitespace().collect();
-    let attach_type: i32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let attach_type = match parts.first() {
+        Some(raw) => match crate::text::parse_i32_strict(raw) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                log::warn!(
+                    "SYSERR: trigger #{vnum} attach type {raw:?} is invalid: {error:?}; record rejected"
+                );
+                None
+            }
+        },
+        None => Some(0),
+    };
     let flags = parts.get(1).copied().unwrap_or("0");
-    let trigger_type = asciiflag_conv(flags);
+    let trigger_type = match asciiflag_conv_checked(flags) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            log::warn!(
+                "SYSERR: trigger #{vnum} flags {flags:?} are invalid: {error:?}; record rejected"
+            );
+            None
+        }
+    };
     // narg is present only when the line has 3 fields (C: k == 3).
-    let narg: i32 = if parts.len() >= 3 {
-        parts[2].parse().unwrap_or(0)
+    let narg = if parts.len() >= 3 {
+        match crate::text::parse_i32_strict(parts[2]) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                log::warn!(
+                    "SYSERR: trigger #{vnum} numeric argument {:?} is invalid: {error:?}; record rejected",
+                    parts[2]
+                );
+                None
+            }
+        }
     } else {
-        0
+        Some(0)
     };
 
     let arglist = read_tilde_string(lines, i);
@@ -260,6 +300,11 @@ fn parse_trigger(vnum: i32, lines: &[&str], i: &mut usize) {
         .filter(|l| !l.is_empty())
         .map(|l| l.to_string())
         .collect();
+
+    let (Some(attach_type), Some(trigger_type), Some(narg)) = (attach_type, trigger_type, narg)
+    else {
+        return;
+    };
 
     let proto = TrigProto {
         vnum,
@@ -579,5 +624,27 @@ mod conformance {
         assert_eq!(asciiflag_conv("bg"), (1 << 1) | (1 << 6));
         assert_eq!(asciiflag_conv("A"), 1 << 26);
         assert_eq!(asciiflag_conv("100"), 100); // all-digit => decimal
+    }
+
+    #[test]
+    fn trigger_loader_rejects_overflowing_records_without_shifting_fields() {
+        let _lock = crate::dg_handler::DG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::lock_ok::lock(&index()).clear();
+        crate::lock_ok::lock(&vnum_map()).clear();
+        parse_trg_file(
+            "#1\nBad attach~\n2147483648 a 1\narg~\ncmd~\n\
+#2\nBad flags~\n0 9223372036854775808 1\narg~\ncmd~\n\
+#3\nBad narg~\n0 a 2147483648\narg~\ncmd~\n\
+#4\nGood~\n0 a 7\narg~\ncmd~\n$~\n",
+        );
+
+        assert_eq!(top_of_trigt(), 1);
+        let good = trig_proto(0).unwrap();
+        assert_eq!(good.vnum, 4);
+        assert_eq!(good.attach_type, MOB_TRIGGER);
+        assert_eq!(good.trigger_type, 1);
+        assert_eq!(good.narg, 7);
     }
 }

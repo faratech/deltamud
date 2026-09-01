@@ -13,11 +13,10 @@
 // ----------------------------
 // The C stores `struct house_control_rec[num_of_houses]` as a raw fwrite() blob
 // in lib/etc/hcontrol, and each house's objects as raw `obj_file_elem` records
-// in lib/house/<vnum>.house. Neither binary layout is portable (time_t width,
-// struct padding, and crucially the Rust port has no Obj_to_store/Obj_from_store
-// object-store layer yet), so this module uses a documented LINE-ORIENTED TEXT
-// format for both files. See the `serialize_*` / `parse_*` helpers below for the
-// exact grammar. The control file additionally caches the owner/guest *names*
+// in lib/house/<vnum>.house. The port auto-detects those exact x86-64 LP64
+// layouts as well as its existing line-oriented Rust formats, and preserves
+// the detected format on every atomic rewrite. The control file additionally
+// caches the owner/guest *names* in its Rust representation
 // alongside their idnums so `hcontrol show`/`house` can render names for offline
 // players. The Rust port now carries the in-memory player_table index (C
 // build_player_index) on GameState, so id<->name resolution works for offline
@@ -34,12 +33,16 @@
 //     as the do_quit port does), so do_bed mirrors really_quit: announce, clear
 //     LOCKOUT, request the descriptor close (which drives save+extract).
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::interpreter::{half_chop, is_abbrev, one_argument, search_block};
-use crate::object::{ExtraFlags, Object, ObjectAffect, ObjectType, WearFlags};
+use crate::object::{
+    ExtraFlags, Object, ObjectAffect, ObjectGraphOrder, ObjectListOrder, ObjectType, WearFlags,
+    walk_object_graph, walk_object_lists_postorder,
+};
 use crate::room::RoomFlags;
 use crate::state::GameState;
 use crate::types::*;
+use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
@@ -69,8 +72,7 @@ const ITEM_NORENT: u64 = 1 << 2;
 
 const NRM_INVIS: u8 = LVL_IMMORT; // mudlog visibility floor.
 
-const HCONTROL_FORMAT: &str =
-    "Usage: hcontrol build <house vnum> <exit direction> <player name>\r\n\
+const HCONTROL_FORMAT: &str = "Usage: hcontrol build <house vnum> <exit direction> <player name>\r\n\
 \x20      hcontrol destroy <house vnum>\r\n\
 \x20      hcontrol update <house vnum> <exit direction> [player name]\r\n\
 \x20      hcontrol pay <house vnum>\r\n\
@@ -116,6 +118,17 @@ impl HouseControlRec {
 fn houses() -> &'static Mutex<Vec<HouseControlRec>> {
     static HOUSES: OnceLock<Mutex<Vec<HouseControlRec>>> = OnceLock::new();
     HOUSES.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn hcontrol_format() -> &'static Mutex<crate::cformat::PersistenceFormat> {
+    static FORMAT: OnceLock<Mutex<crate::cformat::PersistenceFormat>> = OnceLock::new();
+    FORMAT.get_or_init(|| Mutex::new(crate::cformat::default_persistence_format()))
+}
+
+fn house_object_formats() -> &'static Mutex<HashMap<RoomVnum, crate::cformat::PersistenceFormat>> {
+    static FORMATS: OnceLock<Mutex<HashMap<RoomVnum, crate::cformat::PersistenceFormat>>> =
+        OnceLock::new();
+    FORMATS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 // ---------------------------------------------------------------------------
@@ -301,99 +314,215 @@ fn find_house(vnum: RoomVnum) -> Option<usize> {
 /// House_save_control(): write the in-memory table to lib/etc/hcontrol.
 fn house_save_control(g: &GameState) {
     let path = hcontrol_path(&g.config.lib_path);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     let table = crate::lock_ok::lock(&houses());
-    let mut out = String::new();
-    for h in table.iter() {
-        out.push_str(&format!(
-            "H {} {} {} {} {} {} {}\n",
-            h.vnum, h.atrium, h.exit_num, h.built_on, h.mode, h.owner, h.last_payment
-        ));
-        out.push_str(&format!(
-            "O {}\n",
-            if h.owner_name.is_empty() {
-                "*"
-            } else {
-                h.owner_name.as_str()
-            }
-        ));
-        out.push_str(&format!("G {}", h.guests.len()));
-        for (idx, &gid) in h.guests.iter().enumerate() {
-            let gname = h.guest_names.get(idx).map(|s| s.as_str()).unwrap_or("*");
-            let gname = if gname.is_empty() { "*" } else { gname };
-            out.push_str(&format!(" {}:{}", gid, gname));
+    let format = *crate::lock_ok::lock(&hcontrol_format());
+    let bytes = match format {
+        crate::cformat::PersistenceFormat::C => {
+            let records: Vec<_> = table
+                .iter()
+                .map(|h| crate::cformat::CHouseControlRec {
+                    vnum: h.vnum as i64,
+                    atrium: h.atrium as i64,
+                    exit_num: h.exit_num as i64,
+                    built_on: h.built_on,
+                    mode: h.mode,
+                    owner: h.owner,
+                    guests: h.guests.clone(),
+                    last_payment: h.last_payment,
+                })
+                .collect();
+            crate::cformat::encode_hcontrol(&records)
         }
-        out.push('\n');
-    }
-    out.push_str("$\n");
-    if std::fs::write(&path, out).is_err() {
+        crate::cformat::PersistenceFormat::Rust => {
+            let mut out = String::new();
+            for h in table.iter() {
+                out.push_str(&format!(
+                    "H {} {} {} {} {} {} {}\n",
+                    h.vnum, h.atrium, h.exit_num, h.built_on, h.mode, h.owner, h.last_payment
+                ));
+                out.push_str(&format!(
+                    "O {}\n",
+                    if h.owner_name.is_empty() {
+                        "*"
+                    } else {
+                        h.owner_name.as_str()
+                    }
+                ));
+                out.push_str(&format!("G {}", h.guests.len()));
+                for (idx, &gid) in h.guests.iter().enumerate() {
+                    let gname = h.guest_names.get(idx).map(|s| s.as_str()).unwrap_or("*");
+                    let gname = if gname.is_empty() { "*" } else { gname };
+                    out.push_str(&format!(" {}:{}", gid, gname));
+                }
+                out.push('\n');
+            }
+            out.push_str("$\n");
+            out.into_bytes()
+        }
+    };
+    drop(table);
+    if crate::cformat::atomic_write(&path, &bytes).is_err() {
         eprintln!("SYSERR: Unable to open house control file");
     }
 }
 
-/// Parse the text control file into a Vec of records (no world validation).
-fn parse_control_file(text: &str) -> Vec<HouseControlRec> {
+/// Parse the text control file into records (without world validation).
+///
+/// A recognizable Rust file may contain one damaged record among otherwise
+/// valid houses. Reject and log that record, but retain the remaining records;
+/// no present numeric token is allowed to alias to a default value.
+fn parse_control_file(text: &str) -> Option<Vec<HouseControlRec>> {
     let mut recs = Vec::new();
-    let mut lines = text.lines().peekable();
-    while let Some(line) = lines.next() {
-        let line = line.trim_end();
+    let mut lines = text.lines().enumerate().peekable();
+    let mut saw_end = false;
+    while let Some((line_number, line)) = lines.next() {
+        let line = line.trim();
         if line == "$" || line.is_empty() {
             if line == "$" {
+                saw_end = true;
                 break;
             }
             continue;
         }
-        if !line.starts_with('H') {
-            continue;
-        }
-        let parts: Vec<&str> = line[1..].split_whitespace().collect();
-        if parts.len() < 7 {
-            continue;
-        }
-        let mut rec = HouseControlRec::blank();
-        rec.vnum = parts[0].parse().unwrap_or(NOWHERE);
-        rec.atrium = parts[1].parse().unwrap_or(0);
-        rec.exit_num = parts[2].parse().unwrap_or(0);
-        rec.built_on = parts[3].parse().unwrap_or(0);
-        rec.mode = parts[4].parse().unwrap_or(HOUSE_OPEN);
-        rec.owner = parts[5].parse().unwrap_or(-1);
-        rec.last_payment = parts[6].parse().unwrap_or(0);
+        let Some(header) = line.strip_prefix("H ") else {
+            return None;
+        };
+        let parts: Vec<&str> = header.split_whitespace().collect();
+        let mut rec = if parts.len() == 7 {
+            (|| {
+                let mut rec = HouseControlRec::blank();
+                rec.vnum = parts[0].parse().ok()?;
+                rec.atrium = parts[1].parse().ok()?;
+                rec.exit_num = parts[2].parse().ok()?;
+                rec.built_on = parts[3].parse().ok()?;
+                rec.mode = parts[4].parse().ok()?;
+                rec.owner = parts[5].parse().ok()?;
+                rec.last_payment = parts[6].parse().ok()?;
+                Some(rec)
+            })()
+        } else {
+            None
+        };
+        let mut record_valid = rec.is_some();
+
         // Optional O / G lines.
-        if let Some(&next) = lines.peek() {
+        if let Some((_, next)) = lines.peek() {
             if next.trim_start().starts_with('O') {
-                let oline = lines.next().unwrap().trim();
-                let name = oline[1..].trim();
-                if name != "*" {
-                    rec.owner_name = name.to_lowercase();
-                }
-            }
-        }
-        if let Some(&next) = lines.peek() {
-            if next.trim_start().starts_with('G') {
-                let gline = lines.next().unwrap().trim();
-                let toks: Vec<&str> = gline[1..].split_whitespace().collect();
-                // toks[0] = count, then id:name pairs.
-                for tok in toks.iter().skip(1) {
-                    let (idpart, namepart) = match tok.split_once(':') {
-                        Some((a, b)) => (a, b),
-                        None => (*tok, "*"),
-                    };
-                    if let Ok(gid) = idpart.parse::<i64>() {
-                        rec.guests.push(gid);
-                        rec.guest_names.push(if namepart == "*" {
-                            String::new()
-                        } else {
-                            namepart.to_lowercase()
-                        });
+                let (_, oline) = lines.next().expect("peeked owner line");
+                let name = oline.trim().strip_prefix("O ").unwrap_or("").trim();
+                if name.is_empty() {
+                    record_valid = false;
+                } else if name != "*" {
+                    if let Some(rec) = rec.as_mut() {
+                        rec.owner_name = name.to_lowercase();
                     }
                 }
             }
         }
-        recs.push(rec);
+        if let Some((_, next)) = lines.peek() {
+            if next.trim_start().starts_with('G') {
+                let (_, gline) = lines.next().expect("peeked guest line");
+                let guest_fields: Vec<&str> = gline
+                    .trim()
+                    .strip_prefix("G ")
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .collect();
+                // toks[0] = count, then id:name pairs.
+                let declared = guest_fields
+                    .first()
+                    .and_then(|field| field.parse::<usize>().ok());
+                if declared != Some(guest_fields.len().saturating_sub(1)) {
+                    record_valid = false;
+                }
+                let mut guests = Vec::new();
+                let mut guest_names = Vec::new();
+                for tok in guest_fields.iter().skip(1) {
+                    let (idpart, namepart) = match tok.split_once(':') {
+                        Some((a, b)) => (a, b),
+                        None => (*tok, "*"),
+                    };
+                    match idpart.parse::<i64>() {
+                        Ok(gid) => {
+                            guests.push(gid);
+                            guest_names.push(if namepart == "*" {
+                                String::new()
+                            } else {
+                                namepart.to_lowercase()
+                            });
+                        }
+                        Err(_) => record_valid = false,
+                    }
+                }
+                if let Some(rec) = rec.as_mut() {
+                    if record_valid {
+                        rec.guests = guests;
+                        rec.guest_names = guest_names;
+                    } else {
+                        rec.guests.clear();
+                        rec.guest_names.clear();
+                    }
+                }
+            }
+        }
+        if record_valid {
+            if let Some(rec) = rec {
+                recs.push(rec);
+            }
+        } else {
+            log::warn!(
+                "SYSERR: rejected malformed Rust hcontrol record at line {}: field invalid or out of range",
+                line_number + 1
+            );
+        }
     }
-    recs
+
+    // Bytes after the terminator make this structurally unlike the Rust text
+    // format. Keeping this distinction prevents an ASCII-looking C record from
+    // being misdetected.
+    if !saw_end || lines.any(|(_, line)| !line.trim().is_empty()) {
+        None
+    } else {
+        Some(recs)
+    }
+}
+
+fn control_from_c(r: crate::cformat::CHouseControlRec) -> Option<HouseControlRec> {
+    Some(HouseControlRec {
+        vnum: RoomVnum::try_from(r.vnum).ok()?,
+        atrium: RoomVnum::try_from(r.atrium).ok()?,
+        exit_num: i32::try_from(r.exit_num).ok()?,
+        built_on: r.built_on,
+        mode: r.mode,
+        owner: r.owner,
+        owner_name: String::new(),
+        guests: r.guests,
+        guest_names: Vec::new(),
+        last_payment: r.last_payment,
+    })
+}
+
+fn decode_control_bytes(
+    bytes: &[u8],
+) -> Option<(Vec<HouseControlRec>, crate::cformat::PersistenceFormat)> {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        if let Some(parsed) = parse_control_file(text) {
+            return Some((parsed, crate::cformat::PersistenceFormat::Rust));
+        }
+    }
+    let records = crate::cformat::decode_hcontrol(bytes)?;
+    let mut parsed = Vec::with_capacity(records.len());
+    for (record_number, record) in records.into_iter().enumerate() {
+        if let Some(record) = control_from_c(record) {
+            parsed.push(record);
+        } else {
+            log::warn!(
+                "SYSERR: rejected C hcontrol record {} with a room or exit number outside the supported 32-bit range",
+                record_number + 1
+            );
+        }
+    }
+    Some((parsed, crate::cformat::PersistenceFormat::C))
 }
 
 /// House_boot(): load control records, validate vnums, set room bits, load
@@ -413,56 +542,26 @@ fn owner_exists(g: &GameState, idnum: i64) -> bool {
     g.get_name_by_id(idnum).is_some()
 }
 
-/// Map a C record onto the Rust control record (guests carried as idnums).
-fn control_from_c(r: crate::cformat::CHouseControlRec) -> HouseControlRec {
-    HouseControlRec {
-        vnum: r.vnum as RoomVnum,
-        atrium: r.atrium as RoomVnum,
-        exit_num: r.exit_num as i32,
-        built_on: r.built_on,
-        mode: r.mode,
-        owner: r.owner,
-        owner_name: String::new(),
-        guests: r.guests,
-        guest_names: Vec::new(),
-        last_payment: r.last_payment,
-    }
-}
-
 pub fn house_boot(g: &mut GameState) {
     let path = hcontrol_path(&g.config.lib_path);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
         Err(_) => {
             mudlog(g, "House control file does not exist.", NRM_INVIS);
             return;
         }
     };
 
-    // Issue #95: with MUD_CFORMAT_FILES=true (or when the file is not our
-    // text format), lib/etc/hcontrol is read as C's raw 928-byte
-    // house_control_rec records.
-    let parsed = if std::env::var("MUD_CFORMAT_FILES").map(|v| v == "true").unwrap_or(false)
-        || !text.trim_start().starts_with('H')
-    {
-        let bytes = std::fs::read(&path).unwrap_or_default();
-        let recs = crate::cformat::decode_hcontrol(&bytes);
-        recs.into_iter()
-            .map(|r| crate::cformat::CHouseControlRec {
-                vnum: r.vnum,
-                atrium: r.atrium,
-                exit_num: r.exit_num,
-                built_on: r.built_on,
-                mode: r.mode,
-                owner: r.owner,
-                guests: r.guests,
-                last_payment: r.last_payment,
-            })
-            .map(control_from_c)
-            .collect()
+    // Detect from raw bytes before attempting UTF-8. C records commonly
+    // contain invalid UTF-8 in padding/fixed fields and must never hit
+    // read_to_string first (#95).
+    let (parsed, detected) = if let Some(decoded) = decode_control_bytes(&bytes) {
+        decoded
     } else {
-        parse_control_file(&text)
+        mudlog(g, "SYSERR: House control file is corrupt.", NRM_INVIS);
+        return;
     };
+    *crate::lock_ok::lock(&hcontrol_format()) = detected;
     let mut accepted: Vec<HouseControlRec> = Vec::new();
     let mut to_load: Vec<RoomVnum> = Vec::new();
 
@@ -483,7 +582,11 @@ pub fn house_boot(g: &mut GameState) {
         // resolves through the player index is SKIPPED - the soft pass let
         // houses of deleted players survive boot (#178).
         if temp.owner >= 0 && !owner_exists(g, temp.owner) {
-            mudlog(g, "SYSERR: House owner does not exist - skipping house.", NRM_INVIS);
+            mudlog(
+                g,
+                "SYSERR: House owner does not exist - skipping house.",
+                NRM_INVIS,
+            );
             continue;
         }
         if temp.owner != -1 {
@@ -531,10 +634,76 @@ pub fn house_boot(g: &mut GameState) {
 // TEXT FORMAT (lib/house/<vnum>.house): one line per object, flattened
 // depth-first (a parent precedes its contents). Each line:
 //   <depth> <vnum> <type> <wearbits> <extrabits> <weight> <cost> <rent>
-//           <timer> <v0> <v1> <v2> <v3> <#affects> [loc mod ...]
-//           |<name>|<short>|<long>
+//           <timer> <v0> <v1> <v2> <v3> <min_level> <bitvector>
+//           <curr_slots> <total_slots> <#affects> [loc mod ...] [obj_class]
+//           |<name>|<short>|<long>|<action>
 // `depth` tracks container nesting (0 = top of room). On load we rebuild the
 // tree from depth, skipping ITEM_KEY and ITEM_NORENT items exactly as C does.
+
+fn stored_object_weight(g: &GameState, oid: ObjId) -> i32 {
+    let Some(obj) = g.get_obj(oid) else {
+        return 0;
+    };
+    obj.contains.iter().fold(obj.weight, |weight, child| {
+        weight.saturating_sub(g.get_obj(*child).map(|o| o.weight).unwrap_or(0))
+    })
+}
+
+fn rust_house_object_file(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let mut saw_record = false;
+    for line in text
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+    {
+        let Some((head, _)) = line.split_once('|') else {
+            return false;
+        };
+        let fields: Vec<_> = head.split_whitespace().collect();
+        // This is format recognition, not record validation. Keep malformed
+        // or overflowing numeric fields in the Rust path so parse_obj_line can
+        // reject/log only that record while later valid records still load.
+        if fields.len() < 14 {
+            return false;
+        }
+        saw_record = true;
+    }
+    saw_record
+}
+
+fn detect_house_object_format(bytes: &[u8]) -> Option<crate::cformat::PersistenceFormat> {
+    if bytes.is_empty() {
+        return None;
+    }
+    if rust_house_object_file(bytes) {
+        return Some(crate::cformat::PersistenceFormat::Rust);
+    }
+    let elems = crate::cformat::decode_obj_file(bytes)?;
+    elems
+        .iter()
+        .all(|elem| i32::try_from(elem.item_number).is_ok())
+        .then_some(crate::cformat::PersistenceFormat::C)
+}
+
+fn c_house_elem(g: &GameState, oid: ObjId) -> Option<crate::cformat::CObjFileElem> {
+    let obj = g.get_obj(oid)?;
+    Some(crate::cformat::obj_to_c_elem(
+        i64::from(obj.item_number),
+        0,
+        obj.curr_slots,
+        obj.total_slots,
+        obj.values,
+        obj.extra_flags.bits() as i32,
+        stored_object_weight(g, oid),
+        obj.timer,
+        obj.bitvector,
+        obj.min_level,
+        &obj.affects,
+    ))
+}
 
 fn serialize_obj_line(g: &GameState, oid: ObjId, depth: usize, out: &mut String) {
     let o = match g.get_obj(oid) {
@@ -549,7 +718,7 @@ fn serialize_obj_line(g: &GameState, oid: ObjId, depth: usize, out: &mut String)
         ty,
         o.wear_flags.bits(),
         o.extra_flags.bits(),
-        o.weight,
+        stored_object_weight(g, oid),
         o.cost,
         o.rent,
         o.timer,
@@ -557,26 +726,27 @@ fn serialize_obj_line(g: &GameState, oid: ObjId, depth: usize, out: &mut String)
         o.values[1],
         o.values[2],
         o.values[3],
-        o.min_level,    // min_level: the equip gate (see objsave.rs #383)
-        o.bitvector,   // affect bitvector
-        o.curr_slots,  // durability counters (#233)
+        o.min_level,  // min_level: the equip gate (see objsave.rs #383)
+        o.bitvector,  // affect bitvector
+        o.curr_slots, // durability counters (#233)
         o.total_slots,
         o.affects.len()
     ));
     for a in &o.affects {
         out.push_str(&format!(" {} {}", a.location, a.modifier));
     }
+    out.push_str(&format!(" {}", o.obj_class));
     out.push_str(&format!(
-        "|{}|{}|{}\n",
+        "|{}|{}|{}|{}\n",
         o.name.replace('|', "/").replace('\n', " "),
         o.short_description.replace('|', "/").replace('\n', " "),
-        o.description.replace('|', "/").replace('\n', " ")
+        o.description.replace('|', "/").replace('\n', " "),
+        o.action_description
+            .as_deref()
+            .unwrap_or("")
+            .replace('|', "/")
+            .replace('\n', " ")
     ));
-    // Recurse into contents at depth+1 (C: House_save walks obj->contains).
-    let contains = o.contains.clone();
-    for c in contains {
-        serialize_obj_line(g, c, depth + 1, out);
-    }
 }
 
 /// House_crashsave(): serialize every object in the house room to its file and
@@ -590,18 +760,71 @@ pub fn house_crashsave(g: &mut GameState, vnum: RoomVnum) {
         Some(p) => p,
         None => return,
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     let contents = g.room(rnum).contents.clone();
-    let mut out = String::new();
-    for oid in contents {
-        serialize_obj_line(g, oid, 0, &mut out);
-    }
-    if std::fs::write(&path, out).is_err() {
+    let format = crate::lock_ok::lock(&house_object_formats())
+        .get(&vnum)
+        .copied()
+        .or_else(|| {
+            std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| detect_house_object_format(&bytes))
+        })
+        .unwrap_or_else(crate::cformat::default_persistence_format);
+    let bytes = match format {
+        crate::cformat::PersistenceFormat::Rust => {
+            let mut out = String::new();
+            let walk = walk_object_graph(
+                contents,
+                ObjectGraphOrder::Preorder,
+                "House_crashsave (Rust)",
+                |oid| g.get_obj(oid).map(|o| o.contains.clone()),
+            );
+            if walk.malformed() {
+                log::warn!(
+                    "SYSERR: refusing partial Rust house snapshot for room {} because its object graph is malformed",
+                    vnum
+                );
+                return;
+            }
+            for visit in walk.visits {
+                serialize_obj_line(g, visit.id, visit.depth, &mut out);
+            }
+            out.into_bytes()
+        }
+        crate::cformat::PersistenceFormat::C => {
+            let walk = walk_object_lists_postorder(
+                vec![contents],
+                ObjectListOrder::ContainsThenNext,
+                "House_save (C)",
+                |oid| g.get_obj(oid).map(|o| o.contains.clone()),
+            );
+            if walk.malformed() {
+                log::warn!(
+                    "SYSERR: refusing partial C house snapshot for room {} because its object graph is malformed",
+                    vnum
+                );
+                return;
+            }
+            let Some(elems): Option<Vec<_>> = walk
+                .visits
+                .into_iter()
+                .map(|visit| c_house_elem(g, visit.id))
+                .collect()
+            else {
+                log::warn!(
+                    "SYSERR: refusing partial C house snapshot for room {} because an object could not be encoded",
+                    vnum
+                );
+                return;
+            };
+            crate::cformat::encode_obj_file(&elems)
+        }
+    };
+    if crate::cformat::atomic_write(&path, &bytes).is_err() {
         eprintln!("SYSERR: Error saving house file");
         return;
     }
+    crate::lock_ok::lock(&house_object_formats()).insert(vnum, format);
     room_flag_remove(g, rnum, ROOM_HOUSE_CRASH);
 }
 
@@ -619,21 +842,94 @@ fn house_load(g: &mut GameState, vnum: RoomVnum) -> bool {
         Some(p) => p,
         None => return false,
     };
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
         Err(_) => return false, // no file found
+    };
+
+    let format = if bytes.is_empty() {
+        crate::lock_ok::lock(&house_object_formats())
+            .get(&vnum)
+            .copied()
+            .unwrap_or_else(crate::cformat::default_persistence_format)
+    } else {
+        let Some(format) = detect_house_object_format(&bytes) else {
+            mudlog(g, "SYSERR: Corrupt house object file.", NRM_INVIS);
+            return false;
+        };
+        format
+    };
+    crate::lock_ok::lock(&house_object_formats()).insert(vnum, format);
+
+    if format == crate::cformat::PersistenceFormat::C {
+        let Some(elems) = crate::cformat::decode_obj_file(&bytes) else {
+            mudlog(g, "SYSERR: Corrupt C-format house object file.", NRM_INVIS);
+            return false;
+        };
+        for elem in elems {
+            let Ok(vnum) = ObjVnum::try_from(elem.item_number) else {
+                continue;
+            };
+            let Some(oid) = g.load_object(vnum) else {
+                continue;
+            };
+            if let Some(obj) = g.get_obj_mut(oid) {
+                obj.values = elem.value;
+                obj.extra_flags = ExtraFlags::from_bits_retain(u64::from(elem.extra_flags as u32));
+                obj.weight = elem.weight;
+                obj.timer = elem.timer;
+                obj.bitvector = elem.bitvector;
+                obj.curr_slots = elem.curr_slots;
+                obj.total_slots = elem.total_slots;
+                obj.min_level = elem.min_level;
+                obj.affects = elem
+                    .affected
+                    .iter()
+                    .filter(|(location, _)| *location != 0)
+                    .map(|(location, modifier)| ObjectAffect {
+                        location: i32::from(*location),
+                        modifier: i32::from(*modifier),
+                    })
+                    .collect();
+            }
+            let forbidden = g
+                .get_obj(oid)
+                .map(|obj| {
+                    obj.obj_type == ObjectType::Key || obj.extra_flags.contains(ExtraFlags::NO_RENT)
+                })
+                .unwrap_or(true);
+            if forbidden {
+                g.extract_obj(oid);
+            } else {
+                // C House_load deliberately ignores obj_file_elem.locate and
+                // flattens every record into the room.
+                g.obj_to_room(oid, rnum);
+            }
+        }
+        return true;
+    }
+
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return false;
     };
 
     // Stack of (depth, ObjId) for rebuilding container nesting.
     let mut stack: Vec<(usize, ObjId)> = Vec::new();
-    for line in text.lines() {
+    for (line_number, line) in text.lines().enumerate() {
         let line = line.trim_end();
         if line.is_empty() {
             continue;
         }
         let (oid, depth, is_key_or_norent) = match parse_obj_line(g, line) {
             Some(t) => t,
-            None => continue,
+            None => {
+                log::warn!(
+                    "SYSERR: rejected malformed Rust house object record for house {} at line {}",
+                    vnum,
+                    line_number + 1
+                );
+                continue;
+            }
         };
 
         // Pop stack entries whose depth >= this object's depth.
@@ -645,15 +941,14 @@ fn house_load(g: &mut GameState, vnum: RoomVnum) -> bool {
             }
         }
 
+        if is_key_or_norent {
+            g.extract_obj(oid);
+            continue;
+        }
+
         if depth == 0 {
-            // Top-level object: C only places it if it's not a key and not
-            // NORENT; otherwise it is discarded (extracted).
-            if is_key_or_norent {
-                g.extract_obj(oid);
-            } else {
-                g.obj_to_room(oid, rnum);
-                stack.push((depth, oid));
-            }
+            g.obj_to_room(oid, rnum);
+            stack.push((depth, oid));
         } else {
             // Nested object: parent is the current stack top.
             match stack.last().copied() {
@@ -663,12 +958,8 @@ fn house_load(g: &mut GameState, vnum: RoomVnum) -> bool {
                 }
                 None => {
                     // Orphaned nesting (corrupt file) — drop to room as top.
-                    if is_key_or_norent {
-                        g.extract_obj(oid);
-                    } else {
-                        g.obj_to_room(oid, rnum);
-                        stack.push((0, oid));
-                    }
+                    g.obj_to_room(oid, rnum);
+                    stack.push((0, oid));
                 }
             }
         }
@@ -688,56 +979,89 @@ fn parse_obj_line(g: &mut GameState, line: &str) -> Option<(ObjId, usize, bool)>
     if nums.len() < 14 {
         return None;
     }
+    // All fixed columns are present in both versions. Reject the whole record
+    // when any one is malformed or overflowing rather than manufacturing an
+    // object with default vnum/type/flags/cost values.
     let depth: usize = nums[0].parse().ok()?;
-    let vnum: ObjVnum = nums[1].parse().unwrap_or(NOTHING);
-    let ty: i32 = nums[2].parse().unwrap_or(9);
-    let wear: u32 = nums[3].parse().unwrap_or(0);
-    let extra: u64 = nums[4].parse().unwrap_or(0);
-    let weight: i32 = nums[5].parse().unwrap_or(1);
-    let cost: i32 = nums[6].parse().unwrap_or(0);
-    let rent: i32 = nums[7].parse().unwrap_or(0);
-    let timer: i32 = nums[8].parse().unwrap_or(-1);
-    let v0: i32 = nums[9].parse().unwrap_or(0);
-    let v1: i32 = nums[10].parse().unwrap_or(0);
-    let v2: i32 = nums[11].parse().unwrap_or(0);
-    let v3: i32 = nums[12].parse().unwrap_or(0);
+    let vnum: ObjVnum = nums[1].parse().ok()?;
+    let ty: i32 = nums[2].parse().ok()?;
+    let wear: u32 = nums[3].parse().ok()?;
+    let extra: u64 = nums[4].parse().ok()?;
+    let weight: i32 = nums[5].parse().ok()?;
+    let cost: i32 = nums[6].parse().ok()?;
+    let rent: i32 = nums[7].parse().ok()?;
+    let timer: i32 = nums[8].parse().ok()?;
+    let v0: i32 = nums[9].parse().ok()?;
+    let v1: i32 = nums[10].parse().ok()?;
+    let v2: i32 = nums[11].parse().ok()?;
+    let v3: i32 = nums[12].parse().ok()?;
     // Records written before the #233 fix lack level/bitvector/curr_slots/
-    // total_slots (14 head numbers); new records carry 18. Old files load
-    // with the pre-fix defaults.
-    let (level, bitvector, curr_slots, total_slots, naff, mut idx) = if nums.len() >= 18 {
-        (
-            nums[13].parse().unwrap_or(0),
-            nums[14].parse().unwrap_or(0),
-            nums[15].parse().unwrap_or(0),
-            nums[16].parse().unwrap_or(0),
-            nums[17].parse::<usize>().unwrap_or(0),
-            18,
-        )
-    } else {
-        (0, 0, 0, 0, nums[13].parse::<usize>().unwrap_or(0), 14)
-    };
-
-    let mut affects = Vec::new();
-    for _ in 0..naff {
-        if idx + 1 < nums.len() {
-            let loc: i32 = nums[idx].parse().unwrap_or(0);
-            let modi: i32 = nums[idx + 1].parse().unwrap_or(0);
+    // total_slots (14 fixed head numbers); new records carry 18. Try the new
+    // layout first to preserve current files, then the exact legacy layout.
+    // Exact token-count checks keep an invalid field from shifting later data.
+    let parse_tail = |extended: bool| -> Option<(i32, i64, i32, i32, Vec<ObjectAffect>, i32)> {
+        let (level, bitvector, curr_slots, total_slots, naff, mut idx): (
+            i32,
+            i64,
+            i32,
+            i32,
+            usize,
+            usize,
+        ) = if extended {
+            if nums.len() < 18 {
+                return None;
+            }
+            (
+                nums[13].parse().ok()?,
+                nums[14].parse().ok()?,
+                nums[15].parse().ok()?,
+                nums[16].parse().ok()?,
+                nums[17].parse().ok()?,
+                18,
+            )
+        } else {
+            (0, 0, 0, 0, nums[13].parse().ok()?, 14)
+        };
+        let affects_end = idx.checked_add(naff.checked_mul(2)?)?;
+        if !(nums.len() == affects_end || nums.len() == affects_end.checked_add(1)?) {
+            return None;
+        }
+        let mut affects = Vec::with_capacity(naff);
+        for _ in 0..naff {
             affects.push(ObjectAffect {
-                location: loc,
-                modifier: modi,
+                location: nums[idx].parse().ok()?,
+                modifier: nums[idx + 1].parse().ok()?,
             });
             idx += 2;
         }
-    }
+        let obj_class = match nums.get(idx) {
+            Some(value) => value.parse().ok()?,
+            None => -1,
+        };
+        Some((
+            level,
+            bitvector,
+            curr_slots,
+            total_slots,
+            affects,
+            obj_class,
+        ))
+    };
+    let (level, bitvector, curr_slots, total_slots, affects, obj_class) =
+        parse_tail(true).or_else(|| parse_tail(false))?;
 
-    // name|short|long from the tail.
-    let mut tparts = tail.splitn(3, '|');
+    // name|short|long|action from the tail. Older files have three fields.
+    let mut tparts = tail.splitn(4, '|');
     let name = tparts.next().unwrap_or("").to_string();
     let short = tparts.next().unwrap_or("").to_string();
     let long = tparts.next().unwrap_or("").to_string();
+    let action = tparts.next().unwrap_or("").to_string();
 
     let mut obj = Object::new(vnum, name, short);
     obj.description = long;
+    if !action.is_empty() {
+        obj.action_description = Some(action);
+    }
     obj.obj_type = ObjectType::from_i32(ty);
     obj.wear_flags = WearFlags::from_bits_retain(wear);
     obj.extra_flags = ExtraFlags::from_bits_retain(extra);
@@ -752,6 +1076,7 @@ fn parse_obj_line(g: &mut GameState, line: &str) -> Option<(ObjId, usize, bool)>
     obj.bitvector = bitvector;
     obj.curr_slots = curr_slots;
     obj.total_slots = total_slots;
+    obj.obj_class = obj_class;
 
     let is_key_or_norent = obj.obj_type == ObjectType::Key || (extra & ITEM_NORENT) != 0;
     let oid = g.create_obj(obj);
@@ -763,6 +1088,7 @@ fn house_delete_file(g: &GameState, vnum: RoomVnum) {
     if let Some(path) = house_filename(&g.config.lib_path, vnum) {
         let _ = std::fs::remove_file(path);
     }
+    crate::lock_ok::lock(&house_object_formats()).remove(&vnum);
 }
 
 /// House_listrent(): list the objects stored in a house file to `ch`.
@@ -771,14 +1097,39 @@ fn house_listrent(g: &mut GameState, ch: CharId, vnum: RoomVnum) {
         Some(p) => p,
         None => return,
     };
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
         Err(_) => {
             g.send_to_char(ch, &format!("No objects on file for house #{}.\r\n", vnum));
             return;
         }
     };
     let mut buf = String::new();
+    if detect_house_object_format(&bytes) == Some(crate::cformat::PersistenceFormat::C) {
+        if let Some(elems) = crate::cformat::decode_obj_file(&bytes) {
+            for elem in elems {
+                let Some(proto) = i32::try_from(elem.item_number)
+                    .ok()
+                    .and_then(|item| g.obj_protos.get(&item))
+                else {
+                    continue;
+                };
+                buf.push_str(&format!(
+                    " [{:5}] ({:5}au) {}\r\n",
+                    elem.item_number, proto.rent, proto.short_desc
+                ));
+            }
+        }
+        g.send_to_char(ch, &buf);
+        return;
+    }
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        g.send_to_char(
+            ch,
+            &format!("House #{} has a corrupt object file.\r\n", vnum),
+        );
+        return;
+    };
     for line in text.lines() {
         let line = line.trim_end();
         if line.is_empty() {
@@ -792,8 +1143,13 @@ fn house_listrent(g: &mut GameState, ch: CharId, vnum: RoomVnum) {
         if nums.len() < 14 {
             continue;
         }
-        let vnum_o: i32 = nums[1].parse().unwrap_or(-1);
-        let rent: i32 = nums[7].parse().unwrap_or(0);
+        let (Ok(vnum_o), Ok(rent)) = (nums[1].parse::<i32>(), nums[7].parse::<i32>()) else {
+            log::warn!(
+                "SYSERR: rejected malformed Rust house listing record for house {}",
+                vnum
+            );
+            continue;
+        };
         let mut tparts = tail.splitn(3, '|');
         let _name = tparts.next().unwrap_or("");
         let short = tparts.next().unwrap_or("");
@@ -896,6 +1252,20 @@ fn hcontrol_list_houses_guests(g: &mut GameState, ch: CharId) {
     g.send_to_char(ch, &buf);
 }
 
+fn hcontrol_vnum(g: &mut GameState, ch: CharId, value: &str) -> Option<RoomVnum> {
+    match crate::text::parse_i32_atoi(value) {
+        Ok(value) => Some(value),
+        Err(crate::text::ParseIntError::Overflow) => {
+            g.send_to_char(
+                ch,
+                "That room number is outside the supported 32-bit range.\r\n",
+            );
+            None
+        }
+        Err(_) => unreachable!("parse_i32_atoi maps nonnumeric input to zero"),
+    }
+}
+
 fn hcontrol_build_house(g: &mut GameState, ch: CharId, arg: &str) {
     if crate::lock_ok::lock(&houses()).len() >= MAX_HOUSES {
         g.send_to_char(ch, "Max houses already defined.\r\n");
@@ -908,7 +1278,9 @@ fn hcontrol_build_house(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, HCONTROL_FORMAT);
         return;
     }
-    let virt_house: RoomVnum = a1.parse().unwrap_or(0);
+    let Some(virt_house) = hcontrol_vnum(g, ch, &a1) else {
+        return;
+    };
     let real_house = match g.real_room(virt_house) {
         Some(r) => r,
         None => {
@@ -918,6 +1290,16 @@ fn hcontrol_build_house(g: &mut GameState, ch: CharId, arg: &str) {
     };
     if find_house(virt_house).is_some() {
         g.send_to_char(ch, "House already exists.\r\n");
+        return;
+    }
+    // Building immediately crash-saves the room. Refuse existing contents so
+    // zone-reset fixtures cannot be baked into the new house file and then
+    // duplicated after reset plus reboot.
+    if !g.room(real_house).contents.is_empty() {
+        g.send_to_char(
+            ch,
+            "The house room must be empty before it can be built.\r\n",
+        );
         return;
     }
 
@@ -1002,7 +1384,9 @@ fn hcontrol_crashsave_house(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, HCONTROL_FORMAT);
         return;
     }
-    let virt_house: RoomVnum = a1.parse().unwrap_or(0);
+    let Some(virt_house) = hcontrol_vnum(g, ch, &a1) else {
+        return;
+    };
     let real_house = match g.real_room(virt_house) {
         Some(r) => r,
         None => {
@@ -1040,7 +1424,9 @@ fn hcontrol_destroy_house(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, HCONTROL_FORMAT);
         return;
     }
-    let target_vnum: RoomVnum = arg.trim().parse().unwrap_or(0);
+    let Some(target_vnum) = hcontrol_vnum(g, ch, arg.trim()) else {
+        return;
+    };
     let i = match find_house(target_vnum) {
         Some(i) => i,
         None => {
@@ -1072,7 +1458,10 @@ fn hcontrol_destroy_house(g: &mut GameState, ch: CharId, arg: &str) {
 
     // Re-set ROOM_ATRIUM on every surviving house's atrium (in case the
     // destroyed house shared an atrium with another). --JE 9/19/94
-    let atriums: Vec<RoomVnum> = crate::lock_ok::lock(&houses()).iter().map(|h| h.atrium).collect();
+    let atriums: Vec<RoomVnum> = crate::lock_ok::lock(&houses())
+        .iter()
+        .map(|h| h.atrium)
+        .collect();
     for av in atriums {
         if let Some(ra) = g.real_room(av) {
             room_flag_set(g, ra, ROOM_ATRIUM);
@@ -1085,7 +1474,9 @@ fn hcontrol_pay_house(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, HCONTROL_FORMAT);
         return;
     }
-    let target_vnum: RoomVnum = arg.trim().parse().unwrap_or(0);
+    let Some(target_vnum) = hcontrol_vnum(g, ch, arg.trim()) else {
+        return;
+    };
     let i = match find_house(target_vnum) {
         Some(i) => i,
         None => {
@@ -1117,7 +1508,9 @@ fn hcontrol_update_house(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, HCONTROL_FORMAT);
         return;
     }
-    let virt_house: RoomVnum = a1.parse().unwrap_or(0);
+    let Some(virt_house) = hcontrol_vnum(g, ch, &a1) else {
+        return;
+    };
     let house = match find_house(virt_house) {
         Some(h) => h,
         None => {
@@ -1288,6 +1681,7 @@ pub fn do_house(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
     // Toggle: remove if already a guest, else add.
     let mut deleted = false;
+    let mut full = false;
     {
         let mut table = crate::lock_ok::lock(&houses());
         if let Some(pos) = table[i].guests.iter().position(|&gx| gx == id) {
@@ -1296,17 +1690,19 @@ pub fn do_house(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
                 table[i].guest_names.remove(pos);
             }
             deleted = true;
+        } else if table[i].guests.len() >= MAX_GUESTS {
+            // The C array has a hard 100-entry capacity. Reject guest #101
+            // before mutating or saving so the command never reports an add
+            // which was immediately truncated away (#395).
+            full = true;
         } else {
             table[i].guests.push(id);
             table[i].guest_names.push(arg.to_lowercase());
-            // Enforce MAX_GUESTS BEFORE the save: truncating afterwards left
-            // guest #101+ on disk but absent from memory (locked out despite
-            // "Guest added.").
-            if table[i].guests.len() > MAX_GUESTS {
-                table[i].guests.truncate(MAX_GUESTS);
-                table[i].guest_names.truncate(MAX_GUESTS);
-            }
         }
+    }
+    if full {
+        g.send_to_char(ch, "Your house guest list is full.\r\n");
+        return;
     }
     house_save_control(g);
     if deleted {
@@ -1331,28 +1727,29 @@ fn is_unrentable(g: &GameState, oid: ObjId) -> bool {
     }
 }
 
-/// Crash_report_unbedables(): recursively report unrentable items; returns the
-/// count found.
-fn report_unbedables(g: &mut GameState, ch: CharId, oid: ObjId) -> i32 {
+/// Crash_report_unbedables(): report unrentable items below `roots`; returns
+/// the count found.
+fn report_unbedables(g: &mut GameState, ch: CharId, roots: &[ObjId]) -> i32 {
+    let walk = walk_object_graph(
+        roots.iter().copied(),
+        ObjectGraphOrder::Preorder,
+        "Crash_report_unbedables",
+        |oid| g.get_obj(oid).map(|o| o.contains.clone()),
+    );
     let mut count = 0;
-    if is_unrentable(g, oid) {
-        count += 1;
-        act(
-            g,
-            "You cannot go to bed with $p.",
-            false,
-            ch,
-            Some(oid),
-            ActArg::None,
-            To::Char,
-        );
-    }
-    let contains = g
-        .get_obj(oid)
-        .map(|o| o.contains.clone())
-        .unwrap_or_default();
-    for c in contains {
-        count += report_unbedables(g, ch, c);
+    for visit in walk.visits {
+        if is_unrentable(g, visit.id) {
+            count += 1;
+            act(
+                g,
+                "You cannot go to bed with $p.",
+                false,
+                ch,
+                Some(visit.id),
+                ActArg::None,
+                To::Char,
+            );
+        }
     }
     count
 }
@@ -1383,21 +1780,17 @@ pub fn do_bed(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
     }
 
     // Report (and refuse on) any unbedable items in inventory or equipment.
-    let mut nobed = 0;
     let carrying = g
         .get_char(ch)
         .map(|c| c.carrying.clone())
         .unwrap_or_default();
-    for o in carrying {
-        nobed += report_unbedables(g, ch, o);
-    }
+    let mut roots = carrying;
     let worn: Vec<ObjId> = g
         .get_char(ch)
         .map(|c| c.equipment.iter().flatten().copied().collect())
         .unwrap_or_default();
-    for o in worn {
-        nobed += report_unbedables(g, ch, o);
-    }
+    roots.extend(worn);
+    let nobed = report_unbedables(g, ch, &roots);
     if nobed != 0 {
         return;
     }
@@ -1461,7 +1854,10 @@ pub fn do_bed(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
 /// House_save_all(): crash-save every house whose room carries ROOM_HOUSE_CRASH.
 /// Call from the periodic save heartbeat (C: House_save_all in the autosave).
 pub fn house_save_all(g: &mut GameState) {
-    let vnums: Vec<RoomVnum> = crate::lock_ok::lock(&houses()).iter().map(|h| h.vnum).collect();
+    let vnums: Vec<RoomVnum> = crate::lock_ok::lock(&houses())
+        .iter()
+        .map(|h| h.vnum)
+        .collect();
     for vnum in vnums {
         if let Some(rnum) = g.real_room(vnum) {
             if room_flag_isset(g, rnum, ROOM_HOUSE_CRASH) {
@@ -1539,6 +1935,576 @@ pub fn set_test_houses(house_records: Vec<(RoomVnum, i64)>) {
         rec.owner = owner;
         rec.mode = HOUSE_PRIVATE;
         table.push(rec);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::Descriptor;
+    use crate::room::{Exit, Room};
+    use crate::types::ConnId;
+    use crate::world::ObjectProto;
+
+    fn temp_lib(name: &str) -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "deltamud-house-{}-{}-{}",
+            std::process::id(),
+            name,
+            stamp
+        ))
+    }
+
+    fn proto(vnum: ObjVnum, kind: ObjectType) -> ObjectProto {
+        ObjectProto {
+            vnum,
+            name: format!("object {}", vnum),
+            short_desc: format!("object {}", vnum),
+            description: format!("Object {} is here.", vnum),
+            obj_type: kind,
+            wear_flags: WearFlags::TAKE,
+            extra_flags: ExtraFlags::empty(),
+            weight: 1,
+            cost: 25,
+            rent: 5,
+            values: [0; 4],
+            curr_slots: 0,
+            total_slots: 0,
+            obj_class: -1,
+            min_level: 0,
+            bitvector: 0,
+            action_description: String::new(),
+            affects: Vec::new(),
+            ex_descriptions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn hcontrol_build_refuses_room_with_reset_contents() {
+        let mut dir = std::env::temp_dir();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        dir.push(format!(
+            "deltamud-house-build-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        let mut config = Config::default();
+        config.lib_path = dir.to_string_lossy().into_owned();
+        let mut g = GameState::new(config);
+        let house = g.add_room(Room::new(1_900_500, 19_005, "House".into(), String::new()));
+        let atrium = g.add_room(Room::new(1_900_501, 19_005, "Atrium".into(), String::new()));
+        g.room_mut(house).exits[1] = Some(Exit {
+            description: None,
+            keyword: None,
+            exit_info: 0,
+            key: -1,
+            to_room: 1_900_501,
+        });
+        g.room_mut(atrium).exits[3] = Some(Exit {
+            description: None,
+            keyword: None,
+            exit_info: 0,
+            key: -1,
+            to_room: 1_900_500,
+        });
+        g.room_mut(house).contents.push(ObjId(999));
+
+        let mut owner = Character::new_player("Owner".into(), Class::Warrior, Race::Human);
+        owner.idnum = 42;
+        let owner = g.create_char(owner);
+        g.update_player_index(42, "Owner", 1, 0, "");
+        hcontrol_build_house(&mut g, owner, "1900500 east Owner");
+
+        assert!(find_house(1_900_500).is_none());
+        assert!(!dir.join("house/1900500.house").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn hcontrol_rejects_overflowing_room_numbers_before_lookup() {
+        set_test_houses(Vec::new());
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(910);
+        let mut admin = Character::new_player("Admin".into(), Class::Warrior, Race::Human);
+        admin.desc = Some(conn);
+        let admin = g.create_char(admin);
+        let mut descriptor = Descriptor::new(conn, "test".into());
+        descriptor.character = Some(admin);
+        g.descriptors.insert(conn, descriptor);
+
+        for command in [
+            "build 2147483648 east Admin",
+            "crashsave 2147483648",
+            "destroy 2147483648",
+            "pay 2147483648",
+            "update 2147483648 east Admin",
+        ] {
+            do_hcontrol(&mut g, admin, command, 0);
+        }
+
+        assert!(crate::lock_ok::lock(&houses()).is_empty());
+        assert_eq!(
+            g.descriptors[&conn]
+                .outbuf
+                .matches("outside the supported 32-bit range")
+                .count(),
+            5
+        );
+    }
+
+    #[test]
+    fn full_guest_list_rejects_guest_101_without_mutation_or_false_success() {
+        let dir = temp_lib("full-guest-list");
+        let mut config = Config::default();
+        config.lib_path = dir.to_string_lossy().into_owned();
+        let mut g = GameState::new(config);
+        let room = g.add_room(Room::new(790_100, 0, "House".into(), String::new()));
+        room_flag_set(&mut g, room, ROOM_HOUSE);
+
+        let conn = ConnId(911);
+        let mut owner = Character::new_player("Owner".into(), Class::Warrior, Race::Human);
+        owner.idnum = 42;
+        owner.desc = Some(conn);
+        let owner = g.create_char(owner);
+        g.char_to_room(owner, room);
+        let mut descriptor = Descriptor::new(conn, "test".into());
+        descriptor.character = Some(owner);
+        g.descriptors.insert(conn, descriptor);
+        g.update_player_index(999, "Overflowguest", 1, 0, "");
+
+        set_test_houses(vec![(790_100, 42)]);
+        {
+            let mut table = crate::lock_ok::lock(&houses());
+            table[0].guests = (1..=MAX_GUESTS as i64).collect();
+            table[0].guest_names = (1..=MAX_GUESTS)
+                .map(|number| format!("guest{number}"))
+                .collect();
+        }
+
+        do_house(&mut g, owner, "Overflowguest", 0);
+
+        let table = crate::lock_ok::lock(&houses());
+        assert_eq!(table[0].guests.len(), MAX_GUESTS);
+        assert!(!table[0].guests.contains(&999));
+        drop(table);
+        let output = &g.descriptors[&conn].outbuf;
+        assert!(output.contains("guest list is full"));
+        assert!(!output.contains("Guest added"));
+
+        set_test_houses(Vec::new());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn raw_c_hcontrol_starting_with_ascii_h_is_not_misdetected_as_text() {
+        let record = crate::cformat::CHouseControlRec {
+            vnum: i64::from(b'H'),
+            atrium: 1,
+            exit_num: 2,
+            built_on: 3,
+            mode: HOUSE_OPEN,
+            owner: 4,
+            guests: vec![5],
+            last_payment: 6,
+        };
+        let bytes = crate::cformat::encode_hcontrol(&[record]);
+        assert!(std::str::from_utf8(&bytes).is_ok());
+
+        let (decoded, format) = decode_control_bytes(&bytes).unwrap();
+        assert_eq!(format, crate::cformat::PersistenceFormat::C);
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].vnum, i32::from(b'H'));
+        assert_eq!(decoded[0].guests, vec![5]);
+    }
+
+    #[test]
+    fn existing_rust_hcontrol_is_still_detected() {
+        let bytes = b"H 500 501 1 10 0 42 11\nO owner\nG 1 43:guest\n$\n";
+        let (decoded, format) = decode_control_bytes(bytes).unwrap();
+        assert_eq!(format, crate::cformat::PersistenceFormat::Rust);
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].vnum, 500);
+        assert_eq!(decoded[0].owner_name, "owner");
+        assert_eq!(decoded[0].guests, vec![43]);
+    }
+
+    #[test]
+    fn rust_hcontrol_rejects_only_the_record_with_an_invalid_numeric_field() {
+        let invalid_headers = [
+            "H 2147483648 501 1 10 0 42 11",
+            "H 500 -2147483649 1 10 0 42 11",
+            "H 500 501 2147483648 10 0 42 11",
+            "H 500 501 1 9223372036854775808 0 42 11",
+            "H 500 501 1 10 -2147483649 42 11",
+            "H 500 501 1 10 0 9223372036854775808 11",
+            "H 500 501 1 10 0 42 -9223372036854775809",
+        ];
+        for invalid in invalid_headers {
+            let text = format!(
+                "{invalid}\nO rejected\nG 0\n\
+                 H 600 601 1 10 0 52 11\nO accepted\nG 1 53:guest\n$\n"
+            );
+            let (decoded, format) = decode_control_bytes(text.as_bytes()).unwrap();
+            assert_eq!(format, crate::cformat::PersistenceFormat::Rust);
+            assert_eq!(decoded.len(), 1, "invalid header was defaulted: {invalid}");
+            assert_eq!(decoded[0].vnum, 600);
+            assert_eq!(decoded[0].owner_name, "accepted");
+            assert_eq!(decoded[0].guests, vec![53]);
+        }
+
+        for invalid_guests in ["G 18446744073709551616", "G 1 9223372036854775808:guest"] {
+            let text = format!(
+                "H 500 501 1 10 0 42 11\nO rejected\n{invalid_guests}\n\
+                 H 600 601 1 10 0 52 11\nO accepted\nG 0\n$\n"
+            );
+            let (decoded, format) = decode_control_bytes(text.as_bytes()).unwrap();
+            assert_eq!(format, crate::cformat::PersistenceFormat::Rust);
+            assert_eq!(decoded.len(), 1);
+            assert_eq!(decoded[0].vnum, 600);
+        }
+    }
+
+    #[test]
+    fn hcontrol_numeric_boundaries_round_trip_without_aliasing() {
+        let text = format!(
+            "H {} {} {} {} {} {} {}\nO boundary\nG 1 {}:guest\n$\n",
+            i32::MAX,
+            i32::MIN,
+            i32::MAX,
+            i64::MIN,
+            i32::MIN,
+            i64::MIN,
+            i64::MAX,
+            i64::MAX
+        );
+        let (decoded, format) = decode_control_bytes(text.as_bytes()).unwrap();
+        assert_eq!(format, crate::cformat::PersistenceFormat::Rust);
+        assert_eq!(decoded.len(), 1);
+        let record = &decoded[0];
+        assert_eq!(record.vnum, i32::MAX);
+        assert_eq!(record.atrium, i32::MIN);
+        assert_eq!(record.exit_num, i32::MAX);
+        assert_eq!(record.built_on, i64::MIN);
+        assert_eq!(record.mode, i32::MIN);
+        assert_eq!(record.owner, i64::MIN);
+        assert_eq!(record.last_payment, i64::MAX);
+        assert_eq!(record.guests, vec![i64::MAX]);
+
+        let raw = crate::cformat::encode_hcontrol(&[crate::cformat::CHouseControlRec {
+            vnum: i64::from(i32::MAX) + 1,
+            atrium: 1,
+            exit_num: 2,
+            built_on: 3,
+            mode: HOUSE_OPEN,
+            owner: 4,
+            guests: Vec::new(),
+            last_payment: 5,
+        }]);
+        let (decoded, format) = decode_control_bytes(&raw).unwrap();
+        assert_eq!(format, crate::cformat::PersistenceFormat::C);
+        assert!(decoded.is_empty(), "C vnum overflow wrapped into an i32");
+    }
+
+    #[test]
+    fn pre_objclass_rust_house_record_remains_readable() {
+        let mut g = GameState::new(Config::default());
+        let line = "0 321 9 1 0 5 6 7 -1 1 2 3 4 10 11 12 13 0|old|an old object|Old object.";
+        let (oid, depth, forbidden) = parse_obj_line(&mut g, line).unwrap();
+        let object = g.get_obj(oid).unwrap();
+        assert_eq!(depth, 0);
+        assert!(!forbidden);
+        assert_eq!(object.item_number, 321);
+        assert_eq!(object.obj_class, -1);
+        assert_eq!(object.min_level, 10);
+        assert_eq!(object.total_slots, 13);
+    }
+
+    #[test]
+    fn legacy_house_record_with_absent_extended_fields_remains_readable() {
+        let mut g = GameState::new(Config::default());
+        let line = "0 322 9 1 0 5 6 7 -1 1 2 3 4 0|old|an old object|Old object.";
+        let (oid, depth, forbidden) = parse_obj_line(&mut g, line).unwrap();
+        let object = g.get_obj(oid).unwrap();
+        assert_eq!(depth, 0);
+        assert!(!forbidden);
+        assert_eq!(object.item_number, 322);
+        assert_eq!(object.min_level, 0);
+        assert_eq!(object.bitvector, 0);
+        assert_eq!(object.curr_slots, 0);
+        assert_eq!(object.total_slots, 0);
+        assert_eq!(object.obj_class, -1);
+
+        // Two legacy affect pairs make the old record as long as the new
+        // fixed header. It still must be recognized by its exact old count.
+        let line = "0 323 9 1 0 5 6 7 -1 1 2 3 4 2 5 -6 7 -8|old|an old object|Old object.";
+        let (oid, _, _) = parse_obj_line(&mut g, line).unwrap();
+        let object = g.get_obj(oid).unwrap();
+        assert_eq!(
+            object
+                .affects
+                .iter()
+                .map(|affect| (affect.location, affect.modifier))
+                .collect::<Vec<_>>(),
+            vec![(5, -6), (7, -8)]
+        );
+        assert_eq!(object.min_level, 0);
+    }
+
+    #[test]
+    fn rust_house_record_rejects_each_present_malformed_numeric_column() {
+        let base =
+            "0 321 9 1 0 5 6 7 -1 1 2 3 4 10 11 12 13 1 5 -6 3|old|an old object|Old object.";
+        let (head, tail) = base.split_once('|').unwrap();
+        let fields: Vec<_> = head.split_whitespace().collect();
+        for field in 0..fields.len() {
+            let mut malformed = fields.clone();
+            malformed[field] = "not-a-number";
+            let line = format!("{}|{}", malformed.join(" "), tail);
+            let mut g = GameState::new(Config::default());
+            assert!(
+                parse_obj_line(&mut g, &line).is_none(),
+                "numeric field {field} was silently defaulted"
+            );
+            assert!(g.objs.is_empty());
+        }
+
+        let mut g = GameState::new(Config::default());
+        assert!(
+            parse_obj_line(
+                &mut g,
+                "0 321 9 1 0 5 6 7 -1 1 2 3 4 10 11 12 13 1 5|bad|bad|bad"
+            )
+            .is_none()
+        );
+        assert!(g.objs.is_empty(), "an incomplete affect pair was loaded");
+    }
+
+    #[test]
+    fn real_house_load_keeps_i32_boundaries_and_rejects_overflow_records() {
+        let dir = temp_lib("numeric-boundaries");
+        let mut config = Config::default();
+        config.lib_path = dir.to_string_lossy().into_owned();
+        let mut g = GameState::new(config);
+        let room = g.add_room(Room::new(790_404, 0, "House".into(), String::new()));
+        let path = house_filename(&g.config.lib_path, 790_404).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let body = "0 2147483648 9 1 0 5 6 7 -1 1 2 3 4 0|overflow|overflow|overflow\n\
+                    0 -2147483649 9 1 0 5 6 7 -1 1 2 3 4 0|underflow|underflow|underflow\n\
+                    18446744073709551616 404 9 1 0 5 6 7 -1 1 2 3 4 0|depth|depth|depth\n\
+                    bogus 405 9 1 0 5 6 7 -1 1 2 3 4 0|syntax|syntax|syntax\n\
+                    0 2147483647 9 1 0 5 6 7 -1 1 2 3 4 0|max|max|max\n\
+                    0 -2147483648 9 1 0 5 6 7 -1 1 2 3 4 0|min|min|min\n";
+        std::fs::write(&path, body).unwrap();
+
+        assert!(house_load(&mut g, 790_404));
+        let mut loaded: Vec<_> = g
+            .room(room)
+            .contents
+            .iter()
+            .filter_map(|oid| g.get_obj(*oid).map(|obj| obj.item_number))
+            .collect();
+        loaded.sort_unstable();
+        assert_eq!(loaded, vec![i32::MIN, i32::MAX]);
+        assert!(!loaded.contains(&NOTHING));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn c_house_save_matches_contains_then_next_order_and_intrinsic_weights() {
+        let dir = temp_lib("c-save-order");
+        let mut config = Config::default();
+        config.lib_path = dir.to_string_lossy().into_owned();
+        let mut g = GameState::new(config);
+        let room = g.add_room(Room::new(790001, 0, "House".into(), String::new()));
+
+        let mut root_obj = Object::new(100, "root".into(), "root".into());
+        root_obj.weight = 15;
+        let root = g.create_obj(root_obj);
+        let mut first_obj = Object::new(101, "first".into(), "first".into());
+        first_obj.weight = 2;
+        let first = g.create_obj(first_obj);
+        let mut second_obj = Object::new(102, "second".into(), "second".into());
+        second_obj.weight = 3;
+        let second = g.create_obj(second_obj);
+        let mut sibling_obj = Object::new(103, "sibling".into(), "sibling".into());
+        sibling_obj.weight = 4;
+        let sibling = g.create_obj(sibling_obj);
+        g.get_obj_mut(root).unwrap().contains = vec![first, second];
+        g.room_mut(room).contents = vec![root, sibling];
+        crate::lock_ok::lock(&house_object_formats())
+            .insert(790001, crate::cformat::PersistenceFormat::C);
+
+        house_crashsave(&mut g, 790001);
+
+        let path = house_filename(&g.config.lib_path, 790001).unwrap();
+        let elems = crate::cformat::decode_obj_file(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            elems
+                .iter()
+                .map(|elem| elem.item_number)
+                .collect::<Vec<_>>(),
+            vec![102, 101, 103, 100]
+        );
+        assert_eq!(
+            elems.iter().map(|elem| elem.weight).collect::<Vec<_>>(),
+            vec![3, 2, 4, 10]
+        );
+        assert!(elems.iter().all(|elem| elem.locate == 0));
+        crate::lock_ok::lock(&house_object_formats()).remove(&790001);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn malformed_house_graph_preserves_last_snapshot_and_dirty_flag() {
+        let dir = temp_lib("malformed-house-graph");
+        let mut config = Config::default();
+        config.lib_path = dir.to_string_lossy().into_owned();
+        let mut g = GameState::new(config);
+        let room = g.add_room(Room::new(790004, 0, "House".into(), String::new()));
+        let root = g.create_obj(Object::new(110, "root".into(), "root".into()));
+        let child = g.create_obj(Object::new(111, "child".into(), "child".into()));
+        g.obj_to_room(root, room);
+        g.obj_to_obj(child, root);
+        g.get_obj_mut(root).unwrap().contains.push(child);
+        room_flag_set(&mut g, room, ROOM_HOUSE_CRASH);
+        crate::lock_ok::lock(&house_object_formats())
+            .insert(790004, crate::cformat::PersistenceFormat::Rust);
+        let path = house_filename(&g.config.lib_path, 790004).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"last known good house snapshot").unwrap();
+
+        house_crashsave(&mut g, 790004);
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"last known good house snapshot"
+        );
+        assert!(room_flag_isset(&g, room, ROOM_HOUSE_CRASH));
+        crate::lock_ok::lock(&house_object_formats()).remove(&790004);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn c_house_load_ignores_locate_flattens_objects_and_preserves_format() {
+        let dir = temp_lib("c-load");
+        let mut config = Config::default();
+        config.lib_path = dir.to_string_lossy().into_owned();
+        let mut g = GameState::new(config);
+        let room = g.add_room(Room::new(790002, 0, "House".into(), String::new()));
+        g.obj_protos.insert(200, proto(200, ObjectType::Container));
+        g.obj_protos.insert(201, proto(201, ObjectType::Armor));
+        let elems = [
+            crate::cformat::obj_to_c_elem(
+                200,
+                -2,
+                7,
+                9,
+                [1, 2, 3, 4],
+                0,
+                11,
+                12,
+                13,
+                14,
+                &[ObjectAffect {
+                    location: 3,
+                    modifier: -2,
+                }],
+            ),
+            crate::cformat::obj_to_c_elem(201, 9, 0, 0, [0; 4], 0, 5, -1, 0, 0, &[]),
+        ];
+        let path = house_filename(&g.config.lib_path, 790002).unwrap();
+        crate::cformat::atomic_write(&path, &crate::cformat::encode_obj_file(&elems)).unwrap();
+
+        assert!(house_load(&mut g, 790002));
+        assert_eq!(g.room(room).contents.len(), 2);
+        assert!(g.room(room).contents.iter().all(|oid| {
+            matches!(g.get_obj(*oid).map(|obj| obj.loc), Some(crate::object::ObjLoc::Room(r)) if r == room)
+        }));
+        let loaded = g
+            .room(room)
+            .contents
+            .iter()
+            .find_map(|oid| g.get_obj(*oid).filter(|obj| obj.item_number == 200));
+        assert_eq!(loaded.unwrap().values, [1, 2, 3, 4]);
+        assert_eq!(loaded.unwrap().affects[0].modifier, -2);
+
+        house_crashsave(&mut g, 790002);
+        let rewritten = std::fs::read(&path).unwrap();
+        assert!(!rust_house_object_file(&rewritten));
+        let rewritten = crate::cformat::decode_obj_file(&rewritten).unwrap();
+        assert_eq!(
+            rewritten
+                .iter()
+                .map(|elem| elem.item_number)
+                .collect::<Vec<_>>(),
+            vec![200, 201]
+        );
+        assert!(rewritten.iter().all(|elem| elem.locate == 0));
+        crate::lock_ok::lock(&house_object_formats()).remove(&790002);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn existing_rust_house_file_keeps_nesting_and_format() {
+        let dir = temp_lib("rust-load-save");
+        let mut config = Config::default();
+        config.lib_path = dir.to_string_lossy().into_owned();
+        let mut g = GameState::new(config);
+        let room = g.add_room(Room::new(790003, 0, "House".into(), String::new()));
+        let mut parent_obj = Object::new(300, "container".into(), "container".into());
+        parent_obj.obj_type = ObjectType::Container;
+        parent_obj.weight = 10;
+        parent_obj.obj_class = 2;
+        parent_obj.action_description = Some("house action".into());
+        let parent = g.create_obj(parent_obj);
+        let mut child_obj = Object::new(301, "child".into(), "child".into());
+        child_obj.weight = 2;
+        let child = g.create_obj(child_obj);
+        g.obj_to_room(parent, room);
+        g.obj_to_obj(child, parent);
+        crate::lock_ok::lock(&house_object_formats())
+            .insert(790003, crate::cformat::PersistenceFormat::Rust);
+
+        house_crashsave(&mut g, 790003);
+        let path = house_filename(&g.config.lib_path, 790003).unwrap();
+        let first = std::fs::read(&path).unwrap();
+        assert!(rust_house_object_file(&first));
+        assert_eq!(first.iter().filter(|byte| **byte == b'\n').count(), 2);
+
+        g.extract_obj(parent);
+        assert!(g.room(room).contents.is_empty());
+        assert!(house_load(&mut g, 790003));
+        assert_eq!(g.room(room).contents.len(), 1);
+        let loaded_parent = g.room(room).contents[0];
+        assert_eq!(g.get_obj(loaded_parent).unwrap().item_number, 300);
+        assert_eq!(g.get_obj(loaded_parent).unwrap().obj_class, 2);
+        assert_eq!(
+            g.get_obj(loaded_parent)
+                .unwrap()
+                .action_description
+                .as_deref(),
+            Some("house action")
+        );
+        assert_eq!(g.get_obj(loaded_parent).unwrap().contains.len(), 1);
+        assert_eq!(
+            g.get_obj(g.get_obj(loaded_parent).unwrap().contains[0])
+                .unwrap()
+                .item_number,
+            301
+        );
+        house_crashsave(&mut g, 790003);
+        assert!(rust_house_object_file(&std::fs::read(path).unwrap()));
+        crate::lock_ok::lock(&house_object_formats()).remove(&790003);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

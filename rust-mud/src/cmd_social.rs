@@ -11,7 +11,7 @@
 // hit, calls do_action_named(). do_action() (the fixed ACMD-signature shim)
 // remains for symmetry / direct invocation. See `notes` in the manifest.
 
-use crate::act::{act_sleep, ActArg, To};
+use crate::act::{ActArg, To, act_sleep};
 use crate::state::GameState;
 use crate::types::*;
 use std::collections::HashMap;
@@ -161,10 +161,28 @@ fn load_socials(path: &str) -> std::io::Result<SocialTable> {
         let mut it = header.split_whitespace();
         let command = it.next().unwrap_or("~").trim_start_matches('~').to_string();
         let sort_as = it.next().unwrap_or("").to_string();
-        let hide = it.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
-        let min_char_pos = it.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
-        let min_vict_pos = it.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
-        let min_lvl = it.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+        let loader_i32 = |raw: Option<&str>, field: &str| match raw {
+            Some(raw) => match crate::text::parse_i32_strict(raw) {
+                Ok(value) => value,
+                Err(crate::text::ParseIntError::Overflow) => {
+                    let clamped = if raw.trim_start().starts_with('-') {
+                        i32::MIN
+                    } else {
+                        i32::MAX
+                    };
+                    log::warn!(
+                        "SYSERR: social {command} {field} overflow in {path}; clamped to {clamped}"
+                    );
+                    clamped
+                }
+                Err(_) => 0,
+            },
+            None => 0,
+        };
+        let hide = loader_i32(it.next(), "hide");
+        let min_char_pos = loader_i32(it.next(), "minimum character position");
+        let min_vict_pos = loader_i32(it.next(), "minimum victim position");
+        let min_lvl = loader_i32(it.next(), "minimum level");
 
         // Read the 13 message slots (C fread_action: a line starting with '#'
         // is the NULL/placeholder, otherwise the verbatim line is the text).
@@ -638,30 +656,25 @@ fn ignore_matches(g: &GameState, i: &crate::character::IgnoreEntry, ch2: CharId)
 /// COLOR_LEV(ch) (screen.h): PRF_COLOR_1 + 2 * PRF_COLOR_2.
 fn color_lev(g: &GameState, id: CharId) -> i32 {
     let prf = g.get_char(id).map(|c| c.prf_flags).unwrap_or(0);
-    (if prf & crate::flags::PRF_COLOR_1 != 0 { 1 } else { 0 })
-        + (if prf & crate::flags::PRF_COLOR_2 != 0 {
-            2
-        } else {
-            0
-        })
+    (if prf & crate::flags::PRF_COLOR_1 != 0 {
+        1
+    } else {
+        0
+    }) + (if prf & crate::flags::PRF_COLOR_2 != 0 {
+        2
+    } else {
+        0
+    })
 }
 
 /// CCYEL(ch, C_NRM): "&Y" when the viewer's colour level reaches C_NRM, else "".
 fn ccyel(g: &GameState, id: CharId) -> &'static str {
-    if color_lev(g, id) >= C_NRM {
-        "&Y"
-    } else {
-        ""
-    }
+    if color_lev(g, id) >= C_NRM { "&Y" } else { "" }
 }
 
 /// CCNRM(ch, C_NRM): "&n" when the viewer's colour level reaches C_NRM, else "".
 fn ccnrm(g: &GameState, id: CharId) -> &'static str {
-    if color_lev(g, id) >= C_NRM {
-        "&n"
-    } else {
-        ""
-    }
+    if color_lev(g, id) >= C_NRM { "&n" } else { "" }
 }
 
 // ---------------------------------------------------------------------------
@@ -1099,7 +1112,6 @@ fn cap_first(s: &mut String) {
     }
 }
 
-
 /// The social's permanent hide bit (C soc_mess_list[].hide), for the
 /// intangible-player forced-hide run (#229).
 pub fn social_hide(command: &str) -> Option<bool> {
@@ -1122,8 +1134,7 @@ pub fn social_hide(command: &str) -> Option<bool> {
 
 /// Temporarily override a social's hide bit (intangible-player run).
 pub fn set_social_hide(command: &str, hide: bool) {
-    let table = SOCIALS
-        .get_or_init(|| RwLock::new(SocialTable::default()));
+    let table = SOCIALS.get_or_init(|| RwLock::new(SocialTable::default()));
     let mut guard = crate::lock_ok::write(&table);
     if let Some(&i) = guard.by_command.get(&command.to_lowercase()) {
         if let Some(s) = guard.list.get_mut(i) {
@@ -1136,7 +1147,9 @@ pub fn set_social_hide(command: &str, hide: bool) {
 #[cfg(test)]
 pub(crate) fn socials_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap()
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap()
 }
 
 // ===========================================================================

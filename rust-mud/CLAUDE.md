@@ -51,6 +51,7 @@ Key env vars (read in `config.rs` + `main.rs`):
 - `MUD_PORT` (default 4000), `MUD_RNG_SEED=<n>` (pins the Lehmer PRNG for golden tests — same seed => identical zone prime / combat), `MUD_NO_SPECIALS` (or argv `-s`; C-compatible no-specials mode. `-q` is not treated as no-specials).
 - `MUD_METRICS_PORT=<port>` — enables a Prometheus `/metrics` + `/health` HTTP endpoint. **Never use 9200/9201 — this box's Elasticsearch owns them; use e.g. 19595.**
 - `MUD_MAX_CONN` (default 256), `MUD_CONN_BURST`/`MUD_CONN_WINDOW_MS` (per-IP rate limit).
+- `MUD_REVERSE_DNS` (default true), `MUD_REVERSE_DNS_TIMEOUT_MS` (default 1000), and `MUD_REVERSE_DNS_MAX_INFLIGHT` (default 16) enable bounded FCrDNS host identity. Ban checks always include the canonical socket peer IP; lookup failure/timeout falls back to that IP.
 
 ### Testing against a running server
 Scripted-telnet test with raw `nc` (the IAC input filter now tolerates telnet negotiation, but `nc` avoids it entirely):

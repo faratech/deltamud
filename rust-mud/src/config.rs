@@ -41,6 +41,20 @@ pub struct Config {
     /// zone 2; C's placeholder value pointed at unrelated forest rooms).
     pub newbie_room: RoomVnum,
     pub database_url: String,
+    /// Maximum wall time for one database operation. This bounds pool waits,
+    /// connects, reads, writes, and queries at the application boundary.
+    pub db_timeout_secs: u64,
+    /// Resolve accepted peer addresses to hostnames at the async socket edge.
+    /// Hostnames are used only after forward-confirming that they resolve back
+    /// to the canonical peer IP; IP ban checks always remain authoritative.
+    pub reverse_dns: bool,
+    /// Whole reverse+forward-confirmation budget for one accepted connection,
+    /// clamped to 1..=10,000 ms.
+    pub reverse_dns_timeout_ms: u64,
+    /// Maximum number of simultaneous blocking system-resolver calls. Timed-out
+    /// callers fall back to the peer IP while the bounded resolver slot remains
+    /// held until the underlying libc call returns. Clamped to 1..=256.
+    pub reverse_dns_max_inflight: usize,
     pub lib_path: String,
     pub port: u16,
     pub use_compat_mode: bool,
@@ -70,12 +84,34 @@ impl Config {
         Config {
             database_url: env::var("DATABASE_URL")
                 .unwrap_or_else(|_| "mysql://root:password@localhost/deltamud".to_string()),
+            db_timeout_secs: env::var("MUD_DB_TIMEOUT_SECS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|&seconds| seconds > 0)
+                .unwrap_or(5),
+            reverse_dns: env::var("MUD_REVERSE_DNS")
+                .map(|value| !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no"))
+                .unwrap_or(true),
+            reverse_dns_timeout_ms: env::var("MUD_REVERSE_DNS_TIMEOUT_MS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(|milliseconds| milliseconds.clamp(1, 10_000))
+                .unwrap_or(1_000),
+            reverse_dns_max_inflight: env::var("MUD_REVERSE_DNS_MAX_INFLIGHT")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .map(|lookups| lookups.clamp(1, 256))
+                .unwrap_or(16),
             jail_num: 400,
             newbie_room: 200,
             www_who: env::var("MUD_WWW_WHO").map(|v| v == "1").unwrap_or(false),
             www_who_dir: env::var("MUD_WWW_WHO_DIR").unwrap_or_else(|_| "./www".to_string()),
-            autoreboot: env::var("MUD_AUTOREBOOT").map(|v| v == "1").unwrap_or(false),
-            pt_markable: env::var("MUD_PT_MARKABLE").map(|v| v == "1").unwrap_or(false),
+            autoreboot: env::var("MUD_AUTOREBOOT")
+                .map(|v| v == "1")
+                .unwrap_or(false),
+            pt_markable: env::var("MUD_PT_MARKABLE")
+                .map(|v| v == "1")
+                .unwrap_or(false),
             lib_path: env::var("MUD_LIB_PATH").unwrap_or_else(|_| "./lib".to_string()),
             port: env::var("MUD_PORT")
                 .unwrap_or_else(|_| "4000".to_string())
@@ -99,12 +135,20 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             database_url: String::new(),
+            db_timeout_secs: 5,
+            reverse_dns: true,
+            reverse_dns_timeout_ms: 1_000,
+            reverse_dns_max_inflight: 16,
             jail_num: 400,
             newbie_room: 200,
             www_who: env::var("MUD_WWW_WHO").map(|v| v == "1").unwrap_or(false),
             www_who_dir: env::var("MUD_WWW_WHO_DIR").unwrap_or_else(|_| "./www".to_string()),
-            autoreboot: env::var("MUD_AUTOREBOOT").map(|v| v == "1").unwrap_or(false),
-            pt_markable: env::var("MUD_PT_MARKABLE").map(|v| v == "1").unwrap_or(false),
+            autoreboot: env::var("MUD_AUTOREBOOT")
+                .map(|v| v == "1")
+                .unwrap_or(false),
+            pt_markable: env::var("MUD_PT_MARKABLE")
+                .map(|v| v == "1")
+                .unwrap_or(false),
             lib_path: "./lib".to_string(),
             port: 4000,
             use_compat_mode: false,

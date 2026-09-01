@@ -16,13 +16,13 @@
 // dex_app_skill (ported inline here from constants.c), and the arena/jail/bank
 // globals (ported as the documented default vnums used elsewhere in the port).
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::character::Affect;
-use crate::constants::{strength_apply_index, STR_APP};
+use crate::constants::{STR_APP, strength_apply_index};
 use crate::flags::*;
 use crate::handler::isname;
 use crate::interpreter::{half_chop, one_argument};
-use crate::object::{Object, ObjectType, WearFlags};
+use crate::object::{Object, ObjectGraphOrder, ObjectType, WearFlags, walk_object_graph};
 use crate::spell_parser::{skill_name, spell_info};
 use crate::state::GameState;
 use crate::types::*;
@@ -159,17 +159,15 @@ fn is_number(s: &str) -> bool {
     !body.is_empty() && body.chars().all(|c| c.is_ascii_digit())
 }
 
-fn atoi(s: &str) -> i32 {
-    let s = s.trim();
-    let mut end = 0;
-    let bytes = s.as_bytes();
-    if end < bytes.len() && (bytes[end] == b'-' || bytes[end] == b'+') {
-        end += 1;
+fn command_atoi(g: &mut GameState, ch: CharId, s: &str) -> Option<i32> {
+    match crate::text::parse_i32_atoi(s) {
+        Ok(value) => Some(value),
+        Err(crate::text::ParseIntError::Overflow) => {
+            g.send_to_char(ch, "That number is outside the supported range.\r\n");
+            None
+        }
+        Err(_) => unreachable!("parse_i32_atoi maps nonnumeric input to zero"),
     }
-    while end < bytes.len() && bytes[end].is_ascii_digit() {
-        end += 1;
-    }
-    s[..end].parse::<i32>().unwrap_or(0)
 }
 
 /// AN(arg): "an" if arg begins with a vowel, else "a".
@@ -691,33 +689,11 @@ pub fn do_display(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 // do_quit / do_save
 // ===========================================================================
 
-/// count_contents: recursive count of container contents (utils.c).
-fn count_contents(g: &GameState, container: ObjId) -> i32 {
-    let mut count = 0;
-    let inner = g
-        .get_obj(container)
-        .map(|o| o.contains.clone())
-        .unwrap_or_default();
-    for oid in inner {
-        count += 1;
-        let is_cont = g
-            .get_obj(oid)
-            .map(|o| o.obj_type == ObjectType::Container)
-            .unwrap_or(false);
-        let has = g
-            .get_obj(oid)
-            .map(|o| !o.contains.is_empty())
-            .unwrap_or(false);
-        if is_cont && has {
-            count += count_contents(g, oid);
-        }
-    }
-    count
-}
-
-/// item_count: equipment + inventory + recursive container contents (utils.c).
+/// item_count: equipment + inventory + bounded container contents (utils.c).
+///
+/// The C implementation recurses. Use the shared graph walker here so a
+/// corrupt legacy graph cannot overflow the game thread while a player quits.
 fn item_count(g: &GameState, ch: CharId) -> i32 {
-    let mut count = 0;
     let (eq, carrying) = match g.get_char(ch) {
         Some(c) => (
             c.equipment.iter().flatten().copied().collect::<Vec<_>>(),
@@ -725,35 +701,21 @@ fn item_count(g: &GameState, ch: CharId) -> i32 {
         ),
         None => return 0,
     };
-    for oid in eq {
-        count += 1;
-        let is_cont = g
-            .get_obj(oid)
-            .map(|o| o.obj_type == ObjectType::Container)
-            .unwrap_or(false);
-        let has = g
-            .get_obj(oid)
-            .map(|o| !o.contains.is_empty())
-            .unwrap_or(false);
-        if is_cont && has {
-            count += count_contents(g, oid);
-        }
-    }
-    for oid in carrying {
-        count += 1;
-        let is_cont = g
-            .get_obj(oid)
-            .map(|o| o.obj_type == ObjectType::Container)
-            .unwrap_or(false);
-        let has = g
-            .get_obj(oid)
-            .map(|o| !o.contains.is_empty())
-            .unwrap_or(false);
-        if is_cont && has {
-            count += count_contents(g, oid);
-        }
-    }
-    count
+    let walk = walk_object_graph(
+        eq.into_iter().chain(carrying),
+        ObjectGraphOrder::Preorder,
+        "quit item_count",
+        |oid| {
+            g.get_obj(oid).map(|obj| {
+                if obj.obj_type == ObjectType::Container {
+                    obj.contains.clone()
+                } else {
+                    Vec::new()
+                }
+            })
+        },
+    );
+    i32::try_from(walk.visits.len()).unwrap_or(i32::MAX)
 }
 
 /// quit_warning(): the "you'll lose your stuff" nag.
@@ -1582,7 +1544,9 @@ pub fn do_split(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         return;
     }
 
-    let amount = atoi(&arg);
+    let Some(amount) = command_atoi(g, ch, &arg) else {
+        return;
+    };
     if amount <= 0 {
         g.send_to_char(ch, "Sorry, you can't do that.\r\n");
         return;
@@ -1637,14 +1601,18 @@ pub fn do_split(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
     // ch pays out share*(num-1).
     if let Some(c) = g.get_char_mut(ch) {
-        c.points.gold -= share * (num - 1);
+        crate::gold::debit(
+            c,
+            crate::gold::Account::Carried,
+            i64::from(share) * i64::from(num - 1),
+        );
     }
 
     // Head of group (if it's not ch).
     let k_npc = g.get_char(k).map(|c| c.is_npc).unwrap_or(true);
     if k_grouped && k_room == my_room && !k_npc && k != ch {
         if let Some(c) = g.get_char_mut(k) {
-            c.points.gold += share;
+            crate::gold::credit(c, crate::gold::Account::Carried, i64::from(share));
         }
         g.send_to_char(
             k,
@@ -1662,7 +1630,7 @@ pub fn do_split(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
             .unwrap_or((false, true, None));
         if grouped && !is_npc && froom == my_room && *f != ch {
             if let Some(c) = g.get_char_mut(*f) {
-                c.points.gold += share;
+                crate::gold::credit(c, crate::gold::Account::Carried, i64::from(share));
             }
             g.send_to_char(
                 *f,
@@ -2159,9 +2127,8 @@ fn wait_state(g: &mut GameState, ch: CharId, cycles: i32) {
     g.set_wait_state(ch, cycles);
 }
 
-/// extract_obj(): detach from wherever it lives, then remove from the arena.
+/// extract_obj(): atomically detach and remove the validated object graph.
 fn extract_obj_from_world(g: &mut GameState, oid: ObjId) {
-    g.obj_from_anywhere(oid);
     g.extract_obj(oid);
 }
 
@@ -2191,7 +2158,9 @@ pub fn do_wimpy(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         .map(|c| c.is_ascii_digit())
         .unwrap_or(false)
     {
-        let wimp_lev = atoi(&arg);
+        let Some(wimp_lev) = command_atoi(g, ch, &arg) else {
+            return;
+        };
         if wimp_lev != 0 {
             let max_hit = g.get_char(ch).map(|c| c.points.max_hit).unwrap_or(0);
             if wimp_lev < 0 {
@@ -2287,7 +2256,10 @@ pub fn do_gen_write(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) 
         Ok(m) => m,
     };
     if full.len() >= MAX_FILESIZE {
-        g.send_to_char(ch, "Sorry, the file is full right now.. try again later.\r\n");
+        g.send_to_char(
+            ch,
+            "Sorry, the file is full right now.. try again later.\r\n",
+        );
         return;
     }
     let mut fl = match std::fs::OpenOptions::new().append(true).open(&path) {
@@ -2434,8 +2406,12 @@ pub fn do_steal(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     let vict_npc = g.get_char(vict).map(|c| c.is_npc).unwrap_or(false);
     const PT_ALLOWED: bool = true; // config.c:86
     let pcsteal = !PT_ALLOWED && !vict_npc;
-    let vict_vnum = g.get_char(vict).and_then(|c| if c.is_npc { Some(c.nr) } else { None });
-    let is_keeper = vict_vnum.map(crate::shop::is_shop_keeper_vnum).unwrap_or(false);
+    let vict_vnum = g
+        .get_char(vict)
+        .and_then(|c| if c.is_npc { Some(c.nr) } else { None });
+    let is_keeper = vict_vnum
+        .map(crate::shop::is_shop_keeper_vnum)
+        .unwrap_or(false);
     if vict_level >= LVL_IMMORT || pcsteal || is_keeper {
         percent = 101;
     }
@@ -2601,19 +2577,23 @@ pub fn do_steal(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
             );
         } else {
             let vgold = g.get_char(vict).map(|c| c.points.gold).unwrap_or(0);
-            let mut gold = (vgold * g.rng.number(1, 10)) / 100;
+            let mut gold = (i64::from(vgold) * i64::from(g.rng.number(1, 10))) / 100;
             gold = gold.min(1782);
             if gold > 0 {
-                if let Some(c) = g.get_char_mut(ch) {
-                    c.points.gold += gold;
-                }
-                if let Some(c) = g.get_char_mut(vict) {
-                    c.points.gold -= gold;
-                }
-                if gold > 1 {
+                let moved = crate::gold::transfer_between(
+                    g,
+                    vict,
+                    crate::gold::Account::Carried,
+                    ch,
+                    crate::gold::Account::Carried,
+                    gold,
+                );
+                if moved && gold > 1 {
                     g.send_to_char(ch, &format!("Bingo!  You got {} gold coins.\r\n", gold));
-                } else {
+                } else if moved {
                     g.send_to_char(ch, "You manage to swipe a solitary gold coin.\r\n");
+                } else {
+                    g.send_to_char(ch, "You couldn't carry any more gold...\r\n");
                 }
             } else {
                 g.send_to_char(ch, "You couldn't get any gold...\r\n");
@@ -2715,7 +2695,9 @@ fn threshold_command(g: &mut GameState, ch: CharId, argument: &str, kind: Recall
         .map(|c| c.is_ascii_digit())
         .unwrap_or(false)
     {
-        let lev = atoi(&arg);
+        let Some(lev) = command_atoi(g, ch, &arg) else {
+            return;
+        };
         if lev != 0 {
             let max_hit = g.get_char(ch).map(|c| c.points.max_hit).unwrap_or(0);
             if lev < 0 {
@@ -2888,10 +2870,7 @@ pub fn do_observe(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         }
     };
 
-    let vlevel = g
-        .get_char(victim)
-        .map(|c| c.player.level)
-        .unwrap_or(0);
+    let vlevel = g.get_char(victim).map(|c| c.player.level).unwrap_or(0);
     if vlevel >= LVL_IMMORT && victim != ch {
         g.send_to_char(ch, "You dare not.\r\n");
         return;
@@ -3369,8 +3348,7 @@ fn atm_is_in_room(g: &GameState, ch: CharId) -> bool {
 
     // (1) any ATM object in the room.
     for oid in g.room(rnum).contents.clone() {
-        if g
-            .get_obj(oid)
+        if g.get_obj(oid)
             .map(|o| o.obj_type == ObjectType::Atm)
             .unwrap_or(false)
         {
@@ -3391,7 +3369,11 @@ fn atm_is_in_room(g: &GameState, ch: CharId) -> bool {
     }
 
     // (3) carrying a bankcard (an unwearable ITEM_ATM in the inventory).
-    for oid in g.get_char(ch).map(|c| c.carrying.clone()).unwrap_or_default() {
+    for oid in g
+        .get_char(ch)
+        .map(|c| c.carrying.clone())
+        .unwrap_or_default()
+    {
         if let Some(o) = g.get_obj(oid) {
             if o.obj_type == ObjectType::Atm && !wearable_eq_pos(o) {
                 return true;
@@ -3400,10 +3382,13 @@ fn atm_is_in_room(g: &GameState, ch: CharId) -> bool {
     }
 
     // (4) wearing a bankcard.
-    for slot in g.get_char(ch).map(|c| c.equipment).unwrap_or([None; NUM_WEARS]) {
+    for slot in g
+        .get_char(ch)
+        .map(|c| c.equipment)
+        .unwrap_or([None; NUM_WEARS])
+    {
         if let Some(oid) = slot {
-            if g
-                .get_obj(oid)
+            if g.get_obj(oid)
                 .map(|o| o.obj_type == ObjectType::Atm)
                 .unwrap_or(false)
             {
@@ -3450,7 +3435,9 @@ pub fn do_gen_atm(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
             let (b1, rest) = two_arguments(argument.trim());
             let b2 = rest.0;
             if b2.is_empty() {
-                let amount = atoi(argument.trim());
+                let Some(amount) = command_atoi(g, ch, argument.trim()) else {
+                    return;
+                };
                 let gold = g.get_char(ch).map(|c| c.points.gold).unwrap_or(0);
                 if amount <= 0 {
                     g.send_to_char(ch, "How much do you want to deposit?\r\n");
@@ -3458,8 +3445,15 @@ pub fn do_gen_atm(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
                     g.send_to_char(ch, "You don't have that many coins!\r\n");
                 } else {
                     if let Some(c) = g.get_char_mut(ch) {
-                        c.points.gold -= amount;
-                        c.points.bank_gold += amount;
+                        if !crate::gold::transfer(
+                            c,
+                            crate::gold::Account::Carried,
+                            crate::gold::Account::Bank,
+                            i64::from(amount),
+                        ) {
+                            g.send_to_char(ch, "That deposit would exceed your account limit.\r\n");
+                            return;
+                        }
                     }
                     g.send_to_char(ch, &format!("You deposit {} coins.\r\n", amount));
                 }
@@ -3474,18 +3468,28 @@ pub fn do_gen_atm(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
                         g.send_to_char(ch, "What's the point of that?\r\n");
                     }
                     Some(v) => {
-                        let amount = atoi(&b2);
+                        let Some(amount) = command_atoi(g, ch, &b2) else {
+                            return;
+                        };
                         let gold = g.get_char(ch).map(|c| c.points.gold).unwrap_or(0);
                         if amount <= 0 {
                             g.send_to_char(ch, "How much do you want to deposit?\r\n");
                         } else if gold < amount {
                             g.send_to_char(ch, "You don't have that many coins!\r\n");
                         } else {
-                            if let Some(c) = g.get_char_mut(ch) {
-                                c.points.gold -= amount;
-                            }
-                            if let Some(c) = g.get_char_mut(v) {
-                                c.points.bank_gold += amount;
+                            if !crate::gold::transfer_between(
+                                g,
+                                ch,
+                                crate::gold::Account::Carried,
+                                v,
+                                crate::gold::Account::Bank,
+                                i64::from(amount),
+                            ) {
+                                g.send_to_char(
+                                    ch,
+                                    "That deposit would exceed the recipient's account limit.\r\n",
+                                );
+                                return;
                             }
                             act(
                                 g,
@@ -3520,7 +3524,9 @@ pub fn do_gen_atm(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
             }
         }
         SCMD_WITHDRAW => {
-            let amount = atoi(argument.trim());
+            let Some(amount) = command_atoi(g, ch, argument.trim()) else {
+                return;
+            };
             let bank = g.get_char(ch).map(|c| c.points.bank_gold).unwrap_or(0);
             if amount <= 0 {
                 g.send_to_char(ch, "How much do you want to withdraw?\r\n");
@@ -3528,8 +3534,18 @@ pub fn do_gen_atm(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
                 g.send_to_char(ch, "You don't have that many coins deposited!\r\n");
             } else {
                 if let Some(c) = g.get_char_mut(ch) {
-                    c.points.gold += amount;
-                    c.points.bank_gold -= amount;
+                    if !crate::gold::transfer(
+                        c,
+                        crate::gold::Account::Bank,
+                        crate::gold::Account::Carried,
+                        i64::from(amount),
+                    ) {
+                        g.send_to_char(
+                            ch,
+                            "That withdrawal would exceed your carried-gold limit.\r\n",
+                        );
+                        return;
+                    }
                 }
                 g.send_to_char(ch, &format!("You withdraw {} coins.\r\n", amount));
                 act(
@@ -3623,7 +3639,7 @@ pub fn do_postbail(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
             );
             if let Some(c) = g.get_char_mut(ch) {
                 c.points.exp -= ((bail - gold).abs() * XP_MULTIPLIER) as i64;
-                c.points.gold = bail;
+                crate::gold::set(c, crate::gold::Account::Carried, i64::from(bail));
             }
             gold = bail;
         }
@@ -3639,7 +3655,7 @@ pub fn do_postbail(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         if let Some(c) = g.get_char_mut(ch) {
             c.act_flags &= !(PLR_THIEF | PLR_KILLER);
             c.prf_flags &= !PRF_NOAUCT;
-            c.points.gold -= bail;
+            crate::gold::debit(c, crate::gold::Account::Carried, i64::from(bail));
         }
         let cur_room = g.get_char(ch).and_then(|c| c.in_room);
         if let Some(r) = cur_room {
@@ -3985,7 +4001,9 @@ pub fn do_build(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         return;
     }
 
-    let target_vnum = atoi(argument);
+    let Some(target_vnum) = command_atoi(g, ch, argument) else {
+        return;
+    };
     let target_rnum = g.real_room(target_vnum);
 
     if target_rnum.is_none() && argument != "off" {
@@ -4196,6 +4214,45 @@ mod tests {
     }
 
     #[test]
+    fn item_count_is_cycle_safe_and_depth_bounded() {
+        let mut g = GameState::new(Config::default());
+        let ch = connected_player(&mut g, ConnId(41), "Counter", 1);
+
+        let mut first = Object::new(NOTHING, "first".into(), "first".into());
+        first.obj_type = ObjectType::Container;
+        let first = g.create_obj(first);
+        let mut second = Object::new(NOTHING, "second".into(), "second".into());
+        second.obj_type = ObjectType::Container;
+        let second = g.create_obj(second);
+        g.get_char_mut(ch).unwrap().carrying.push(first);
+        g.get_obj_mut(first).unwrap().loc = crate::object::ObjLoc::Carried(ch);
+        g.get_obj_mut(first).unwrap().contains.push(second);
+        g.get_obj_mut(second).unwrap().loc = crate::object::ObjLoc::Contained(first);
+        // Inject a corrupt legacy back-edge without going through obj_to_obj.
+        g.get_obj_mut(second).unwrap().contains.push(first);
+        assert_eq!(item_count(&g, ch), 2);
+
+        g.get_char_mut(ch).unwrap().carrying.clear();
+        let mut chain = Vec::new();
+        for index in 0..crate::object::MAX_OBJECT_GRAPH_DEPTH + 5 {
+            let mut object =
+                Object::new(NOTHING, format!("chain {index}"), format!("chain {index}"));
+            object.obj_type = ObjectType::Container;
+            chain.push(g.create_obj(object));
+        }
+        g.get_char_mut(ch).unwrap().carrying.push(chain[0]);
+        g.get_obj_mut(chain[0]).unwrap().loc = crate::object::ObjLoc::Carried(ch);
+        for pair in chain.windows(2) {
+            g.get_obj_mut(pair[0]).unwrap().contains.push(pair[1]);
+            g.get_obj_mut(pair[1]).unwrap().loc = crate::object::ObjLoc::Contained(pair[0]);
+        }
+        assert_eq!(
+            item_count(&g, ch),
+            crate::object::MAX_OBJECT_GRAPH_DEPTH as i32
+        );
+    }
+
+    #[test]
     fn recall_and_retreat_threshold_commands_store_character_fields() {
         let mut g = GameState::new(Config::default());
         let conn = ConnId(1);
@@ -4210,17 +4267,52 @@ mod tests {
         do_recall(&mut g, ch, "19", 0);
         assert_eq!(g.get_char(ch).unwrap().recall_level, 19);
         do_recall(&mut g, ch, "", 0);
-        assert!(g
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("Your current recall level is 19 hit points.\r\n"));
+        assert!(
+            g.descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("Your current recall level is 19 hit points.\r\n")
+        );
 
         do_retreat(&mut g, ch, "17", 0);
         assert_eq!(g.get_char(ch).unwrap().retreat_level, 17);
         do_retreat(&mut g, ch, "0", 0);
         assert_eq!(g.get_char(ch).unwrap().retreat_level, 0);
+    }
+
+    #[test]
+    fn split_command_accepts_i32_edges_and_rejects_adjacent_overflow() {
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(4_040_001);
+        let ch = connected_player(&mut g, conn, "Splitter", 1);
+        crate::gold::set(
+            g.get_char_mut(ch).unwrap(),
+            crate::gold::Account::Carried,
+            i64::from(i32::MAX),
+        );
+        let original_gold = g.get_char(ch).unwrap().points.gold;
+
+        for (input, expected) in [
+            (
+                "2147483647",
+                "You don't seem to have that much gold to split.\r\n",
+            ),
+            ("-2147483648", "Sorry, you can't do that.\r\n"),
+            (
+                "2147483648",
+                "That number is outside the supported range.\r\n",
+            ),
+            (
+                "-2147483649",
+                "That number is outside the supported range.\r\n",
+            ),
+        ] {
+            g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+            do_split(&mut g, ch, input, 0);
+            assert_eq!(output(&g, conn), expected, "input={input:?}");
+            assert_eq!(g.get_char(ch).unwrap().points.gold, original_gold);
+        }
     }
 
     #[test]
@@ -4419,7 +4511,11 @@ mod tests {
         let machine = g.create_obj(machine);
         g.obj_to_room(machine, here);
 
-        g.get_char_mut(ch).unwrap().points.gold = 100;
+        crate::gold::set(
+            g.get_char_mut(ch).unwrap(),
+            crate::gold::Account::Carried,
+            100,
+        );
 
         do_gen_atm(&mut g, ch, "Away 40", SCMD_DEPOSIT);
 
@@ -4446,7 +4542,6 @@ mod tests {
         let machine = g.create_obj(machine);
         g.obj_to_room(machine, here);
         assert!(atm_is_in_room(&g, ch));
-        g.obj_from_anywhere(machine);
         g.extract_obj(machine);
         assert!(!atm_is_in_room(&g, ch));
 
@@ -4460,7 +4555,6 @@ mod tests {
         let card = g.create_obj(card);
         g.obj_to_char(card, ch);
         assert!(atm_is_in_room(&g, ch));
-        g.obj_from_anywhere(card);
         g.extract_obj(card);
         assert!(!atm_is_in_room(&g, ch));
 
@@ -4481,6 +4575,7 @@ mod tests {
         );
 
         // ...but it counts once worn.
+        g.obj_from_anywhere(tabard);
         g.equip_char(ch, tabard, WEAR_ABOUT);
         assert!(atm_is_in_room(&g, ch));
         let _ = output(&g, conn);
@@ -4541,8 +4636,8 @@ mod tests {
         assert_eq!(output(&g, conn), "Okay.  Thanks!\r\n");
 
         // C act.other.c:1564: "%-8s (%6.6s) [%5s] %s\n", with rcds()'s "%5d".
-        let data = std::fs::read_to_string(std::path::Path::new(&lib).join("misc").join("typos"))
-            .unwrap();
+        let data =
+            std::fs::read_to_string(std::path::Path::new(&lib).join("misc").join("typos")).unwrap();
         assert!(data.starts_with("Reporter "), "got: {:?}", data);
         assert!(
             data.contains(") [ 3001] the ceiling leaks\n"),
@@ -4648,7 +4743,8 @@ mod tests {
 
     #[test]
     fn observe_reports_and_retargets_from_the_observatory_311() {
-        use crate::arena::{set_stat_for_test, ARENA_COMBATANT1, ARENA_OBSERVER};
+        use crate::arena::{ARENA_COMBATANT1, ARENA_OBSERVER, set_stat_for_test};
+        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
         crate::arena::reset_for_tests();
         let mut g = GameState::new(Config::default());
         let conn = ConnId(1);
@@ -4703,10 +4799,7 @@ mod tests {
         // Observing yourself by name detaches (C act.other.c:1826-1830).
         g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
         do_observe(&mut g, ch, "watcher", 0);
-        assert_eq!(
-            output(&g, conn),
-            "Ok. You're observing nobody now.\r\n"
-        );
+        assert_eq!(output(&g, conn), "Ok. You're observing nobody now.\r\n");
         assert_eq!(crate::arena::arena_observing(ch), None);
 
         // Drop our entries so the shared table stays clean.

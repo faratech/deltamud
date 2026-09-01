@@ -13,7 +13,7 @@
 // modelled (house.rs): spell_home teleports the caster to their owned house via
 // house::house_for_owner().
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::character::Affect;
 use crate::flags::{
     APPLY_CON, APPLY_DEFENSE, APPLY_DEX, APPLY_HIT, APPLY_INT, APPLY_MANA, APPLY_MDEFENSE,
@@ -160,11 +160,7 @@ fn mortal_start_index(home: i32) -> usize {
         0
     };
     // home == 0 falls back to table slot 1 (start town 1), matching C.
-    if home == 0 {
-        1
-    } else {
-        home as usize
-    }
+    if home == 0 { 1 } else { home as usize }
 }
 
 /// The player's recall destination room rnum
@@ -428,7 +424,15 @@ pub fn spell_summon(
     }
 
     if mob_flagged(g, victim, MOB_AGGRESSIVE) {
-        act(g, "As the words escape your lips and $N travels\r\nthrough time and space towards you, you realize that $E is\r\naggressive and might harm you, so you wisely send $M back.", false, ch, None, ActArg::Char(victim), To::Char);
+        act(
+            g,
+            "As the words escape your lips and $N travels\r\nthrough time and space towards you, you realize that $E is\r\naggressive and might harm you, so you wisely send $M back.",
+            false,
+            ch,
+            None,
+            ActArg::Char(victim),
+            To::Char,
+        );
         return;
     }
     if !is_npc(g, victim) && !prf_flagged(g, victim, PRF_SUMMONABLE) {
@@ -460,7 +464,10 @@ pub fn spell_summon(
         // C spells.c:250-252: immortal audit trail for blocked summons (#249).
         crate::syslog::mudlog(
             g,
-            &format!("{} failed summoning {} to {}.", caster_name, vname, room_name),
+            &format!(
+                "{} failed summoning {} to {}.",
+                caster_name, vname, room_name
+            ),
             crate::syslog::BRF,
             LVL_IMMORT,
         );
@@ -1266,7 +1273,6 @@ pub fn spell_recharge(
             c.points.hit -= explode;
         }
         update_pos(g, ch);
-        g.obj_from_anywhere(obj);
         g.extract_obj(obj);
     } else {
         g.send_to_char(
@@ -1806,12 +1812,77 @@ mod tests {
         spell_recall(&mut g, 1, ch, Some(ch), None);
 
         assert_eq!(g.get_char(ch).unwrap().in_room, Some(room));
-        assert!(g
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("The spell fails because your victim is atop a mount.\r\n"));
+        assert!(
+            g.descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("The spell fails because your victim is atop a mount.\r\n")
+        );
+    }
+
+    #[test]
+    fn spell_teleport_forced_arena_departure_restores_without_penalty() {
+        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
+        crate::arena::reset_for_tests();
+        let mut g = GameState::new(Config::default());
+        let mut arena = Room::new(4801, 48, "Arena".into(), String::new());
+        // Leave exactly one eligible teleport destination.
+        arena.room_flags |= RoomFlags::PRIVATE;
+        let arena = g.add_room(arena);
+        let outside = g.add_room(Room::new(3001, 30, "Temple".into(), String::new()));
+        let mut victim = Character::new_player("Teleporter".into(), Class::Warrior, Race::Human);
+        victim.wimp_level = 12;
+        victim.recall_level = 34;
+        victim.affect_flags = crate::flags::AFF_INVISIBLE;
+        crate::gold::set(&mut victim, crate::gold::Account::Carried, 4_321);
+        let victim = g.create_char(victim);
+        g.char_to_room(victim, arena);
+        crate::arena::set_stat_for_test(victim, crate::arena::ARENA_COMBATANT1);
+        crate::arena::bup_affects(&mut g, victim);
+        g.get_char_mut(victim).unwrap().affect_flags = crate::flags::AFF_BLIND;
+
+        spell_teleport(&mut g, 20, victim, Some(victim), None);
+
+        let state = g.get_char(victim).unwrap();
+        assert_eq!(state.in_room, Some(outside));
+        assert_eq!(state.affect_flags, crate::flags::AFF_INVISIBLE);
+        assert_eq!(state.wimp_level, 12);
+        assert_eq!(state.recall_level, 34);
+        assert_eq!(state.points.gold, 4_321);
+        assert_eq!(crate::arena::arena_stat(victim), crate::arena::ARENA_NOT);
+        assert_eq!(g.player_save_requests, vec![victim]);
+        crate::arena::reset_for_tests();
+    }
+
+    #[test]
+    fn arena_recall_within_arena_does_not_consume_the_backup() {
+        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
+        crate::arena::reset_for_tests();
+        let mut g = GameState::new(Config::default());
+        let prep = g.add_room(Room::new(4801, 48, "Arena Prep".into(), String::new()));
+        let pit = g.add_room(Room::new(4899, 48, "Arena Pit".into(), String::new()));
+        let mut victim = Character::new_player("Recaller".into(), Class::Warrior, Race::Human);
+        victim.wimp_level = 12;
+        victim.recall_level = 34;
+        victim.affect_flags = crate::flags::AFF_INVISIBLE;
+        let victim = g.create_char(victim);
+        g.char_to_room(victim, pit);
+        crate::arena::set_stat_for_test(victim, crate::arena::ARENA_COMBATANT1);
+        crate::arena::bup_affects(&mut g, victim);
+
+        spell_recall(&mut g, 20, victim, Some(victim), None);
+
+        let state = g.get_char(victim).unwrap();
+        assert_eq!(state.in_room, Some(prep));
+        assert_eq!(state.wimp_level, 0);
+        assert_eq!(state.recall_level, 0);
+        assert_eq!(
+            crate::arena::arena_stat(victim),
+            crate::arena::ARENA_COMBATANT1
+        );
+        assert!(g.player_save_requests.is_empty());
+        crate::arena::reset_for_tests();
     }
 
     #[test]
@@ -1842,12 +1913,13 @@ mod tests {
 
         spell_summon(&mut g, 20, caster, Some(victim), None);
 
-        assert!(g
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("You failed.\r\n"));
+        assert!(
+            g.descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("You failed.\r\n")
+        );
     }
 
     #[test]
@@ -1885,12 +1957,13 @@ mod tests {
 
         spell_portal(&mut g, 20, caster, Some(target), None);
 
-        assert!(g
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("Eldritch wizardry obstructs thee.\n\r"));
+        assert!(
+            g.descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("Eldritch wizardry obstructs thee.\n\r")
+        );
         assert!(g.room(caster_room).contents.is_empty());
         assert!(g.room(target_room).contents.is_empty());
     }
@@ -1973,12 +2046,13 @@ mod tests {
 
         spell_portal(&mut g, 20, caster, Some(target), None);
 
-        assert!(g
-            .descriptors
-            .get(&conn)
-            .unwrap()
-            .outbuf
-            .contains("Your target is protected against your magic.\n\r"));
+        assert!(
+            g.descriptors
+                .get(&conn)
+                .unwrap()
+                .outbuf
+                .contains("Your target is protected against your magic.\n\r")
+        );
         assert!(g.room(caster_room).contents.is_empty());
         assert!(g.room(house_room).contents.is_empty());
     }

@@ -22,11 +22,11 @@
 // locals before any send/act; re-look-up entities by id; never hold a borrow
 // across a mutation. Output strings track the C byte-for-byte.
 
-use crate::act::{act, ActArg, To};
-use crate::object::ObjectType;
+use crate::act::{ActArg, To, act};
+use crate::object::{ObjectGraphOrder, ObjectType, walk_object_graph};
 use crate::room::{RoomFlags, SectorType};
 use crate::state::GameState;
-use crate::syslog::{mudlog, BRF, PFT};
+use crate::syslog::{BRF, PFT, mudlog};
 use crate::types::*;
 
 // ---------------------------------------------------------------------------
@@ -330,15 +330,7 @@ pub fn set_title(g: &mut GameState, ch: CharId, title: Option<&str>) {
             }
         }
     };
-    if t.len() > MAX_TITLE_LENGTH {
-        // Truncate on a char boundary (a raw truncate(40) panics when byte 40
-        // splits a multi-byte character).
-        let mut n = MAX_TITLE_LENGTH.min(t.len());
-        while n > 0 && !t.is_char_boundary(n) {
-            n -= 1;
-        }
-        t.truncate(n);
-    }
+    crate::text::truncate_utf8_bytes(&mut t, MAX_TITLE_LENGTH);
     if let Some(c) = g.get_char_mut(ch) {
         c.player.title = Some(t);
     }
@@ -901,21 +893,23 @@ fn update_pos(g: &mut GameState, ch: CharId) {
 // Object timer ticking (handler.c update_char_objects / update_object).
 // ---------------------------------------------------------------------------
 
-/// update_object(obj, use): count this object's timer down by `use`, recursing
-/// into its contents (handler.c). Sibling recursion in C is covered by our
-/// explicit list iteration at the call site.
-fn update_object(g: &mut GameState, oid: ObjId, use_: i32) {
-    let (has_timer, contents) = match g.get_obj(oid) {
-        Some(o) => (o.timer > 0, o.contains.clone()),
-        None => return,
-    };
-    if has_timer {
-        if let Some(o) = g.get_obj_mut(oid) {
-            o.timer -= use_;
+/// update_object(obj, use): count each root and its contents down by the root's
+/// `use` value (handler.c). The shared graph walker prevents malformed cycles
+/// or double-parented objects from ticking forever or more than once.
+fn update_objects(g: &mut GameState, roots: &[(ObjId, i32)]) {
+    let walk = walk_object_graph(
+        roots.iter().map(|(oid, _)| *oid),
+        ObjectGraphOrder::Preorder,
+        "update_object",
+        |oid| g.get_obj(oid).map(|o| o.contains.clone()),
+    );
+    for visit in walk.visits {
+        let use_ = roots[visit.root_index].1;
+        if let Some(o) = g.get_obj_mut(visit.id) {
+            if o.timer > 0 {
+                o.timer -= use_;
+            }
         }
-    }
-    for c in contents {
-        update_object(g, c, use_);
     }
 }
 
@@ -986,20 +980,20 @@ fn update_char_objects(g: &mut GameState, ch: CharId) {
         .get_char(ch)
         .map(|c| c.equipment.iter().flatten().copied().collect())
         .unwrap_or_default();
-    for oid in eq {
-        update_object(g, oid, 2);
-    }
 
     // Inventory timers tick by 1 (the C only walks the head of ->carrying; our
-    // update_object recursion + this list walk reproduces the head + sibling +
-    // contents traversal of the C linked list).
+    // combined roots reproduce the head + sibling + contents traversal of the
+    // C linked list).
     let inv: Vec<ObjId> = g
         .get_char(ch)
         .map(|c| c.carrying.clone())
         .unwrap_or_default();
-    for oid in inv {
-        update_object(g, oid, 1);
-    }
+    let roots: Vec<(ObjId, i32)> = eq
+        .into_iter()
+        .map(|oid| (oid, 2))
+        .chain(inv.into_iter().map(|oid| (oid, 1)))
+        .collect();
+    update_objects(g, &roots);
 }
 
 // ---------------------------------------------------------------------------
@@ -1122,7 +1116,7 @@ fn env_die(g: &mut GameState, ch: CharId) {
                 g.obj_to_obj(money, corpse);
             }
             if let Some(c) = g.get_char_mut(ch) {
-                c.points.gold = 0;
+                crate::gold::set(c, crate::gold::Account::Carried, 0);
             }
         }
 
@@ -1186,9 +1180,9 @@ fn make_corpse(g: &mut GameState, who: &str, victim: CharId) -> ObjId {
     obj.obj_type = ObjectType::Container;
     crate::combat::apply_corpse_metadata(&mut obj, g, victim);
     // C fight.c:315-318: GET_OBJ_TIMER(corpse) = IS_NPC(ch) ?
-// max_npc_corpse_time (5) : max_pc_corpse_time (10) (config.c:120-121),
-// decremented once per mud hour by point_update. The flat 60 made
-// corpses persist 6-12x longer than C (#102).
+    // max_npc_corpse_time (5) : max_pc_corpse_time (10) (config.c:120-121),
+    // decremented once per mud hour by point_update. The flat 60 made
+    // corpses persist 6-12x longer than C (#102).
     obj.timer = if g.get_char(victim).map(|c| c.is_npc).unwrap_or(true) {
         5
     } else {
@@ -1261,7 +1255,15 @@ pub fn point_update(g: &mut GameState) {
                             ch,
                             "Death makes a cryptic gesture and you find yourself englufed in light!\r\n",
                         );
-                        act(g, "Death makes a cryptic gesture and $n dissapears in a bright light!\r\n", false, ch, None, ActArg::None, To::Room);
+                        act(
+                            g,
+                            "Death makes a cryptic gesture and $n dissapears in a bright light!\r\n",
+                            false,
+                            ch,
+                            None,
+                            ActArg::None,
+                            To::Room,
+                        );
                         if let Some(c) = g.get_char_mut(ch) {
                             c.prf2_flags &= !PRF2_INTANGIBLE;
                         }
@@ -1489,7 +1491,6 @@ pub fn point_update(g: &mut GameState) {
                 };
                 if !is_boat && g.rng.number(0, weight) > 0 {
                     act_obj_to_room(g, "$p sinks into the murky depths.", oid);
-                    g.obj_from_anywhere(oid);
                     g.extract_obj(oid);
                     continue;
                 } else {
@@ -1517,7 +1518,6 @@ pub fn point_update(g: &mut GameState) {
             };
             if t == 0 {
                 act_obj_to_room(g, "$p dissapears in a puff of smoke!", oid);
-                g.obj_from_anywhere(oid);
                 g.extract_obj(oid);
                 continue;
             }
@@ -1594,7 +1594,6 @@ pub fn point_update(g: &mut GameState) {
                         SpillDest::Nowhere => { /* assert(FALSE) in C */ }
                     }
                 }
-                g.obj_from_anywhere(oid);
                 g.extract_obj(oid);
             }
         } else {
@@ -1838,10 +1837,11 @@ mod tests {
         let c = g.get_char(ch).unwrap();
         assert_eq!(c.player.level, 3);
         assert_eq!(c.carrying.len(), 2);
-        assert!(c.carrying.iter().all(|oid| g
-            .get_obj(*oid)
-            .map(|o| o.item_number == 3014)
-            .unwrap_or(false)));
+        assert!(c.carrying.iter().all(|oid| {
+            g.get_obj(*oid)
+                .map(|o| o.item_number == 3014)
+                .unwrap_or(false)
+        }));
     }
 
     #[test]
@@ -1912,5 +1912,37 @@ mod tests {
         assert!(out.contains("[ Idle force-rented and extracted (idle). ]\r\n"));
 
         let _ = std::fs::remove_dir_all(&g.config.lib_path);
+    }
+
+    #[test]
+    fn object_timers_tick_each_identity_once_across_cycle_and_shared_child() {
+        let mut g = test_game();
+        let a = g.create_obj(crate::object::Object::new(
+            100,
+            "a".to_string(),
+            "object a".to_string(),
+        ));
+        let b = g.create_obj(crate::object::Object::new(
+            101,
+            "b".to_string(),
+            "object b".to_string(),
+        ));
+        let c = g.create_obj(crate::object::Object::new(
+            102,
+            "c".to_string(),
+            "object c".to_string(),
+        ));
+        for oid in [a, b, c] {
+            g.get_obj_mut(oid).unwrap().timer = 10;
+        }
+        g.get_obj_mut(a).unwrap().contains = vec![b, c];
+        g.get_obj_mut(b).unwrap().contains = vec![c];
+        g.get_obj_mut(c).unwrap().contains = vec![a];
+
+        update_objects(&mut g, &[(a, 1)]);
+
+        assert_eq!(g.get_obj(a).unwrap().timer, 9);
+        assert_eq!(g.get_obj(b).unwrap().timer, 9);
+        assert_eq!(g.get_obj(c).unwrap().timer, 9);
     }
 }

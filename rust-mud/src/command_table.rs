@@ -944,7 +944,7 @@ mod help_coverage_tests {
             // Skip non-command rows: the RESERVED slot, the "." debug entry
             // and the trailing "\n" sentinel (all faithful to C cmd_info[]).
             .filter(|n| n.chars().any(|c| c.is_ascii_alphanumeric()))
-            .filter(|n| *n != "RESERVED")  // the C reserved slot, not a command
+            .filter(|n| *n != "RESERVED") // the C reserved slot, not a command
             .filter(|n| !topics.contains(&n.to_ascii_lowercase()))
             .collect();
         assert!(

@@ -6,7 +6,7 @@
 // commands need are embedded here as private tables/helpers, transcribed from
 // spell_parser.c so the output strings and mana math match the C MUD exactly.
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::object::{ExtraFlags, ObjectType, WearFlags};
 use crate::state::GameState;
 use crate::types::*;
@@ -218,15 +218,15 @@ fn spell_mana_params(spellnum: i32) -> Option<(i32, i32, i32)> {
         // spell_parser.c:1327 (portal) and :1354 (redirect charge). Without
         // these two a scribe produced portal / redirect-charge scrolls for
         // zero mana.
-        41 => (170, 100, 5),  // portal
-        51 => (200, 100, 5),  // redirect charge
-        44 => (110, 85, 5),   // convergence of power
-        45 => (140, 100, 5),  // mana autus
-        46 => (200, 100, 2),  // resist portal
-        47 => (150, 150, 0),  // regen mana
-        48 => (80, 20, 1),    // home
-        49 => (30, 20, 1),    // word of retreat
-        37 => (200, 150, 1),  // waterwalk
+        41 => (170, 100, 5), // portal
+        51 => (200, 100, 5), // redirect charge
+        44 => (110, 85, 5),  // convergence of power
+        45 => (140, 100, 5), // mana autus
+        46 => (200, 100, 2), // resist portal
+        47 => (150, 150, 0), // regen mana
+        48 => (80, 20, 1),   // home
+        49 => (30, 20, 1),   // word of retreat
+        37 => (200, 150, 1), // waterwalk
         _ => return None,
     };
     Some(p)
@@ -489,7 +489,6 @@ fn make_potion(g: &mut GameState, ch: CharId, potion: i32, container: ObjId) {
             ActArg::None,
             To::Room,
         );
-        g.obj_from_anywhere(container);
         g.extract_obj(container);
         let dam_hi = mag_manacost(g, ch, potion) * 2;
         let dam = g.rng.number(15, dam_hi);
@@ -522,7 +521,6 @@ fn make_potion(g: &mut GameState, ch: CharId, potion: i32, container: ObjId) {
             ActArg::None,
             To::Room,
         );
-        g.obj_from_anywhere(container);
         g.extract_obj(container);
     } else {
         g.send_to_char(ch, "You don't have enough mana to mix that potion!\r\n");
@@ -540,8 +538,10 @@ fn make_potion(g: &mut GameState, ch: CharId, potion: i32, container: ObjId) {
     obj.description = format!("A {} potion lies here.", colour);
     // C act.other.c:184-190: the hint goes in an extra description keyed by the
     // potion's name, so "look potion" reveals which spell it holds.
-    obj.ex_descriptions
-        .push((obj.name.clone(), format!("It appears to be a {} potion.", sname)));
+    obj.ex_descriptions.push((
+        obj.name.clone(),
+        format!("It appears to be a {} potion.", sname),
+    ));
     obj.obj_type = ObjectType::Potion;
     obj.wear_flags = WearFlags::TAKE;
     obj.extra_flags = ExtraFlags::NO_RENT;
@@ -642,7 +642,6 @@ fn make_scroll(g: &mut GameState, ch: CharId, scroll: i32, paper: ObjId) {
             ActArg::None,
             To::Room,
         );
-        g.obj_from_anywhere(paper);
         g.extract_obj(paper);
         let dam_hi = mag_manacost(g, ch, scroll) * 2;
         let dam = g.rng.number(15, dam_hi);
@@ -675,7 +674,6 @@ fn make_scroll(g: &mut GameState, ch: CharId, scroll: i32, paper: ObjId) {
             ActArg::None,
             To::Room,
         );
-        g.obj_from_anywhere(paper);
         g.extract_obj(paper);
     } else {
         g.send_to_char(
@@ -881,7 +879,6 @@ pub fn do_forge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             ActArg::None,
             To::Room,
         );
-        g.obj_from_anywhere(weapon);
         g.extract_obj(weapon);
         let dam = g.rng.number(10, 22);
         if let Some(c) = g.get_char_mut(ch) {
@@ -915,7 +912,6 @@ pub fn do_forge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             ActArg::None,
             To::Room,
         );
-        g.obj_from_anywhere(weapon);
         g.extract_obj(weapon);
         let dam = g.rng.number(10, 50);
         if let Some(c) = g.get_char_mut(ch) {

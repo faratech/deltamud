@@ -28,7 +28,7 @@ use crate::constants::{ACTION_BITS, AFFECTED_BITS, GENDERS, POSITION_TYPES};
 use crate::olc::{self, EditorKind};
 use crate::state::GameState;
 use crate::types::*;
-use crate::world::MobileProto;
+use crate::world::{MobileProto, zone_vnum_bounds};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -274,8 +274,14 @@ pub fn do_medit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     };
     // C olc.c:198-212: refuse when another descriptor is editing the same
     // entity (issue #272).
-    if crate::lock_ok::lock(&states()).values().any(|s| s.vnum == st.vnum) {
-        g.send_to_char(ch, "That mobile is currently being edited by someone else.\r\n");
+    if crate::lock_ok::lock(&states())
+        .values()
+        .any(|s| s.vnum == st.vnum)
+    {
+        g.send_to_char(
+            ch,
+            "That mobile is currently being edited by someone else.\r\n",
+        );
         return;
     }
     crate::lock_ok::lock(&states()).insert(conn, st);
@@ -404,7 +410,7 @@ fn trim_trailing_nl(s: &str) -> String {
 fn zone_for_vnum(g: &GameState, vnum: MobVnum) -> Option<i32> {
     g.zones
         .iter()
-        .find(|z| z.number * 100 <= vnum && z.top >= vnum)
+        .find(|z| z.contains_vnum(vnum))
         .map(|z| z.number)
 }
 
@@ -730,27 +736,41 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             after_edit(g, conn);
         }
         Mode::Sex => {
-            let n = atoi(line).clamp(0, (NUM_GENDERS - 1) as i32);
+            let Some(n) = olc_atoi(g, conn, line) else {
+                return;
+            };
+            let n = n.clamp(0, (NUM_GENDERS - 1) as i32);
             with_mob(conn, |m| m.sex = n);
             after_edit(g, conn);
         }
         Mode::Position => {
-            let n = atoi(line).clamp(0, (NUM_POSITIONS - 1) as i32);
+            let Some(n) = olc_atoi(g, conn, line) else {
+                return;
+            };
+            let n = n.clamp(0, (NUM_POSITIONS - 1) as i32);
             with_mob(conn, |m| m.position = n);
             after_edit(g, conn);
         }
         Mode::DefaultPos => {
-            let n = atoi(line).clamp(0, (NUM_POSITIONS - 1) as i32);
+            let Some(n) = olc_atoi(g, conn, line) else {
+                return;
+            };
+            let n = n.clamp(0, (NUM_POSITIONS - 1) as i32);
             with_mob(conn, |m| m.default_pos = n);
             after_edit(g, conn);
         }
         Mode::Attack => {
-            let n = atoi(line).clamp(0, (NUM_ATTACK_TYPES - 1) as i32);
+            let Some(n) = olc_atoi(g, conn, line) else {
+                return;
+            };
+            let n = n.clamp(0, (NUM_ATTACK_TYPES - 1) as i32);
             with_mob(conn, |m| m.attack_type = n);
             after_edit(g, conn);
         }
         Mode::NpcFlags => {
-            let i = atoi(line);
+            let Some(i) = olc_atoi(g, conn, line) else {
+                return;
+            };
             if i == 0 {
                 after_edit(g, conn);
                 return;
@@ -761,7 +781,9 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             disp_mob_flags(g, conn);
         }
         Mode::AffFlags => {
-            let i = atoi(line);
+            let Some(i) = olc_atoi(g, conn, line) else {
+                return;
+            };
             if i == 0 {
                 after_edit(g, conn);
                 return;
@@ -797,7 +819,10 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
         // Numerical responses (ranges mirror medit.c exactly).
         Mode::Level => {
-            let n = atoi(line).clamp(1, 100);
+            let Some(n) = olc_atoi(g, conn, line) else {
+                return;
+            };
+            let n = n.clamp(1, 100);
             with_mob(conn, |m| {
                 m.level = n;
                 set_mob_stats(m, n);
@@ -818,12 +843,18 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         Mode::Exp => {
             // C medit.c:1330: GET_EXP = MAX(0, atoi(arg)) into an int — values
             // beyond i32::MAX overflow the .mob loader's %d sscanf (#303).
-            let n = (atoi64(line)).max(0).min(i32::MAX as i64);
+            let Some(n) = olc_atoi64(g, conn, line) else {
+                return;
+            };
+            let n = n.max(0).min(i32::MAX as i64);
             with_mob(conn, |m| m.exp = n);
             after_edit(g, conn);
         }
         Mode::Gold => {
-            let n = (atoi64(line)).max(0).min(i32::MAX as i64);
+            let Some(n) = olc_atoi64(g, conn, line) else {
+                return;
+            };
+            let n = n.clamp(0, crate::gold::GOLD_CAP);
             with_mob(conn, |m| m.gold = n);
             after_edit(g, conn);
         }
@@ -842,7 +873,10 @@ fn num_set<F: FnOnce(&mut EditMob, i32)>(
     hi: i32,
     f: F,
 ) {
-    let n = atoi(line).clamp(lo, hi);
+    let Some(n) = olc_atoi(g, conn, line) else {
+        return;
+    };
+    let n = n.clamp(lo, hi);
     with_mob(conn, |m| f(m, n));
     after_edit(g, conn);
 }
@@ -1075,9 +1109,7 @@ fn ddesc_input(g: &mut GameState, conn: ConnId, line: &str) {
         if !text.ends_with('\n') {
             text.push('\n');
         }
-        if text.len() > MAX_MOB_DESC {
-            text.truncate(MAX_MOB_DESC);
-        }
+        crate::text::truncate_utf8_bytes(&mut text, MAX_MOB_DESC);
         with_mob(conn, |m| m.description = text);
         after_edit(g, conn);
         return;
@@ -1144,7 +1176,7 @@ fn save_internally(g: &mut GameState, conn: ConnId) {
         hitpoints: m.hit.max(1),
         hit_dice: (0, 0, m.hit.max(1)),
         experience: m.exp,
-        gold: m.gold as Gold,
+        gold: crate::gold::normalize(m.gold),
         position: Position::from_u8(m.position.clamp(0, 9) as u8),
         default_pos: Position::from_u8(m.default_pos.clamp(0, 9) as u8),
         sex: Gender::from_u8(m.sex.clamp(0, 2) as u8),
@@ -1214,9 +1246,17 @@ fn save_to_disk(g: &mut GameState, conn: ConnId) {
 
     // Collect, in vnum order, every mob block for this zone. The edited mob's
     // block is produced from scratch state; the rest are read off disk.
-    let (zone_lo, zone_top) = match g.zones.iter().find(|z| z.number == zone_number) {
-        Some(z) => (z.number * 100, z.top),
-        None => (zone_number * 100, zone_number * 100 + 99),
+    let zone_bounds = match g.zones.iter().find(|z| z.number == zone_number) {
+        Some(z) => z.vnum_start().map(|start| (start, z.top)),
+        None => zone_vnum_bounds(zone_number),
+    };
+    let Some((zone_lo, zone_top)) = zone_bounds else {
+        send(
+            g,
+            conn,
+            "Warning: mob's zone number is outside the supported range.\r\n",
+        );
+        return;
     };
 
     // Existing on-disk blocks (so unedited mobs keep their exact text/espec).
@@ -1269,7 +1309,10 @@ fn save_to_disk(g: &mut GameState, conn: ConnId) {
 /// editor save path.
 pub fn medit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
     let (zone_number, zone_lo, zone_top) = match g.zones.get(zone_rnum) {
-        Some(z) => (z.number, z.number * 100, z.top),
+        Some(z) => match z.vnum_start() {
+            Some(start) => (z.number, start, z.top),
+            None => return,
+        },
         None => return,
     };
     // C medit.c:465: the internal save marks the save list; the disk write
@@ -1438,20 +1481,29 @@ fn read_disk_blocks(path: &std::path::Path) -> HashMap<MobVnum, String> {
             break;
         }
         if let Some(rest) = t.strip_prefix('#') {
-            if let Ok(vnum) = rest.trim().parse::<MobVnum>() {
-                i += 1;
-                let mut block = String::new();
-                while i < lines.len() {
-                    let lt = lines[i].trim_end();
-                    if lt.starts_with('#') || lt == "$" || lt == "$~" {
-                        break;
-                    }
-                    block.push_str(lines[i]);
-                    block.push('\n');
+            match crate::text::parse_i32_strict(rest) {
+                Ok(vnum) => {
                     i += 1;
+                    let mut block = String::new();
+                    while i < lines.len() {
+                        let lt = lines[i].trim_end();
+                        if lt.starts_with('#') || lt == "$" || lt == "$~" {
+                            break;
+                        }
+                        block.push_str(lines[i]);
+                        block.push('\n');
+                        i += 1;
+                    }
+                    map.insert(vnum, block);
+                    continue;
                 }
-                map.insert(vnum, block);
-                continue;
+                Err(crate::text::ParseIntError::Overflow) => {
+                    log::warn!(
+                        "SYSERR: mobile vnum overflow in {}; block ignored",
+                        path.display()
+                    );
+                }
+                Err(_) => {}
             }
         }
         i += 1;
@@ -1482,10 +1534,35 @@ fn read_disk_mob(path: &std::path::Path, vnum: MobVnum) -> Option<DiskMobExt> {
     if fp.len() < 4 {
         return None;
     }
-    let mob_flags = asciiflag_conv(fp[0]);
-    let aff_flags = asciiflag_conv(fp[1]);
-    let alignment: i32 = fp[2].parse().unwrap_or(0);
+    let mob_flags = match asciiflag_conv(fp[0]) {
+        Ok(flags) => flags,
+        Err(_) => {
+            log::warn!(
+                "SYSERR: mobile {vnum} invalid mob flags in {}; record rejected",
+                path.display()
+            );
+            return None;
+        }
+    };
+    let aff_flags = match asciiflag_conv(fp[1]) {
+        Ok(flags) => flags,
+        Err(_) => {
+            log::warn!(
+                "SYSERR: mobile {vnum} invalid affect flags in {}; record rejected",
+                path.display()
+            );
+            return None;
+        }
+    };
+    let alignment = disk_i32(path, vnum, "alignment", fp[2])?;
     let letter = fp[3].chars().next().unwrap_or('S').to_ascii_uppercase();
+    if !matches!(letter, 'S' | 'E') {
+        log::warn!(
+            "SYSERR: mobile {vnum} unsupported type {letter:?} in {}; record rejected",
+            path.display()
+        );
+        return None;
+    }
 
     // Stats line — classic ` # # # #d#+# #d#+#` or extended `X# # # # # # #d#+# #d#`.
     let stats_line = lines.get(idx)?.trim();
@@ -1521,40 +1598,127 @@ fn read_disk_mob(path: &std::path::Path, vnum: MobVnum) -> Option<DiskMobExt> {
     {
         // X<level> <power> <mpower> <defense> <mdefense> <technique> <hit>d<mana>+<move> <ndd>d<sdd>
         let toks: Vec<&str> = rest.split_whitespace().collect();
-        let n = |k: usize| toks.get(k).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
-        ext.power = n(1);
-        ext.mpower = n(2);
-        ext.defense = n(3);
-        ext.mdefense = n(4);
-        ext.technique = n(5);
-        if let Some((h, ma, mo)) = parse_dice_plus(toks.get(6).copied().unwrap_or("")) {
-            ext.hit = h;
-            ext.mana = ma;
-            ext.movep = mo;
+        if toks.len() != 8 {
+            log::warn!(
+                "SYSERR: mobile {vnum} extended stats have {} fields in {}; expected 8; record rejected",
+                toks.len(),
+                path.display()
+            );
+            return None;
         }
-        if let Some((ndd, sdd)) = parse_dice(toks.get(7).copied().unwrap_or("")) {
-            ext.num_dam_dice = ndd;
-            ext.size_dam_dice = sdd;
-        }
+        let n = |k: usize, field: &str| {
+            let raw = toks.get(k).copied().or_else(|| {
+                log::warn!(
+                    "SYSERR: mobile {vnum} missing {field} in {}; record rejected",
+                    path.display()
+                );
+                None
+            })?;
+            disk_i32(path, vnum, field, raw)
+        };
+        n(0, "level")?;
+        ext.power = n(1, "power")?;
+        ext.mpower = n(2, "magic power")?;
+        ext.defense = n(3, "defense")?;
+        ext.mdefense = n(4, "magic defense")?;
+        ext.technique = n(5, "technique")?;
+        let hit_dice = toks.get(6).copied().or_else(|| {
+            log::warn!(
+                "SYSERR: mobile {vnum} missing hit/mana/move dice in {}; record rejected",
+                path.display()
+            );
+            None
+        })?;
+        let damage_dice = toks.get(7).copied().or_else(|| {
+            log::warn!(
+                "SYSERR: mobile {vnum} missing damage dice in {}; record rejected",
+                path.display()
+            );
+            None
+        })?;
+        let (h, ma, mo) = disk_dice_plus(path, vnum, "hit/mana/move dice", hit_dice)?;
+        ext.hit = h;
+        ext.mana = ma;
+        ext.movep = mo;
+        let (ndd, sdd) = disk_dice(path, vnum, "damage dice", damage_dice)?;
+        ext.num_dam_dice = ndd;
+        ext.size_dam_dice = sdd;
     } else {
         // Classic: ` # # # #d#+# #d#+#` — fields after level are thac0/ac then
         // the H/M/V dice and bare-hand dice. We extract the H dice (4th token)
         // and bare-hand dice (last token).
         let toks: Vec<&str> = stats_line.split_whitespace().collect();
-        if let Some((h, ma, mo)) = parse_dice_plus(toks.get(3).copied().unwrap_or("")) {
-            ext.hit = h;
-            ext.mana = ma;
-            ext.movep = mo;
+        if toks.len() != 5 {
+            log::warn!(
+                "SYSERR: mobile {vnum} classic stats have {} fields in {}; expected 5; record rejected",
+                toks.len(),
+                path.display()
+            );
+            return None;
         }
-        if let Some((ndd, sdd)) = parse_dice(toks.get(4).copied().unwrap_or("")) {
-            ext.num_dam_dice = ndd;
-            ext.size_dam_dice = sdd;
+        for (index, field) in ["level", "thac0", "armor"].into_iter().enumerate() {
+            let raw = toks.get(index).copied().or_else(|| {
+                log::warn!(
+                    "SYSERR: mobile {vnum} missing {field} in {}; record rejected",
+                    path.display()
+                );
+                None
+            })?;
+            disk_i32(path, vnum, field, raw)?;
         }
+        let hit_dice = toks.get(3).copied().or_else(|| {
+            log::warn!(
+                "SYSERR: mobile {vnum} missing hit/mana/move dice in {}; record rejected",
+                path.display()
+            );
+            None
+        })?;
+        let damage_dice = toks.get(4).copied().or_else(|| {
+            log::warn!(
+                "SYSERR: mobile {vnum} missing damage dice in {}; record rejected",
+                path.display()
+            );
+            None
+        })?;
+        let (h, ma, mo) = disk_dice_plus(path, vnum, "hit/mana/move dice", hit_dice)?;
+        ext.hit = h;
+        ext.mana = ma;
+        ext.movep = mo;
+        let (ndd, sdd, _) = disk_dice_plus(path, vnum, "damage dice", damage_dice)?;
+        ext.num_dam_dice = ndd;
+        ext.size_dam_dice = sdd;
     }
 
-    // Skip gold/exp and pos/default/sex (already on the proto), then read the
-    // espec keyword block until a lone 'E' (only when the flag letter was 'E').
-    idx += 2; // gold/exp line + pos line
+    // These fields are already represented by the live proto, but still
+    // validate every present on-disk number before MEDIT can rewrite it.
+    let ge_line = lines.get(idx)?.trim();
+    idx += 1;
+    let ge: Vec<&str> = ge_line.split_whitespace().collect();
+    if ge.len() < 2 {
+        log::warn!(
+            "SYSERR: mobile {vnum} missing gold/experience fields in {}; record rejected",
+            path.display()
+        );
+        return None;
+    }
+    disk_i32(path, vnum, "gold", ge[0])?;
+    disk_i64(path, vnum, "experience", ge[1])?;
+
+    let pos_line = lines.get(idx)?.trim();
+    idx += 1;
+    let pos: Vec<&str> = pos_line.split_whitespace().collect();
+    if pos.len() < 3 {
+        log::warn!(
+            "SYSERR: mobile {vnum} missing position/default-position/sex fields in {}; record rejected",
+            path.display()
+        );
+        return None;
+    }
+    disk_i32(path, vnum, "position", pos[0])?;
+    disk_i32(path, vnum, "default position", pos[1])?;
+    disk_i32(path, vnum, "sex", pos[2])?;
+
+    // Read the espec keyword block until a lone 'E' (only for enhanced mobs).
     if letter == 'E' {
         while idx < lines.len() {
             let lt = lines[idx].trim();
@@ -1563,7 +1727,7 @@ fn read_disk_mob(path: &std::path::Path, vnum: MobVnum) -> Option<DiskMobExt> {
                 break;
             }
             if let Some((kw, val)) = lt.split_once(':') {
-                let num: i32 = val.trim().parse().unwrap_or(0);
+                let num = disk_i32(path, vnum, kw.trim(), val.trim())?;
                 match kw.trim() {
                     "BareHandAttack" => ext.attack_type = num.clamp(0, 99),
                     "Str" => ext.str_ = num.clamp(3, 25),
@@ -1582,34 +1746,99 @@ fn read_disk_mob(path: &std::path::Path, vnum: MobVnum) -> Option<DiskMobExt> {
     Some(ext)
 }
 
-/// Parse `NdM+K` -> (N, M, K). Returns None if not in that form.
-fn parse_dice_plus(tok: &str) -> Option<(i32, i32, i32)> {
-    let (n_part, rest) = tok.split_once('d')?;
-    let (m_part, plus) = match rest.split_once('+') {
-        Some((m, p)) => (m, Some(p)),
-        None => (rest, None),
-    };
-    let n: i32 = n_part.parse().ok()?;
-    let m: i32 = m_part.parse().ok()?;
-    let k: i32 = plus.and_then(|p| p.parse().ok()).unwrap_or(0);
-    Some((n, m, k))
+fn disk_i32(path: &std::path::Path, vnum: MobVnum, field: &str, raw: &str) -> Option<i32> {
+    match crate::text::parse_i32_strict(raw) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            log::warn!(
+                "SYSERR: mobile {vnum} invalid {field} ({error:?}) in {}; record rejected",
+                path.display(),
+            );
+            None
+        }
+    }
 }
 
-/// Parse `NdM` -> (N, M).
-fn parse_dice(tok: &str) -> Option<(i32, i32)> {
-    let (n_part, m_part) = tok.split_once('d')?;
-    let n: i32 = n_part.parse().ok()?;
-    // Drop any trailing +K (defensive; bare-hand dice has no +).
-    let m: i32 = m_part.split('+').next().unwrap_or(m_part).parse().ok()?;
-    Some((n, m))
+fn disk_i64(path: &std::path::Path, vnum: MobVnum, field: &str, raw: &str) -> Option<i64> {
+    match crate::text::parse_i64_strict(raw) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            log::warn!(
+                "SYSERR: mobile {vnum} invalid {field} ({error:?}) in {}; record rejected",
+                path.display(),
+            );
+            None
+        }
+    }
+}
+
+fn disk_dice_plus(
+    path: &std::path::Path,
+    vnum: MobVnum,
+    field: &str,
+    raw: &str,
+) -> Option<(i32, i32, i32)> {
+    match parse_dice_plus(raw) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            log::warn!(
+                "SYSERR: mobile {vnum} invalid {field} ({error:?}) in {}; record rejected",
+                path.display(),
+            );
+            None
+        }
+    }
+}
+
+fn disk_dice(path: &std::path::Path, vnum: MobVnum, field: &str, raw: &str) -> Option<(i32, i32)> {
+    match parse_dice(raw) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            log::warn!(
+                "SYSERR: mobile {vnum} invalid {field} ({error:?}) in {}; record rejected",
+                path.display(),
+            );
+            None
+        }
+    }
+}
+
+/// Parse `NdM+K` -> (N, M, K), preserving numeric overflow as an error.
+fn parse_dice_plus(tok: &str) -> Result<(i32, i32, i32), crate::text::ParseIntError> {
+    let (n_part, rest) = tok
+        .split_once('d')
+        .ok_or(crate::text::ParseIntError::Invalid)?;
+    let (m_part, plus) = rest
+        .split_once('+')
+        .ok_or(crate::text::ParseIntError::Invalid)?;
+    let n = crate::text::parse_i32_strict(n_part)?;
+    let m = crate::text::parse_i32_strict(m_part)?;
+    let k = crate::text::parse_i32_strict(plus)?;
+    Ok((n, m, k))
+}
+
+/// Parse `NdM` -> (N, M), preserving numeric overflow as an error.
+fn parse_dice(tok: &str) -> Result<(i32, i32), crate::text::ParseIntError> {
+    let (n_part, m_part) = tok
+        .split_once('d')
+        .ok_or(crate::text::ParseIntError::Invalid)?;
+    let n = crate::text::parse_i32_strict(n_part)?;
+    // Extended-format bare-hand dice has no bonus. Reject a trailing `+K`
+    // instead of dropping it, because that can hide an overflowing field.
+    let m = crate::text::parse_i32_strict(m_part)?;
+    Ok((n, m))
 }
 
 /// CircleMUD asciiflag_conv: a flag field is either a plain integer or a string
 /// of letters (a-z = bits 0-25, A-Z = bits 26-51).
-fn asciiflag_conv(flag: &str) -> i64 {
+fn asciiflag_conv(flag: &str) -> Result<i64, crate::text::ParseIntError> {
     let flag = flag.trim();
-    if let Ok(n) = flag.parse::<i64>() {
-        return n;
+    let decimal = flag
+        .strip_prefix('-')
+        .or_else(|| flag.strip_prefix('+'))
+        .unwrap_or(flag);
+    if !decimal.is_empty() && decimal.bytes().all(|byte| byte.is_ascii_digit()) {
+        return crate::text::parse_i64_strict(flag);
     }
     let mut bits: i64 = 0;
     for c in flag.chars() {
@@ -1617,9 +1846,11 @@ fn asciiflag_conv(flag: &str) -> i64 {
             bits |= 1 << (c as i64 - 'a' as i64);
         } else if c.is_ascii_uppercase() {
             bits |= 1 << (26 + c as i64 - 'A' as i64);
+        } else {
+            return Err(crate::text::ParseIntError::Invalid);
         }
     }
-    bits
+    Ok(bits)
 }
 
 // ===========================================================================
@@ -1687,33 +1918,29 @@ fn mlog(base: f64, x: i32) -> f64 {
 }
 
 // ===========================================================================
-// Tiny numeric helpers (C atoi semantics: leading int, else 0).
+// Tiny numeric helpers (C atoi syntax, but overflow keeps the editor open).
 // ===========================================================================
 
-fn atoi(s: &str) -> i32 {
-    let t = s.trim();
-    let mut end = 0;
-    let bytes = t.as_bytes();
-    if !bytes.is_empty() && (bytes[0] == b'-' || bytes[0] == b'+') {
-        end = 1;
+fn olc_atoi(g: &mut GameState, conn: ConnId, s: &str) -> Option<i32> {
+    match crate::text::parse_i32_atoi(s) {
+        Ok(value) => Some(value),
+        Err(crate::text::ParseIntError::Overflow) => {
+            send(g, conn, "That number is outside the supported range.\r\n] ");
+            None
+        }
+        Err(_) => unreachable!("parse_i32_atoi maps nonnumeric input to zero"),
     }
-    while end < bytes.len() && bytes[end].is_ascii_digit() {
-        end += 1;
-    }
-    t[..end].parse().unwrap_or(0)
 }
 
-fn atoi64(s: &str) -> i64 {
-    let t = s.trim();
-    let mut end = 0;
-    let bytes = t.as_bytes();
-    if !bytes.is_empty() && (bytes[0] == b'-' || bytes[0] == b'+') {
-        end = 1;
+fn olc_atoi64(g: &mut GameState, conn: ConnId, s: &str) -> Option<i64> {
+    match crate::text::parse_i64_atoi(s) {
+        Ok(value) => Some(value),
+        Err(crate::text::ParseIntError::Overflow) => {
+            send(g, conn, "That number is outside the supported range.\r\n] ");
+            None
+        }
+        Err(_) => unreachable!("parse_i64_atoi maps nonnumeric input to zero"),
     }
-    while end < bytes.len() && bytes[end].is_ascii_digit() {
-        end += 1;
-    }
-    t[..end].parse().unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -1724,8 +1951,24 @@ mod tests {
     use crate::connection::Descriptor;
     use crate::world::Zone;
 
-    #[test]
-    fn exp_entry_clamps_to_i32_max() {
+    fn temp_mob_file(name: &str) -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "deltamud-medit-{name}-{}-{stamp}.mob",
+            std::process::id()
+        ))
+    }
+
+    fn disk_mob(stats: &str, alignment: &str) -> String {
+        format!(
+            "#150\nkeywords~\nshort~\nlong~\ndescription~\n0 0 {alignment} S\n{stats}\n0 0\n0 0 0\n$\n"
+        )
+    }
+
+    fn editor_game(conn: ConnId) -> (GameState, CharId) {
         let mut g = GameState::new(Config::default());
         g.zones.push(Zone {
             number: 1,
@@ -1745,11 +1988,17 @@ mod tests {
         let mut ch = Character::new_player("Root".into(), Class::Cleric, Race::Human);
         ch.player.level = LVL_IMPL;
         let ch = g.create_char(ch);
-        let conn = ConnId(95);
         g.get_char_mut(ch).unwrap().desc = Some(conn);
         let mut d = Descriptor::new(conn, "example.test".to_string());
         d.character = Some(ch);
         g.descriptors.insert(conn, d);
+        (g, ch)
+    }
+
+    #[test]
+    fn exp_entry_clamps_to_i32_max() {
+        let conn = ConnId(95);
+        let (mut g, ch) = editor_game(conn);
 
         do_medit(&mut g, ch, "150", 0);
         medit_parse(&mut g, conn, "d"); // exp prompt
@@ -1758,5 +2007,105 @@ mod tests {
         with_mob(conn, |m| exp.set(m.exp));
         // C stores into an int; a wider value would overflow the .mob loader (#303).
         assert_eq!(exp.get(), i32::MAX as i64);
+    }
+
+    #[test]
+    fn secondary_disk_reader_accepts_i32_edges_and_rejects_adjacent_overflow() {
+        let path = temp_mob_file("numeric-boundaries");
+        let valid = disk_mob("X2147483647 -2147483648 3 4 5 6 7d8+9 10d11", "-2147483648");
+        std::fs::write(&path, valid).unwrap();
+        let loaded = read_disk_mob(&path, 150).expect("signed i32 edges are valid");
+        assert_eq!(loaded.alignment, i32::MIN);
+        assert_eq!(loaded.power, i32::MIN);
+
+        for (alignment, stats) in [
+            ("2147483648", "X1 2 3 4 5 6 7d8+9 10d11"),
+            ("0", "X1 -2147483649 3 4 5 6 7d8+9 10d11"),
+            ("0", "X1 2 3 4 5 6 2147483648d8+9 10d11"),
+            ("0", "X1 2 3 4 5 6 7d8+-2147483649 10d11"),
+            ("0", "X1 2 3 4 5 6 7d8+9 10d2147483648"),
+            ("0", "X1 2 3 4 5 6 7d8+9 10d11+2147483648"),
+            ("0", "1 2 3 4d5+6 10d11+2147483648"),
+            ("0", "X1 2 3 4 5 6 malformed 10d11"),
+        ] {
+            std::fs::write(&path, disk_mob(stats, alignment)).unwrap();
+            assert!(
+                read_disk_mob(&path, 150).is_none(),
+                "alignment={alignment:?}, stats={stats:?}"
+            );
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn medit_entry_rejects_overflowing_classic_damage_bonus() {
+        let conn = ConnId(98);
+        let (mut g, ch) = editor_game(conn);
+        let root = std::env::temp_dir().join(format!(
+            "deltamud-medit-entry-{}-{}",
+            std::process::id(),
+            conn.0
+        ));
+        let mob_dir = root.join("world/mob");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&mob_dir).unwrap();
+        g.config.lib_path = root.to_string_lossy().into_owned();
+
+        // Create the live prototype first; opening an existing prototype is
+        // what invokes the secondary on-disk loader through seed_from_proto.
+        do_medit(&mut g, ch, "new 198", 0);
+        save_internally(&mut g, conn);
+        finish(&mut g, conn);
+
+        let record = |bonus: &str| {
+            format!(
+                "#198\nkeywords~\nshort~\nlong~\ndescription~\n0 0 777 S\n1 2 3 4d5+6 10d11+{bonus}\n0 0\n0 0 0\n$\n"
+            )
+        };
+
+        std::fs::write(mob_dir.join("1.mob"), record("2147483647")).unwrap();
+        do_medit(&mut g, ch, "198", 0);
+        let alignment = std::cell::Cell::new(0);
+        with_mob(conn, |m| alignment.set(m.alignment));
+        assert_eq!(alignment.get(), 777, "valid classic record is loaded");
+        finish(&mut g, conn);
+
+        std::fs::write(mob_dir.join("1.mob"), record("2147483648")).unwrap();
+        do_medit(&mut g, ch, "198", 0);
+        with_mob(conn, |m| alignment.set(m.alignment));
+        assert_eq!(
+            alignment.get(),
+            0,
+            "overflowing classic bonus rejects the disk extension"
+        );
+        finish(&mut g, conn);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn description_editor_handles_multibyte_scalars_at_the_real_byte_boundary() {
+        let conn = ConnId(96);
+        let (mut g, ch) = editor_game(conn);
+        do_medit(&mut g, ch, "151", 0);
+
+        for scalar in ['é', '€', '🦀'] {
+            medit_parse(&mut g, conn, "5");
+            crate::lock_ok::lock(&states())
+                .get_mut(&conn)
+                .unwrap()
+                .ddesc_buf
+                .clear();
+            let input = format!("{}{scalar}", "a".repeat(MAX_MOB_DESC - 1));
+            medit_parse(&mut g, conn, &input);
+            medit_parse(&mut g, conn, "/s");
+            let description = crate::lock_ok::lock(&states())[&conn]
+                .mob
+                .description
+                .clone();
+            assert!(description.is_char_boundary(description.len()));
+            assert!(!description.contains(scalar));
+        }
+        crate::lock_ok::lock(&states()).remove(&conn);
+        olc::clear_active(conn);
     }
 }

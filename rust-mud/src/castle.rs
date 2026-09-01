@@ -31,7 +31,7 @@
 // content behaviour, not a port gap. The port is complete, so the procs come
 // alive the moment the zone is loaded.
 
-use crate::act::{act, ActArg, To};
+use crate::act::{ActArg, To, act};
 use crate::combat::{hit, set_fighting};
 use crate::interpreter::is_abbrev;
 use crate::spell_parser::SPELL_HEAL;
@@ -158,11 +158,11 @@ fn member_of_royal_guard(g: &GameState, ch: CharId) -> bool {
 /// Returns the id of an NPC in `at_char`'s room whose short description begins
 /// with `name` (first `len` chars, case-sensitive strncmp). Used by Tim & Tom.
 fn find_npc_by_name(g: &GameState, at_char: CharId, name: &str, len: usize) -> Option<CharId> {
-    let prefix = &name[..len.min(name.len())];
+    let prefix = crate::text::utf8_prefix(name, len);
     for cid in people_in_room(g, at_char) {
         if is_npc(g, cid) {
             let sd = short_descr(g, cid);
-            if sd.len() >= prefix.len() && &sd[..prefix.len()] == prefix {
+            if sd.starts_with(prefix) {
                 return Some(cid);
             }
         }
@@ -348,7 +348,7 @@ fn block_way(
     let cmd_num = dir_command_num(cmd);
 
     let sd = short_descr(g, ch);
-    let is_king = sd.len() >= 11 && &sd[..11] == "King Welmar";
+    let is_king = sd.starts_with("King Welmar");
 
     if cmd_num != prohibited || is_king {
         return false;
