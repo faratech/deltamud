@@ -1368,7 +1368,7 @@ pub fn spell_portal(
     if v_flags.contains(RoomFlags::HOUSE) || v_flags.bits() & ROOM_HOUSE_CRASH != 0 {
         let caster_idnum = g.get_char(ch).map(|c| c.idnum).unwrap_or(-1);
         let target_vnum = g.room(v_room).number;
-        if !crate::house::house_owned_by(target_vnum, caster_idnum) {
+        if !crate::house::house_owned_by(g, target_vnum, caster_idnum) {
             g.send_to_char(ch, "Your target is protected against your magic.\n\r");
             return;
         }
@@ -1490,7 +1490,7 @@ pub fn spell_home(
     // Find the house this caster owns (house_control[i].owner == GET_IDNUM(ch),
     // last match wins — spells.c). homenum == 0 / None means "no house owned".
     let idnum = g.get_char(ch).map(|c| c.idnum).unwrap_or(-1);
-    let homenum = match crate::house::house_for_owner(idnum) {
+    let homenum = match crate::house::house_for_owner(g, idnum) {
         Some(v) => v,
         None => {
             g.send_to_char(ch, "The spell fails because you don't own a house!\r\n");
@@ -1922,8 +1922,8 @@ mod tests {
     #[test]
     fn portal_blocks_intangible_target_for_mortal_caster() {
         let _guard = lock_test_houses();
-        crate::house::set_test_houses(Vec::new());
         let mut g = GameState::new(Config::default());
+        crate::house::set_test_houses(&mut g, Vec::new());
         add_portal_proto(&mut g);
         let caster_room = g.add_room(Room::new(
             100,
@@ -1983,7 +1983,7 @@ mod tests {
             "A private home.".to_string(),
         ));
         g.room_mut(house_room).room_flags |= RoomFlags::HOUSE;
-        crate::house::set_test_houses(vec![(200, 10)]);
+        crate::house::set_test_houses(&mut g, vec![(200, 10)]);
         let conn = ConnId(1);
         g.descriptors
             .insert(conn, Descriptor::new(conn, "test".to_string()));
@@ -2024,7 +2024,7 @@ mod tests {
             "A private home.".to_string(),
         ));
         g.room_mut(house_room).room_flags |= RoomFlags::HOUSE;
-        crate::house::set_test_houses(vec![(200, 99)]);
+        crate::house::set_test_houses(&mut g, vec![(200, 99)]);
         let conn = ConnId(1);
         g.descriptors
             .insert(conn, Descriptor::new(conn, "test".to_string()));

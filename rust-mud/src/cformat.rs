@@ -37,8 +37,9 @@ pub const C_MAX_BOARD_MESSAGES: usize = 60;
 /// structs.h:583 MAX_ROOM_VNUM - the C loader stops at this vnum.
 pub const C_MAX_ROOM_VNUM: i64 = 500000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PersistenceFormat {
+    #[default]
     Rust,
     C,
 }

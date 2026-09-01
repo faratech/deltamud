@@ -1867,8 +1867,8 @@ where
     F: FnOnce(&std::path::Path, &[u8]) -> IoResult<()>,
 {
     let vnum = with_state(conn, |state| state.vnum);
-    let result = sedit_save_internally_with_reconcile(g, conn, replace, |contents, vnum| {
-        crate::shop::upsert_shop_from_zone_contents(contents, vnum)
+    let result = sedit_save_internally_with_reconcile(g, conn, replace, |game, contents, vnum| {
+        crate::shop::upsert_shop_from_zone_contents(game, contents, vnum)
     });
     if let Some(vnum) = vnum {
         match &result {
@@ -1887,7 +1887,7 @@ fn sedit_save_internally_with_reconcile<F, R>(
 ) -> IoResult<()>
 where
     F: FnOnce(&std::path::Path, &[u8]) -> IoResult<()>,
-    R: FnOnce(&str, i32) -> IoResult<()>,
+    R: FnOnce(&mut GameState, &str, i32) -> IoResult<()>,
 {
     let (shop, vnum, zone) = match with_state(conn, |st| (st.shop.clone(), st.vnum, st.zone)) {
         Some(v) => v,
@@ -1922,7 +1922,7 @@ where
         Err(error) => return Err(error),
     };
 
-    if let Err(reconcile_error) = reconcile(&candidate, vnum) {
+    if let Err(reconcile_error) = reconcile(g, &candidate, vnum) {
         crate::olc::olc_add_to_save_list(zone, crate::olc::OLC_SAVE_SHOP);
         let context = publication_error.as_ref().map_or_else(
             || "shop data was published, but the live shop could not be reconciled".to_string(),
@@ -2028,11 +2028,10 @@ mod tests {
         original.keeper = old_keeper;
         original.profit_buy = 1.10;
         sedit_save_to_disk(dir.to_str().unwrap(), zone, &[original]).unwrap();
-        crate::shop::upsert_shop_from_zone_file(dir.to_str().unwrap(), zone, vnum).unwrap();
-
         let mut config = Config::default();
         config.lib_path = dir.to_string_lossy().into_owned();
         let mut g = GameState::new(config);
+        crate::shop::upsert_shop_from_zone_file(&mut g, dir.to_str().unwrap(), zone, vnum).unwrap();
         let ch = g.create_char(Character::new_player(
             "Root".into(),
             Class::Cleric,
@@ -2063,14 +2062,14 @@ mod tests {
         assert_eq!(persisted[0].keeper, new_keeper);
         assert_eq!(persisted[0].profit_buy, 1.75);
         assert!(!dir.join("world/shp/9876.new").exists());
-        let live = crate::shop::test_shop_definition(vnum).unwrap();
+        let live = crate::shop::test_shop_definition(&g, vnum).unwrap();
         assert_eq!(live.0, new_keeper);
         assert_eq!(live.1, 1.75);
-        assert!(!crate::shop::is_shop_keeper_vnum(old_keeper));
-        assert!(crate::shop::is_shop_keeper_vnum(new_keeper));
+        assert!(!crate::shop::is_shop_keeper_vnum(&g, old_keeper));
+        assert!(crate::shop::is_shop_keeper_vnum(&g, new_keeper));
 
         take_state(conn);
-        crate::shop::test_remove_shop(vnum);
+        crate::shop::test_remove_shop(&mut g, vnum);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -2142,7 +2141,7 @@ mod tests {
         g.char_to_room(buyer, new_room);
         g.char_to_room(keeper, new_room);
         assert_eq!(
-            crate::shop::test_shop_definition(vnum).unwrap().0,
+            crate::shop::test_shop_definition(&g, vnum).unwrap().0,
             keeper_vnum
         );
         assert_eq!(g.get_char(keeper).unwrap().nr, keeper_vnum);
@@ -2210,7 +2209,7 @@ mod tests {
         assert!(g.descriptors[&conn].outbuf.contains("LIVE PURCHASE 50."));
 
         take_state(conn);
-        crate::shop::test_remove_shop(vnum);
+        crate::shop::test_remove_shop(&mut g, vnum);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -2224,11 +2223,10 @@ mod tests {
         original.keeper = 987_801;
         original.profit_buy = 1.25;
         sedit_save_to_disk(dir.to_str().unwrap(), zone, &[original]).unwrap();
-        crate::shop::upsert_shop_from_zone_file(dir.to_str().unwrap(), zone, vnum).unwrap();
-
         let mut config = Config::default();
         config.lib_path = dir.to_string_lossy().into_owned();
         let mut g = GameState::new(config);
+        crate::shop::upsert_shop_from_zone_file(&mut g, dir.to_str().unwrap(), zone, vnum).unwrap();
         let ch = g.create_char(Character::new_player(
             "Root".into(),
             Class::Cleric,
@@ -2260,12 +2258,12 @@ mod tests {
         let persisted = load_zone_shops(dir.to_str().unwrap(), zone).unwrap();
         assert_eq!(persisted[0].keeper, 987_801);
         assert_eq!(persisted[0].profit_buy, 1.25);
-        let live = crate::shop::test_shop_definition(vnum).unwrap();
+        let live = crate::shop::test_shop_definition(&g, vnum).unwrap();
         assert_eq!(live.0, 987_801);
         assert_eq!(live.1, 1.25);
 
         take_state(conn);
-        crate::shop::test_remove_shop(vnum);
+        crate::shop::test_remove_shop(&mut g, vnum);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -2278,11 +2276,11 @@ mod tests {
             let mut original = Shop::new(vnum);
             original.keeper = vnum + 1;
             sedit_save_to_disk(dir.to_str().unwrap(), zone, &[original]).unwrap();
-            crate::shop::upsert_shop_from_zone_file(dir.to_str().unwrap(), zone, vnum).unwrap();
-
             let mut config = Config::default();
             config.lib_path = dir.to_string_lossy().into_owned();
             let mut g = GameState::new(config);
+            crate::shop::upsert_shop_from_zone_file(&mut g, dir.to_str().unwrap(), zone, vnum)
+                .unwrap();
             let ch = g.create_char(Character::new_player(
                 "Root".into(),
                 Class::Cleric,
@@ -2319,7 +2317,9 @@ mod tests {
                         crate::olc::atomic_replace(path, bytes)
                     }
                 },
-                |_contents, _vnum| Err(std::io::Error::other("injected live reconcile failure")),
+                |_game, _contents, _vnum| {
+                    Err(std::io::Error::other("injected live reconcile failure"))
+                },
             )
             .unwrap_err();
 
@@ -2328,7 +2328,10 @@ mod tests {
                 load_zone_shops(dir.to_str().unwrap(), zone).unwrap()[0].keeper,
                 vnum + 2
             );
-            assert_eq!(crate::shop::test_shop_definition(vnum).unwrap().0, vnum + 1);
+            assert_eq!(
+                crate::shop::test_shop_definition(&g, vnum).unwrap().0,
+                vnum + 1
+            );
             assert!(crate::olc::test_pending_save(
                 zone,
                 crate::olc::OLC_SAVE_SHOP
@@ -2336,7 +2339,7 @@ mod tests {
 
             crate::olc::olc_remove_from_save_list(zone, crate::olc::OLC_SAVE_SHOP);
             take_state(conn);
-            crate::shop::test_remove_shop(vnum);
+            crate::shop::test_remove_shop(&mut g, vnum);
             let _ = std::fs::remove_dir_all(dir);
         }
     }

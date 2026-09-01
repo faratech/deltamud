@@ -806,18 +806,18 @@ async fn run_server() -> Result<state::ProcessDisposition> {
     // DB_BOOT_SHP, which boot_world() skips under no_specials (db.c:261
     // `if (!no_specials) index_boot(DB_BOOT_SHP)`).
     if !config.no_specials {
-        shop::boot_shops(&config.lib_path);
+        shop::boot_shops(&mut state, &config.lib_path);
     }
-    clan::boot_clans(&config.lib_path);
+    clan::boot_clans(&mut state, &config.lib_path);
     match db.clan_member_counts().await {
-        Ok(counts) => clan::recount_member_counts(&counts),
+        Ok(counts) => clan::recount_member_counts(&mut state, &counts),
         Err(e) => warn!("Could not recount clan members from player_main: {}", e),
     }
     boards::boot_boards(&config.lib_path);
     ban::boot_ban(&config.lib_path);
     mail::boot_mail(&config.lib_path);
     quest::boot_quest(&mut state, &config.lib_path);
-    auction::boot_auction(&config.lib_path);
+    auction::boot_auction(&mut state, &config.lib_path);
     // C boot_db order (db.c:358-365 vs 369-373): the initial zone reset
     // (world population) runs BEFORE House_boot, so stored house objects are
     // not present during the first reset - otherwise an 'R' command could

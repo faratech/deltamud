@@ -33,7 +33,6 @@ use crate::interpreter::{half_chop, is_abbrev};
 use crate::room::RoomFlags;
 use crate::state::{GameState, OfflineOpAuthority};
 use crate::types::*;
-use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
 // Constants (clan.h / structs.h) mirrored locally so this module is
@@ -114,30 +113,25 @@ impl ClanInfo {
 /// The whole table plus its count, behind one mutex (C globals `clan[]` and
 /// `num_of_clans`). `lib_path` is captured at boot so `save_clans` can rewrite
 /// the file without threading it through every call site.
-struct ClanTable {
-    clans: Vec<ClanInfo>,
-    lib_path: String,
-    format: crate::cformat::PersistenceFormat,
+pub struct ClanTable {
+    pub clans: Vec<ClanInfo>,
+    pub lib_path: String,
+    pub format: crate::cformat::PersistenceFormat,
 }
 
-static CLANS: OnceLock<Mutex<ClanTable>> = OnceLock::new();
+// The live clan table lives on GameState as `econ.clans` (phase-1 statics
+// migration). A fresh GameState therefore starts empty with the default
+// persistence format, exactly like the old never-booted static.
 
-#[cfg(test)]
-pub(crate) fn test_clan_guard() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-}
-
-fn table() -> &'static Mutex<ClanTable> {
-    // If boot_clans was never called (e.g. a unit test), install an empty
-    // table with the default lib path so the commands still operate.
-    CLANS.get_or_init(|| {
-        Mutex::new(ClanTable {
+/// Empty table for tests / never-booted states.
+impl Default for ClanTable {
+    fn default() -> Self {
+        ClanTable {
             clans: Vec::new(),
             lib_path: "lib".to_string(),
             format: crate::cformat::default_persistence_format(),
-        })
-    })
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +199,7 @@ fn convert_to_c_clan(clan: &ClanInfo) -> crate::cformat::CClanInfo {
     }
 }
 
-pub fn boot_clans(lib_path: &str) {
+pub fn boot_clans(g: &mut GameState, lib_path: &str) {
     let path = clan_file_path(lib_path);
     let (clans, format) = match std::fs::read(&path) {
         Ok(bytes) => {
@@ -242,29 +236,22 @@ pub fn boot_clans(lib_path: &str) {
         format,
     };
 
-    // Install (or, on a double-boot, replace the contents of) the static.
-    match CLANS.get() {
-        Some(m) => {
-            *crate::lock_ok::lock(&m) = new_table;
-        }
-        None => {
-            let _ = CLANS.set(Mutex::new(new_table));
-        }
-    }
+    // Install (or, on a double-boot, replace the contents of) the owned table.
+    g.econ.clans = new_table;
 
     // Mirror the C "create a new one if missing" behaviour: persist now so the
     // file exists on first boot. Member recounting (C walks the player table)
     // is deferred — the live count is maintained incrementally by the verbs,
     // and a roster count over the live game is done in `clan who`.
-    save_clans();
+    save_clans(g);
     eprintln!("Booting clans . . . Done.");
 }
 
 /// Rebuild loaded clan member counts from player_main aggregate rows, matching
 /// C boot_clans(): start every loaded clan at zero, count only valid clan
 /// indexes, and ignore applicants whose clan_rank is -1.
-pub fn recount_member_counts(counts: &[(i32, i32)]) {
-    let mut t = crate::lock_ok::lock(&table());
+pub fn recount_member_counts(g: &mut GameState, counts: &[(i32, i32)]) {
+    let t = &mut g.econ.clans;
     for clan in &mut t.clans {
         clan.members = 0;
     }
@@ -276,13 +263,12 @@ pub fn recount_member_counts(counts: &[(i32, i32)]) {
             clan.members = count;
         }
     }
-    drop(t);
-    save_clans();
+    save_clans(g);
 }
 
-/// CircleMUD save_clans(): serialize the whole table to clans.dat.
-fn save_clans() {
-    let t = crate::lock_ok::lock(&table());
+/// CircleMUD save_clans(g): serialize the whole table to clans.dat.
+fn save_clans(g: &GameState) {
+    let t = &g.econ.clans;
     let bytes = match t.format {
         crate::cformat::PersistenceFormat::C => {
             let clans: Vec<_> = t.clans.iter().map(convert_to_c_clan).collect();
@@ -507,19 +493,18 @@ fn get_player_vis(g: &GameState, observer: CharId, name: &str) -> Option<CharId>
 }
 
 /// Read a clan field by index without holding the lock across a send.
-fn with_clan<R>(idx: i32, f: impl FnOnce(&ClanInfo) -> R) -> Option<R> {
-    let t = crate::lock_ok::lock(&table());
+fn with_clan<R>(g: &GameState, idx: i32, f: impl FnOnce(&ClanInfo) -> R) -> Option<R> {
     let i = usize::try_from(idx).ok()?;
-    t.clans.get(i).map(f)
+    g.econ.clans.clans.get(i).map(f)
 }
 
-pub fn clan_display_name_and_rank(idx: i32, rank: i32) -> Option<(String, String)> {
-    with_clan(idx, |c| (c.name.clone(), c.rank_label(rank).to_string()))
+pub fn clan_display_name_and_rank(g: &GameState, idx: i32, rank: i32) -> Option<(String, String)> {
+    with_clan(g, idx, |c| (c.name.clone(), c.rank_label(rank).to_string()))
 }
 
 #[cfg(test)]
-pub fn set_test_clans(clans: Vec<(String, Vec<String>)>) {
-    let mut table = crate::lock_ok::lock(&table());
+pub fn set_test_clans(g: &mut GameState, clans: Vec<(String, Vec<String>)>) {
+    let table = &mut g.econ.clans;
     table.clans = clans
         .into_iter()
         .enumerate()
@@ -536,8 +521,8 @@ pub fn set_test_clans(clans: Vec<(String, Vec<String>)>) {
         .collect();
 }
 
-fn num_of_clans() -> i32 {
-    crate::lock_ok::lock(&table()).clans.len() as i32
+fn num_of_clans(g: &GameState) -> i32 {
+    g.econ.clans.clans.len() as i32
 }
 
 // ---------------------------------------------------------------------------
@@ -592,7 +577,7 @@ fn clan_create(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, "You can't do that!\r\n");
         return;
     }
-    if num_of_clans() as usize >= MAX_CLANS {
+    if num_of_clans(g) as usize >= MAX_CLANS {
         g.send_to_char(ch, "Max clans reached.  Report this to an implementor.\r\n");
         return;
     }
@@ -621,7 +606,7 @@ fn clan_create(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, "The leader already belongs to a clan!\r\n");
         return;
     }
-    if find_clan(&arg2).is_some() {
+    if find_clan(g, &arg2).is_some() {
         g.send_to_char(ch, "That clan name alread exists!\r\n");
         return;
     }
@@ -629,7 +614,7 @@ fn clan_create(g: &mut GameState, ch: CharId, arg: &str) {
     let leader_name = get_name(g, leader);
     let new_index;
     {
-        let mut t = crate::lock_ok::lock(&table());
+        let t = &mut g.econ.clans;
         let number = t.clans.len() as i32;
         let mut info = ClanInfo::default();
         info.name = cap(&arg2);
@@ -646,10 +631,10 @@ fn clan_create(g: &mut GameState, ch: CharId, arg: &str) {
         t.clans.push(info);
         new_index = number;
     }
-    save_clans();
+    save_clans(g);
 
     // GET_CLAN(leader) = new index; GET_CLAN_RANK(leader) = clan.ranks.
-    let ranks = with_clan(new_index, |c| c.ranks).unwrap_or(2);
+    let ranks = with_clan(g, new_index, |c| c.ranks).unwrap_or(2);
     if let Some(l) = g.get_char_mut(leader) {
         l.clan = new_index;
         l.clan_rank = ranks;
@@ -657,14 +642,14 @@ fn clan_create(g: &mut GameState, ch: CharId, arg: &str) {
     g.send_to_char(ch, "Clan created successfuly.\r\n");
 }
 
-/// find_clan(name): index of the clan whose (capitalised) name matches, else
+/// find_clan(g, name): index of the clan whose (capitalised) name matches, else
 /// None. C compares CAP(arg) to CAP(clan.name); both are already-capitalised.
-fn find_clan(arg: &str) -> Option<i32> {
+fn find_clan(g: &GameState, arg: &str) -> Option<i32> {
     if arg.is_empty() {
         return None;
     }
     let target = cap(arg);
-    let t = crate::lock_ok::lock(&table());
+    let t = &g.econ.clans;
     t.clans
         .iter()
         .position(|c| cap(&c.name) == target)
@@ -683,7 +668,7 @@ fn clan_destroy(g: &mut GameState, ch: CharId, arg: &str) {
     let Some(i) = clan_i32(g, ch, arg, 0) else {
         return;
     };
-    let n = num_of_clans();
+    let n = num_of_clans(g);
     if i < 0 || i > n - 1 {
         g.send_to_char(ch, "Unknown clan.\r\n");
         return;
@@ -715,7 +700,7 @@ fn clan_destroy(g: &mut GameState, ch: CharId, arg: &str) {
     }
 
     {
-        let mut t = crate::lock_ok::lock(&table());
+        let t = &mut g.econ.clans;
         let idx = i as usize;
         if idx < t.clans.len() {
             t.clans.remove(idx);
@@ -726,7 +711,7 @@ fn clan_destroy(g: &mut GameState, ch: CharId, arg: &str) {
         }
     }
     g.send_to_char(ch, "Clan deleted.\r\n");
-    save_clans();
+    save_clans(g);
 }
 
 // ---------------------------------------------------------------------------
@@ -739,13 +724,13 @@ fn clan_score(g: &mut GameState, ch: CharId) {
         g.send_to_char(ch, NOCLAN);
         return;
     }
-    let score_priv = with_clan(cl, |c| c.privilege[SCORE_PRIV]).unwrap_or(0);
+    let score_priv = with_clan(g, cl, |c| c.privilege[SCORE_PRIV]).unwrap_or(0);
     if rank < score_priv {
         g.send_to_char(ch, "You aren't high enough ranked to do that.\r\n");
         return;
     }
 
-    let info = match with_clan(cl, |c| c.clone()) {
+    let info = match with_clan(g, cl, |c| c.clone()) {
         Some(c) => c,
         None => {
             g.send_to_char(ch, NOCLAN);
@@ -806,7 +791,7 @@ fn set_priv(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, NOCLAN);
         return;
     }
-    let ranks = with_clan(cl, |c| c.ranks).unwrap_or(0);
+    let ranks = with_clan(g, cl, |c| c.ranks).unwrap_or(0);
     if rank != ranks {
         g.send_to_char(
             ch,
@@ -848,12 +833,12 @@ fn set_priv(g: &mut GameState, ch: CharId, arg: &str) {
     match target {
         Some((priv_idx, label)) => {
             {
-                let mut t = crate::lock_ok::lock(&table());
+                let t = &mut g.econ.clans;
                 if let Some(c) = t.clans.get_mut(cl as usize) {
                     c.privilege[priv_idx] = level;
                 }
             }
-            save_clans();
+            save_clans(g);
             g.send_to_char(ch, &format!("{} changed to {}.\r\n", label, level));
         }
         None => {
@@ -885,7 +870,7 @@ fn handle_rank(g: &mut GameState, ch: CharId, arg: &str) {
     let Some(n) = clan_i32(g, ch, &arg2, 0) else {
         return;
     };
-    let ranks = with_clan(cl, |c| c.ranks).unwrap_or(0);
+    let ranks = with_clan(g, cl, |c| c.ranks).unwrap_or(0);
 
     if is_abbrev(&arg1, "raise") {
         // C guard: n in 1..9 AND n >= clan.ranks (raising upward).
@@ -895,7 +880,7 @@ fn handle_rank(g: &mut GameState, ch: CharId, arg: &str) {
         }
         g.send_to_char(ch, &format!("Clan ranks changed to {}.\r\n", n));
         {
-            let mut t = crate::lock_ok::lock(&table());
+            let t = &mut g.econ.clans;
             if let Some(c) = t.clans.get_mut(cl as usize) {
                 let mut i = c.ranks;
                 while i < n {
@@ -910,7 +895,7 @@ fn handle_rank(g: &mut GameState, ch: CharId, arg: &str) {
         if let Some(c) = g.get_char_mut(ch) {
             c.clan_rank = n;
         }
-        save_clans();
+        save_clans(g);
         return;
     }
     if is_abbrev(&arg1, "lower") {
@@ -920,7 +905,7 @@ fn handle_rank(g: &mut GameState, ch: CharId, arg: &str) {
         }
         g.send_to_char(ch, &format!("Clan ranks changed to {}.\r\n", n));
         {
-            let mut t = crate::lock_ok::lock(&table());
+            let t = &mut g.econ.clans;
             if let Some(c) = t.clans.get_mut(cl as usize) {
                 c.ranks = n;
             }
@@ -929,7 +914,7 @@ fn handle_rank(g: &mut GameState, ch: CharId, arg: &str) {
         if let Some(c) = g.get_char_mut(ch) {
             c.clan_rank = n;
         }
-        save_clans();
+        save_clans(g);
         return;
     }
     send_clan_format(g, ch);
@@ -938,7 +923,7 @@ fn handle_rank(g: &mut GameState, ch: CharId, arg: &str) {
 /// lower_entire_clan: when a clan's ranks are lowered, everyone in it (except
 /// rank -1 applicants) drops to rank 1. Only ONLINE members are reachable.
 fn lower_entire_clan(g: &mut GameState, clan_idx: i32) {
-    let number = with_clan(clan_idx, |c| c.number).unwrap_or(clan_idx);
+    let number = with_clan(g, clan_idx, |c| c.number).unwrap_or(clan_idx);
     // C clan.c:388-405: the SQL UPDATE also covers OFFLINE members (#165).
     g.deferred_db_ops
         .push(crate::state::DeferredDbOp::ClanLowerRanks(number));
@@ -966,7 +951,7 @@ fn clan_rank_name(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, NOCLAN);
         return;
     }
-    let ranks = with_clan(cl, |c| c.ranks).unwrap_or(0);
+    let ranks = with_clan(g, cl, |c| c.ranks).unwrap_or(0);
     if rank < ranks {
         g.send_to_char(ch, "You aren't in a position to do that!\r\n");
         return;
@@ -989,7 +974,7 @@ fn clan_rank_name(g: &mut GameState, ch: CharId, arg: &str) {
         return;
     }
     {
-        let mut t = crate::lock_ok::lock(&table());
+        let t = &mut g.econ.clans;
         if let Some(c) = t.clans.get_mut(cl as usize) {
             let slot = (lvl - 1) as usize;
             if slot < MAX_RANKS - 1 {
@@ -998,7 +983,7 @@ fn clan_rank_name(g: &mut GameState, ch: CharId, arg: &str) {
         }
     }
     g.send_to_char(ch, "Rank name changed.\r\n");
-    save_clans();
+    save_clans(g);
 }
 
 // ---------------------------------------------------------------------------
@@ -1022,7 +1007,7 @@ fn clan_apply(g: &mut GameState, ch: CharId, arg: &str) {
     let Some(num) = clan_atoi(g, ch, &arg1) else {
         return;
     };
-    if num >= 0 && num < num_of_clans() {
+    if num >= 0 && num < num_of_clans(g) {
         g.send_to_char(
             ch,
             "Clan applied for.  You may type 'resign' to withdraw your application at any point.\r\n\
@@ -1048,13 +1033,13 @@ fn clan_resign(g: &mut GameState, ch: CharId) {
         g.send_to_char(ch, NOCLAN);
         return;
     }
-    let leader = with_clan(cl, |c| c.leader.clone()).unwrap_or_default();
+    let leader = with_clan(g, cl, |c| c.leader.clone()).unwrap_or_default();
     if get_name(g, ch) == leader {
         g.send_to_char(ch, "Clan owners can't resign.  Speak to a clan god.\r\n");
         return;
     }
     if get_clan_rank(g, ch) > 0 {
-        let mut t = crate::lock_ok::lock(&table());
+        let t = &mut g.econ.clans;
         if let Some(c) = t.clans.get_mut(cl as usize) {
             c.members -= 1;
         }
@@ -1064,7 +1049,7 @@ fn clan_resign(g: &mut GameState, ch: CharId) {
         c.clan_rank = 0;
     }
     g.send_to_char(ch, "You have resigned from your clan.\r\n");
-    save_clans();
+    save_clans(g);
 }
 
 // ---------------------------------------------------------------------------
@@ -1077,7 +1062,7 @@ fn clan_enlist(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, NOCLAN);
         return;
     }
-    let enlist_priv = with_clan(cl, |c| c.privilege[ENLIST_PRIV]).unwrap_or(0);
+    let enlist_priv = with_clan(g, cl, |c| c.privilege[ENLIST_PRIV]).unwrap_or(0);
     if rank < enlist_priv {
         g.send_to_char(ch, "You aren't privileged enough to do that.\r\n");
         return;
@@ -1111,7 +1096,7 @@ fn clan_enlist(g: &mut GameState, ch: CharId, arg: &str) {
     if let Some(v) = g.get_char_mut(victim) {
         v.clan_rank = 1;
     }
-    let clan_name = with_clan(cl, |c| c.name.clone()).unwrap_or_default();
+    let clan_name = with_clan(g, cl, |c| c.name.clone()).unwrap_or_default();
     let ch_name = get_name(g, ch);
     let vic_name = get_name(g, victim);
     g.send_to_char(
@@ -1123,12 +1108,12 @@ fn clan_enlist(g: &mut GameState, ch: CharId, arg: &str) {
         &format!("{} has been enlisted into your clan!\r\n", vic_name),
     );
     {
-        let mut t = crate::lock_ok::lock(&table());
+        let t = &mut g.econ.clans;
         if let Some(c) = t.clans.get_mut(cl as usize) {
             c.members += 1;
         }
     }
-    save_clans();
+    save_clans(g);
 }
 
 // ---------------------------------------------------------------------------
@@ -1141,7 +1126,7 @@ fn clan_expel(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, NOCLAN);
         return;
     }
-    let expel_priv = with_clan(cl, |c| c.privilege[EXPEL_PRIV]).unwrap_or(0);
+    let expel_priv = with_clan(g, cl, |c| c.privilege[EXPEL_PRIV]).unwrap_or(0);
     if rank < expel_priv {
         g.send_to_char(ch, "You aren't privileged enough to do that.\r\n");
         return;
@@ -1168,7 +1153,7 @@ fn clan_expel(g: &mut GameState, ch: CharId, arg: &str) {
         return;
     }
 
-    let clan_name = with_clan(cl, |c| c.name.clone()).unwrap_or_default();
+    let clan_name = with_clan(g, cl, |c| c.name.clone()).unwrap_or_default();
     let ch_name = get_name(g, ch);
     let vic_name = get_name(g, victim);
     if let Some(v) = g.get_char_mut(victim) {
@@ -1189,14 +1174,14 @@ fn clan_expel(g: &mut GameState, ch: CharId, arg: &str) {
         // must not decrement -- the old unconditional decrement drove
         // Members negative and the value persisted in clans.dat.
         let was_member = get_clan_rank(g, victim) > 0;
-        let mut t = crate::lock_ok::lock(&table());
+        let t = &mut g.econ.clans;
         if was_member {
             if let Some(c) = t.clans.get_mut(cl as usize) {
                 c.members -= 1;
             }
         }
     }
-    save_clans();
+    save_clans(g);
 }
 
 // ---------------------------------------------------------------------------
@@ -1210,7 +1195,7 @@ fn clan_list(g: &mut GameState, ch: CharId) {
          ------ -------------------------------- ---->\r\n",
     );
     let rows: Vec<(i32, String, String)> = {
-        let t = crate::lock_ok::lock(&table());
+        let t = &g.econ.clans;
         t.clans
             .iter()
             .enumerate()
@@ -1233,7 +1218,7 @@ fn clan_promote(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, NOCLAN);
         return;
     }
-    let promote_priv = with_clan(cl, |c| c.privilege[PROMOTE_PRIV]).unwrap_or(0);
+    let promote_priv = with_clan(g, cl, |c| c.privilege[PROMOTE_PRIV]).unwrap_or(0);
     if rank < promote_priv {
         g.send_to_char(ch, "You aren't privileged enough to do that!\r\n");
         return;
@@ -1271,7 +1256,7 @@ fn clan_promote(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, "You can't promote someone higher than yourself.\r\n");
         return;
     }
-    let vclan_ranks = with_clan(get_clan(g, victim), |c| c.ranks).unwrap_or(0);
+    let vclan_ranks = with_clan(g, get_clan(g, victim), |c| c.ranks).unwrap_or(0);
     if vrank == vclan_ranks {
         g.send_to_char(
             ch,
@@ -1284,8 +1269,8 @@ fn clan_promote(g: &mut GameState, ch: CharId, arg: &str) {
     if let Some(v) = g.get_char_mut(victim) {
         v.clan_rank = new_rank;
     }
-    let label =
-        with_clan(cl, |c| c.rank_label(new_rank).to_string()).unwrap_or_else(|| "N/A".to_string());
+    let label = with_clan(g, cl, |c| c.rank_label(new_rank).to_string())
+        .unwrap_or_else(|| "N/A".to_string());
     let ch_name = get_name(g, ch);
     let vic_name = get_name(g, victim);
     g.send_to_char(
@@ -1305,7 +1290,7 @@ fn clan_demote(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, NOCLAN);
         return;
     }
-    let demote_priv = with_clan(cl, |c| c.privilege[DEMOTE_PRIV]).unwrap_or(0);
+    let demote_priv = with_clan(g, cl, |c| c.privilege[DEMOTE_PRIV]).unwrap_or(0);
     if rank < demote_priv {
         g.send_to_char(ch, "You aren't privileged enough to do that!\r\n");
         return;
@@ -1355,8 +1340,8 @@ fn clan_demote(g: &mut GameState, ch: CharId, arg: &str) {
     if let Some(v) = g.get_char_mut(victim) {
         v.clan_rank = new_rank;
     }
-    let label =
-        with_clan(cl, |c| c.rank_label(new_rank).to_string()).unwrap_or_else(|| "N/A".to_string());
+    let label = with_clan(g, cl, |c| c.rank_label(new_rank).to_string())
+        .unwrap_or_else(|| "N/A".to_string());
     let ch_name = get_name(g, ch);
     let vic_name = get_name(g, victim);
     g.send_to_char(
@@ -1387,7 +1372,7 @@ fn clan_who_title(g: &mut GameState, ch: CharId, arg: &str) {
     let Some(num) = clan_atoi(g, ch, &arg1) else {
         return;
     };
-    if num < 0 || num > num_of_clans() - 1 {
+    if num < 0 || num > num_of_clans(g) - 1 {
         g.send_to_char(ch, "That clan number does not exist.\r\n");
         return;
     }
@@ -1399,13 +1384,13 @@ fn clan_who_title(g: &mut GameState, ch: CharId, arg: &str) {
         return;
     }
     {
-        let mut t = crate::lock_ok::lock(&table());
+        let t = &mut g.econ.clans;
         if let Some(c) = t.clans.get_mut(num as usize) {
             c.who_name = arg2.clone();
         }
     }
     g.send_to_char(ch, "Clan who title changed.\r\n");
-    save_clans();
+    save_clans(g);
 }
 
 // ---------------------------------------------------------------------------
@@ -1481,11 +1466,11 @@ fn clan_info_list(g: &mut GameState, ch: CharId, arg: &str) {
     let Some(num) = clan_i32(g, ch, arg, -1) else {
         return;
     };
-    if num < 0 || num > num_of_clans() - 1 {
+    if num < 0 || num > num_of_clans(g) - 1 {
         g.send_to_char(ch, "That clan doesn't exist.\r\n");
         return;
     }
-    let info = match with_clan(num, |c| c.clone()) {
+    let info = match with_clan(g, num, |c| c.clone()) {
         Some(c) => c,
         None => {
             g.send_to_char(ch, "That clan doesn't exist.\r\n");
@@ -1535,7 +1520,7 @@ fn clan_who(g: &mut GameState, ch: CharId) {
                 None => continue,
             };
             let drank = get_clan_rank(g, d);
-            let label = with_clan(num, |c| c.rank_label(drank).to_string())
+            let label = with_clan(g, num, |c| c.rank_label(drank).to_string())
                 .unwrap_or_else(|| "N/A".to_string());
             g.send_to_char(
                 ch,
@@ -1575,7 +1560,7 @@ fn clan_roster(g: &mut GameState, ch: CharId) {
         .collect::<Vec<_>>();
     rows.sort_by(|a, b| a.name.cmp(&b.name));
     for p in rows {
-        let label = with_clan(num, |c| c.rank_label(p.clan_rank).to_string())
+        let label = with_clan(g, num, |c| c.rank_label(p.clan_rank).to_string())
             .unwrap_or_else(|| "N/A".to_string());
         g.send_to_char(
             ch,
@@ -1598,7 +1583,7 @@ fn clan_roster(g: &mut GameState, ch: CharId) {
                 let Some(c) = g.get_char(d) else {
                     continue;
                 };
-                let label = with_clan(num, |clan| clan.rank_label(c.clan_rank).to_string())
+                let label = with_clan(g, num, |clan| clan.rank_label(c.clan_rank).to_string())
                     .unwrap_or_else(|| "N/A".to_string());
                 g.send_to_char(
                     ch,
@@ -1645,7 +1630,7 @@ fn clan_new_owner(g: &mut GameState, ch: CharId, arg: &str) {
     let Some(num) = clan_atoi(g, ch, &arg1) else {
         return;
     };
-    if num < 0 || num > num_of_clans() - 1 {
+    if num < 0 || num > num_of_clans(g) - 1 {
         g.send_to_char(ch, "That clan doesn't exist.\r\n");
         return;
     }
@@ -1655,7 +1640,7 @@ fn clan_new_owner(g: &mut GameState, ch: CharId, arg: &str) {
             v.clan = num;
         }
     }
-    let target_ranks = with_clan(num, |c| c.ranks).unwrap_or(2);
+    let target_ranks = with_clan(g, num, |c| c.ranks).unwrap_or(2);
     if get_clan_rank(g, victim) < target_ranks {
         if let Some(v) = g.get_char_mut(victim) {
             v.clan_rank = target_ranks;
@@ -1663,12 +1648,12 @@ fn clan_new_owner(g: &mut GameState, ch: CharId, arg: &str) {
     }
     let vic_name = get_name(g, victim);
     {
-        let mut t = crate::lock_ok::lock(&table());
+        let t = &mut g.econ.clans;
         if let Some(c) = t.clans.get_mut(num as usize) {
             c.leader = vic_name;
         }
     }
-    save_clans();
+    save_clans(g);
 }
 
 // ---------------------------------------------------------------------------
@@ -1688,7 +1673,7 @@ fn set_clanroom(g: &mut GameState, ch: CharId, arg: &str) {
     let Some(num) = clan_atoi(g, ch, &arg1) else {
         return;
     };
-    if num < 0 || num > num_of_clans() - 1 {
+    if num < 0 || num > num_of_clans(g) - 1 {
         g.send_to_char(ch, "No such clan.\r\n");
         return;
     }
@@ -1707,12 +1692,12 @@ fn set_clanroom(g: &mut GameState, ch: CharId, arg: &str) {
         ),
     );
     {
-        let mut t = crate::lock_ok::lock(&table());
+        let t = &mut g.econ.clans;
         if let Some(c) = t.clans.get_mut(num as usize) {
             c.clan_room = room_vnum;
         }
     }
-    save_clans();
+    save_clans(g);
 }
 
 // ---------------------------------------------------------------------------
@@ -1726,7 +1711,7 @@ fn in_clan_room(g: &GameState, ch: CharId, clan_idx: i32) -> bool {
         Some(r) => r,
         None => return false,
     };
-    let clan_room_vnum = match with_clan(clan_idx, |c| c.clan_room) {
+    let clan_room_vnum = match with_clan(g, clan_idx, |c| c.clan_room) {
         Some(v) => v,
         None => return false,
     };
@@ -1751,7 +1736,7 @@ fn do_clan_withdraw(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, NOCLAN);
         return;
     }
-    let withdraw_priv = with_clan(cl, |c| c.privilege[WITHDRAW_PRIV]).unwrap_or(0);
+    let withdraw_priv = with_clan(g, cl, |c| c.privilege[WITHDRAW_PRIV]).unwrap_or(0);
     if rank < withdraw_priv {
         g.send_to_char(ch, "You aren't privileged enough to do that.\r\n");
         return;
@@ -1767,7 +1752,7 @@ fn do_clan_withdraw(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, "Don't you want to withdraw something?\r\n");
         return;
     }
-    let clan_gold = with_clan(cl, |c| c.gold).unwrap_or(0);
+    let clan_gold = with_clan(g, cl, |c| c.gold).unwrap_or(0);
     if amount as i64 > clan_gold {
         g.send_to_char(ch, "Your clan doesn't have that much gold!\r\n");
         return;
@@ -1782,7 +1767,7 @@ fn do_clan_withdraw(g: &mut GameState, ch: CharId, arg: &str) {
     }
 
     {
-        let mut t = crate::lock_ok::lock(&table());
+        let t = &mut g.econ.clans;
         if let Some(c) = t.clans.get_mut(cl as usize) {
             c.gold -= amount as i64;
         }
@@ -1790,7 +1775,7 @@ fn do_clan_withdraw(g: &mut GameState, ch: CharId, arg: &str) {
     if let Some(c) = g.get_char_mut(ch) {
         crate::gold::credit(c, crate::gold::Account::Carried, i64::from(amount));
     }
-    save_clans();
+    save_clans(g);
     g.send_to_char(
         ch,
         &format!(
@@ -1831,14 +1816,14 @@ fn do_clan_deposit(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, "You don't have that much!\r\n");
         return;
     }
-    let clan_gold = with_clan(cl, |c| c.gold).unwrap_or(0);
+    let clan_gold = with_clan(g, cl, |c| c.gold).unwrap_or(0);
     if clan_gold.checked_add(i64::from(amount)).is_none() {
         g.send_to_char(ch, "Your clan account cannot hold that much gold.\r\n");
         return;
     }
 
     {
-        let mut t = crate::lock_ok::lock(&table());
+        let t = &mut g.econ.clans;
         if let Some(c) = t.clans.get_mut(cl as usize) {
             c.gold = c.gold.saturating_add(i64::from(amount));
         }
@@ -1846,7 +1831,7 @@ fn do_clan_deposit(g: &mut GameState, ch: CharId, arg: &str) {
     if let Some(c) = g.get_char_mut(ch) {
         crate::gold::debit(c, crate::gold::Account::Carried, i64::from(amount));
     }
-    save_clans();
+    save_clans(g);
     g.send_to_char(
         ch,
         &format!(
@@ -2042,7 +2027,7 @@ mod tests {
         });
     }
 
-    fn install_test_clan(lib: &str) {
+    fn install_test_clan(g: &mut GameState, lib: &str) {
         let mut c = ClanInfo::default();
         c.name = "First".to_string();
         c.number = 0;
@@ -2052,12 +2037,11 @@ mod tests {
         c.rank_name[1] = "Officer".to_string();
         c.rank_name[2] = "Leader".to_string();
         std::fs::write(clan_file_path(lib), encode_clans(&[c])).unwrap();
-        boot_clans(lib);
+        boot_clans(g, lib);
     }
 
     #[test]
     fn recount_member_counts_replaces_stale_loaded_counts() {
-        let _guard = test_clan_guard();
         let lib = temp_lib("recount");
         let mut first = ClanInfo::default();
         first.name = "First".to_string();
@@ -2068,14 +2052,15 @@ mod tests {
         let path = clan_file_path(&lib);
         std::fs::write(&path, encode_clans(&[first, second])).unwrap();
 
-        boot_clans(&lib);
-        assert_eq!(with_clan(0, |c| c.members), Some(99));
-        assert_eq!(with_clan(1, |c| c.members), Some(88));
+        let mut g = GameState::new(crate::config::Config::default());
+        boot_clans(&mut g, &lib);
+        assert_eq!(with_clan(&g, 0, |c| c.members), Some(99));
+        assert_eq!(with_clan(&g, 1, |c| c.members), Some(88));
 
-        recount_member_counts(&[(0, 2), (1, 0), (4, 12), (-1, 7)]);
+        recount_member_counts(&mut g, &[(0, 2), (1, 0), (4, 12), (-1, 7)]);
 
-        assert_eq!(with_clan(0, |c| c.members), Some(2));
-        assert_eq!(with_clan(1, |c| c.members), Some(0));
+        assert_eq!(with_clan(&g, 0, |c| c.members), Some(2));
+        assert_eq!(with_clan(&g, 1, |c| c.members), Some(0));
         let saved = std::fs::read(&path).unwrap();
         let decoded = decode_clans(&saved).unwrap();
         assert_eq!(decoded[0].members, 2);
@@ -2085,7 +2070,6 @@ mod tests {
 
     #[test]
     fn c_clan_file_is_loaded_and_rewritten_in_c_format() {
-        let _guard = test_clan_guard();
         let lib = temp_lib("c-format");
         let path = clan_file_path(&lib);
         let fixture = crate::cformat::CClanInfo {
@@ -2112,16 +2096,14 @@ mod tests {
         };
         std::fs::write(&path, crate::cformat::encode_clans_dat(&[fixture])).unwrap();
 
-        boot_clans(&lib);
+        let mut g = GameState::new(crate::config::Config::default());
+        boot_clans(&mut g, &lib);
         assert_eq!(
-            with_clan(0, |clan| clan.name.clone()),
+            with_clan(&g, 0, |clan| clan.name.clone()),
             Some("The Wardens".into())
         );
-        assert_eq!(
-            crate::lock_ok::lock(&table()).format,
-            crate::cformat::PersistenceFormat::C
-        );
-        recount_member_counts(&[(0, 2)]);
+        assert_eq!(g.econ.clans.format, crate::cformat::PersistenceFormat::C);
+        recount_member_counts(&mut g, &[(0, 2)]);
 
         let saved = std::fs::read(&path).unwrap();
         assert_eq!(saved.len(), 4 + crate::cformat::C_CLAN_INFO_SIZE);
@@ -2134,10 +2116,9 @@ mod tests {
 
     #[test]
     fn clan_roster_lists_indexed_offline_members_with_class_and_rank() {
-        let _guard = test_clan_guard();
         let lib = temp_lib("offline-roster");
-        install_test_clan(&lib);
         let mut g = GameState::new(Config::default());
+        install_test_clan(&mut g, &lib);
         let actor = connected_player(&mut g, ConnId(1), "Leader", 50);
         {
             let c = g.get_char_mut(actor).unwrap();
@@ -2166,10 +2147,9 @@ mod tests {
 
     #[test]
     fn clan_promote_queues_indexed_offline_target() {
-        let _guard = test_clan_guard();
         let lib = temp_lib("offline-queue");
-        install_test_clan(&lib);
         let mut g = GameState::new(Config::default());
+        install_test_clan(&mut g, &lib);
         let actor = connected_player(&mut g, ConnId(1), "Leader", 50);
         {
             let c = g.get_char_mut(actor).unwrap();
@@ -2190,9 +2170,9 @@ mod tests {
 
     #[test]
     fn clan_membership_commands_queue_indexed_offline_targets() {
-        let _guard = test_clan_guard();
         let lib = temp_lib("offline-all-queue");
-        install_test_clan(&lib);
+        let mut g = GameState::new(Config::default());
+        install_test_clan(&mut g, &lib);
         for command in ["enlist", "expel", "promote", "demote"] {
             let mut g = GameState::new(Config::default());
             let actor = connected_player(&mut g, ConnId(1), "Leader", 50);
@@ -2216,10 +2196,9 @@ mod tests {
 
     #[test]
     fn clan_promote_replay_accepts_descriptorless_loaded_target() {
-        let _guard = test_clan_guard();
         let lib = temp_lib("offline-replay");
-        install_test_clan(&lib);
         let mut g = GameState::new(Config::default());
+        install_test_clan(&mut g, &lib);
         let actor = connected_player(&mut g, ConnId(1), "Leader", 50);
         {
             let c = g.get_char_mut(actor).unwrap();

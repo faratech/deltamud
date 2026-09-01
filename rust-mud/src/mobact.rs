@@ -802,7 +802,7 @@ fn call_mob_spec(g: &mut GameState, ch: CharId) -> bool {
         }
         return false;
     }
-    if crate::shop::is_shop_keeper_vnum(vnum) {
+    if crate::shop::is_shop_keeper_vnum(g, vnum) {
         return crate::shop::shop_keeper(g, ch, ch, "", "");
     }
     if g.get_char(ch)
@@ -840,7 +840,7 @@ pub fn combat_mob_spec_pulse(g: &mut GameState, ch: CharId) {
     let vnum = c.nr;
     if c.act_flags & MOB_CASTER != 0
         || crate::spec_assign::get_mob_spec(g, vnum).is_some()
-        || crate::shop::is_shop_keeper_vnum(vnum)
+        || crate::shop::is_shop_keeper_vnum(g, vnum)
     {
         let _ = call_mob_spec(g, ch);
     }

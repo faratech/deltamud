@@ -27,7 +27,6 @@ use crate::act::{ActArg, To, act};
 use crate::state::GameState;
 use crate::syslog::{CMP, mudlog};
 use crate::types::*;
-use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
 // auction.h #defines for the `ticks` state machine.
@@ -63,17 +62,24 @@ const LVL_IMPL: u8 = crate::types::LVL_IMPL;
 // `obj` is the escrowed object id (None == no item). Behind one mutex so the
 // command handlers and the heartbeat update share a single canonical copy.
 // ---------------------------------------------------------------------------
-struct AuctionData {
-    seller: i64,
-    bidder: i64,
-    obj: Option<ObjId>,
-    bid: i64,
-    ticks: i32,
-    auctioneer: String,
+#[derive(Clone)]
+pub struct AuctionData {
+    pub(crate) seller: i64,
+    pub(crate) bidder: i64,
+    pub(crate) obj: Option<ObjId>,
+    pub(crate) bid: i64,
+    pub(crate) ticks: i32,
+    pub(crate) auctioneer: String,
+}
+
+impl Default for AuctionData {
+    fn default() -> Self {
+        AuctionData::empty()
+    }
 }
 
 impl AuctionData {
-    fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         AuctionData {
             seller: -1,
             bidder: -1,
@@ -85,16 +91,18 @@ impl AuctionData {
     }
 }
 
-static AUCTION: OnceLock<Mutex<AuctionData>> = OnceLock::new();
+fn auction(g: &GameState) -> &AuctionData {
+    &g.econ.auction
+}
 
-fn auction() -> &'static Mutex<AuctionData> {
-    AUCTION.get_or_init(|| Mutex::new(AuctionData::empty()))
+fn auction_mut(g: &mut GameState) -> &mut AuctionData {
+    &mut g.econ.auction
 }
 
 /// CircleMUD auction_reset(): return the auction to a non-bidding state. Does
 /// NOT touch the escrowed object — callers decide what happens to it first.
-fn auction_reset() {
-    let mut a = crate::lock_ok::lock(&auction());
+fn auction_reset(g: &mut GameState) {
+    let a = auction_mut(g);
     a.bidder = -1;
     a.seller = -1;
     a.obj = None;
@@ -107,13 +115,8 @@ fn auction_reset() {
 /// installs (or, on a copyover/double-boot, resets) a fresh empty table. The
 /// `lib_path` argument is accepted to match the other `boot_*` hooks; it is
 /// unused because the auction has no on-disk state.
-pub fn boot_auction(_lib_path: &str) {
-    match AUCTION.get() {
-        Some(m) => *crate::lock_ok::lock(&m) = AuctionData::empty(),
-        None => {
-            let _ = AUCTION.set(Mutex::new(AuctionData::empty()));
-        }
-    }
+pub fn boot_auction(g: &mut GameState, _lib_path: &str) {
+    g.econ.auction = AuctionData::empty();
 }
 
 // ---------------------------------------------------------------------------
@@ -254,7 +257,7 @@ fn get_ch_by_id_desc(g: &GameState, idnum: i64) -> Option<CharId> {
 // (connected, not writing, not PRF_NOAUCT, not in a soundproof room) matches C.
 // ---------------------------------------------------------------------------
 fn auction_output(g: &mut GameState, color: &str, black: &str) {
-    let crier = crate::lock_ok::lock(&auction()).auctioneer.clone();
+    let crier = auction(g).auctioneer.clone();
 
     // Recipient set: every playing descriptor with an attached character.
     let recipients: Vec<CharId> = g
@@ -313,7 +316,7 @@ fn coin_s(bid: i64) -> &'static str {
 pub fn auction_update(g: &mut GameState) {
     // Snapshot the table (copy locals before any send/act, per borrow rules).
     let (ticks, seller_id, bidder_id, obj, bid) = {
-        let a = crate::lock_ok::lock(&auction());
+        let a = auction(g);
         (a.ticks, a.seller, a.bidder, a.obj, a.bid)
     };
 
@@ -340,7 +343,7 @@ pub fn auction_update(g: &mut GameState) {
         if let Some(oid) = obj {
             g.extract_obj(oid);
         }
-        auction_reset();
+        auction_reset(g);
         return;
     }
 
@@ -355,7 +358,7 @@ pub fn auction_update(g: &mut GameState) {
         Some(o) => o,
         // No object but a live auction state — nothing sensible to crier; bail.
         None => {
-            auction_reset();
+            auction_reset(g);
             return;
         }
     };
@@ -378,7 +381,7 @@ pub fn auction_update(g: &mut GameState) {
             short, phase, bname, bid, cs
         );
         auction_output(g, &color, &plain);
-        bump_ticks();
+        bump_ticks(g);
         return;
     }
 
@@ -399,7 +402,7 @@ pub fn auction_update(g: &mut GameState) {
                 g.extract_obj(oid);
             }
         }
-        auction_reset();
+        auction_reset(g);
         return;
     }
 
@@ -415,7 +418,7 @@ pub fn auction_update(g: &mut GameState) {
             short, phase, bid, s
         );
         auction_output(g, &color, &plain);
-        bump_ticks();
+        bump_ticks(g);
         return;
     }
 
@@ -480,13 +483,13 @@ pub fn auction_update(g: &mut GameState) {
             To::Char,
         );
 
-        auction_reset();
+        auction_reset(g);
     }
 }
 
 /// Increment the auction timer (C: auction.ticks++).
-fn bump_ticks() {
-    let mut a = crate::lock_ok::lock(&auction());
+fn bump_ticks(g: &mut GameState) {
+    let a = auction_mut(g);
     a.ticks += 1;
 }
 
@@ -502,7 +505,7 @@ pub fn do_bid(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
     // Snapshot the auction state.
     let (ticks, seller_id, bidder_id, obj, cur_bid) = {
-        let a = crate::lock_ok::lock(&auction());
+        let a = auction(g);
         (a.ticks, a.seller, a.bidder, a.obj, a.bid)
     };
 
@@ -584,7 +587,7 @@ pub fn do_bid(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     // Record the new bid, take the gold, and reset to first-chance.
     let my_id = get_idnum(g, ch);
     {
-        let mut a = crate::lock_ok::lock(&auction());
+        let a = auction_mut(g);
         a.bid = bid;
         a.bidder = my_id;
         a.ticks = AUC_BID;
@@ -621,7 +624,7 @@ pub fn do_auction(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     }
 
     let (ticks, seller_id, obj, cur_bid) = {
-        let a = crate::lock_ok::lock(&auction());
+        let a = auction(g);
         (a.ticks, a.seller, a.obj, a.bid)
     };
 
@@ -691,7 +694,7 @@ pub fn do_auction(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     g.obj_from_anywhere(obj);
 
     {
-        let mut a = crate::lock_ok::lock(&auction());
+        let a = auction_mut(g);
         a.ticks = AUC_BID;
         a.seller = seller_idnum;
         a.bid = minimum;
@@ -723,7 +726,7 @@ pub fn do_auctioneer(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32
         return;
     }
     {
-        let mut a = crate::lock_ok::lock(&auction());
+        let a = auction_mut(g);
         a.auctioneer = name.to_string();
     }
     g.send_to_char(ch, "&YOkay.&n\r\n");
@@ -735,7 +738,7 @@ pub fn do_auctioneer(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32
 // ---------------------------------------------------------------------------
 pub fn do_stop_auction(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
     let (seller_id, bidder_id, obj, bid) = {
-        let a = crate::lock_ok::lock(&auction());
+        let a = auction(g);
         (a.seller, a.bidder, a.obj, a.bid)
     };
 
@@ -758,7 +761,7 @@ pub fn do_stop_auction(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: 
         }
     }
 
-    auction_reset();
+    auction_reset(g);
     g.send_to_char(ch, "&YOkay.&n\r\n");
 }
 
@@ -810,7 +813,7 @@ mod tests {
             "a test lot".to_string(),
         ));
         {
-            let mut a = crate::lock_ok::lock(&auction());
+            let a = auction_mut(&mut g);
             *a = AuctionData {
                 seller: 10_001,
                 bidder: 10_002,
@@ -828,6 +831,6 @@ mod tests {
             crate::gold::GOLD_CAP
         );
         assert!(g.get_char(bidder).unwrap().carrying.contains(&lot));
-        assert_eq!(crate::lock_ok::lock(&auction()).ticks, AUC_NONE);
+        assert_eq!(g.econ.auction.ticks, AUC_NONE);
     }
 }

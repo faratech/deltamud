@@ -554,6 +554,20 @@ pub struct EconomyState {
     /// arena.rs: live arena side-state (per-char arena status, arenamaster,
     /// observer links).
     pub arena: crate::arena::ArenaWorld,
+    /// clan.rs: the live clan table (lib/etc/clans.dat mirror).
+    pub clans: crate::clan::ClanTable,
+    /// house.rs: the house-control table (C house_control[]).
+    pub houses: Vec<crate::house::HouseControlRec>,
+    /// house.rs: detected persistence format of lib/etc/hcontrol.
+    pub house_control_format: crate::cformat::PersistenceFormat,
+    /// house.rs: per-house object file persistence format.
+    pub house_object_formats: HashMap<RoomVnum, crate::cformat::PersistenceFormat>,
+    /// shop.rs: loaded shop table (C shop_index) — added with the shop family.
+    pub shops: Vec<crate::shop::ShopData>,
+    /// shop.rs: keeper vnum -> captured secondary spec procs.
+    pub shop_funcs: Option<HashMap<MobVnum, crate::shop::ShopFn>>,
+    /// auction.rs: the live auction house state.
+    pub auction: crate::auction::AuctionData,
 }
 
 pub struct GameState {

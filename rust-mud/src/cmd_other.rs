@@ -2417,7 +2417,7 @@ pub fn do_steal(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         .get_char(vict)
         .and_then(|c| if c.is_npc { Some(c.nr) } else { None });
     let is_keeper = vict_vnum
-        .map(crate::shop::is_shop_keeper_vnum)
+        .map(|vnum| crate::shop::is_shop_keeper_vnum(g, vnum))
         .unwrap_or(false);
     if vict_level >= LVL_IMMORT || pcsteal || is_keeper {
         percent = 101;

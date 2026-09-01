@@ -2628,7 +2628,7 @@ pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         }
         if c.clan > -1 && c.clan_rank > 0 {
             if let Some((clan_name, rank_name)) =
-                crate::clan::clan_display_name_and_rank(c.clan, c.clan_rank)
+                crate::clan::clan_display_name_and_rank(g, c.clan, c.clan_rank)
             {
                 line.push_str(&format!(" &B[&n{} of {}&B]", rank_name, clan_name));
             } else {
@@ -4163,12 +4163,14 @@ mod tests {
 
     #[test]
     fn do_who_displays_clan_rank_and_clan_names() {
-        let _guard = crate::clan::test_clan_guard();
-        crate::clan::set_test_clans(vec![(
-            "Rustaceans".to_string(),
-            vec!["Initiate".to_string(), "Captain".to_string()],
-        )]);
         let mut g = GameState::new(Config::default());
+        crate::clan::set_test_clans(
+            &mut g,
+            vec![(
+                "Rustaceans".to_string(),
+                vec!["Initiate".to_string(), "Captain".to_string()],
+            )],
+        );
         // Unique ids: do_who pages through the process-global pager table,
         // which is keyed by ConnId — concurrent tests sharing an id would
         // swap each other's pages.

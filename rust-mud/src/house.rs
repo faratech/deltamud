@@ -42,8 +42,6 @@ use crate::object::{
 use crate::room::RoomFlags;
 use crate::state::GameState;
 use crate::types::*;
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
 // Constants (house.h / structs.h / db.h)
@@ -85,7 +83,7 @@ const HCONTROL_FORMAT: &str = "Usage: hcontrol build <house vnum> <exit directio
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
-struct HouseControlRec {
+pub struct HouseControlRec {
     vnum: RoomVnum,
     atrium: RoomVnum,
     exit_num: i32,
@@ -115,20 +113,16 @@ impl HouseControlRec {
     }
 }
 
-fn houses() -> &'static Mutex<Vec<HouseControlRec>> {
-    static HOUSES: OnceLock<Mutex<Vec<HouseControlRec>>> = OnceLock::new();
-    HOUSES.get_or_init(|| Mutex::new(Vec::new()))
+// The house control table and its persistence-format bookkeeping live on
+// GameState as `econ.houses` / `econ.house_control_format` /
+// `econ.house_object_formats` (phase-1 statics migration).
+
+fn houses(g: &GameState) -> &Vec<HouseControlRec> {
+    &g.econ.houses
 }
 
-fn hcontrol_format() -> &'static Mutex<crate::cformat::PersistenceFormat> {
-    static FORMAT: OnceLock<Mutex<crate::cformat::PersistenceFormat>> = OnceLock::new();
-    FORMAT.get_or_init(|| Mutex::new(crate::cformat::default_persistence_format()))
-}
-
-fn house_object_formats() -> &'static Mutex<HashMap<RoomVnum, crate::cformat::PersistenceFormat>> {
-    static FORMATS: OnceLock<Mutex<HashMap<RoomVnum, crate::cformat::PersistenceFormat>>> =
-        OnceLock::new();
-    FORMATS.get_or_init(|| Mutex::new(HashMap::new()))
+fn houses_mut(g: &mut GameState) -> &mut Vec<HouseControlRec> {
+    &mut g.econ.houses
 }
 
 // ---------------------------------------------------------------------------
@@ -175,7 +169,7 @@ fn get_id_by_name(g: &GameState, name: &str) -> i64 {
         return id;
     }
     // Fall back to the control-file name cache.
-    let table = crate::lock_ok::lock(&houses());
+    let table = houses(g);
     for h in table.iter() {
         if h.owner >= 0 && h.owner_name.eq_ignore_ascii_case(&lower) {
             return h.owner;
@@ -208,7 +202,7 @@ fn get_name_by_id(g: &GameState, id: i64) -> Option<String> {
     if let Some(n) = g.get_name_by_id(id) {
         return Some(n);
     }
-    let table = crate::lock_ok::lock(&houses());
+    let table = houses(g);
     for h in table.iter() {
         if h.owner == id && !h.owner_name.is_empty() {
             return Some(h.owner_name.clone());
@@ -295,13 +289,12 @@ fn mudlog(g: &mut GameState, line: &str, min_level: u8) {
 }
 
 // ===========================================================================
-// find_house() (house.c)
+// find_house(g, ) (house.c)
 // ===========================================================================
 
 /// Index of the house whose vnum == `vnum`, or None.
-fn find_house(vnum: RoomVnum) -> Option<usize> {
-    let table = crate::lock_ok::lock(&houses());
-    table.iter().position(|h| h.vnum == vnum)
+fn find_house(g: &GameState, vnum: RoomVnum) -> Option<usize> {
+    houses(g).iter().position(|h| h.vnum == vnum)
 }
 
 // ===========================================================================
@@ -317,8 +310,8 @@ fn find_house(vnum: RoomVnum) -> Option<usize> {
 /// House_save_control(): write the in-memory table to lib/etc/hcontrol.
 fn house_save_control(g: &GameState) {
     let path = hcontrol_path(&g.config.lib_path);
-    let table = crate::lock_ok::lock(&houses());
-    let format = *crate::lock_ok::lock(&hcontrol_format());
+    let table = houses(g);
+    let format = g.econ.house_control_format;
     let bytes = match format {
         crate::cformat::PersistenceFormat::C => {
             let records: Vec<_> = table
@@ -564,7 +557,7 @@ pub fn house_boot(g: &mut GameState) {
         mudlog(g, "SYSERR: House control file is corrupt.", NRM_INVIS);
         return;
     };
-    *crate::lock_ok::lock(&hcontrol_format()) = detected;
+    g.econ.house_control_format = detected;
     let mut accepted: Vec<HouseControlRec> = Vec::new();
     let mut to_load: Vec<RoomVnum> = Vec::new();
 
@@ -619,7 +612,7 @@ pub fn house_boot(g: &mut GameState) {
     }
 
     {
-        let mut table = crate::lock_ok::lock(&houses());
+        let table = houses_mut(g);
         *table = accepted;
     }
 
@@ -764,7 +757,9 @@ pub fn house_crashsave(g: &mut GameState, vnum: RoomVnum) {
         None => return,
     };
     let contents = g.room(rnum).contents.clone();
-    let format = crate::lock_ok::lock(&house_object_formats())
+    let format = g
+        .econ
+        .house_object_formats
         .get(&vnum)
         .copied()
         .or_else(|| {
@@ -827,7 +822,7 @@ pub fn house_crashsave(g: &mut GameState, vnum: RoomVnum) {
         eprintln!("SYSERR: Error saving house file");
         return;
     }
-    crate::lock_ok::lock(&house_object_formats()).insert(vnum, format);
+    g.econ.house_object_formats.insert(vnum, format);
     room_flag_remove(g, rnum, ROOM_HOUSE_CRASH);
 }
 
@@ -851,7 +846,8 @@ fn house_load(g: &mut GameState, vnum: RoomVnum) -> bool {
     };
 
     let format = if bytes.is_empty() {
-        crate::lock_ok::lock(&house_object_formats())
+        g.econ
+            .house_object_formats
             .get(&vnum)
             .copied()
             .unwrap_or_else(crate::cformat::default_persistence_format)
@@ -862,7 +858,7 @@ fn house_load(g: &mut GameState, vnum: RoomVnum) -> bool {
         };
         format
     };
-    crate::lock_ok::lock(&house_object_formats()).insert(vnum, format);
+    g.econ.house_object_formats.insert(vnum, format);
 
     if format == crate::cformat::PersistenceFormat::C {
         let Some(elems) = crate::cformat::decode_obj_file(&bytes) else {
@@ -1087,11 +1083,11 @@ fn parse_obj_line(g: &mut GameState, line: &str) -> Option<(ObjId, usize, bool)>
 }
 
 /// House_delete_file(): remove a house's object file.
-fn house_delete_file(g: &GameState, vnum: RoomVnum) {
+fn house_delete_file(g: &mut GameState, vnum: RoomVnum) {
     if let Some(path) = house_filename(&g.config.lib_path, vnum) {
         let _ = std::fs::remove_file(path);
     }
-    crate::lock_ok::lock(&house_object_formats()).remove(&vnum);
+    g.econ.house_object_formats.remove(&vnum);
 }
 
 /// House_listrent(): list the objects stored in a house file to `ch`.
@@ -1166,7 +1162,7 @@ fn house_listrent(g: &mut GameState, ch: CharId, vnum: RoomVnum) {
 // ===========================================================================
 
 fn hcontrol_list_houses(g: &mut GameState, ch: CharId, showguests: bool) {
-    let table: Vec<HouseControlRec> = crate::lock_ok::lock(&houses()).clone();
+    let table: Vec<HouseControlRec> = houses(g).clone();
     if table.is_empty() {
         g.send_to_char(ch, "No houses have been defined.\r\n");
         return;
@@ -1215,7 +1211,7 @@ fn hcontrol_list_houses(g: &mut GameState, ch: CharId, showguests: bool) {
 }
 
 fn hcontrol_list_houses_guests(g: &mut GameState, ch: CharId) {
-    let table: Vec<HouseControlRec> = crate::lock_ok::lock(&houses()).clone();
+    let table: Vec<HouseControlRec> = houses(g).clone();
     if table.is_empty() {
         g.send_to_char(ch, "No houses have been defined.\r\n");
         return;
@@ -1270,7 +1266,7 @@ fn hcontrol_vnum(g: &mut GameState, ch: CharId, value: &str) -> Option<RoomVnum>
 }
 
 fn hcontrol_build_house(g: &mut GameState, ch: CharId, arg: &str) {
-    if crate::lock_ok::lock(&houses()).len() >= MAX_HOUSES {
+    if houses(g).len() >= MAX_HOUSES {
         g.send_to_char(ch, "Max houses already defined.\r\n");
         return;
     }
@@ -1291,7 +1287,7 @@ fn hcontrol_build_house(g: &mut GameState, ch: CharId, arg: &str) {
             return;
         }
     };
-    if find_house(virt_house).is_some() {
+    if find_house(g, virt_house).is_some() {
         g.send_to_char(ch, "House already exists.\r\n");
         return;
     }
@@ -1367,7 +1363,7 @@ fn hcontrol_build_house(g: &mut GameState, ch: CharId, arg: &str) {
     temp.guests = Vec::new();
     temp.guest_names = Vec::new();
 
-    crate::lock_ok::lock(&houses()).push(temp);
+    houses_mut(g).push(temp);
 
     room_flag_set(g, real_house, ROOM_HOUSE | ROOM_PRIVATE);
     room_flag_set(g, real_atrium, ROOM_ATRIUM);
@@ -1378,7 +1374,7 @@ fn hcontrol_build_house(g: &mut GameState, ch: CharId, arg: &str) {
 }
 
 fn hcontrol_crashsave_house(g: &mut GameState, ch: CharId, arg: &str) {
-    if crate::lock_ok::lock(&houses()).len() >= MAX_HOUSES {
+    if houses(g).len() >= MAX_HOUSES {
         g.send_to_char(ch, "Max crashsaveables/houses already defined.\r\n");
         return;
     }
@@ -1397,7 +1393,7 @@ fn hcontrol_crashsave_house(g: &mut GameState, ch: CharId, arg: &str) {
             return;
         }
     };
-    if find_house(virt_house).is_some() {
+    if find_house(g, virt_house).is_some() {
         g.send_to_char(ch, "House already exists.\r\n");
         return;
     }
@@ -1413,7 +1409,7 @@ fn hcontrol_crashsave_house(g: &mut GameState, ch: CharId, arg: &str) {
     temp.guests = Vec::new();
     temp.guest_names = Vec::new();
 
-    crate::lock_ok::lock(&houses()).push(temp);
+    houses_mut(g).push(temp);
 
     room_flag_set(g, real_house, ROOM_HOUSE | ROOM_PRIVATE);
     house_crashsave(g, virt_house);
@@ -1430,7 +1426,7 @@ fn hcontrol_destroy_house(g: &mut GameState, ch: CharId, arg: &str) {
     let Some(target_vnum) = hcontrol_vnum(g, ch, arg.trim()) else {
         return;
     };
-    let i = match find_house(target_vnum) {
+    let i = match find_house(g, target_vnum) {
         Some(i) => i,
         None => {
             g.send_to_char(ch, "Unknown house.\r\n");
@@ -1439,7 +1435,7 @@ fn hcontrol_destroy_house(g: &mut GameState, ch: CharId, arg: &str) {
     };
 
     let (atrium_vnum, house_vnum) = {
-        let table = crate::lock_ok::lock(&houses());
+        let table = houses(g);
         (table[i].atrium, table[i].vnum)
     };
 
@@ -1454,17 +1450,14 @@ fn hcontrol_destroy_house(g: &mut GameState, ch: CharId, arg: &str) {
 
     house_delete_file(g, house_vnum);
 
-    crate::lock_ok::lock(&houses()).remove(i);
+    houses_mut(g).remove(i);
 
     g.send_to_char(ch, "House deleted.\r\n");
     house_save_control(g);
 
     // Re-set ROOM_ATRIUM on every surviving house's atrium (in case the
     // destroyed house shared an atrium with another). --JE 9/19/94
-    let atriums: Vec<RoomVnum> = crate::lock_ok::lock(&houses())
-        .iter()
-        .map(|h| h.atrium)
-        .collect();
+    let atriums: Vec<RoomVnum> = houses(g).iter().map(|h| h.atrium).collect();
     for av in atriums {
         if let Some(ra) = g.real_room(av) {
             room_flag_set(g, ra, ROOM_ATRIUM);
@@ -1480,7 +1473,7 @@ fn hcontrol_pay_house(g: &mut GameState, ch: CharId, arg: &str) {
     let Some(target_vnum) = hcontrol_vnum(g, ch, arg.trim()) else {
         return;
     };
-    let i = match find_house(target_vnum) {
+    let i = match find_house(g, target_vnum) {
         Some(i) => i,
         None => {
             g.send_to_char(ch, "Unknown house.\r\n");
@@ -1497,7 +1490,7 @@ fn hcontrol_pay_house(g: &mut GameState, ch: CharId, arg: &str) {
     mudlog(g, &msg, LVL_IMMORT.max(invis));
 
     {
-        let mut table = crate::lock_ok::lock(&houses());
+        let table = houses_mut(g);
         table[i].last_payment = now();
     }
     house_save_control(g);
@@ -1514,7 +1507,7 @@ fn hcontrol_update_house(g: &mut GameState, ch: CharId, arg: &str) {
     let Some(virt_house) = hcontrol_vnum(g, ch, &a1) else {
         return;
     };
-    let house = match find_house(virt_house) {
+    let house = match find_house(g, virt_house) {
         Some(h) => h,
         None => {
             g.send_to_char(ch, "Unknown house.\r\n");
@@ -1583,7 +1576,7 @@ fn hcontrol_update_house(g: &mut GameState, ch: CharId, arg: &str) {
     }
 
     {
-        let mut table = crate::lock_ok::lock(&houses());
+        let table = houses_mut(g);
         table[house].atrium = virt_atrium;
         table[house].exit_num = exit_num as i32;
         if owner != -1 {
@@ -1646,7 +1639,7 @@ pub fn do_house(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         return;
     }
     let room_vnum = g.room(in_room).number;
-    let i = match find_house(room_vnum) {
+    let i = match find_house(g, room_vnum) {
         Some(i) => i,
         None => {
             g.send_to_char(ch, "Um.. this house seems to be screwed up.\r\n");
@@ -1655,7 +1648,7 @@ pub fn do_house(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     };
 
     let my_idnum = g.get_char(ch).map(|c| c.idnum).unwrap_or(-1);
-    let owner = crate::lock_ok::lock(&houses())[i].owner;
+    let owner = houses(g)[i].owner;
     if my_idnum != owner {
         g.send_to_char(ch, "Only the primary owner can set guests.\r\n");
         return;
@@ -1663,7 +1656,7 @@ pub fn do_house(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
     if arg.is_empty() {
         // List guests.
-        let guests = crate::lock_ok::lock(&houses())[i].guests.clone();
+        let guests = houses(g)[i].guests.clone();
         g.send_to_char(ch, "Guests of your house:\r\n");
         if guests.is_empty() {
             g.send_to_char(ch, "  None.\r\n");
@@ -1686,7 +1679,7 @@ pub fn do_house(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     let mut deleted = false;
     let mut full = false;
     {
-        let mut table = crate::lock_ok::lock(&houses());
+        let table = houses_mut(g);
         if let Some(pos) = table[i].guests.iter().position(|&gx| gx == id) {
             table[i].guests.remove(pos);
             if pos < table[i].guest_names.len() {
@@ -1768,7 +1761,7 @@ pub fn do_bed(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
         return;
     }
     let room_vnum = g.room(in_room).number;
-    let i = match find_house(room_vnum) {
+    let i = match find_house(g, room_vnum) {
         Some(i) => i,
         None => {
             g.send_to_char(ch, "Um.. this house seems to be screwed up.\r\n");
@@ -1776,7 +1769,7 @@ pub fn do_bed(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
         }
     };
     let my_idnum = g.get_char(ch).map(|c| c.idnum).unwrap_or(-1);
-    let owner = crate::lock_ok::lock(&houses())[i].owner;
+    let owner = houses(g)[i].owner;
     if my_idnum != owner {
         g.send_to_char(ch, "Only the primary owner can go to bed in the house.\r\n");
         return;
@@ -1856,10 +1849,7 @@ pub fn do_bed(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
 /// House_save_all(): crash-save every house whose room carries ROOM_HOUSE_CRASH.
 /// Call from the periodic save heartbeat (C: House_save_all in the autosave).
 pub fn house_save_all(g: &mut GameState) {
-    let vnums: Vec<RoomVnum> = crate::lock_ok::lock(&houses())
-        .iter()
-        .map(|h| h.vnum)
-        .collect();
+    let vnums: Vec<RoomVnum> = houses(g).iter().map(|h| h.vnum).collect();
     for vnum in vnums {
         if let Some(rnum) = g.real_room(vnum) {
             if room_flag_isset(g, rnum, ROOM_HOUSE_CRASH) {
@@ -1869,17 +1859,16 @@ pub fn house_save_all(g: &mut GameState) {
     }
 }
 
-/// house_for_owner(idnum): the vnum of the house owned by `idnum`, or None.
+/// house_for_owner(g, idnum): the vnum of the house owned by `idnum`, or None.
 /// Mirrors spell_home's scan (spells.c): walk the control table and keep the
 /// *last* house whose owner matches, exactly as the C loop overwrites `homenum`
 /// on every match. Used by spell_home to teleport an owner to their house.
-pub fn house_for_owner(idnum: i64) -> Option<RoomVnum> {
+pub fn house_for_owner(g: &GameState, idnum: i64) -> Option<RoomVnum> {
     if idnum < 0 {
         return None;
     }
-    let table = crate::lock_ok::lock(&houses());
     let mut found: Option<RoomVnum> = None;
-    for h in table.iter() {
+    for h in houses(g).iter() {
         if h.owner == idnum {
             found = Some(h.vnum);
         }
@@ -1888,11 +1877,11 @@ pub fn house_for_owner(idnum: i64) -> Option<RoomVnum> {
 }
 
 /// True if the control table records `vnum` as a house owned by `owner_idnum`.
-pub fn house_owned_by(vnum: RoomVnum, owner_idnum: i64) -> bool {
+pub fn house_owned_by(g: &GameState, vnum: RoomVnum, owner_idnum: i64) -> bool {
     if owner_idnum < 0 {
         return false;
     }
-    let table = crate::lock_ok::lock(&houses());
+    let table = houses(g);
     table
         .iter()
         .any(|h| h.vnum == vnum && h.owner == owner_idnum)
@@ -1908,11 +1897,11 @@ pub fn house_can_enter(g: &GameState, ch: CharId, house: RoomVnum) -> bool {
     if has_house_privacy_override(g, ch) {
         return true;
     }
-    let i = match find_house(house) {
+    let i = match find_house(g, house) {
         Some(i) => i,
         None => return true,
     };
-    let table = crate::lock_ok::lock(&houses());
+    let table = houses(g);
     let h = &table[i];
     let my_idnum = g.get_char(ch).map(|c| c.idnum).unwrap_or(-1);
     match h.mode {
@@ -1945,8 +1934,8 @@ fn has_house_privacy_override(g: &GameState, ch: CharId) -> bool {
 }
 
 #[cfg(test)]
-pub fn set_test_houses(house_records: Vec<(RoomVnum, i64)>) {
-    let mut table = crate::lock_ok::lock(&houses());
+pub fn set_test_houses(g: &mut GameState, house_records: Vec<(RoomVnum, i64)>) {
+    let table = houses_mut(g);
     table.clear();
     for (vnum, owner) in house_records {
         let mut rec = HouseControlRec::blank();
@@ -2101,15 +2090,15 @@ mod tests {
         g.update_player_index(42, "Owner", 1, 0, "");
         hcontrol_build_house(&mut g, owner, "1900500 east Owner");
 
-        assert!(find_house(1_900_500).is_none());
+        assert!(find_house(&g, 1_900_500).is_none());
         assert!(!dir.join("house/1900500.house").exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn hcontrol_rejects_overflowing_room_numbers_before_lookup() {
-        set_test_houses(Vec::new());
         let mut g = GameState::new(Config::default());
+        set_test_houses(&mut g, Vec::new());
         let conn = ConnId(910);
         let mut admin = Character::new_player("Admin".into(), Class::Warrior, Race::Human);
         admin.desc = Some(conn);
@@ -2128,7 +2117,7 @@ mod tests {
             do_hcontrol(&mut g, admin, command, 0);
         }
 
-        assert!(crate::lock_ok::lock(&houses()).is_empty());
+        assert!(houses(&g).is_empty());
         assert_eq!(
             g.descriptors[&conn]
                 .outbuf
@@ -2158,9 +2147,9 @@ mod tests {
         g.descriptors.insert(conn, descriptor);
         g.update_player_index(999, "Overflowguest", 1, 0, "");
 
-        set_test_houses(vec![(790_100, 42)]);
+        set_test_houses(&mut g, vec![(790_100, 42)]);
         {
-            let mut table = crate::lock_ok::lock(&houses());
+            let table = houses_mut(&mut g);
             table[0].guests = (1..=MAX_GUESTS as i64).collect();
             table[0].guest_names = (1..=MAX_GUESTS)
                 .map(|number| format!("guest{number}"))
@@ -2169,15 +2158,14 @@ mod tests {
 
         do_house(&mut g, owner, "Overflowguest", 0);
 
-        let table = crate::lock_ok::lock(&houses());
+        let table = houses(&g);
         assert_eq!(table[0].guests.len(), MAX_GUESTS);
         assert!(!table[0].guests.contains(&999));
-        drop(table);
         let output = &g.descriptors[&conn].outbuf;
         assert!(output.contains("guest list is full"));
         assert!(!output.contains("Guest added"));
 
-        set_test_houses(Vec::new());
+        set_test_houses(&mut g, Vec::new());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -2417,7 +2405,8 @@ mod tests {
         let sibling = g.create_obj(sibling_obj);
         g.get_obj_mut(root).unwrap().contains = vec![first, second];
         g.room_mut(room).contents = vec![root, sibling];
-        crate::lock_ok::lock(&house_object_formats())
+        g.econ
+            .house_object_formats
             .insert(790001, crate::cformat::PersistenceFormat::C);
 
         house_crashsave(&mut g, 790001);
@@ -2436,7 +2425,7 @@ mod tests {
             vec![3, 2, 4, 10]
         );
         assert!(elems.iter().all(|elem| elem.locate == 0));
-        crate::lock_ok::lock(&house_object_formats()).remove(&790001);
+        g.econ.house_object_formats.remove(&790001);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -2453,7 +2442,8 @@ mod tests {
         g.obj_to_obj(child, root);
         g.get_obj_mut(root).unwrap().contains.push(child);
         room_flag_set(&mut g, room, ROOM_HOUSE_CRASH);
-        crate::lock_ok::lock(&house_object_formats())
+        g.econ
+            .house_object_formats
             .insert(790004, crate::cformat::PersistenceFormat::Rust);
         let path = house_filename(&g.config.lib_path, 790004).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2466,7 +2456,7 @@ mod tests {
             b"last known good house snapshot"
         );
         assert!(room_flag_isset(&g, room, ROOM_HOUSE_CRASH));
-        crate::lock_ok::lock(&house_object_formats()).remove(&790004);
+        g.econ.house_object_formats.remove(&790004);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -2526,7 +2516,7 @@ mod tests {
             vec![200, 201]
         );
         assert!(rewritten.iter().all(|elem| elem.locate == 0));
-        crate::lock_ok::lock(&house_object_formats()).remove(&790002);
+        g.econ.house_object_formats.remove(&790002);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -2548,7 +2538,8 @@ mod tests {
         let child = g.create_obj(child_obj);
         g.obj_to_room(parent, room);
         g.obj_to_obj(child, parent);
-        crate::lock_ok::lock(&house_object_formats())
+        g.econ
+            .house_object_formats
             .insert(790003, crate::cformat::PersistenceFormat::Rust);
 
         house_crashsave(&mut g, 790003);
@@ -2580,7 +2571,7 @@ mod tests {
         );
         house_crashsave(&mut g, 790003);
         assert!(rust_house_object_file(&std::fs::read(path).unwrap()));
-        crate::lock_ok::lock(&house_object_formats()).remove(&790003);
+        g.econ.house_object_formats.remove(&790003);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -53,7 +53,6 @@ use crate::types::*;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result as IoResult};
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
 // Constants (shop.h).
@@ -221,7 +220,7 @@ struct ShopBuyData {
 }
 
 #[derive(Clone, Debug)]
-struct ShopData {
+pub(crate) struct ShopData {
     vnum: i32,
     /// Produced item *real* numbers (obj vnums; resolved at trade time). C
     /// stores real_object() rnums, but we keep vnums and look up obj_protos.
@@ -282,10 +281,12 @@ impl ShopData {
     }
 }
 
-static SHOPS: OnceLock<Mutex<Vec<ShopData>>> = OnceLock::new();
+fn shops(g: &crate::state::GameState) -> &Vec<ShopData> {
+    &g.econ.shops
+}
 
-fn shops() -> &'static Mutex<Vec<ShopData>> {
-    SHOPS.get_or_init(|| Mutex::new(Vec::new()))
+fn shops_mut(g: &mut crate::state::GameState) -> &mut Vec<ShopData> {
+    &mut g.econ.shops
 }
 
 // ---------------------------------------------------------------------------
@@ -314,30 +315,23 @@ fn shops() -> &'static Mutex<Vec<ShopData>> {
 // target, so this map ends up empty — byte-for-byte what C produces (every
 // SHOP_FUNC stays 0). The machinery is faithful regardless: if a future build
 // assigns a spec to a keeper vnum, it is captured and dispatched here.
-type ShopFn = crate::spec_assign::SpecFn;
+pub(crate) type ShopFn = crate::spec_assign::SpecFn;
 
-static SHOP_FUNCS: OnceLock<Mutex<Option<HashMap<MobVnum, ShopFn>>>> = OnceLock::new();
-
-fn shop_funcs() -> &'static Mutex<Option<HashMap<MobVnum, ShopFn>>> {
-    SHOP_FUNCS.get_or_init(|| Mutex::new(None))
-}
-
-fn invalidate_shop_funcs() {
-    *crate::lock_ok::lock(shop_funcs()) = None;
+// SHOP_FUNC secondary-spec cache; None = needs (re)build from the live tables.
+// Lives on GameState as `econ.shop_funcs` (phase-1 statics migration).
+fn invalidate_shop_funcs(g: &mut crate::state::GameState) {
+    g.econ.shop_funcs = None;
 }
 
 /// SHOP_FUNC(shop_nr) lookup, keyed by the shop's keeper mob vnum. Returns the
 /// captured secondary spec, or None when the keeper had no prior spec (the
 /// common case — equivalent to C's SHOP_FUNC == 0).
-fn shop_func(g: &crate::state::GameState, keeper_vnum: MobVnum) -> Option<ShopFn> {
-    {
-        let cache = crate::lock_ok::lock(shop_funcs());
-        if let Some(map) = cache.as_ref() {
-            return map.get(&keeper_vnum).copied();
-        }
+fn shop_func(g: &mut crate::state::GameState, keeper_vnum: MobVnum) -> Option<ShopFn> {
+    if let Some(map) = g.econ.shop_funcs.as_ref() {
+        return map.get(&keeper_vnum).copied();
     }
 
-    let keepers: Vec<MobVnum> = crate::lock_ok::lock(shops())
+    let keepers: Vec<MobVnum> = shops(g)
         .iter()
         .map(|shop| shop.keeper)
         .filter(|keeper| *keeper != NOBODY)
@@ -347,15 +341,12 @@ fn shop_func(g: &crate::state::GameState, keeper_vnum: MobVnum) -> Option<ShopFn
         .filter_map(|keeper| crate::spec_assign::get_mob_spec(g, keeper).map(|func| (keeper, func)))
         .collect();
     let found = map.get(&keeper_vnum).copied();
-    *crate::lock_ok::lock(shop_funcs()) = Some(map);
+    g.econ.shop_funcs = Some(map);
     found
 }
 
-pub fn is_shop_keeper_vnum(keeper_vnum: MobVnum) -> bool {
-    shops()
-        .lock()
-        .map(|guard| guard.iter().any(|s| s.keeper == keeper_vnum))
-        .unwrap_or(false)
+pub fn is_shop_keeper_vnum(g: &crate::state::GameState, keeper_vnum: MobVnum) -> bool {
+    shops(g).iter().any(|s| s.keeper == keeper_vnum)
 }
 
 // ---------------------------------------------------------------------------
@@ -366,15 +357,15 @@ pub fn is_shop_keeper_vnum(keeper_vnum: MobVnum) -> bool {
 /// once at boot (alongside prime_zones). Degrades to an empty table — and thus
 /// "no shop" everywhere — if the index or any file is missing/garbled, exactly
 /// as the C boot path leaves top_shop at 0 when shp/ is absent.
-pub fn boot_shops(lib_path: &str) {
+pub fn boot_shops(g: &mut crate::state::GameState, lib_path: &str) {
     let pending_new_zones = match crate::olc::pending_new_zone_publications(lib_path) {
         Ok(pending) => pending,
         Err(error) => {
             log::error!(
                 "Refusing to load shops because new-zone transaction state is unreadable: {error}"
             );
-            let _ = shops().lock().map(|mut shops| shops.clear());
-            invalidate_shop_funcs();
+            *shops_mut(g) = Vec::new();
+            invalidate_shop_funcs(&mut *g);
             return;
         }
     };
@@ -384,8 +375,8 @@ pub fn boot_shops(lib_path: &str) {
         Ok(s) => s,
         Err(_) => {
             // No index -> no shops (mirrors C with an empty shp dir).
-            let _ = shops().lock().map(|mut v| v.clear());
-            invalidate_shop_funcs();
+            shops_mut(&mut *g).clear();
+            invalidate_shop_funcs(&mut *g);
             return;
         }
     };
@@ -406,10 +397,8 @@ pub fn boot_shops(lib_path: &str) {
         }
     }
 
-    if let Ok(mut guard) = shops().lock() {
-        *guard = table;
-    }
-    invalidate_shop_funcs();
+    *shops_mut(g) = table;
+    invalidate_shop_funcs(g);
 }
 
 /// A line-oriented cursor over the .shp file body, providing the get_line /
@@ -717,6 +706,7 @@ fn upsert_runtime_shop(table: &mut Vec<ShopData>, mut incoming: ShopData) {
 /// Re-read one shop from the atomically replaced zone file and install it into
 /// the live shop table through the canonical on-disk parser.
 pub(crate) fn upsert_shop_from_zone_file(
+    g: &mut crate::state::GameState,
     lib_path: &str,
     zone: i32,
     shop_vnum: i32,
@@ -726,7 +716,7 @@ pub(crate) fn upsert_shop_from_zone_file(
         .join("shp")
         .join(format!("{zone}.shp"));
     let contents = std::fs::read_to_string(&path)?;
-    upsert_shop_from_zone_contents(&contents, shop_vnum).map_err(|error| {
+    upsert_shop_from_zone_contents(g, &contents, shop_vnum).map_err(|error| {
         Error::new(
             error.kind(),
             format!("{} while reading {}", error, path.display()),
@@ -737,7 +727,11 @@ pub(crate) fn upsert_shop_from_zone_file(
 /// Install one shop from bytes which have already passed SEDIT validation and
 /// were rendered for publication. This avoids a second fallible disk read
 /// after rename, when durable state has already changed.
-pub(crate) fn upsert_shop_from_zone_contents(contents: &str, shop_vnum: i32) -> IoResult<()> {
+pub(crate) fn upsert_shop_from_zone_contents(
+    g: &mut crate::state::GameState,
+    contents: &str,
+    shop_vnum: i32,
+) -> IoResult<()> {
     let mut parsed = Vec::new();
     boot_the_shops(contents, &mut parsed);
     let incoming = parsed
@@ -750,17 +744,17 @@ pub(crate) fn upsert_shop_from_zone_contents(contents: &str, shop_vnum: i32) -> 
             )
         })?;
 
-    {
-        let mut table = crate::lock_ok::lock(shops());
-        upsert_runtime_shop(&mut table, incoming);
-    }
-    invalidate_shop_funcs();
+    upsert_runtime_shop(shops_mut(g), incoming);
+    invalidate_shop_funcs(g);
     Ok(())
 }
 
 #[cfg(test)]
-pub(crate) fn test_shop_definition(shop_vnum: i32) -> Option<(MobVnum, f32, i32, i32)> {
-    crate::lock_ok::lock(shops())
+pub(crate) fn test_shop_definition(
+    g: &crate::state::GameState,
+    shop_vnum: i32,
+) -> Option<(MobVnum, f32, i32, i32)> {
+    shops(g)
         .iter()
         .find(|shop| shop.vnum == shop_vnum)
         .map(|shop| {
@@ -774,9 +768,9 @@ pub(crate) fn test_shop_definition(shop_vnum: i32) -> Option<(MobVnum, f32, i32,
 }
 
 #[cfg(test)]
-pub(crate) fn test_remove_shop(shop_vnum: i32) {
-    crate::lock_ok::lock(shops()).retain(|shop| shop.vnum != shop_vnum);
-    invalidate_shop_funcs();
+pub(crate) fn test_remove_shop(g: &mut crate::state::GameState, shop_vnum: i32) {
+    shops_mut(g).retain(|shop| shop.vnum != shop_vnum);
+    invalidate_shop_funcs(g);
 }
 
 // ---------------------------------------------------------------------------
@@ -1610,10 +1604,8 @@ fn sort_keeper_objs(g: &mut GameState, keeper: CharId, shop_idx: usize) {
     if let Some(c) = g.get_char_mut(keeper) {
         c.carrying = sorted;
     }
-    if let Ok(mut guard) = shops().lock() {
-        if let Some(s) = guard.get_mut(shop_idx) {
-            s.lastsort = n;
-        }
+    if let Some(s) = shops_mut(g).get_mut(shop_idx) {
+        s.lastsort = n;
     }
 }
 
@@ -1628,16 +1620,14 @@ fn ok_shop_room(shop: &ShopData, room: RoomVnum) -> bool {
 // ---------------------------------------------------------------------------
 // shopping_buy / sell / value / list (shop.c). These take a *clone* of the
 // ShopData so they don't hold the global lock across send/act; mutations to
-// bank/gold/lastsort are written back through commit_shop().
+// bank/gold/lastsort are written back through commit_shop(g, ).
 // ---------------------------------------------------------------------------
 
-/// Write the mutable shop fields (bank, lastsort) back into the global table.
-fn commit_shop(shop_idx: usize, bank: i32, lastsort: i32) {
-    if let Ok(mut guard) = shops().lock() {
-        if let Some(s) = guard.get_mut(shop_idx) {
-            s.bank_account = bank;
-            s.lastsort = lastsort;
-        }
+/// Write the mutable shop fields (bank, lastsort) back into the owned table.
+fn commit_shop(g: &mut GameState, shop_idx: usize, bank: i32, lastsort: i32) {
+    if let Some(s) = shops_mut(g).get_mut(shop_idx) {
+        s.bank_account = bank;
+        s.lastsort = lastsort;
     }
 }
 
@@ -1655,7 +1645,7 @@ fn load_shop_product(g: &mut GameState, vnum: ObjVnum) -> Option<ObjId> {
 }
 
 fn shopping_buy(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_idx: usize) {
-    let mut shop = match shops().lock().ok().and_then(|v| v.get(shop_idx).cloned()) {
+    let mut shop = match shops(g).get(shop_idx).cloned() {
         Some(s) => s,
         None => return,
     };
@@ -1845,11 +1835,11 @@ fn shopping_buy(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_i
         }
     }
 
-    commit_shop(shop_idx, shop.bank_account, shop.lastsort);
+    commit_shop(g, shop_idx, shop.bank_account, shop.lastsort);
 }
 
 fn shopping_sell(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_idx: usize) {
-    let mut shop = match shops().lock().ok().and_then(|v| v.get(shop_idx).cloned()) {
+    let mut shop = match shops(g).get(shop_idx).cloned() {
         Some(s) => s,
         None => return,
     };
@@ -1971,7 +1961,7 @@ fn shopping_sell(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_
         }
     }
 
-    commit_shop(shop_idx, shop.bank_account, shop.lastsort);
+    commit_shop(g, shop_idx, shop.bank_account, shop.lastsort);
 }
 
 /// slide_obj: place a just-bought item into the keeper's inventory, grouped
@@ -2040,7 +2030,7 @@ fn slide_obj(g: &mut GameState, obj: ObjId, keeper: CharId, shop: &mut ShopData)
 }
 
 fn shopping_value(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_idx: usize) {
-    let shop = match shops().lock().ok().and_then(|v| v.get(shop_idx).cloned()) {
+    let shop = match shops(g).get(shop_idx).cloned() {
         Some(s) => s,
         None => return,
     };
@@ -2066,7 +2056,7 @@ fn shopping_value(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop
 }
 
 fn shopping_list(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_idx: usize) {
-    let mut shop = match shops().lock().ok().and_then(|v| v.get(shop_idx).cloned()) {
+    let mut shop = match shops(g).get(shop_idx).cloned() {
         Some(s) => s,
         None => return,
     };
@@ -2153,11 +2143,7 @@ pub fn shop_keeper(g: &mut GameState, ch: CharId, me: CharId, cmd: &str, arg: &s
     let keeper_vnum = g.get_char(keeper).map(|c| c.nr).unwrap_or(NOBODY);
 
     // Find the shop owned by this keeper.
-    let shop_idx = match shops()
-        .lock()
-        .ok()
-        .and_then(|guard| guard.iter().position(|s| s.keeper == keeper_vnum))
-    {
+    let shop_idx = match shops(g).iter().position(|s| s.keeper == keeper_vnum) {
         Some(i) => i,
         None => return false,
     };
@@ -2177,10 +2163,8 @@ pub fn shop_keeper(g: &mut GameState, ch: CharId, me: CharId, cmd: &str, arg: &s
     if keeper == ch {
         if !cmd.is_empty() {
             // "drop all" safety: reset lastsort.
-            if let Ok(mut guard) = shops().lock() {
-                if let Some(s) = guard.get_mut(shop_idx) {
-                    s.lastsort = 0;
-                }
+            if let Some(s) = shops_mut(g).get_mut(shop_idx) {
+                s.lastsort = 0;
             }
         }
         return false;
@@ -2191,10 +2175,9 @@ pub fn shop_keeper(g: &mut GameState, ch: CharId, me: CharId, cmd: &str, arg: &s
         Some(r) => room_vnum(g, r),
         None => return false,
     };
-    let in_shop_room = shops()
-        .lock()
-        .ok()
-        .and_then(|guard| guard.get(shop_idx).map(|s| ok_shop_room(s, room)))
+    let in_shop_room = shops(g)
+        .get(shop_idx)
+        .map(|s| ok_shop_room(s, room))
         .unwrap_or(false);
     if !in_shop_room {
         return false;
@@ -2239,15 +2222,9 @@ pub fn ok_damage_shopkeeper(g: &mut GameState, ch: CharId, victim: CharId) -> bo
         return true;
     }
     let vnum = g.get_char(victim).map(|c| c.nr).unwrap_or(NOBODY);
-    let protected = shops()
-        .lock()
-        .ok()
-        .map(|guard| {
-            guard
-                .iter()
-                .any(|s| s.keeper == vnum && s.bitvector & WILL_START_FIGHT == 0)
-        })
-        .unwrap_or(false);
+    let protected = shops(g)
+        .iter()
+        .any(|s| s.keeper == vnum && s.bitvector & WILL_START_FIGHT == 0);
     if protected {
         let pname = get_name(g, ch);
         crate::cmd_social::do_action_named(g, victim, "slap", &pname);
@@ -2276,7 +2253,7 @@ fn keeper_here(g: &GameState, ch: CharId) -> Option<(CharId, usize)> {
         .room_opt(rnum)
         .map(|r| r.people.clone())
         .unwrap_or_default();
-    let guard = shops().lock().ok()?;
+    let guard = shops(g);
     for &cid in &people {
         if cid == ch {
             continue;
@@ -2376,10 +2353,7 @@ pub fn show_shops(g: &mut GameState, ch: CharId, arg: &str) {
         return;
     }
 
-    let shops_snapshot = match shops().lock().ok().map(|v| v.clone()) {
-        Some(v) => v,
-        None => return,
-    };
+    let shops_snapshot = shops(g).clone();
     let top = shops_snapshot.len();
 
     let shop_nr: i32 = if arg == "." {
@@ -2418,10 +2392,7 @@ pub fn show_shops(g: &mut GameState, ch: CharId, arg: &str) {
 }
 
 fn list_all_shops(g: &mut GameState, ch: CharId) {
-    let shops_snapshot = match shops().lock().ok().map(|v| v.clone()) {
-        Some(v) => v,
-        None => return,
-    };
+    let shops_snapshot = shops(g).clone();
 
     let mut buf = String::from("\r\n");
     for (shop_nr, shop) in shops_snapshot.iter().enumerate() {
@@ -2489,17 +2460,14 @@ fn list_detailed_shop(g: &mut GameState, ch: CharId, shop: &ShopData, shop_idx: 
             .get(&shop.keeper)
             .map(|p| fname(&p.name))
             .unwrap_or_else(|| "<none>".to_string());
+        let has_special_function = shop_func(g, shop.keeper).is_some();
         g.send_to_char(
             ch,
             &format!(
                 "Shopkeeper: {} (#{}) Special Function: {}\r\n",
                 kname,
                 shop.keeper,
-                if shop_func(g, shop.keeper).is_some() {
-                    "Yes"
-                } else {
-                    "No"
-                }
+                if has_special_function { "Yes" } else { "No" }
             ),
         );
         // Live coins, if an instance exists.
@@ -2641,11 +2609,12 @@ mod tests {
         assert_eq!(installed.bank_account, 4321);
         assert_eq!(installed.lastsort, 17);
 
+        let mut g = GameState::new(Config::default());
         let mut stale = HashMap::new();
         stale.insert(1001, dummy_shop_func as ShopFn);
-        *crate::lock_ok::lock(shop_funcs()) = Some(stale);
-        invalidate_shop_funcs();
-        assert!(crate::lock_ok::lock(shop_funcs()).is_none());
+        g.econ.shop_funcs = Some(stale);
+        invalidate_shop_funcs(&mut g);
+        assert!(g.econ.shop_funcs.is_none());
     }
 
     fn add_player(g: &mut GameState, name: &str, level: Level) -> CharId {
@@ -2730,7 +2699,7 @@ mod tests {
         let ch = connected_player(&mut g, conn, "Imm", LVL_IMPL);
 
         {
-            let mut guard = crate::lock_ok::lock(&shops());
+            let guard = shops_mut(&mut g);
             guard.clear();
             for i in 0..40 {
                 let mut shop = ShopData::new(10_000 + i);
@@ -2747,24 +2716,25 @@ mod tests {
         assert!(out.contains("Virtual"));
         assert!(!out.contains("10039"));
 
-        crate::lock_ok::lock(&shops()).clear();
+        shops_mut(&mut g).clear();
         let _ = crate::modify::page_input(&mut g, conn, "q");
     }
 
     #[test]
     fn is_shop_keeper_vnum_matches_loaded_shop_table() {
+        let mut g = GameState::new(Config::default());
         {
-            let mut guard = crate::lock_ok::lock(&shops());
+            let guard = shops_mut(&mut g);
             guard.clear();
             let mut shop = ShopData::new(1);
             shop.keeper = 4242;
             guard.push(shop);
         }
 
-        assert!(is_shop_keeper_vnum(4242));
-        assert!(!is_shop_keeper_vnum(4243));
+        assert!(is_shop_keeper_vnum(&g, 4242));
+        assert!(!is_shop_keeper_vnum(&g, 4243));
 
-        crate::lock_ok::lock(&shops()).clear();
+        shops_mut(&mut g).clear();
     }
 
     #[test]
@@ -2785,7 +2755,7 @@ mod tests {
         g.char_to_room(attacker, room);
         g.char_to_room(keeper, room);
         {
-            let mut guard = crate::lock_ok::lock(&shops());
+            let guard = shops_mut(&mut g);
             guard.clear();
             let mut shop = ShopData::new(1);
             shop.keeper = 4242;
@@ -2805,7 +2775,7 @@ mod tests {
                 .contains(MSG_CANT_KILL_KEEPER)
         );
 
-        crate::lock_ok::lock(&shops()).clear();
+        shops_mut(&mut g).clear();
     }
 
     #[test]
@@ -2853,7 +2823,7 @@ mod tests {
         g.obj_to_char(stock, keeper);
 
         {
-            let mut guard = crate::lock_ok::lock(&shops());
+            let guard = shops_mut(&mut g);
             guard.clear();
             let mut shop = ShopData::new(1);
             shop.producing.push(5100);
@@ -2877,7 +2847,7 @@ mod tests {
             crate::dg_handler::get_global_var(ScriptKey::Obj(bought), "bought").as_deref(),
             Some("yes")
         );
-        crate::lock_ok::lock(&shops()).clear();
+        shops_mut(&mut g).clear();
     }
 
     #[test]
@@ -2900,7 +2870,7 @@ mod tests {
         FAIL_PRODUCT_LOAD.with(|failed| failed.set(Some(5101)));
 
         {
-            let mut guard = crate::lock_ok::lock(&shops());
+            let guard = shops_mut(&mut g);
             guard.clear();
             let mut shop = ShopData::new(2);
             shop.producing.push(5101);
@@ -2923,7 +2893,7 @@ mod tests {
                 .outbuf
                 .contains("I only have 0 to sell you.")
         );
-        crate::lock_ok::lock(&shops()).clear();
+        shops_mut(&mut g).clear();
     }
 }
 
