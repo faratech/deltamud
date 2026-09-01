@@ -6,17 +6,18 @@
 use crate::DatabaseInterface;
 use crate::character::Abilities;
 use crate::combat;
-use crate::connection::{
-    ConState, Descriptor, GameMessage, OutputFrame, QueuedInput, render_color,
-};
-use crate::interpreter::run_command;
+use crate::connection::{ConState, Descriptor, GameMessage, OutputFrame, QueuedInput};
+use crate::flags::{PRF_HOLYLIGHT, PRF_NOHASSLE};
+use crate::interpreter::run_authenticated_command;
 use crate::metrics::Metrics;
-use crate::state::{GameState, OfflineOpAuthority, PLAYER_INSPECTION_DENIED};
+use crate::state::{
+    GameState, OfflineOpAuthority, PLAYER_INSPECTION_DENIED, ProcessDisposition, ShutdownRequest,
+};
 use crate::types::*;
 use anyhow::Result;
 use futures_util::FutureExt;
 use log::{error, info, warn};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::os::unix::io::RawFd;
 use std::panic::AssertUnwindSafe;
@@ -53,6 +54,250 @@ const MSSP_VAR: u8 = 1;
 const MSSP_VAL: u8 = 2;
 
 const PLR_SITEOK: i64 = 1 << 7;
+const PRF_ROOMFLAGS: i64 = 1 << 21;
+
+fn player_authority_state(character: &crate::character::Character) -> crate::PlayerAuthorityState {
+    crate::PlayerAuthorityState {
+        level: character.player.level,
+        trust: character.trust,
+        exp: character.points.exp,
+        godcmds1: character.godcmds1,
+        godcmds2: character.godcmds2,
+        godcmds3: character.godcmds3,
+        godcmds4: character.godcmds4,
+    }
+}
+
+fn persisted_player_trust(character: &crate::character::Character) -> Option<i32> {
+    (0..=i32::from(LVL_IMPL))
+        .contains(&character.trust)
+        .then_some(character.trust)
+}
+
+fn apply_player_authority_state(
+    character: &mut crate::character::Character,
+    authority: crate::PlayerAuthorityState,
+) {
+    character.player.level = authority.level;
+    character.trust = authority.trust;
+    character.points.exp = authority.exp;
+    character.godcmds1 = authority.godcmds1;
+    character.godcmds2 = authority.godcmds2;
+    character.godcmds3 = authority.godcmds3;
+    character.godcmds4 = authority.godcmds4;
+    character.invis_level = character.invis_level.min(authority.trust.max(0));
+    if authority.trust < i32::from(LVL_IMMORT) {
+        character.prf_flags &= !(PRF_NOHASSLE | PRF_HOLYLIGHT | PRF_ROOMFLAGS);
+    }
+}
+
+fn least_privileged_authority(
+    first: crate::PlayerAuthorityState,
+    second: crate::PlayerAuthorityState,
+) -> crate::PlayerAuthorityState {
+    let privilege_key = |state: crate::PlayerAuthorityState| {
+        (
+            state.trust,
+            state.level,
+            state.godcmds1.count_ones()
+                + state.godcmds2.count_ones()
+                + state.godcmds3.count_ones()
+                + state.godcmds4.count_ones(),
+        )
+    };
+    if privilege_key(first) <= privilege_key(second) {
+        first
+    } else {
+        second
+    }
+}
+
+fn lockout_unlock_is_current(
+    state: &GameState,
+    character: CharId,
+    principal: CharId,
+    descriptor: ConnId,
+    idnum: i64,
+    name: &str,
+    expected_hash: &str,
+) -> bool {
+    let authority = state.principal_authority(character);
+    let Some(live) = state.get_char(character) else {
+        return false;
+    };
+    let session_hash = state
+        .descriptors
+        .get(&descriptor)
+        .filter(|session| {
+            session.state == ConState::Playing
+                && session.character == Some(character)
+                && session.original.is_none()
+        })
+        .and_then(|session| session.password_hash.as_deref());
+    let effective_hash = live.pending_password_hash.as_deref().or(session_hash);
+    authority.is_some_and(|authority| {
+        authority.is_authenticated_player()
+            && authority.principal == principal
+            && principal == character
+    }) && !live.is_npc
+        && live.desc == Some(descriptor)
+        && live.idnum == idnum
+        && live.get_name() == name
+        && live.prf2_flags & crate::flags::PRF2_LOCKOUT != 0
+        && effective_hash == Some(expected_hash)
+}
+
+fn authority_update_request_is_current(
+    state: &GameState,
+    request: &crate::state::AuthorityUpdateRequest,
+) -> bool {
+    if !state.authenticated_command_request_is_current(
+        request.authorization,
+        i32::from(LVL_IMMORT),
+        1,
+        crate::gcmd::GCMD_ADVANCE,
+    ) {
+        return false;
+    }
+    let requester = state.principal_authority(request.authorization.requester_body);
+    let target = state.principal_authority(request.victim);
+    let live_is_exact = state.get_char(request.victim).is_some_and(|character| {
+        !character.is_npc
+            && character.idnum == request.idnum
+            && character.get_name() == request.name
+            && player_authority_state(character) == request.expected
+            && state
+                .players_by_name
+                .get(&request.name.to_lowercase())
+                .copied()
+                == Some(request.victim)
+    });
+    let target_is_exact_player = target.is_some_and(|principal| {
+        principal.principal_is_player && principal.principal == request.victim
+    });
+    let hierarchy_is_current = requester.zip(target).is_some_and(|(requester, target)| {
+        requester.authority > target.authority && requester.authority >= request.replacement.trust
+    });
+    let canonical_grants =
+        crate::gcmd::canonical_advance_grants(request.replacement.level, LVL_IMMORT, LVL_IMPL);
+    let replacement_is_canonical = (1..=LVL_IMPL).contains(&request.replacement.level)
+        && request.replacement.trust == i32::from(request.replacement.level)
+        && request.replacement.exp
+            == crate::limits::exp_to_level(i32::from(request.replacement.level) - 1)
+        && canonical_grants
+            == (
+                request.replacement.godcmds1,
+                request.replacement.godcmds2,
+                request.replacement.godcmds3,
+                request.replacement.godcmds4,
+            );
+    target_is_exact_player
+        && live_is_exact
+        && hierarchy_is_current
+        && replacement_is_canonical
+        && !state.authority_quarantine.contains(&request.idnum)
+}
+
+fn password_update_target_is_current(
+    state: &GameState,
+    request: &crate::state::PasswordUpdateRequest,
+) -> Option<Option<CharId>> {
+    let target_key = request.name.to_lowercase();
+    if let Some(victim) = state.players_by_name.get(&target_key).copied() {
+        let exact_principal = state.principal_authority(victim).is_some_and(|authority| {
+            authority.principal_is_player && authority.principal == victim
+        });
+        let exact_character = victim == request.victim
+            && state.get_char(victim).is_some_and(|character| {
+                !character.is_npc
+                    && character.idnum == request.idnum
+                    && character.get_name().eq_ignore_ascii_case(&request.name)
+                    && character.trust < i32::from(LVL_GRGOD)
+            });
+        return (exact_principal && exact_character).then_some(Some(victim));
+    }
+
+    // An offline replay extracts its temporary Character before this queue is
+    // drained. Any still-live body or same-id player means the offline index is
+    // no longer a sufficient identity predicate.
+    if state.char_exists(request.victim)
+        || state.char_ids().into_iter().any(|candidate| {
+            state
+                .get_char(candidate)
+                .is_some_and(|character| character.idnum == request.idnum)
+        })
+    {
+        return None;
+    }
+    state
+        .player_table
+        .iter()
+        .any(|player| {
+            player.idnum == request.idnum
+                && player.name.eq_ignore_ascii_case(&request.name)
+                && player.trust < i32::from(LVL_GRGOD)
+        })
+        .then_some(None)
+}
+
+fn password_update_request_is_current(
+    state: &GameState,
+    request: &crate::state::PasswordUpdateRequest,
+) -> Option<Option<CharId>> {
+    state
+        .authenticated_command_request_is_current(
+            request.authorization,
+            i32::from(LVL_IMPL),
+            1,
+            crate::gcmd::GCMD_SET,
+        )
+        .then(|| password_update_target_is_current(state, request))
+        .flatten()
+}
+
+fn player_rename_request_is_current(
+    state: &GameState,
+    request: &crate::state::PlayerRenameRequest,
+) -> Option<String> {
+    if !state.authenticated_command_request_is_current(
+        request.authorization,
+        i32::from(LVL_IMMORT),
+        2,
+        crate::gcmd::GCMD2_IMP,
+    ) {
+        return None;
+    }
+    let requester = state.principal_authority(request.authorization.requester_body)?;
+    let target = state.principal_authority(request.victim)?;
+    let victim = state.get_char(request.victim)?;
+    let old_key = request.old_name.to_lowercase();
+    let new_key = request.new_name.to_lowercase();
+    let target_is_exact = target.principal_is_player
+        && target.principal == request.victim
+        && !victim.is_npc
+        && victim.idnum == request.idnum
+        && victim.get_name().eq_ignore_ascii_case(&request.old_name)
+        && state.players_by_name.get(&old_key).copied() == Some(request.victim);
+    let hierarchy_is_current = requester.authority > target.authority;
+    let live_collision = state
+        .players_by_name
+        .get(&new_key)
+        .is_some_and(|owner| *owner != request.victim);
+    let index_collision = state.player_table.iter().any(|player| {
+        player.name.eq_ignore_ascii_case(&request.new_name) && player.idnum != request.idnum
+    });
+    if !target_is_exact
+        || !hierarchy_is_current
+        || live_collision
+        || index_collision
+        || request.old_name.eq_ignore_ascii_case(&request.new_name)
+    {
+        return None;
+    }
+    state
+        .get_char(request.authorization.requester_principal)
+        .map(|principal| principal.get_name().to_string())
+}
 // ---- C config.c:256-295: the login/menu strings, verbatim (#198) ----
 pub const ANSI_QUESTION: &str = "\u{1b}[0;31;1mRED\u{1b}[31;0m \u{1b}[0;34;1mBLUE\u{1b}[34;0m \u{1b}[0;32;1mGREEN\u{1b}[32;0m\r\nIs the above text shown in color? ";
 
@@ -196,24 +441,37 @@ fn dispatch_command_isolated(
     context: &str,
 ) -> bool {
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_command(state, ch, input);
+        run_authenticated_command(state, ch, input);
     }));
     match res {
         Ok(()) => true,
         Err(payload) => {
             let msg = panic_payload_str(&payload);
+            let command = panic_command_verb(input);
             let pname = state
                 .get_char(ch)
                 .map(|c| c.get_name().to_string())
                 .unwrap_or_else(|| "<unknown>".to_string());
             error!(
-                "PANIC contained in command [{}] from player '{}' input {:?}: {}",
-                context, pname, input, msg
+                "PANIC contained in command [{}] from player '{}' verb {:?}: {}",
+                context, pname, command, msg
             );
             state.send_to_char(ch, "An error occurred processing that command.\r\n");
             false
         }
     }
+}
+
+/// Panic diagnostics must never serialize command arguments: they can contain
+/// account credentials (`unlock`, `set ... passwd`) or other private text.
+fn panic_command_verb(input: &str) -> String {
+    input
+        .split_whitespace()
+        .next()
+        .unwrap_or("<empty>")
+        .chars()
+        .take(32)
+        .collect()
 }
 
 /// Extract a human-readable message from a catch_unwind payload.
@@ -231,8 +489,19 @@ fn panic_payload_str(payload: &(dyn std::any::Any + Send)) -> String {
 /// by the shutdown round-trip test.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct ShutdownReport {
+    pub player_saves_attempted: u32,
     pub players_saved: u32,
+    pub alias_writes_attempted: u32,
     pub aliases_written: u32,
+    pub alias_errors: u32,
+    pub database_errors: u32,
+    pub crash_saves_attempted: u32,
+    pub crash_saves_written: u32,
+    pub crash_save_errors: u32,
+    pub calendar_saved: bool,
+    pub calendar_errors: u32,
+    /// Aggregate persistence failures. Output-delivery failures are reported
+    /// separately because they occur only after durability has committed.
     pub save_errors: u32,
     pub output_attempted: u32,
     pub output_acknowledged: u32,
@@ -240,6 +509,20 @@ pub struct ShutdownReport {
     pub output_timed_out: u32,
     /// Backward-compatible aggregate of failed plus timed-out final flushes.
     pub output_failures: u32,
+}
+
+impl ShutdownReport {
+    fn finish_persistence_counts(&mut self) {
+        self.save_errors = self
+            .alias_errors
+            .saturating_add(self.database_errors)
+            .saturating_add(self.crash_save_errors)
+            .saturating_add(self.calendar_errors);
+    }
+
+    fn persistence_succeeded(&self) -> bool {
+        self.save_errors == 0
+    }
 }
 
 struct PendingPlayerSave {
@@ -291,6 +574,10 @@ pub struct Game {
     mins_since_crashsave: u32,
     /// Auto-reboot warning latch (one warning per armed schedule).
     reboot_warned: bool,
+    /// Present only for an OS-signal request forwarded by main. The result lets
+    /// main distinguish a committed stop from an OLC-preserving refusal.
+    system_shutdown_result:
+        Option<tokio::sync::oneshot::Sender<crate::connection::SystemShutdownResult>>,
 }
 
 impl Game {
@@ -314,6 +601,7 @@ impl Game {
             zone_reset_queue: Vec::new(),
             mins_since_crashsave: 0,
             reboot_warned: false,
+            system_shutdown_result: None,
         }
     }
 
@@ -380,7 +668,10 @@ impl Game {
         crate::maputils::prime_weather(&mut self.state);
     }
 
-    pub async fn run(&mut self, game_rx: mpsc::Receiver<GameMessage>) -> Result<()> {
+    pub async fn run(
+        &mut self,
+        game_rx: mpsc::Receiver<GameMessage>,
+    ) -> Result<ProcessDisposition> {
         info!("Game loop starting...");
         self.game_rx = Some(game_rx);
         let mut tick = interval(Duration::from_millis(100)); // 10 pulses/sec
@@ -389,30 +680,7 @@ impl Game {
         // the next future deadline instead (tokio default is Burst).
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-        // SIGTERM stream (systemd stop / kill -TERM). Ctrl-C (SIGINT) is handled
-        // by tokio::signal::ctrl_c. On either, we run a clean shutdown: crash-save
-        // every player + their objects, flush descriptors, and return.
-        let mut sigterm =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    warn!("Could not install SIGTERM handler: {} (Ctrl-C only)", e);
-                    None
-                }
-            };
-
         loop {
-            // When the SIGTERM stream failed to install, fall back to a future
-            // that is pending forever so the select arm is inert.
-            let sigterm_fut = async {
-                match sigterm.as_mut() {
-                    Some(s) => {
-                        s.recv().await;
-                    }
-                    None => std::future::pending::<()>().await,
-                }
-            };
-
             if let Some(msg) = self.deferred_messages.pop_front() {
                 self.handle_message_isolated(msg).await;
             } else {
@@ -421,16 +689,6 @@ impl Game {
                         self.handle_message_isolated(msg).await;
                     }
                     _ = tick.tick() => self.heartbeat(),
-                    _ = tokio::signal::ctrl_c() => {
-                        info!("Received Ctrl-C (SIGINT); beginning graceful shutdown.");
-                        self.shutdown().await;
-                        return Ok(());
-                    }
-                    _ = sigterm_fut => {
-                        info!("Received SIGTERM; beginning graceful shutdown.");
-                        self.shutdown().await;
-                        return Ok(());
-                    }
                 }
             }
             // Async bridge for OFFLINE immortal commands (set/stat/show on a
@@ -438,6 +696,9 @@ impl Game {
             // awaits, where &mut self.state is free for the sync replay — we load
             // the player, replay the command, save, and extract.
             self.drain_offline_ops().await;
+            self.drain_authority_update_requests().await;
+            self.drain_lockout_unlock_requests().await;
+            self.drain_password_update_requests().await;
             self.drain_player_rename_requests().await;
             self.drain_deferred_db_ops().await;
             self.drain_player_save_requests().await;
@@ -445,16 +706,83 @@ impl Game {
             self.reap_completed_player_saves().await;
             self.flush_all().await;
 
-            if let Some(requester) = self.state.copyover_requested.take() {
+            if let Some(requester) = self.take_authorized_copyover_request() {
                 self.execute_copyover(requester).await;
             }
 
             // The `shutdown` immortal command sets this (C circle_shutdown=1);
             // halt via the same graceful path as a SIGTERM so the server stops.
-            if self.state.shutdown_requested {
+            if let Some(disposition) = self.take_authorized_shutdown_request() {
                 info!("shutdown requested by command; beginning graceful shutdown.");
-                self.shutdown().await;
-                return Ok(());
+                let committed = self.shutdown().await;
+                if let Some(result_tx) = self.system_shutdown_result.take() {
+                    let result = if committed {
+                        crate::connection::SystemShutdownResult::Committed
+                    } else {
+                        crate::connection::SystemShutdownResult::Refused
+                    };
+                    let _ = result_tx.send(result);
+                }
+                if committed {
+                    return Ok(disposition);
+                }
+            }
+        }
+    }
+
+    fn take_authorized_copyover_request(&mut self) -> Option<CharId> {
+        let request = self.state.copyover_requested.take()?;
+        if self.state.authenticated_command_request_is_current(
+            request,
+            i32::from(LVL_IMMORT),
+            3,
+            crate::gcmd::GCMD3_COPYOVER,
+        ) {
+            return Some(request.requester_body);
+        }
+        warn!(
+            "AUDIT: queued copyover canceled because its authenticated authority or grant changed"
+        );
+        if self.state.char_exists(request.requester_body) {
+            self.state.send_to_char(
+                request.requester_body,
+                "Copyover canceled because your session authority changed.\n\r",
+            );
+        }
+        None
+    }
+
+    fn take_authorized_shutdown_request(&mut self) -> Option<ProcessDisposition> {
+        match self.state.shutdown_requested.take()? {
+            ShutdownRequest::System(disposition) => Some(disposition),
+            ShutdownRequest::Command {
+                authorization,
+                mode,
+            } if self.state.authenticated_command_request_is_current(
+                authorization,
+                i32::from(LVL_IMMORT),
+                1,
+                crate::gcmd::GCMD_SHUTDOWN,
+            ) =>
+            {
+                crate::cmd_wizard::publish_authorized_shutdown(
+                    &mut self.state,
+                    authorization.requester_body,
+                    mode,
+                );
+                Some(mode.disposition())
+            }
+            ShutdownRequest::Command { authorization, .. } => {
+                warn!(
+                    "AUDIT: queued shutdown canceled because its authenticated authority or grant changed"
+                );
+                if self.state.char_exists(authorization.requester_body) {
+                    self.state.send_to_char(
+                        authorization.requester_body,
+                        "Shutdown canceled because your session authority changed.\r\n",
+                    );
+                }
+                None
             }
         }
     }
@@ -530,7 +858,7 @@ impl Game {
                 // second database wait from nesting here.
                 Box::pin(self.handle_input(conn_id, input)).await;
             }
-            GameMessage::EnableGmcp { conn_id } => self.enable_gmcp(conn_id),
+            GameMessage::Gmcp { conn_id, event } => self.handle_gmcp_event(conn_id, event),
             GameMessage::SendMssp { conn_id } => self.send_mssp(conn_id),
             GameMessage::Disconnect { conn_id } => self.disconnect(conn_id).await,
             other => self.deferred_messages.push_back(other),
@@ -559,6 +887,50 @@ impl Game {
             .await
     }
 
+    async fn db_update_password_hash(
+        &mut self,
+        idnum: i64,
+        expected_name: &str,
+        expected_current_hash: Option<&str>,
+        password_hash: &str,
+    ) -> Result<crate::PasswordHashUpdateOutcome> {
+        let db = self.db.clone();
+        let expected_name = expected_name.to_string();
+        let expected_current_hash = expected_current_hash.map(str::to_string);
+        let password_hash = password_hash.to_string();
+        self.await_database(async move {
+            db.update_password_hash(
+                idnum,
+                &expected_name,
+                expected_current_hash.as_deref(),
+                &password_hash,
+            )
+            .await
+        })
+        .await
+    }
+
+    /// A timed/network error can arrive after MySQL committed an UPDATE. Read
+    /// the narrow credential back before deciding whether to publish success,
+    /// failure, or an explicitly indeterminate outcome.
+    async fn resolve_password_update_error(
+        &mut self,
+        name: &str,
+        requested_hash: &str,
+        update_error: anyhow::Error,
+    ) -> Result<crate::PasswordHashUpdateOutcome> {
+        match self.db_get_password_hash(name).await {
+            Ok(Some(current)) if current == requested_hash => {
+                Ok(crate::PasswordHashUpdateOutcome::Updated)
+            }
+            Ok(Some(_)) => Ok(crate::PasswordHashUpdateOutcome::CurrentHashMismatch),
+            Ok(None) => Ok(crate::PasswordHashUpdateOutcome::IdentityMismatch),
+            Err(read_error) => Err(anyhow::anyhow!(
+                "password update failed ({update_error}); credential readback also failed ({read_error})"
+            )),
+        }
+    }
+
     async fn db_load_player(&mut self, name: &str) -> Result<crate::character::Character> {
         let db = self.db.clone();
         let name = name.to_string();
@@ -585,16 +957,19 @@ impl Game {
             .await
     }
 
-    async fn db_create_player(
+    async fn db_create_player_with_password_hash(
         &mut self,
         character: &crate::character::Character,
-        password: &str,
+        password_hash: &str,
     ) -> Result<i64> {
         let db = self.db.clone();
         let character = character.clone();
-        let password = password.to_string();
-        self.await_database(async move { db.create_player(&character, &password).await })
-            .await
+        let password_hash = password_hash.to_string();
+        self.await_database(async move {
+            db.create_player_with_password_hash(&character, &password_hash)
+                .await
+        })
+        .await
     }
 
     async fn db_clan_destroy_fixup(&mut self, clan: i32) -> Result<()> {
@@ -609,18 +984,6 @@ impl Game {
             .await
     }
 
-    async fn db_delete_deleted_players(&mut self) -> Result<u64> {
-        let db = self.db.clone();
-        self.await_database(async move { db.delete_deleted_players().await })
-            .await
-    }
-
-    async fn db_delete_deleted_players_by_idnums(&mut self, idnums: Vec<i64>) -> Result<u64> {
-        let db = self.db.clone();
-        self.await_database(async move { db.delete_deleted_players_by_idnums(idnums).await })
-            .await
-    }
-
     async fn db_list_players(&mut self) -> Result<Vec<crate::state::PlayerIndex>> {
         let db = self.db.clone();
         self.await_database(async move { db.list_players().await })
@@ -632,22 +995,96 @@ impl Game {
     /// final "shutting down" notice + any buffered output to every descriptor,
     /// log the count, and return so `run` exits cleanly instead of being killed
     /// with unsaved state.
-    async fn shutdown(&mut self) {
-        let report = self.shutdown_save().await;
-        info!(
-            "Shutting down, saved {} player(s) ({} alias files, {} save errors; output attempted={}, acknowledged={}, failed={}, timed out={}).",
-            report.players_saved,
-            report.aliases_written,
-            report.save_errors,
-            report.output_attempted,
-            report.output_acknowledged,
-            report.output_failed,
-            report.output_timed_out,
-        );
+    async fn shutdown(&mut self) -> bool {
+        if !self.state.authority_quarantine.is_empty() {
+            warn!(
+                "Shutdown aborted because {} player authority update(s) have an indeterminate durable outcome",
+                self.state.authority_quarantine.len()
+            );
+            self.state.shutdown_requested = None;
+            self.notify_shutdown_aborted(
+                "\r\nShutdown aborted: an administrative authority change still needs durable reconciliation. The server will remain online.\r\n",
+            );
+            self.flush_all().await;
+            return false;
+        }
+        match self.shutdown_save().await {
+            Ok(report) if report.persistence_succeeded() => {
+                info!(
+                    "Shutting down, saved {}/{} player row(s), {}/{} alias file(s), {}/{} crash file(s), and the calendar (output attempted={}, acknowledged={}, failed={}, timed out={}).",
+                    report.players_saved,
+                    report.player_saves_attempted,
+                    report.aliases_written,
+                    report.alias_writes_attempted,
+                    report.crash_saves_written,
+                    report.crash_saves_attempted,
+                    report.output_attempted,
+                    report.output_acknowledged,
+                    report.output_failed,
+                    report.output_timed_out,
+                );
+                true
+            }
+            Ok(report) => {
+                warn!(
+                    "Shutdown aborted after persistence failures: database={}, aliases={}, crash files={}, calendar={} (saved {}/{} player row(s), {}/{} alias file(s), {}/{} crash file(s)).",
+                    report.database_errors,
+                    report.alias_errors,
+                    report.crash_save_errors,
+                    report.calendar_errors,
+                    report.players_saved,
+                    report.player_saves_attempted,
+                    report.aliases_written,
+                    report.alias_writes_attempted,
+                    report.crash_saves_written,
+                    report.crash_saves_attempted,
+                );
+                self.state.shutdown_requested = None;
+                self.notify_shutdown_aborted(
+                    "\r\nShutdown aborted: player or world persistence failed. The server will remain online; shutdown can be retried after recovery.\r\n",
+                );
+                self.flush_all().await;
+                false
+            }
+            Err(error) => {
+                warn!("Shutdown aborted because pending OLC could not be saved: {error}");
+                self.state.shutdown_requested = None;
+                self.notify_shutdown_aborted(
+                    "\r\nShutdown aborted: pending OLC changes could not be saved. The server will remain online.\r\n",
+                );
+                self.flush_all().await;
+                false
+            }
+        }
+    }
+
+    fn notify_shutdown_aborted(&mut self, message: &str) {
+        let connections: Vec<ConnId> = self.state.descriptors.keys().copied().collect();
+        for connection in connections {
+            self.out(connection, message);
+        }
     }
 
     async fn execute_copyover(&mut self, requester: CharId) {
-        crate::arena::prepare_process_exit(&mut self.state);
+        if !self.state.authority_quarantine.is_empty() {
+            warn!(
+                "Copyover aborted because {} player authority update(s) have an indeterminate durable outcome",
+                self.state.authority_quarantine.len()
+            );
+            self.state.send_to_char(
+                requester,
+                "Copyover authority reconciliation failed; reboot aborted. Retry the rank change after database recovery.\n\r",
+            );
+            return;
+        }
+        if let Err(error) = crate::olc::flush_save_list_to_disk(&mut self.state) {
+            warn!("Copyover aborted because pending OLC could not be saved: {error}");
+            self.state.send_to_char(
+                requester,
+                "Copyover OLC save failed; reboot aborted. Unsaved OLC entries remain pending.\n\r",
+            );
+            return;
+        }
         if self.persist_copyover_players().await != 0 {
             self.state.send_to_char(
                 requester,
@@ -671,14 +1108,20 @@ impl Game {
                 requester,
                 "Copyover socket flush failed; reboot aborted.\n\r",
             );
-            self.flush_all().await;
             return;
         }
+        // Do not consume arena backups in the old process. The durable SQL and
+        // recovery snapshots already project their process-exit state; a
+        // successful exec discards this memory, while any returned failure can
+        // continue with the exact live arena/session state intact.
         crate::cmd_wizard::perform_copyover(&mut self.state, requester);
     }
 
     async fn flush_outputs_for_copyover(&mut self) -> bool {
-        self.flush_all().await;
+        // Game::run flushes descriptor outbufs immediately before dispatching
+        // the queued copyover. This barrier only proves every writer has
+        // completed its already-enqueued work; it deliberately does not drain
+        // or remove any descriptor/output owner on refusal.
         let writers: Vec<(ConnId, mpsc::Sender<OutputFrame>)> = self
             .outputs
             .iter()
@@ -721,111 +1164,175 @@ impl Game {
         // chained and awaited, so no stale task can outlive exec and no player
         // is recovered from an older SQL row.
         let mut failures = self.await_all_player_saves().await;
-        let players: Vec<CharId> = self
+        let mut seen_players = HashSet::new();
+        let players: Vec<(CharId, String)> = self
             .state
             .descriptors
             .values()
             .filter_map(|descriptor| {
                 (descriptor.state == ConState::Playing)
-                    .then_some(descriptor.character)
+                    .then(|| {
+                        descriptor
+                            .original
+                            .or(descriptor.character)
+                            .map(|player| (player, descriptor.host.clone()))
+                    })
                     .flatten()
             })
+            .filter(|(player, _)| seen_players.insert(*player))
             .collect();
-        for player in players {
+        for (player, host) in players {
             let room_stamp = self
                 .state
                 .get_char(player)
                 .and_then(|character| character.in_room)
                 .and_then(|room| self.state.rooms.get(room))
                 .map(|room| (room.number, room.map_x.zip(room.map_y)));
-            if let (Some((vnum, coordinates)), Some(character)) =
-                (room_stamp, self.state.get_char_mut(player))
-            {
-                if let Some((x, y)) = coordinates {
-                    character.tloadroom = -1;
-                    character.mapx = x as i64;
-                    character.mapy = y as i64;
-                } else {
-                    character.tloadroom = vnum as i64;
-                    character.mapx = -1;
-                    character.mapy = -1;
-                }
-            }
-            let Some(snapshot) = self.snapshot_online_player_for_save(player) else {
+            let Some(mut snapshot) = self.snapshot_online_player_for_shutdown(player) else {
                 continue;
             };
-            let host = snapshot
-                .desc
-                .and_then(|conn| self.state.descriptors.get(&conn))
-                .map(|descriptor| descriptor.host.clone())
-                .unwrap_or_default();
-            self.state.update_player_index_from_character(
-                &snapshot,
-                snapshot.last_logon.timestamp(),
-                &host,
-            );
+            if let Some((vnum, coordinates)) = room_stamp {
+                if let Some((x, y)) = coordinates {
+                    snapshot.tloadroom = -1;
+                    snapshot.mapx = x as i64;
+                    snapshot.mapy = y as i64;
+                } else {
+                    snapshot.tloadroom = vnum as i64;
+                    snapshot.mapx = -1;
+                    snapshot.mapy = -1;
+                }
+            }
             self.queue_player_save(snapshot, host);
         }
         failures = failures.saturating_add(self.await_all_player_saves().await);
         failures
     }
 
-    /// The save-and-flush half of shutdown, extracted (W6 live-ops) so the
-    /// persistence contract is callable and testable independently of the
-    /// signal path: OLC save-list flush, crash-save rent files, mud calendar,
-    /// per-player SQL rows + alias sidecars, then a bounded drain of every
-    /// output channel so the shutdown notice actually reaches the sockets.
-    /// Returns a report for the shutdown log / tests.
-    async fn shutdown_save(&mut self) -> ShutdownReport {
-        crate::arena::prepare_process_exit(&mut self.state);
+    /// Persist shutdown state first, then perform irreversible process-exit and
+    /// output teardown only after every durability outcome is clean. A failed
+    /// pass leaves descriptors, output senders, arena backups, and dirty crash
+    /// flags available for a later retry.
+    async fn shutdown_save(
+        &mut self,
+    ) -> std::result::Result<ShutdownReport, crate::olc::OlcFlushError> {
         // C comm.c:458-510: flush the OLC save list before stopping (#262).
-        crate::olc::flush_save_list_to_disk(&mut self.state);
-
-        // Notify everyone still connected.
+        crate::olc::flush_save_list_to_disk(&mut self.state)?;
         let conn_ids: Vec<ConnId> = self.state.descriptors.keys().copied().collect();
+        let mut report = ShutdownReport::default();
+
+        // A prior disconnect save cannot be allowed to outlive the final
+        // snapshot. Account for its outcome before queueing current rows.
+        let pending_attempted = u32::try_from(self.pending_player_saves.len()).unwrap_or(u32::MAX);
+        let pending_failures = self.await_all_player_saves().await;
+        report.player_saves_attempted = report
+            .player_saves_attempted
+            .saturating_add(pending_attempted);
+        report.players_saved = report
+            .players_saved
+            .saturating_add(pending_attempted.saturating_sub(pending_failures));
+        report.database_errors = report.database_errors.saturating_add(pending_failures);
+
+        // Crash-save only the connected playing PCs whose inventory is dirty,
+        // matching Crash_save_all, but retain each result. Successful writes
+        // clear PLR_CRASH, so failures elsewhere restore it before refusing the
+        // shutdown to keep the whole pass retryable.
+        let mut crash_players = Vec::new();
+        let mut seen_crash_players = HashSet::new();
+        for descriptor in self.state.descriptors.values() {
+            if descriptor.state != ConState::Playing {
+                continue;
+            }
+            for ch in descriptor.original.into_iter().chain(descriptor.character) {
+                let needs_crash_save = self.state.get_char(ch).is_some_and(|character| {
+                    !character.is_npc && character.act_flags & crate::objsave::PLR_CRASH != 0
+                });
+                if needs_crash_save && seen_crash_players.insert(ch) {
+                    crash_players.push(ch);
+                }
+            }
+        }
+        let mut successful_crash_saves = Vec::new();
+        for ch in crash_players {
+            report.crash_saves_attempted = report.crash_saves_attempted.saturating_add(1);
+            if crate::objsave::crash_save(&mut self.state, ch, &self.lib_path) {
+                report.crash_saves_written = report.crash_saves_written.saturating_add(1);
+                successful_crash_saves.push(ch);
+            } else {
+                report.crash_save_errors = report.crash_save_errors.saturating_add(1);
+            }
+        }
+
+        match crate::weather::try_write_mud_date_to_file(&self.state) {
+            Ok(()) => report.calendar_saved = true,
+            Err(error) => {
+                warn!("shutdown mud-date save failed: {error}");
+                report.calendar_errors = report.calendar_errors.saturating_add(1);
+            }
+        }
+
+        // One current snapshot per attached PC. The detached clone carries an
+        // arena-safe process-exit projection and updated play time, while the
+        // live Character remains untouched until the pass commits.
+        let mut player_connections = Vec::new();
+        let mut seen_players = HashSet::new();
+        for (&conn, descriptor) in &self.state.descriptors {
+            for ch in descriptor.original.into_iter().chain(descriptor.character) {
+                if seen_players.insert(ch) {
+                    player_connections.push((conn, ch, descriptor.host.clone()));
+                }
+            }
+        }
+        let mut current_player_saves = 0u32;
+        for (_conn, ch, host) in player_connections {
+            let Some(snapshot) = self.snapshot_online_player_for_shutdown(ch) else {
+                continue;
+            };
+            report.alias_writes_attempted = report.alias_writes_attempted.saturating_add(1);
+            if let Err(error) =
+                crate::alias::write_aliases(&self.lib_path, snapshot.get_name(), snapshot.idnum)
+            {
+                warn!(
+                    "shutdown write_aliases({}) failed: {}",
+                    snapshot.get_name(),
+                    error
+                );
+                report.alias_errors = report.alias_errors.saturating_add(1);
+            } else {
+                report.aliases_written = report.aliases_written.saturating_add(1);
+            }
+            current_player_saves = current_player_saves.saturating_add(1);
+            self.queue_player_save(snapshot, host);
+        }
+        report.player_saves_attempted = report
+            .player_saves_attempted
+            .saturating_add(current_player_saves);
+        let current_database_errors = self.await_all_player_saves().await;
+        report.players_saved = report
+            .players_saved
+            .saturating_add(current_player_saves.saturating_sub(current_database_errors));
+        report.database_errors = report
+            .database_errors
+            .saturating_add(current_database_errors);
+        report.finish_persistence_counts();
+
+        if !report.persistence_succeeded() {
+            for ch in successful_crash_saves {
+                if let Some(character) = self.state.get_char_mut(ch) {
+                    character.act_flags |= crate::objsave::PLR_CRASH;
+                }
+            }
+            return Ok(report);
+        }
+
+        // All restart-critical data is durable. Only now consume arena
+        // backups, publish the final notice, and close writer ownership.
+        crate::arena::prepare_process_exit(&mut self.state);
         for cid in &conn_ids {
             self.out(
                 *cid,
                 "\r\nThe server is shutting down. Saving and disconnecting...\r\n",
             );
         }
-
-        let mut report = ShutdownReport::default();
-
-        // Crash-save all rent/inventory + persist every online player file.
-        crate::objsave::crash_save_all(&mut self.state);
-        crate::weather::write_mud_date_to_file(&self.state);
-        for cid in &conn_ids {
-            if let Some(ch) = self.state.descriptors.get(cid).and_then(|d| d.character) {
-                report.players_saved += 1;
-                if let Some(snapshot) = self.snapshot_online_player_for_save(ch) {
-                    if let Err(e) = crate::alias::write_aliases(
-                        &self.lib_path,
-                        snapshot.get_name(),
-                        snapshot.idnum,
-                    ) {
-                        warn!(
-                            "shutdown write_aliases({}) failed: {}",
-                            snapshot.get_name(),
-                            e
-                        );
-                        report.save_errors += 1;
-                    } else {
-                        report.aliases_written += 1;
-                    }
-                    let host = self
-                        .state
-                        .descriptors
-                        .get(cid)
-                        .map(|d| d.host.as_str())
-                        .unwrap_or("");
-                    self.queue_player_save(snapshot, host.to_string());
-                }
-            }
-        }
-        report.save_errors = report
-            .save_errors
-            .saturating_add(self.await_all_player_saves().await);
 
         // Snapshot writers before flushing: `flush_all` deliberately removes a
         // descriptor whose channel is full/closed, but shutdown reporting must
@@ -874,7 +1381,7 @@ impl Game {
         // Closing every sender lets writers without a barrier terminate too;
         // main owns and deterministically joins/aborts the connection tasks.
         self.outputs.clear();
-        report
+        Ok(report)
     }
 
     async fn handle_message_isolated(&mut self, msg: GameMessage) {
@@ -902,6 +1409,16 @@ impl Game {
 
     async fn handle_message(&mut self, msg: GameMessage) {
         match msg {
+            GameMessage::SystemShutdown { result_tx } => {
+                // Main is the sole OS-signal owner. Queueing the request here
+                // makes service stops use the same OLC-preserving shutdown path
+                // as an authorized in-game stop.
+                if let Some(previous) = self.system_shutdown_result.replace(result_tx) {
+                    let _ = previous.send(crate::connection::SystemShutdownResult::Refused);
+                }
+                self.state.shutdown_requested =
+                    Some(ShutdownRequest::System(ProcessDisposition::Stop));
+            }
             GameMessage::NewConnection {
                 id,
                 host,
@@ -943,8 +1460,8 @@ impl Game {
             GameMessage::Input { conn_id, input } => {
                 self.handle_input(conn_id, input).await;
             }
-            GameMessage::EnableGmcp { conn_id } => {
-                self.enable_gmcp(conn_id);
+            GameMessage::Gmcp { conn_id, event } => {
+                self.handle_gmcp_event(conn_id, event);
             }
             GameMessage::SendMssp { conn_id } => {
                 self.send_mssp(conn_id);
@@ -1221,7 +1738,29 @@ impl Game {
                     }
                     return;
                 }
-                let exists = self.db_player_exists(&name).await.unwrap_or(false);
+                let exists = match self.db_player_exists(&name).await {
+                    Ok(exists) => exists,
+                    Err(error) => {
+                        warn!("check player name {} failed: {}", name, error);
+                        self.out(
+                            conn_id,
+                            "Unable to check that name right now; please try again.\r\nName: ",
+                        );
+                        if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                            d.suppress_prompt = true;
+                        }
+                        return;
+                    }
+                };
+                if !exists && crate::olc::name_reserved_by_zone_acl(&self.state, &name) {
+                    self.out(conn_id, "Invalid name, please try another.\r\nName: ");
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.temp_name = None;
+                        d.state = ConState::GetName;
+                        d.suppress_prompt = true;
+                    }
+                    return;
+                }
                 if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                     d.temp_name = Some(name.clone());
                     d.state = if exists {
@@ -1234,6 +1773,16 @@ impl Game {
             ConState::ConfirmName => {
                 let yes = input.eq_ignore_ascii_case("y") || input.eq_ignore_ascii_case("yes");
                 if yes {
+                    let requested_name = self.descriptor_name(conn_id);
+                    if crate::olc::name_reserved_by_zone_acl(&self.state, &requested_name) {
+                        self.out(conn_id, "Invalid name, please try another.\r\nName: ");
+                        if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                            d.temp_name = None;
+                            d.state = ConState::GetName;
+                            d.suppress_prompt = true;
+                        }
+                        return;
+                    }
                     let host = self.descriptor_host(conn_id);
                     let banned = self.descriptor_ban_type(conn_id);
                     if banned >= crate::ban::BanType::New {
@@ -1279,10 +1828,32 @@ impl Game {
             ConState::GetOldPassword => {
                 // C interpreter.c:1869-2020 CON_PASSWORD.
                 let name = self.descriptor_name(conn_id);
-                let ok = self
-                    .db_verify_password(&name, &input)
-                    .await
-                    .unwrap_or(false);
+                // Fetch the exact durable hash once: it authenticates this
+                // attempt and becomes the session cache unless a legacy
+                // upgrade commits. This avoids a second DB read and a fresh,
+                // unnecessary Argon2 hash on every successful login.
+                let stored_hash = if input.len() > crate::password::MAX_PASSWORD_INPUT_BYTES {
+                    None
+                } else {
+                    match self.db_get_password_hash(&name).await {
+                        Ok(Some(hash)) => Some(hash),
+                        Ok(None) => None,
+                        Err(error) => {
+                            warn!("read password hash for {} failed: {}", name, error);
+                            None
+                        }
+                    }
+                };
+                let ok = match stored_hash.as_ref() {
+                    Some(hash) => {
+                        self.await_database(crate::password::check_password_async(
+                            hash.clone(),
+                            input.clone(),
+                        ))
+                        .await
+                    }
+                    None => false,
+                };
                 if !ok {
                     // C 1897-1911: mudlog the attempt, bump GET_BAD_PWS (and
                     // persist it), re-prompt; disconnect at max_bad_pws (#194).
@@ -1308,9 +1879,7 @@ impl Game {
                         }
                     } else {
                         self.out(conn_id, "Wrong password.\r\nPassword: ");
-                        if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
-                            // stay in GetOldPassword; echo stays off
-                        }
+                        // Stay in GetOldPassword; echo stays off.
                     }
                     return;
                 }
@@ -1334,22 +1903,98 @@ impl Game {
                     let _ = self.db_save_player(&rec).await;
                 }
 
-                // C 1914-1952: automatic upgrade of legacy password hashes (#219).
-                if let Ok(Some(hash)) = self.db_get_password_hash(&name).await {
-                    if crate::password::password_needs_upgrade(&hash) {
-                        info!("Upgrading password security for {}", name);
-                        rec.pending_password_hash = Some(crate::password::hash_password(&input));
-                        let _ = self.db_save_player(&rec).await;
-                        rec.pending_password_hash = None;
+                // C 1914-1952: automatic upgrade of legacy password hashes
+                // (#219), narrowed to the credential column. An upgrade write
+                // failure is audited but never blocks a password that already
+                // verified; the old durable hash remains the session truth.
+                let mut session_hash = stored_hash.expect("successful password check had a hash");
+                if crate::password::password_needs_upgrade(&session_hash) {
+                    info!("Upgrading password security for {}", name);
+                    if let Some(upgraded_hash) = self
+                        .await_database(crate::password::hash_password_async(input.clone()))
+                        .await
+                    {
+                        let upgrade_result = match self
+                            .db_update_password_hash(
+                                rec.idnum,
+                                &name,
+                                Some(&session_hash),
+                                &upgraded_hash,
+                            )
+                            .await
+                        {
+                            Err(error) => {
+                                self.resolve_password_update_error(&name, &upgraded_hash, error)
+                                    .await
+                            }
+                            result => result,
+                        };
+                        match upgrade_result {
+                            Ok(crate::PasswordHashUpdateOutcome::Updated) => {
+                                session_hash = upgraded_hash
+                            }
+                            Ok(crate::PasswordHashUpdateOutcome::IdentityMismatch) => warn!(
+                                "AUDIT: legacy password upgrade for {} was rejected because its durable identity changed; login continues with the prior hash",
+                                name
+                            ),
+                            Ok(crate::PasswordHashUpdateOutcome::CurrentHashMismatch) => {
+                                warn!(
+                                    "AUDIT: legacy password upgrade for {} lost a credential compare-and-swap race; the concurrent password is preserved and this authenticated login continues",
+                                    name
+                                );
+                                // Keep unlock verification aligned with the
+                                // credential that won the race. A read failure is
+                                // non-fatal: this login already authenticated
+                                // against the previously observed durable hash.
+                                match self.db_get_password_hash(&name).await {
+                                    Ok(Some(current_hash)) => session_hash = current_hash,
+                                    Ok(None) => warn!(
+                                        "AUDIT: credential readback for {} disappeared after a legacy-upgrade CAS miss",
+                                        name
+                                    ),
+                                    Err(error) => warn!(
+                                        "AUDIT: credential readback for {} failed after a legacy-upgrade CAS miss: {}",
+                                        name, error
+                                    ),
+                                }
+                            }
+                            Err(error) => warn!(
+                                "AUDIT: legacy password upgrade for {} has an indeterminate durable outcome: {}; authenticated login continues",
+                                name, error
+                            ),
+                        }
+                    } else {
+                        warn!(
+                            "AUDIT: legacy password upgrade for {} could not start its bounded hashing worker; login continues with the prior hash",
+                            name
+                        );
                     }
                 }
 
-                // Cache the session password hash so `unlock <password>`
-                // (act.other.c do_lockout) can verify against the real account
-                // password (C compares against GET_PASSWD(ch)) (#313).
+                // Cache the exact durable session hash so `unlock <password>`
+                // (act.other.c do_lockout) verifies the real account password.
                 if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
-                    d.password_hash = Some(crate::password::hash_password(&input));
+                    d.password_hash = Some(session_hash);
                 }
+
+                // Persisted trust, not the cosmetic/display level, controls
+                // every login-time staff exception and staff-only disclosure.
+                // Corrupt authority fails closed before the account enters a
+                // world/menu state.
+                let Some(account_trust) = persisted_player_trust(&rec) else {
+                    error!(
+                        "AUDIT: login for {} denied because persisted trust {} is outside 0..={}",
+                        name, rec.trust, LVL_IMPL
+                    );
+                    self.out(
+                        conn_id,
+                        "Your account authority record is invalid. Please contact an administrator.\r\n",
+                    );
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.state = ConState::Close;
+                    }
+                    return;
+                };
 
                 // C 1957-1967: BAN_SELECT without PLR_SITEOK.
                 let banned = self.descriptor_ban_type(conn_id);
@@ -1368,7 +2013,7 @@ impl Game {
                 // C 1968-1979: multiplay gate (comm.c check_multiplaying;
                 // the C build returns 1 immediately — dev-mode bypass kept).
                 if !crate::cmd_comm::check_multiplaying(&self.state, &host)
-                    && rec.player.level < LVL_IMMORT
+                    && account_trust < i32::from(LVL_IMMORT)
                     && rec.act_flags & crate::flags::PLR_MULTIOK == 0
                 {
                     self.out(
@@ -1388,7 +2033,7 @@ for access.\r\n\r\n",
                 }
                 // C 1980-1989: wizlock (#202).
                 let restrict = crate::cmd_wizard::circle_restrict();
-                if restrict > 0 && (rec.player.level as i32) < restrict {
+                if restrict > 0 && account_trust < restrict {
                     self.out(
                         conn_id,
                         "The game is temporarily restricted.. try again later.\r\n",
@@ -1408,7 +2053,7 @@ for access.\r\n\r\n",
                 // C 1991-2019: motd/imotd, "has connected" mudlog, the
                 // bad-pw notice, do_time, and PRESS RETURN -> CON_RMOTD.
                 self.pending_load.insert(conn_id, rec.clone());
-                let motd = if rec.player.level >= LVL_IMMORT {
+                let motd = if account_trust >= i32::from(LVL_IMMORT) {
                     self.state.imotd.clone()
                 } else {
                     self.state.motd.clone()
@@ -1442,7 +2087,7 @@ for access.\r\n\r\n",
                 // C interpreter.c:2043-2045: empty, >64, <3, or equal to the
                 // name are all 'Illegal password.' with a 'Password: ' retry.
                 if input.is_empty()
-                    || input.len() > 64
+                    || input.len() > crate::password::MAX_PASSWORD_INPUT_BYTES
                     || input.len() < 3
                     || input.eq_ignore_ascii_case(&self.descriptor_name(conn_id))
                 {
@@ -1462,17 +2107,34 @@ for access.\r\n\r\n",
                     .state
                     .descriptors
                     .get(&conn_id)
-                    .and_then(|d| d.temp_password.clone())
-                    .map(|p| p == input)
-                    .unwrap_or(false);
+                    .and_then(|d| d.temp_password.as_deref())
+                    == Some(input.as_str());
                 if matches {
+                    let password = self
+                        .state
+                        .descriptors
+                        .get_mut(&conn_id)
+                        .and_then(|descriptor| descriptor.temp_password.take())
+                        .expect("matching confirmation has a staged password");
+                    let Some(password_hash) = self
+                        .await_database(crate::password::hash_password_async(password))
+                        .await
+                    else {
+                        self.out(
+                            conn_id,
+                            "\r\nPassword setup is temporarily unavailable; please try again.\r\nPassword: ",
+                        );
+                        if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                            d.temp_password = None;
+                            d.state = ConState::GetNewPassword;
+                            d.suppress_prompt = true;
+                        }
+                        return;
+                    };
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                         d.state = ConState::GetNewbie;
                         // Session password hash, for the `unlock` gate.
-                        d.password_hash = d
-                            .temp_password
-                            .as_ref()
-                            .map(|p| crate::password::hash_password(p));
+                        d.password_hash = Some(password_hash);
                     }
                 } else {
                     // C interpreter.c:2057: '...start over.' + inline prompt.
@@ -1649,18 +2311,49 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
             ConState::ChPwdGetOld => {
                 // C interpreter.c:2348-2364.
                 let name = self.descriptor_name(conn_id);
-                let ok = self
-                    .db_verify_password(&name, &input)
-                    .await
-                    .unwrap_or(false);
-                if ok {
+                let stored_hash = if input.len() > crate::password::MAX_PASSWORD_INPUT_BYTES {
+                    Ok(None)
+                } else {
+                    self.db_get_password_hash(&name).await
+                };
+                let authenticated_hash = match stored_hash {
+                    Ok(Some(hash)) => {
+                        let matches = self
+                            .await_database(crate::password::check_password_async(
+                                hash.clone(),
+                                input.clone(),
+                            ))
+                            .await;
+                        matches.then_some(hash)
+                    }
+                    Ok(None) => None,
+                    Err(error) => {
+                        warn!(
+                            "load password-change credential for {} failed: {}",
+                            name, error
+                        );
+                        self.out(
+                            conn_id,
+                            "\r\nPassword verification is temporarily unavailable; please try again.\r\n",
+                        );
+                        self.out(conn_id, MENU);
+                        if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                            d.password_change_expected_hash = None;
+                            d.state = ConState::Menu;
+                        }
+                        return;
+                    }
+                };
+                if let Some(expected_hash) = authenticated_hash {
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.password_change_expected_hash = Some(expected_hash);
                         d.state = ConState::ChPwdGetNew;
                     }
                 } else {
                     self.out(conn_id, "\r\nIncorrect password.\r\n");
                     self.out(conn_id, MENU);
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.password_change_expected_hash = None;
                         d.state = ConState::Menu;
                     }
                 }
@@ -1668,7 +2361,7 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
             ConState::ChPwdGetNew => {
                 // C interpreter.c:2022-2039 CON_NEWPASSWD (shared).
                 if input.is_empty()
-                    || input.len() > 64
+                    || input.len() > crate::password::MAX_PASSWORD_INPUT_BYTES
                     || input.len() < 3
                     || input.eq_ignore_ascii_case(&self.descriptor_name(conn_id))
                 {
@@ -1681,7 +2374,8 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
                 }
             }
             ConState::ChPwdVerify => {
-                // C interpreter.c:2041-2068 CON_CHPWD_VRFY: save immediately.
+                // C interpreter.c:2041-2068 CON_CHPWD_VRFY: persist before
+                // publishing success, but update only the credential column.
                 let matches = self
                     .state
                     .descriptors
@@ -1700,32 +2394,132 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
                     return;
                 }
                 let name = self.descriptor_name(conn_id);
-                let mut rec = match self.load_player_latest(&name).await {
-                    Ok(c) => c,
-                    Err(_) => {
-                        self.out(conn_id, MENU);
-                        if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
-                            d.state = ConState::Menu;
+                let identity = self
+                    .pending_load
+                    .get(&conn_id)
+                    .filter(|character| character.get_name().eq_ignore_ascii_case(&name))
+                    .map(|character| character.idnum);
+                let idnum = match identity {
+                    Some(idnum) => idnum,
+                    None => match self.load_player_latest(&name).await {
+                        Ok(character) => character.idnum,
+                        Err(error) => {
+                            warn!(
+                                "load password-change identity for {} failed: {}",
+                                name, error
+                            );
+                            self.out(
+                                conn_id,
+                                "\r\nPassword change failed; your old password is unchanged.\r\n",
+                            );
+                            self.out(conn_id, MENU);
+                            if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                                d.temp_password = None;
+                                d.password_change_expected_hash = None;
+                                d.state = ConState::Menu;
+                            }
+                            return;
                         }
-                        return;
-                    }
+                    },
                 };
-                rec.pending_password_hash = Some(crate::password::hash_password(&input));
-                let _ = self.db_save_player(&rec).await;
-                self.out(conn_id, "\r\nDone.\n\r");
+                let Some(password_hash) = self
+                    .await_database(crate::password::hash_password_async(input.clone()))
+                    .await
+                else {
+                    self.out(
+                        conn_id,
+                        "\r\nPassword change is temporarily unavailable; your old password is unchanged.\r\n",
+                    );
+                    self.out(conn_id, MENU);
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.temp_password = None;
+                        d.password_change_expected_hash = None;
+                        d.state = ConState::Menu;
+                    }
+                    return;
+                };
+                let expected_hash = self
+                    .state
+                    .descriptors
+                    .get(&conn_id)
+                    .and_then(|descriptor| descriptor.password_change_expected_hash.clone());
+                let Some(expected_hash) = expected_hash else {
+                    self.out(
+                        conn_id,
+                        "\r\nPassword change authorization expired. Reconnect and authenticate again.\r\n",
+                    );
+                    self.out(conn_id, MENU);
+                    if let Some(descriptor) = self.state.descriptors.get_mut(&conn_id) {
+                        descriptor.temp_password = None;
+                        descriptor.state = ConState::Menu;
+                    }
+                    return;
+                };
+                let durable = match self
+                    .db_update_password_hash(idnum, &name, Some(&expected_hash), &password_hash)
+                    .await
+                {
+                    Err(error) => {
+                        self.resolve_password_update_error(&name, &password_hash, error)
+                            .await
+                    }
+                    result => result,
+                };
+                match durable {
+                    Ok(crate::PasswordHashUpdateOutcome::Updated) => {
+                        self.out(conn_id, "\r\nDone.\n\r");
+                        if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                            d.password_hash = Some(password_hash);
+                        }
+                    }
+                    Ok(crate::PasswordHashUpdateOutcome::IdentityMismatch) => {
+                        warn!(
+                            "AUDIT: password change for {} was rejected because its durable identity changed",
+                            name
+                        );
+                        self.out(
+                            conn_id,
+                            "\r\nPassword change failed; your old password is unchanged.\r\n",
+                        );
+                    }
+                    Ok(crate::PasswordHashUpdateOutcome::CurrentHashMismatch) => {
+                        warn!(
+                            "AUDIT: password change for {} lost its credential CAS; a concurrent reset won",
+                            name
+                        );
+                        self.out(
+                            conn_id,
+                            "\r\nYour account password changed during this operation. The requested password was not installed; reconnect and authenticate again.\r\n",
+                        );
+                    }
+                    Err(error) => {
+                        warn!(
+                            "AUDIT: password change for {} has an indeterminate durable outcome: {}",
+                            name, error
+                        );
+                        self.out(
+                            conn_id,
+                            "\r\nPassword change could not be confirmed. Reconnect and try the new password, then the old password.\r\n",
+                        );
+                    }
+                }
                 self.out(conn_id, MENU);
                 if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                     d.temp_password = None;
+                    d.password_change_expected_hash = None;
                     d.state = ConState::Menu;
                 }
             }
             ConState::DelCnf1 => {
                 // C interpreter.c:2366-2387 CON_DELCNF1.
                 let name = self.descriptor_name(conn_id);
-                let ok = self
-                    .db_verify_password(&name, &input)
-                    .await
-                    .unwrap_or(false);
+                let ok = if input.len() > crate::password::MAX_PASSWORD_INPUT_BYTES {
+                    false
+                } else {
+                    self.db_verify_password(&name, &input)
+                        .await
+                        .unwrap_or(false)
+                };
                 if ok {
                     self.out(
                         conn_id,
@@ -1758,9 +2552,35 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                             }
                             return;
                         }
-                        if rec.player.level < LVL_GRGOD {
-                            rec.act_flags |= crate::flags::PLR_DELETED;
+                        let Some(account_trust) = persisted_player_trust(&rec) else {
+                            error!(
+                                "AUDIT: self-delete for {} denied because persisted trust {} is invalid",
+                                name, rec.trust
+                            );
+                            self.out(
+                                conn_id,
+                                "Character not deleted because the account authority record is invalid. Please contact an administrator.\r\n",
+                            );
+                            if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                                d.state = ConState::Close;
+                            }
+                            return;
+                        };
+                        if account_trust >= i32::from(LVL_GRGOD) {
+                            warn!(
+                                "AUDIT: protected staff account {} refused self-deletion at trust {}",
+                                name, account_trust
+                            );
+                            self.out(
+                                conn_id,
+                                "Privileged characters cannot self-delete. Character not deleted.\r\n",
+                            );
+                            if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                                d.state = ConState::Close;
+                            }
+                            return;
                         }
+                        rec.act_flags |= crate::flags::PLR_DELETED;
                         let level = rec.player.level;
                         if let Err(error) = self.db_save_player(&rec).await {
                             error!(
@@ -1898,6 +2718,27 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         Some(c.clone())
     }
 
+    /// Build the process-exit player row without mutating live session state.
+    /// The normal save helper advances the live play-time clock; shutdown must
+    /// be able to abort and retry with the exact live state intact. Arena
+    /// backups are projected onto this clone because they must survive restart,
+    /// but remain attached to the live combatant until durability succeeds.
+    fn snapshot_online_player_for_shutdown(
+        &self,
+        ch: CharId,
+    ) -> Option<crate::character::Character> {
+        let now = chrono::Utc::now();
+        let mut snapshot = self.state.get_char(ch)?.clone();
+        if snapshot.is_npc {
+            return None;
+        }
+        let elapsed = (now - snapshot.last_logon).num_seconds().max(0);
+        snapshot.player.time_played = snapshot.player.time_played.saturating_add(elapsed);
+        snapshot.last_logon = now;
+        crate::arena::apply_process_exit_state_to_snapshot(ch, &mut snapshot);
+        Some(snapshot)
+    }
+
     fn queue_player_save(&mut self, snapshot: crate::character::Character, host: String) {
         let idnum = snapshot.idnum;
         let name = snapshot.get_name().to_string();
@@ -2003,14 +2844,14 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
     }
 
     async fn create_and_enter(&mut self, conn_id: ConnId) {
-        let (name, pass) = {
+        let (name, password_hash) = {
             let d = match self.state.descriptors.get(&conn_id) {
                 Some(d) => d,
                 None => return,
             };
             (
                 d.temp_name.clone().unwrap_or_default(),
-                d.temp_password.clone().unwrap_or_default(),
+                d.password_hash.clone().unwrap_or_default(),
             )
         };
         let choices = self.pending.remove(&conn_id).unwrap_or_default();
@@ -2052,34 +2893,15 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         };
         self.state.extract_char(temp_id);
 
-        match self.db_create_player(&ch, &pass).await {
+        match self
+            .db_create_player_with_password_hash(&ch, &password_hash)
+            .await
+        {
             Ok(idnum) => {
-                // The in-memory char MUST take the assigned idnum, or the
-                // save_player below (which keys on idnum) writes idnum=0 with an
-                // empty pwd and REPLACE-clobbers the just-created row (name is
-                // UNIQUE), losing the password and orphaning skills/affects.
+                // The in-memory char must take the identity allocated by the
+                // collision-safe creation transaction before any targeted
+                // generic save can match the durable row.
                 ch.idnum = idnum;
-                // CircleMUD convention: the first character created becomes the
-                // Implementor (nanny CON_QRACE).
-                if idnum == 1 {
-                    ch.player.level = LVL_IMPL;
-                    ch.player.level = LVL_IMPL;
-                    ch.player.title = Some("the Implementor".to_string());
-                    // Grant the Implementor every god-command bit (act.wizard.c
-                    // do_advance:1738-1745). Without this the new godcmd gate in
-                    // the interpreter would lock idnum 1 out of ALL god commands
-                    // and the game would be unadministrable. Persisted via the
-                    // save_player below and reloaded in enter_game.
-                    crate::gcmd::grant_advance(
-                        &mut ch.godcmds1,
-                        &mut ch.godcmds2,
-                        &mut ch.godcmds3,
-                        &mut ch.godcmds4,
-                        LVL_IMPL,
-                        crate::types::LVL_IMMORT,
-                        LVL_IMPL,
-                    );
-                }
                 let host = self
                     .state
                     .descriptors
@@ -2443,7 +3265,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
 
     /// Load (or, for fresh chars, re-load) the player, place them in the
     /// world, and start play.
-    async fn enter_game(&mut self, conn_id: ConnId, is_new: bool) {
+    async fn enter_game(&mut self, conn_id: ConnId, _is_new: bool) {
         // C interpreter.c enter_player_game. The record was usually already
         // loaded at password-verify (pending_load) — consume it so login hits
         // the DB once.
@@ -2535,9 +3357,6 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         // the raw C bitfield); defined locally to match enter_player_game.
         const PLR_FROZEN_C: i64 = 1 << 2;
         const PLR_KILLER_C: i64 = 1 << 0;
-        const NEWBIE_ROOM: crate::types::RoomVnum = 2200; // config.c newbie_room
-        const JAIL_NUM: crate::types::RoomVnum = 400; // config.c jail_num
-
         // Snapshot the saved room fields + flags (clone scalars before any
         // mutation; house style).
         let (saved_load, saved_tload, saved_mapx, saved_mapy, newbie, level, act_flags, prf2_flags) =
@@ -2598,7 +3417,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
 
         // newbie loadroom (C: newbie == 1 && level < 5 -> newbie_room).
         if newbie == 1 && level < 5 {
-            if let Some(rnum) = self.state.real_room(NEWBIE_ROOM) {
+            if let Some(rnum) = self.state.real_room(self.state.config.newbie_room) {
                 load_rnum = Some(rnum);
             }
         }
@@ -2654,7 +3473,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             }
         }
         if act_flags & PLR_KILLER_C != 0 {
-            if let Some(r) = self.state.real_room(JAIL_NUM) {
+            if let Some(r) = self.state.real_room(self.state.config.jail_num) {
                 load_rnum = Some(r);
             }
         }
@@ -2863,15 +3682,15 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             // just replay against the live char — no load/extract needed.
             let key = op.target.to_lowercase();
             if let Some(target) = self.state.players_by_name.get(&key).copied() {
-                let target_level = self
+                let target_trust = self
                     .state
                     .get_char(target)
-                    .map(|character| character.player.level)
-                    .unwrap_or(u8::MAX);
+                    .map(|character| character.trust)
+                    .unwrap_or(i32::MAX);
                 if op.authority == OfflineOpAuthority::InspectPlayer
                     && !self
                         .state
-                        .can_inspect_player_level(op.requester, target_level)
+                        .can_inspect_player_authority(op.requester, target_trust)
                 {
                     self.state
                         .send_to_char(op.requester, PLAYER_INSPECTION_DENIED);
@@ -2902,7 +3721,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             if op.authority == OfflineOpAuthority::InspectPlayer
                 && !self
                     .state
-                    .can_inspect_player_level(op.requester, chr.player.level)
+                    .can_inspect_player_authority(op.requester, chr.trust)
             {
                 self.state
                     .send_to_char(op.requester, PLAYER_INSPECTION_DENIED);
@@ -2931,12 +3750,34 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             // present, the handler's normal online branch applies the change (and
             // the immortal sees the standard output); the offline branch can't
             // re-trigger (the name resolves), so there's no re-deferral.
+            let password_requests_before = self.state.password_update_requests.len();
             dispatch_command_isolated(
                 &mut self.state,
                 op.requester,
                 &op.command,
                 "offline-op-replay",
             );
+
+            // `set passwd` queues its own typed, targeted credential update.
+            // It intentionally does not mutate the temporary Character, so a
+            // broad snapshot save here would add unrelated writes and could
+            // race the password-only operation with a stale stored hash.
+            let password_only = self
+                .state
+                .password_update_requests
+                .get(password_requests_before..)
+                .unwrap_or_default()
+                .iter()
+                .any(|request| {
+                    request.victim == id
+                        && request.authorization.requester_body == op.requester
+                        && request.idnum
+                            == self
+                                .state
+                                .get_char(id)
+                                .map(|character| character.idnum)
+                                .unwrap_or(0)
+                });
 
             // Snapshot the (possibly edited) record, drop it from the world, and
             // persist — mirroring C's save_char(ch, NOWHERE) after the edit.
@@ -2947,8 +3788,480 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                     .update_player_index_from_character(s, s.last_logon.timestamp(), "");
             }
             self.state.extract_char(id);
-            if let Some(s) = snap {
+            if let Some(s) = snap.filter(|_| !password_only) {
                 self.queue_player_save(s, String::new());
+            }
+        }
+    }
+
+    /// Verify AFK-terminal unlock passwords without running a KDF in the
+    /// synchronous command dispatcher. `await_database` continues servicing
+    /// world messages while the bounded blocking worker runs, so the exact
+    /// descriptor/principal/hash relationship is checked both before and after.
+    async fn drain_lockout_unlock_requests(&mut self) {
+        let requests = self.state.take_lockout_unlock_requests();
+        for request in requests {
+            if !lockout_unlock_is_current(
+                &self.state,
+                request.character,
+                request.principal,
+                request.descriptor,
+                request.idnum,
+                &request.name,
+                &request.expected_hash,
+            ) {
+                if self.state.char_exists(request.character) {
+                    self.state.send_to_char(
+                        request.character,
+                        "Password verification expired because the authenticated session changed; the terminal remains locked.\r\n",
+                    );
+                }
+                continue;
+            }
+
+            let verified = self
+                .await_database(crate::password::check_password_async(
+                    request.expected_hash.clone(),
+                    request.plaintext_password,
+                ))
+                .await;
+            if !lockout_unlock_is_current(
+                &self.state,
+                request.character,
+                request.principal,
+                request.descriptor,
+                request.idnum,
+                &request.name,
+                &request.expected_hash,
+            ) {
+                if self.state.char_exists(request.character) {
+                    self.state.send_to_char(
+                        request.character,
+                        "Password verification expired because the authenticated session changed; the terminal remains locked.\r\n",
+                    );
+                }
+                continue;
+            }
+            if verified {
+                crate::cmd_other::complete_lockout_unlock(&mut self.state, request.character);
+            } else {
+                self.state.send_to_char(
+                    request.character,
+                    "Password mismatch! Sorry.\r\nTo unlock please type 'unlock <yourpassword>'\r\n",
+                );
+            }
+        }
+    }
+
+    /// Commit exact player-authority transitions while the single-owner world
+    /// is quiescent. The command path only queues a request; no live rank,
+    /// capability, success message, or audit event is published until this
+    /// drain confirms the complete durable tuple.
+    async fn drain_authority_update_requests(&mut self) {
+        enum Resolution {
+            Committed,
+            Rejected,
+            Reconcile(crate::PlayerAuthorityState),
+            Quarantine,
+        }
+
+        let requests = self.state.take_authority_update_requests();
+        for request in requests {
+            if !authority_update_request_is_current(&self.state, &request) {
+                warn!(
+                    "AUDIT: authority update for {} (id {}) failed its drain-time principal, identity, hierarchy, or canonical-state check",
+                    request.name, request.idnum
+                );
+                if self.state.char_exists(request.authorization.requester_body) {
+                    self.state.send_to_char(
+                        request.authorization.requester_body,
+                        "Authority change failed because identity, authority, or the requested transition changed; no authority change was made.\r\n",
+                    );
+                }
+                continue;
+            }
+
+            // A previously launched broad save contains an older copy of every
+            // authority field. It must finish before the narrow CAS so it can
+            // never commit later and resurrect the superseded tuple.
+            if let Some(save) = self.pending_player_saves.remove(&request.idnum) {
+                let save_result = match save.task.await {
+                    Ok(result) => result,
+                    Err(error) => Err(format!("prior save task failed: {error}")),
+                };
+                if let Err(error) = save_result {
+                    self.player_save_failures = self.player_save_failures.saturating_add(1);
+                    error!(
+                        "AUDIT: authority update for {} (id {}) aborted after prior player save failure: {}",
+                        request.name, request.idnum, error
+                    );
+                    if authority_update_request_is_current(&self.state, &request) {
+                        self.state.send_to_char(
+                            request.authorization.requester_body,
+                            "Authority change failed because the player's pending save did not complete; no authority change was made.\r\n",
+                        );
+                    }
+                    continue;
+                }
+            }
+
+            // Awaiting a prior save is quiescent today, but repeat the exact
+            // request/target predicate here so this write stays safe if its
+            // scheduling changes later.
+            if !authority_update_request_is_current(&self.state, &request) {
+                warn!(
+                    "AUDIT: authority update for {} (id {}) canceled after its prior-save boundary",
+                    request.name, request.idnum
+                );
+                continue;
+            }
+
+            let update = self
+                .db
+                .update_authority_if_current(
+                    request.idnum,
+                    &request.name,
+                    request.expected,
+                    request.replacement,
+                )
+                .await;
+            let resolution = match update {
+                Ok(crate::AuthorityUpdateOutcome::Updated) => Resolution::Committed,
+                Ok(crate::AuthorityUpdateOutcome::PreconditionsChanged) => {
+                    warn!(
+                        "AUDIT: authority CAS for {} (id {}) observed changed durable preconditions; resolving by exact readback",
+                        request.name, request.idnum
+                    );
+                    match self.db.player_authority_by_id(request.idnum).await {
+                        Ok(Some((name, authority)))
+                            if name == request.name && authority == request.replacement =>
+                        {
+                            Resolution::Committed
+                        }
+                        Ok(Some((name, authority)))
+                            if name == request.name && authority == request.expected =>
+                        {
+                            Resolution::Rejected
+                        }
+                        Ok(Some((name, authority))) if name == request.name => {
+                            warn!(
+                                "AUDIT: authority update for {} (id {}) lost a durable race; reconciling live authority to {:?}",
+                                request.name, request.idnum, authority
+                            );
+                            Resolution::Reconcile(authority)
+                        }
+                        Ok(observed) => {
+                            error!(
+                                "AUDIT: CRITICAL authority update for {} (id {}) cannot reconcile identity after a rejected CAS; observed={:?}",
+                                request.name, request.idnum, observed
+                            );
+                            Resolution::Quarantine
+                        }
+                        Err(error) => {
+                            error!(
+                                "AUDIT: CRITICAL authority update for {} (id {}) rejected and exact readback failed: {}",
+                                request.name, request.idnum, error
+                            );
+                            Resolution::Quarantine
+                        }
+                    }
+                }
+                Err(error) => {
+                    error!(
+                        "AUDIT: authority CAS for {} (id {}) errored; resolving the potentially committed write by exact readback: {}",
+                        request.name, request.idnum, error
+                    );
+                    match self.db.player_authority_by_id(request.idnum).await {
+                        Ok(Some((name, authority)))
+                            if name == request.name && authority == request.replacement =>
+                        {
+                            Resolution::Committed
+                        }
+                        Ok(Some((name, authority)))
+                            if name == request.name && authority == request.expected =>
+                        {
+                            Resolution::Rejected
+                        }
+                        Ok(Some((name, authority))) if name == request.name => {
+                            warn!(
+                                "AUDIT: authority update error for {} (id {}) resolved to another durable tuple {:?}; reconciling live authority",
+                                request.name, request.idnum, authority
+                            );
+                            Resolution::Reconcile(authority)
+                        }
+                        Ok(observed) => {
+                            error!(
+                                "AUDIT: CRITICAL authority outcome for {} (id {}) is indeterminate because durable identity differs or is absent; observed={:?}",
+                                request.name, request.idnum, observed
+                            );
+                            Resolution::Quarantine
+                        }
+                        Err(read_error) => {
+                            error!(
+                                "AUDIT: CRITICAL authority outcome for {} (id {}) is indeterminate; exact readback also failed: {}",
+                                request.name, request.idnum, read_error
+                            );
+                            Resolution::Quarantine
+                        }
+                    }
+                }
+            };
+
+            // Direct database awaits quiesce the world, nevertheless take one
+            // final exact snapshot before any live mutation or requester-facing
+            // publication. Durable reconciliation below is a system
+            // continuation and must still complete after an ambiguous commit.
+            let requester_may_receive_result =
+                authority_update_request_is_current(&self.state, &request);
+            match resolution {
+                Resolution::Committed => {
+                    if requester_may_receive_result {
+                        crate::cmd_wizard::complete_advance(&mut self.state, &request);
+                    } else if let Some(victim) = self.state.get_char_mut(request.victim) {
+                        apply_player_authority_state(victim, request.replacement);
+                    }
+                    self.state.authority_quarantine.remove(&request.idnum);
+                    if let Some(snapshot) = self.state.get_char(request.victim).cloned() {
+                        self.state.update_player_index_from_character(
+                            &snapshot,
+                            snapshot.last_logon.timestamp(),
+                            "",
+                        );
+                    }
+                    // Persist dependent demotion cleanup (invisibility and
+                    // preference flags). The complete authority tuple is
+                    // already durable, and any later save snapshots it.
+                    self.state.request_player_save(request.victim);
+                }
+                Resolution::Rejected => {
+                    self.state.authority_quarantine.remove(&request.idnum);
+                    if requester_may_receive_result {
+                        self.state.send_to_char(
+                            request.authorization.requester_body,
+                            "Authority change was rejected because durable state changed; no requested authority change was made.\r\n",
+                        );
+                    }
+                }
+                Resolution::Reconcile(authority) => {
+                    if let Some(victim) = self.state.get_char_mut(request.victim) {
+                        apply_player_authority_state(victim, authority);
+                    }
+                    self.state.authority_quarantine.remove(&request.idnum);
+                    if let Some(snapshot) = self.state.get_char(request.victim).cloned() {
+                        self.state.update_player_index_from_character(
+                            &snapshot,
+                            snapshot.last_logon.timestamp(),
+                            "",
+                        );
+                    }
+                    self.state.request_player_save(request.victim);
+                    if requester_may_receive_result {
+                        self.state.send_to_char(
+                            request.authorization.requester_body,
+                            "Authority change lost a durable race. Live authority was reconciled to storage; retry after reviewing the target.\r\n",
+                        );
+                    }
+                }
+                Resolution::Quarantine => {
+                    let safe = least_privileged_authority(request.expected, request.replacement);
+                    if let Some(victim) = self.state.get_char_mut(request.victim) {
+                        apply_player_authority_state(victim, safe);
+                    }
+                    self.state.authority_quarantine.insert(request.idnum);
+                    if let Some(snapshot) = self.state.get_char(request.victim).cloned() {
+                        self.state.update_player_index_from_character(
+                            &snapshot,
+                            snapshot.last_logon.timestamp(),
+                            "",
+                        );
+                    }
+                    if requester_may_receive_result {
+                        self.state.send_to_char(
+                            request.authorization.requester_body,
+                            "CRITICAL: the durable authority outcome is indeterminate. The account has been privilege-quarantined; check the audit log and database before retrying.\r\n",
+                        );
+                    }
+                    if self.state.char_exists(request.victim) {
+                        self.state.send_to_char(
+                            request.victim,
+                            "Your administrative authority is temporarily quarantined while durable state is reconciled.\r\n",
+                        );
+                    }
+                }
+            }
+            self.state.revalidate_snoop_links();
+        }
+    }
+
+    /// Commit authenticated `set passwd` requests through the password-only
+    /// database primitive. Authority and target identity are rechecked at the
+    /// async boundary; neither the requester nor the victim sees success until
+    /// the exact durable row acknowledges the update.
+    async fn drain_password_update_requests(&mut self) {
+        let requests = self.state.take_password_update_requests();
+        for mut request in requests {
+            if password_update_request_is_current(&self.state, &request).is_none() {
+                warn!(
+                    "AUDIT: password update for {} (id {}) failed its drain-time identity/authority check",
+                    request.name, request.idnum
+                );
+                if self.state.authenticated_command_request_is_current(
+                    request.authorization,
+                    i32::from(LVL_IMPL),
+                    1,
+                    crate::gcmd::GCMD_SET,
+                ) {
+                    self.state.send_to_char(
+                        request.authorization.requester_body,
+                        "Password change failed because authority or the player identity changed; no password change was made.\r\n",
+                    );
+                }
+                continue;
+            }
+            let requester_name = self
+                .state
+                .get_char(request.authorization.requester_principal)
+                .map(|principal| principal.get_name().to_string())
+                .unwrap_or_else(|| "<departed>".to_string());
+
+            // Order this credential change after any already-launched save for
+            // the same player. Generic saves now exclude `pwd` atomically, so
+            // they cannot resurrect a hash on either side of this boundary.
+            if let Some(save) = self.pending_player_saves.remove(&request.idnum) {
+                match save.task.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(save_error)) => {
+                        self.player_save_failures = self.player_save_failures.saturating_add(1);
+                        warn!(
+                            "ordered save preceding password update for {} failed: {}",
+                            request.name, save_error
+                        );
+                    }
+                    Err(save_error) => {
+                        self.player_save_failures = self.player_save_failures.saturating_add(1);
+                        warn!(
+                            "ordered save task preceding password update for {} failed: {}",
+                            request.name, save_error
+                        );
+                    }
+                }
+            }
+
+            if password_update_request_is_current(&self.state, &request).is_none() {
+                warn!(
+                    "AUDIT: password update for {} (id {}) canceled after its prior-save boundary",
+                    request.name, request.idnum
+                );
+                continue;
+            }
+
+            let plaintext_password = std::mem::take(&mut request.plaintext_password);
+            let Some(password_hash) = self
+                .await_database(crate::password::hash_password_async(plaintext_password))
+                .await
+            else {
+                warn!(
+                    "AUDIT: password update for {} (id {}) could not enter or complete the password KDF",
+                    request.name, request.idnum
+                );
+                if password_update_request_is_current(&self.state, &request).is_some() {
+                    self.state.send_to_char(
+                        request.authorization.requester_body,
+                        "Password change is temporarily unavailable; no password change was made.\r\n",
+                    );
+                }
+                continue;
+            };
+
+            // The KDF runs through await_database and may service disconnects,
+            // switches, grant changes, or authority transitions. Bind the
+            // password write to the exact session and target again now.
+            if password_update_request_is_current(&self.state, &request).is_none() {
+                warn!(
+                    "AUDIT: password update for {} (id {}) canceled after KDF because its authenticated request changed",
+                    request.name, request.idnum
+                );
+                continue;
+            }
+
+            let durable = match self
+                .db
+                .update_password_hash(request.idnum, &request.name, None, &password_hash)
+                .await
+            {
+                Err(error) => {
+                    self.resolve_password_update_error(&request.name, &password_hash, error)
+                        .await
+                }
+                result => result,
+            };
+            let request_current_after_durable =
+                password_update_request_is_current(&self.state, &request).is_some();
+            let live_target_after_durable =
+                password_update_target_is_current(&self.state, &request).flatten();
+            match durable {
+                Ok(crate::PasswordHashUpdateOutcome::Updated) => {
+                    // Updating the target's credential cache reconciles a
+                    // confirmed durable commit and is independent of the
+                    // requester's continued session. It still requires the
+                    // exact target identity observed by the request.
+                    if let Some(victim) = live_target_after_durable {
+                        if let Some(conn_id) = self.state.get_char(victim).and_then(|c| c.desc) {
+                            if let Some(descriptor) = self.state.descriptors.get_mut(&conn_id) {
+                                descriptor.password_hash = Some(password_hash.clone());
+                            }
+                        }
+                        if let Some(character) = self.state.get_char_mut(victim) {
+                            character.pending_password_hash = None;
+                        }
+                    }
+                    info!(
+                        "AUDIT: {} changed the password for {} (id {})",
+                        requester_name, request.name, request.idnum
+                    );
+                    if request_current_after_durable {
+                        self.state.send_to_char(
+                            request.authorization.requester_body,
+                            &format!("Password changed for {}.\r\n", request.name),
+                        );
+                    }
+                }
+                Ok(crate::PasswordHashUpdateOutcome::IdentityMismatch) => {
+                    warn!(
+                        "AUDIT: password update for {} (id {}) was rejected by the durable identity predicate",
+                        request.name, request.idnum
+                    );
+                    if request_current_after_durable {
+                        self.state.send_to_char(
+                            request.authorization.requester_body,
+                            "Password change failed because the durable player identity changed; no password change was made.\r\n",
+                        );
+                    }
+                }
+                Ok(crate::PasswordHashUpdateOutcome::CurrentHashMismatch) => {
+                    warn!(
+                        "AUDIT: password update for {} (id {}) was not confirmed; durable readback found another credential",
+                        request.name, request.idnum
+                    );
+                    if request_current_after_durable {
+                        self.state.send_to_char(
+                            request.authorization.requester_body,
+                            "Password change was not confirmed; the requested credential was not active at durable readback. Have the player reconnect and use their current account password.\r\n",
+                        );
+                    }
+                }
+                Err(error) => {
+                    error!(
+                        "AUDIT: password update for {} (id {}) has an indeterminate durable outcome: {}",
+                        request.name, request.idnum, error
+                    );
+                    if request_current_after_durable {
+                        self.state.send_to_char(
+                            request.authorization.requester_body,
+                            "Password change could not be confirmed. Have the player reconnect and try the new password, then the old password.\r\n",
+                        );
+                    }
+                }
             }
         }
     }
@@ -2963,62 +4276,15 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
     async fn drain_player_rename_requests(&mut self) {
         let requests = self.state.take_player_rename_requests();
         for request in requests {
-            let preflight = self
-                .state
-                .get_char(request.requester)
-                .filter(|requester| !requester.is_npc)
-                .map(|requester| (requester.get_name().to_string(), requester.player.level))
-                .zip(self.state.get_char(request.victim).map(|victim| {
-                    (
-                        victim.idnum,
-                        victim.get_name().to_string(),
-                        victim.player.level,
-                    )
-                }));
-            let Some((
-                (requester_name, requester_level),
-                (victim_idnum, victim_name, victim_level),
-            )) = preflight
-            else {
+            if player_rename_request_is_current(&self.state, &request).is_none() {
                 warn!(
-                    "AUDIT: rename {} -> {} abandoned because requester or victim left the world",
-                    request.old_name, request.new_name
-                );
-                continue;
-            };
-
-            let old_key = request.old_name.to_lowercase();
-            let new_key = request.new_name.to_lowercase();
-            let identity_is_current = victim_idnum == request.idnum
-                && victim_name.eq_ignore_ascii_case(&request.old_name)
-                && self.state.players_by_name.get(&old_key).copied() == Some(request.victim);
-            let authority_is_current = requester_level > victim_level;
-            let live_collision = self
-                .state
-                .players_by_name
-                .get(&new_key)
-                .is_some_and(|owner| *owner != request.victim);
-            let index_collision = self.state.player_table.iter().any(|player| {
-                player.name.eq_ignore_ascii_case(&request.new_name) && player.idnum != request.idnum
-            });
-            if !identity_is_current
-                || !authority_is_current
-                || live_collision
-                || index_collision
-                || request.old_name.eq_ignore_ascii_case(&request.new_name)
-            {
-                warn!(
-                    "AUDIT: rename {} (id {}) -> {} failed its drain-time identity/authority/collision recheck",
+                    "AUDIT: rename {} (id {}) -> {} failed its drain-time authenticated identity/authority/collision recheck",
                     request.old_name, request.idnum, request.new_name
                 );
-                if self.state.char_exists(request.requester) {
-                    self.state.send_to_char(
-                        request.requester,
-                        "Rename failed because the player identity, authority, or destination changed; no name change was made.\r\n",
-                    );
-                }
                 continue;
             }
+            let old_key = request.old_name.to_lowercase();
+            let new_key = request.new_name.to_lowercase();
 
             // A disconnect save from an earlier iteration may still be running
             // with the old name.  It must finish before the conditional rename
@@ -3034,14 +4300,22 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                         "AUDIT: rename {} (id {}) -> {} aborted after prior player save failure: {}",
                         request.old_name, request.idnum, request.new_name, error
                     );
-                    if self.state.char_exists(request.requester) {
+                    if player_rename_request_is_current(&self.state, &request).is_some() {
                         self.state.send_to_char(
-                            request.requester,
+                            request.authorization.requester_body,
                             "Rename failed because the player's pending save did not complete; no name change was made.\r\n",
                         );
                     }
                     continue;
                 }
+            }
+
+            if player_rename_request_is_current(&self.state, &request).is_none() {
+                warn!(
+                    "AUDIT: rename {} (id {}) -> {} canceled after its prior-save boundary",
+                    request.old_name, request.idnum, request.new_name
+                );
+                continue;
             }
 
             // SQL is the authoritative identity.  Do not touch sidecars until
@@ -3057,9 +4331,9 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                         "AUDIT: rename {} (id {}) -> {} rejected by the durable identity/collision predicate",
                         request.old_name, request.idnum, request.new_name
                     );
-                    if self.state.char_exists(request.requester) {
+                    if player_rename_request_is_current(&self.state, &request).is_some() {
                         self.state.send_to_char(
-                            request.requester,
+                            request.authorization.requester_body,
                             "Rename failed because the durable player identity or destination changed; no name change was made.\r\n",
                         );
                     }
@@ -3100,16 +4374,33 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                             request.old_name, request.idnum, request.new_name, observed_name
                         );
                     }
-                    if self.state.char_exists(request.requester) {
+                    if player_rename_request_is_current(&self.state, &request).is_some() {
                         let message = if old_name_confirmed {
                             "Rename failed while saving the durable player identity; the database old name was confirmed and no files or live names were changed.\r\n"
                         } else {
                             "CRITICAL: rename database state is indeterminate after a failed compensation. No files or live names were changed; check the audit log immediately.\r\n"
                         };
-                        self.state.send_to_char(request.requester, message);
+                        self.state
+                            .send_to_char(request.authorization.requester_body, message);
                     }
                     continue;
                 }
+            }
+
+            // Direct SQL awaits quiesce the world, but recheck after the
+            // durable boundary before mutating name-keyed sidecars. If this
+            // invariant ever changes, compensate SQL rather than publishing a
+            // stale administrator request.
+            if player_rename_request_is_current(&self.state, &request).is_none() {
+                let rollback = self
+                    .db
+                    .rename_player_if_current(request.idnum, &request.new_name, &request.old_name)
+                    .await;
+                error!(
+                    "AUDIT: rename {} (id {}) -> {} lost authorization after SQL commit; rollback={:?}",
+                    request.old_name, request.idnum, request.new_name, rollback
+                );
+                continue;
             }
 
             // The database now owns the new name.  Move both name-keyed files
@@ -3165,16 +4456,43 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                         request.old_name, request.idnum, request.new_name
                     );
                 }
-                if self.state.char_exists(request.requester) {
+                if player_rename_request_is_current(&self.state, &request).is_some() {
                     let message = if fully_consistent_failure {
                         "Rename failed while moving the player's durable files; the database old name was restored and no live name change was published.\r\n"
                     } else {
                         "CRITICAL: rename storage is inconsistent after a failed rollback. No live name change was published; check the audit log immediately.\r\n"
                     };
-                    self.state.send_to_char(request.requester, message);
+                    self.state
+                        .send_to_char(request.authorization.requester_body, message);
                 }
                 continue;
             }
+
+            // No world state can change during the synchronous sidecar move,
+            // but make the publication invariant explicit at the exact live
+            // index/name mutation boundary.
+            let Some(requester_name) = player_rename_request_is_current(&self.state, &request)
+            else {
+                let sidecar_rollback = crate::player_sidecars::rename_player_sidecars(
+                    &self.lib_path,
+                    &request.new_name,
+                    &request.old_name,
+                    request.idnum,
+                );
+                let sql_rollback = self
+                    .db
+                    .rename_player_if_current(request.idnum, &request.new_name, &request.old_name)
+                    .await;
+                error!(
+                    "AUDIT: rename {} (id {}) -> {} lost authorization before live publication; sidecar rollback={:?}; SQL rollback={:?}",
+                    request.old_name,
+                    request.idnum,
+                    request.new_name,
+                    sidecar_rollback,
+                    sql_rollback
+                );
+                continue;
+            };
 
             // Every durable component now resolves through the new identity.
             // These remaining in-memory operations are infallible; only here
@@ -3193,15 +4511,13 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             }
             crate::mail::mail_register_player(request.idnum, &request.new_name);
 
-            if self.state.char_exists(request.requester) {
-                self.state.send_to_char(
-                    request.requester,
-                    &format!(
-                        "You have renamed {} to {}.\r\n",
-                        request.old_name, request.new_name
-                    ),
-                );
-            }
+            self.state.send_to_char(
+                request.authorization.requester_body,
+                &format!(
+                    "You have renamed {} to {}.\r\n",
+                    request.old_name, request.new_name
+                ),
+            );
             if self.state.char_exists(request.victim) {
                 self.state.send_to_char(
                     request.victim,
@@ -3224,7 +4540,18 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
     }
 
     async fn drain_pfileclean(&mut self) {
-        if !self.state.take_pfileclean_request() {
+        let Some(request) = self.state.take_pfileclean_request() else {
+            return;
+        };
+        if !self.state.authenticated_command_request_is_current(
+            request,
+            i32::from(LVL_IMMORT),
+            3,
+            crate::gcmd::GCMD3_PFILECLEAN,
+        ) {
+            warn!(
+                "AUDIT: queued pfileclean canceled because its authenticated authority or grant changed"
+            );
             return;
         }
 
@@ -3239,6 +4566,17 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                 return;
             }
         };
+        if !self.state.authenticated_command_request_is_current(
+            request,
+            i32::from(LVL_IMMORT),
+            3,
+            crate::gcmd::GCMD3_PFILECLEAN,
+        ) {
+            warn!(
+                "AUDIT: pfileclean canceled after player discovery because its authenticated authority or grant changed"
+            );
+            return;
+        }
         self.state.player_table = latest_players.clone();
         let deleted_players: Vec<_> = latest_players
             .into_iter()
@@ -3252,6 +4590,18 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             warn!(
                 "AUDIT: pfileclean aborted: deleted player {} (id {}) is still in the world",
                 player.name, player.idnum
+            );
+            return;
+        }
+
+        if !self.state.authenticated_command_request_is_current(
+            request,
+            i32::from(LVL_IMMORT),
+            3,
+            crate::gcmd::GCMD3_PFILECLEAN,
+        ) {
+            warn!(
+                "AUDIT: pfileclean canceled before sidecar deletion because its authenticated authority or grant changed"
             );
             return;
         }
@@ -3274,15 +4624,52 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             return;
         }
 
-        let audited_idnums = deleted_players.iter().map(|player| player.idnum).collect();
+        if !self.state.authenticated_command_request_is_current(
+            request,
+            i32::from(LVL_IMMORT),
+            3,
+            crate::gcmd::GCMD3_PFILECLEAN,
+        ) {
+            warn!(
+                "AUDIT: pfileclean retained DB tombstones because authorization changed before row deletion"
+            );
+            return;
+        }
+        let audited_idnums: Vec<i64> = deleted_players.iter().map(|player| player.idnum).collect();
+        // This destructive call deliberately bypasses await_database: the
+        // exact recheck above and the commit are one quiescent world boundary.
         match self
-            .db_delete_deleted_players_by_idnums(audited_idnums)
+            .db
+            .delete_deleted_players_by_idnums(audited_idnums)
             .await
         {
             Ok(deleted) => {
+                if !self.state.authenticated_command_request_is_current(
+                    request,
+                    i32::from(LVL_IMMORT),
+                    3,
+                    crate::gcmd::GCMD3_PFILECLEAN,
+                ) {
+                    warn!(
+                        "AUDIT: pfileclean requester changed during a quiescent delete; continuing committed-state reconciliation"
+                    );
+                }
                 info!("pfileclean deleted {} PLR_DELETED player row(s)", deleted);
-                match self.db_list_players().await {
+                // Rebuilding the index is reconciliation of an already
+                // committed system state and must complete even if a future DB
+                // implementation can invalidate the requesting session here.
+                match self.db.list_players().await {
                     Ok(players) => {
+                        if !self.state.authenticated_command_request_is_current(
+                            request,
+                            i32::from(LVL_IMMORT),
+                            3,
+                            crate::gcmd::GCMD3_PFILECLEAN,
+                        ) {
+                            warn!(
+                                "AUDIT: pfileclean requester changed during quiescent index readback; applying committed-state reconciliation only"
+                            );
+                        }
                         self.state.player_table = players;
                     }
                     Err(err) => {
@@ -3421,6 +4808,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         if pulse % (60 * PASSES_PER_SEC) == 0 {
             crate::quest::quest_update(&mut self.state);
             crate::maputils::blood_update(&mut self.state);
+            self.autoreboot_check();
         }
         // Mud-hour block (SECS_PER_MUD_HOUR * PASSES_PER_SEC = 750 pulses):
         // calendar/sky, affect aging (comm.c:1038, #96), then regen/conditions.
@@ -3578,6 +4966,13 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         use chrono::Timelike;
         let now = chrono::Utc::now();
         let (hr, min) = (now.hour() as i32, now.minute() as i32);
+        self.autoreboot_check_at((rh, rm, wh, wm), hr, min);
+    }
+
+    /// Time-injected half of the autoreboot clock. Keeping the wall clock at
+    /// the thin wrapper above makes the trigger and its fail-closed OLC gate
+    /// deterministic in unit tests.
+    fn autoreboot_check_at(&mut self, (rh, rm, wh, wm): (i32, i32, i32, i32), hr: i32, min: i32) {
         if hr == wh && min == wm && !self.reboot_warned {
             self.reboot_warned = true;
             let msg = format!(
@@ -3593,6 +4988,19 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             );
         }
         if hr == rh && min == rm {
+            if let Err(error) = crate::olc::flush_save_list_to_disk(&mut self.state) {
+                warn!("Auto-reboot aborted because pending OLC could not be saved: {error}");
+                crate::syslog::mudlog(
+                    &mut self.state,
+                    "Automatic reboot aborted: pending OLC changes could not be saved.",
+                    crate::syslog::NRM,
+                    0,
+                );
+                self.state.send_to_all_players(
+                    "&m[&RERROR&m]&n Automatic reboot aborted because pending OLC changes could not be saved.\r\n",
+                );
+                return;
+            }
             info!("Auto-reboot triggered; saving and restarting.");
             crate::syslog::mudlog(
                 &mut self.state,
@@ -3602,8 +5010,8 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             );
             crate::objsave::crash_save_all(&mut self.state);
             crate::house::house_save_all(&mut self.state);
-            crate::olc::flush_save_list_to_disk(&mut self.state);
-            self.state.shutdown_requested = true;
+            self.state.shutdown_requested =
+                Some(ShutdownRequest::System(ProcessDisposition::Restart));
         }
     }
 
@@ -3924,20 +5332,23 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
 
     // ---- GMCP (out-of-band JSON) ---------------------------------------
 
-    /// Handle `GameMessage::EnableGmcp`: flip the descriptor's gmcp flag (set in
-    /// connection.rs after we replied `IAC WILL GMCP`) and, if the connection is
-    /// already in-world, push an initial Char.Vitals/Room.Info so a client that
-    /// negotiates mid-session lights its gauges/mapper immediately rather than
-    /// waiting for the next command.
-    fn enable_gmcp(&mut self, conn_id: ConnId) {
-        let playing = match self.state.descriptors.get_mut(&conn_id) {
-            Some(d) => {
-                d.gmcp = true;
-                d.state == ConState::Playing
+    /// Apply negotiation/Core metadata parsed at the socket edge. An already
+    /// playing descriptor gets one immediate snapshot only on the disabled ->
+    /// enabled transition; duplicate DO messages cannot amplify output. DONT
+    /// clears both the send gate and all client-advertised package state.
+    fn handle_gmcp_event(&mut self, conn_id: ConnId, event: crate::connection::GmcpClientEvent) {
+        let (became_enabled, playing, enabled) = match self.state.descriptors.get_mut(&conn_id) {
+            Some(descriptor) => {
+                let playing = descriptor.state == ConState::Playing;
+                let became_enabled = descriptor.apply_gmcp_event(event);
+                (became_enabled, playing, descriptor.gmcp)
             }
             None => return,
         };
-        if playing {
+        if !enabled {
+            self.state.gmcp_dirty.remove(&conn_id);
+        }
+        if became_enabled && playing {
             self.push_gmcp_update(conn_id);
         }
     }
@@ -4193,6 +5604,9 @@ fn reserved_or_fill_word(name: &str) -> bool {
 }
 
 #[cfg(test)]
+// Tests in this module hold synchronous guards only to serialize process-global
+// ban/arena fixtures on the current test process; production paths do not.
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::DatabaseInterface;
@@ -4201,6 +5615,13 @@ mod tests {
     use std::sync::Arc;
     use std::sync::{Mutex, OnceLock};
     use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn panic_diagnostics_never_include_command_arguments() {
+        assert_eq!(panic_command_verb("unlock swordfish"), "unlock");
+        assert_eq!(panic_command_verb("set Victim passwd hunter2"), "set");
+        assert!(!panic_command_verb("set Victim passwd hunter2").contains("hunter2"));
+    }
 
     pub(super) fn test_game(db: Arc<MockDatabase>) -> Game {
         let db_trait: Arc<dyn DatabaseInterface> = db;
@@ -4222,6 +5643,50 @@ mod tests {
         game.state
             .descriptors
             .insert(conn, Descriptor::new(conn, host.to_string()));
+    }
+
+    pub(super) async fn persistent_connected_player(
+        game: &mut Game,
+        db: &MockDatabase,
+        conn: ConnId,
+        name: &str,
+        level: Level,
+    ) -> CharId {
+        attach_descriptor(game, conn);
+        let descriptor = game.state.descriptors.get_mut(&conn).unwrap();
+        descriptor.state = ConState::Playing;
+
+        let mut character =
+            crate::character::Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        character.desc = Some(conn);
+        character.player.level = level;
+        character.trust = i32::from(level);
+        let grants = crate::gcmd::canonical_advance_grants(level, LVL_IMMORT, LVL_IMPL);
+        character.godcmds1 = grants.0;
+        character.godcmds2 = grants.1;
+        character.godcmds3 = grants.2;
+        character.godcmds4 = grants.3;
+        character.idnum = db.create_player(&character, "test-password").await.unwrap();
+
+        let id = game.state.create_char(character);
+        game.state.descriptors.get_mut(&conn).unwrap().character = Some(id);
+        game.state.players_by_name.insert(name.to_lowercase(), id);
+        id
+    }
+
+    fn authenticated_request(
+        game: &Game,
+        body: CharId,
+    ) -> crate::state::AuthenticatedCommandRequest {
+        let authority = game.state.principal_authority(body).unwrap();
+        let descriptor = authority.descriptor.unwrap();
+        let principal = game.state.get_char(authority.principal).unwrap();
+        crate::state::AuthenticatedCommandRequest {
+            requester_body: body,
+            requester_principal: authority.principal,
+            descriptor,
+            idnum: principal.idnum,
+        }
     }
 
     /// Attach a descriptor and answer the CON_QANSI colour question so the
@@ -4254,6 +5719,461 @@ mod tests {
 
     fn descriptor_state(game: &Game, conn: ConnId) -> ConState {
         game.state.descriptors.get(&conn).unwrap().state
+    }
+
+    fn zone_with_builders(builders: &str) -> crate::world::Zone {
+        crate::world::Zone {
+            number: 30,
+            name: "Builder ACL test zone".into(),
+            builders: builders.into(),
+            lifespan: 30,
+            age: 0,
+            top: 3099,
+            reset_mode: 2,
+            min_level: 0,
+            max_level: LVL_IMPL,
+            status_mode: 0,
+            map_x: None,
+            map_y: None,
+            reset_commands: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_unlock_is_verified_async_before_lock_is_cleared() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        let character =
+            persistent_connected_player(&mut game, db.as_ref(), ConnId(8_901), "Terminalowner", 10)
+                .await;
+        game.state.get_char_mut(character).unwrap().prf2_flags |= crate::flags::PRF2_LOCKOUT;
+        game.state
+            .descriptors
+            .get_mut(&ConnId(8_901))
+            .unwrap()
+            .password_hash = Some(crate::password::hash_password("unlock-me"));
+
+        crate::cmd_other::do_lockout(&mut game.state, character, "unlock-me", 0);
+
+        assert_ne!(
+            game.state.get_char(character).unwrap().prf2_flags & crate::flags::PRF2_LOCKOUT,
+            0
+        );
+        assert!(
+            !game.state.descriptors[&ConnId(8_901)]
+                .outbuf
+                .contains("terminal is now unlocked")
+        );
+        assert_eq!(game.state.lockout_unlock_requests.len(), 1);
+
+        game.drain_lockout_unlock_requests().await;
+
+        assert_eq!(
+            game.state.get_char(character).unwrap().prf2_flags & crate::flags::PRF2_LOCKOUT,
+            0
+        );
+        assert!(
+            game.state.descriptors[&ConnId(8_901)]
+                .outbuf
+                .contains("terminal is now unlocked")
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_unlock_wrong_password_or_changed_session_fails_closed() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        let character =
+            persistent_connected_player(&mut game, db.as_ref(), ConnId(8_902), "Lockedowner", 10)
+                .await;
+        game.state.get_char_mut(character).unwrap().prf2_flags |= crate::flags::PRF2_LOCKOUT;
+        game.state
+            .descriptors
+            .get_mut(&ConnId(8_902))
+            .unwrap()
+            .password_hash = Some(crate::password::hash_password("right-password"));
+
+        crate::cmd_other::do_lockout(&mut game.state, character, "wrong-password", 0);
+        game.drain_lockout_unlock_requests().await;
+        assert_ne!(
+            game.state.get_char(character).unwrap().prf2_flags & crate::flags::PRF2_LOCKOUT,
+            0
+        );
+        assert!(
+            game.state.descriptors[&ConnId(8_902)]
+                .outbuf
+                .contains("Password mismatch")
+        );
+
+        game.state
+            .descriptors
+            .get_mut(&ConnId(8_902))
+            .unwrap()
+            .outbuf
+            .clear();
+        crate::cmd_other::do_lockout(&mut game.state, character, "right-password", 0);
+        game.state
+            .descriptors
+            .get_mut(&ConnId(8_902))
+            .unwrap()
+            .password_hash = Some(crate::password::hash_password("rotated-password"));
+        game.drain_lockout_unlock_requests().await;
+        assert_ne!(
+            game.state.get_char(character).unwrap().prf2_flags & crate::flags::PRF2_LOCKOUT,
+            0
+        );
+        assert!(
+            game.state.descriptors[&ConnId(8_902)]
+                .outbuf
+                .contains("verification expired")
+        );
+    }
+
+    #[tokio::test]
+    async fn advance_is_durable_before_live_publication_and_survives_reload() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        let room = game.state.add_room(crate::room::Room::new(
+            100,
+            0,
+            "Authority room".to_string(),
+            "A room.".to_string(),
+        ));
+        let actor = persistent_connected_player(
+            &mut game,
+            db.as_ref(),
+            ConnId(9_001),
+            "Authorityactor",
+            LVL_IMPL,
+        )
+        .await;
+        let target = persistent_connected_player(
+            &mut game,
+            db.as_ref(),
+            ConnId(9_002),
+            "Authoritytarget",
+            2,
+        )
+        .await;
+        game.state.char_to_room(actor, room);
+        game.state.char_to_room(target, room);
+
+        run_authenticated_command(&mut game.state, actor, "advance Authoritytarget 101");
+
+        assert_eq!(game.state.get_char(target).unwrap().player.level, 2);
+        assert_eq!(
+            db.load_player("Authoritytarget")
+                .await
+                .unwrap()
+                .player
+                .level,
+            2
+        );
+        assert!(
+            !game.state.descriptors[&ConnId(9_001)]
+                .outbuf
+                .contains("has advanced")
+        );
+
+        game.drain_authority_update_requests().await;
+
+        let live = game.state.get_char(target).unwrap();
+        assert_eq!(live.player.level, LVL_IMMORT);
+        assert_eq!(live.trust, i32::from(LVL_IMMORT));
+        assert_eq!(live.points.exp, crate::limits::exp_to_level(100));
+        assert_eq!(live.godcmds1, crate::gcmd::GCMD_GEN);
+        assert_eq!((live.godcmds2, live.godcmds3, live.godcmds4), (0, 0, 0));
+        assert!(
+            game.state.descriptors[&ConnId(9_001)]
+                .outbuf
+                .contains("has advanced Authoritytarget to level 101")
+        );
+
+        let reloaded = db.load_player("Authoritytarget").await.unwrap();
+        assert_eq!(reloaded.player.level, LVL_IMMORT);
+        assert_eq!(reloaded.trust, i32::from(LVL_IMMORT));
+        assert_eq!(reloaded.points.exp, crate::limits::exp_to_level(100));
+        assert_eq!(reloaded.godcmds1, crate::gcmd::GCMD_GEN);
+        assert_eq!(
+            (reloaded.godcmds2, reloaded.godcmds3, reloaded.godcmds4),
+            (0, 0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn advance_demotion_revokes_trust_and_every_capability_durably() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        let room = game.state.add_room(crate::room::Room::new(
+            101,
+            0,
+            "Authority room".to_string(),
+            "A room.".to_string(),
+        ));
+        let actor =
+            persistent_connected_player(&mut game, db.as_ref(), ConnId(9_011), "Demoter", LVL_IMPL)
+                .await;
+        let target = persistent_connected_player(
+            &mut game,
+            db.as_ref(),
+            ConnId(9_012),
+            "Demoted",
+            LVL_GRGOD,
+        )
+        .await;
+        game.state.char_to_room(actor, room);
+        game.state.char_to_room(target, room);
+        {
+            let character = game.state.get_char_mut(target).unwrap();
+            character.godcmds1 = !0;
+            character.godcmds2 = !0;
+            character.godcmds3 = !0;
+            character.godcmds4 = !0;
+        }
+        db.save_player(game.state.get_char(target).unwrap())
+            .await
+            .unwrap();
+
+        run_authenticated_command(&mut game.state, actor, "advance Demoted 1");
+        game.drain_authority_update_requests().await;
+
+        let reloaded = db.load_player("Demoted").await.unwrap();
+        assert_eq!((reloaded.player.level, reloaded.trust), (1, 1));
+        assert_eq!(reloaded.points.exp, crate::limits::exp_to_level(0));
+        assert_eq!(
+            (
+                reloaded.godcmds1,
+                reloaded.godcmds2,
+                reloaded.godcmds3,
+                reloaded.godcmds4,
+            ),
+            (0, 0, 0, 0)
+        );
+        let live = game.state.get_char(target).unwrap();
+        assert_eq!((live.player.level, live.trust), (1, 1));
+        assert_eq!(
+            (live.godcmds1, live.godcmds2, live.godcmds3, live.godcmds4),
+            (0, 0, 0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_authority_update_rechecks_the_exact_advance_grant() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        let actor = persistent_connected_player(
+            &mut game,
+            db.as_ref(),
+            ConnId(9_013),
+            "Grantactor",
+            LVL_IMPL,
+        )
+        .await;
+        let target =
+            persistent_connected_player(&mut game, db.as_ref(), ConnId(9_014), "Granttarget", 2)
+                .await;
+
+        run_authenticated_command(&mut game.state, actor, "advance Granttarget 101");
+        assert_eq!(game.state.authority_update_requests.len(), 1);
+        game.state.get_char_mut(actor).unwrap().godcmds1 &= !crate::gcmd::GCMD_ADVANCE;
+
+        game.drain_authority_update_requests().await;
+
+        assert_eq!(game.state.get_char(target).unwrap().trust, 2);
+        assert_eq!(db.load_player("Granttarget").await.unwrap().trust, 2);
+    }
+
+    #[tokio::test]
+    async fn authority_update_failure_keeps_live_and_durable_state_unchanged() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        let room = game.state.add_room(crate::room::Room::new(
+            102,
+            0,
+            "Authority room".to_string(),
+            "A room.".to_string(),
+        ));
+        let actor = persistent_connected_player(
+            &mut game,
+            db.as_ref(),
+            ConnId(9_021),
+            "Failureactor",
+            LVL_IMPL,
+        )
+        .await;
+        let target =
+            persistent_connected_player(&mut game, db.as_ref(), ConnId(9_022), "Failuretarget", 2)
+                .await;
+        game.state.char_to_room(actor, room);
+        game.state.char_to_room(target, room);
+        run_authenticated_command(&mut game.state, actor, "advance Failuretarget 101");
+        db.fail_next_authority_update();
+
+        game.drain_authority_update_requests().await;
+
+        assert_eq!(game.state.get_char(target).unwrap().player.level, 2);
+        assert_eq!(game.state.get_char(target).unwrap().trust, 2);
+        let durable = db.load_player("Failuretarget").await.unwrap();
+        assert_eq!((durable.player.level, durable.trust), (2, 2));
+        assert!(!game.state.authority_quarantine.contains(&durable.idnum));
+        let output = &game.state.descriptors[&ConnId(9_021)].outbuf;
+        assert!(output.contains("rejected because durable state changed"));
+        assert!(!output.contains("has advanced"));
+    }
+
+    #[tokio::test]
+    async fn authority_postcommit_error_is_confirmed_by_exact_readback() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        let room = game.state.add_room(crate::room::Room::new(
+            104,
+            0,
+            "Authority room".to_string(),
+            "A room.".to_string(),
+        ));
+        let actor = persistent_connected_player(
+            &mut game,
+            db.as_ref(),
+            ConnId(9_041),
+            "Readbackactor",
+            LVL_IMPL,
+        )
+        .await;
+        let target =
+            persistent_connected_player(&mut game, db.as_ref(), ConnId(9_042), "Readbacktarget", 2)
+                .await;
+        game.state.char_to_room(actor, room);
+        game.state.char_to_room(target, room);
+        run_authenticated_command(&mut game.state, actor, "advance Readbacktarget 101");
+        db.fail_next_authority_update_after_commit();
+
+        game.drain_authority_update_requests().await;
+
+        let live = game.state.get_char(target).unwrap();
+        assert_eq!(
+            (live.player.level, live.trust),
+            (LVL_IMMORT, i32::from(LVL_IMMORT))
+        );
+        let durable = db.load_player("Readbacktarget").await.unwrap();
+        assert_eq!(
+            (durable.player.level, durable.trust),
+            (LVL_IMMORT, i32::from(LVL_IMMORT))
+        );
+        assert!(!game.state.authority_quarantine.contains(&durable.idnum));
+        assert!(
+            game.state.descriptors[&ConnId(9_041)]
+                .outbuf
+                .contains("has advanced Readbacktarget to level 101")
+        );
+    }
+
+    #[tokio::test]
+    async fn indeterminate_authority_outcome_quarantines_the_account_fail_closed() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        let room = game.state.add_room(crate::room::Room::new(
+            105,
+            0,
+            "Authority room".to_string(),
+            "A room.".to_string(),
+        ));
+        let actor = persistent_connected_player(
+            &mut game,
+            db.as_ref(),
+            ConnId(9_051),
+            "Quarantineactor",
+            LVL_IMPL,
+        )
+        .await;
+        let target = persistent_connected_player(
+            &mut game,
+            db.as_ref(),
+            ConnId(9_052),
+            "Quarantinetarget",
+            LVL_GRGOD,
+        )
+        .await;
+        game.state.char_to_room(actor, room);
+        game.state.char_to_room(target, room);
+        run_authenticated_command(&mut game.state, actor, "advance Quarantinetarget 1");
+        db.fail_next_authority_update();
+        db.fail_next_authority_read();
+
+        game.drain_authority_update_requests().await;
+
+        let idnum = game.state.get_char(target).unwrap().idnum;
+        assert!(game.state.authority_quarantine.contains(&idnum));
+        assert_eq!(
+            (
+                game.state.get_char(target).unwrap().player.level,
+                game.state.get_char(target).unwrap().trust,
+            ),
+            (1, 1),
+            "an ambiguous demotion must expose only the less-privileged tuple"
+        );
+        run_authenticated_command(&mut game.state, target, "shutdown die");
+        assert!(game.state.shutdown_requested.is_none());
+        assert!(
+            game.state.descriptors[&ConnId(9_051)]
+                .outbuf
+                .contains("privilege-quarantined")
+        );
+        assert!(
+            !game.state.descriptors[&ConnId(9_051)]
+                .outbuf
+                .contains("has advanced")
+        );
+        assert_eq!(
+            db.load_player("Quarantinetarget").await.unwrap().trust,
+            i32::from(LVL_GRGOD),
+            "the injected pre-commit failure leaves durable state old while live authority is denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn authority_cas_runs_after_an_older_broad_save() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        let room = game.state.add_room(crate::room::Room::new(
+            103,
+            0,
+            "Authority room".to_string(),
+            "A room.".to_string(),
+        ));
+        let actor = persistent_connected_player(
+            &mut game,
+            db.as_ref(),
+            ConnId(9_031),
+            "Saveorderactor",
+            LVL_IMPL,
+        )
+        .await;
+        let target = persistent_connected_player(
+            &mut game,
+            db.as_ref(),
+            ConnId(9_032),
+            "Saveordertarget",
+            2,
+        )
+        .await;
+        game.state.char_to_room(actor, room);
+        game.state.char_to_room(target, room);
+
+        let stale_snapshot = game.state.get_char(target).unwrap().clone();
+        db.set_save_delay(Some(std::time::Duration::from_millis(25)));
+        game.queue_player_save(stale_snapshot, String::new());
+        run_authenticated_command(&mut game.state, actor, "advance Saveordertarget 101");
+
+        game.drain_authority_update_requests().await;
+        db.set_save_delay(None);
+
+        let durable = db.load_player("Saveordertarget").await.unwrap();
+        assert_eq!(
+            (durable.player.level, durable.trust),
+            (LVL_IMMORT, i32::from(LVL_IMMORT))
+        );
+        assert_eq!(durable.godcmds1, crate::gcmd::GCMD_GEN);
+        assert!(!game.pending_player_saves.contains_key(&durable.idnum));
     }
 
     #[test]
@@ -4496,6 +6416,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deleted_builder_acl_name_cannot_be_reused_for_a_new_character() {
+        let db = Arc::new(MockDatabase::new());
+        let mut deleted = crate::character::Character::new_player(
+            "Aclbuilder".into(),
+            Class::Warrior,
+            Race::Human,
+        );
+        deleted.act_flags |= crate::flags::PLR_DELETED;
+        db.create_player(&deleted, "gone").await.unwrap();
+        assert_eq!(db.delete_deleted_players().await.unwrap(), 1);
+        assert!(!db.player_exists("Aclbuilder").await.unwrap());
+
+        let mut game = test_game(db);
+        game.state
+            .zones
+            .push(zone_with_builders("Michael Aclbuilder, Claude"));
+        let conn = ConnId(101);
+        attach_descriptor_at_name(&mut game, conn, "builder-name.test").await;
+
+        game.nanny(conn, "Aclbuilder".into()).await;
+
+        let descriptor = &game.state.descriptors[&conn];
+        assert_eq!(descriptor.state, ConState::GetName);
+        assert_eq!(descriptor.temp_name, None);
+        assert!(descriptor.outbuf.contains("Invalid name"));
+    }
+
+    #[tokio::test]
+    async fn current_builder_acl_change_is_rechecked_before_creation_confirmation() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        let conn = ConnId(102);
+        attach_descriptor_at_name(&mut game, conn, "builder-race.test").await;
+
+        game.nanny(conn, "Aclbuilder".into()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::ConfirmName);
+        game.state
+            .zones
+            .push(zone_with_builders("Michael ACLBUILDER, Claude"));
+
+        game.nanny(conn, "y".into()).await;
+
+        let descriptor = &game.state.descriptors[&conn];
+        assert_eq!(descriptor.state, ConState::GetName);
+        assert_eq!(descriptor.temp_name, None);
+        assert!(descriptor.outbuf.contains("Invalid name"));
+    }
+
+    #[tokio::test]
+    async fn existing_builder_account_still_reaches_the_password_prompt() {
+        let db = Arc::new(MockDatabase::new());
+        let builder = crate::character::Character::new_player(
+            "Aclbuilder".into(),
+            Class::Warrior,
+            Race::Human,
+        );
+        db.create_player(&builder, "secret").await.unwrap();
+
+        let mut game = test_game(db);
+        game.state
+            .zones
+            .push(zone_with_builders("Michael Aclbuilder, Claude"));
+        let conn = ConnId(103);
+        attach_descriptor_at_name(&mut game, conn, "existing-builder.test").await;
+
+        game.nanny(conn, "Aclbuilder".into()).await;
+
+        assert_eq!(descriptor_state(&game, conn), ConState::GetOldPassword);
+        assert_eq!(
+            game.state.descriptors[&conn].temp_name.as_deref(),
+            Some("Aclbuilder")
+        );
+    }
+
+    #[tokio::test]
     async fn accepted_creation_stats_are_started_and_saved() {
         let db = Arc::new(MockDatabase::new());
         let seed = crate::character::Character::new_player(
@@ -4506,6 +6501,19 @@ mod tests {
         db.create_player(&seed, "seedpass").await.unwrap();
 
         let mut game = test_game(db.clone());
+        let configured_newbie_room = game.state.config.newbie_room;
+        let configured_newbie_rnum = game.state.add_room(crate::room::Room::new(
+            configured_newbie_room,
+            2,
+            "Configured newbie room".into(),
+            String::new(),
+        ));
+        let obsolete_c_default_rnum = game.state.add_room(crate::room::Room::new(
+            2200,
+            22,
+            "Obsolete C newbie room".into(),
+            String::new(),
+        ));
         let conn = ConnId(2);
         attach_descriptor_at_name(&mut game, conn, "example.test").await;
 
@@ -4513,6 +6521,13 @@ mod tests {
         game.nanny(conn, "y".to_string()).await;
         game.nanny(conn, "secret".to_string()).await;
         game.nanny(conn, "secret".to_string()).await;
+        assert!(game.state.descriptors[&conn].temp_password.is_none());
+        assert!(
+            game.state.descriptors[&conn]
+                .password_hash
+                .as_deref()
+                .is_some_and(|hash| hash.starts_with("$argon2id$"))
+        );
         game.nanny(conn, "y".to_string()).await;
         game.nanny(conn, "m".to_string()).await;
         game.nanny(conn, "d".to_string()).await;
@@ -4528,6 +6543,13 @@ mod tests {
         assert_eq!(descriptor_state(&game, conn), ConState::Menu);
         game.nanny(conn, "1".to_string()).await;
         assert_eq!(descriptor_state(&game, conn), ConState::Playing);
+        let live_player = game.state.descriptors[&conn].character.unwrap();
+        assert_eq!(
+            game.state.get_char(live_player).unwrap().in_room,
+            Some(configured_newbie_rnum),
+            "new players must enter the configured newbie room"
+        );
+        assert_ne!(configured_newbie_rnum, obsolete_c_default_rnum);
 
         let saved = db.load_player("Bob").await.unwrap();
         assert_eq!(saved.idnum, 2);
@@ -4557,10 +6579,17 @@ mod tests {
         assert!(saved.prf_flags & crate::flags::PRF_DISPEXP != 0);
         assert!(saved.prf_flags & crate::flags::PRF_NOLOOKSTACK != 0);
         assert!(saved.prf2_flags & crate::flags::PRF2_DISPMOB != 0);
+        assert!(db.verify_password("Bob", "secret").await.unwrap());
+        assert!(!db.verify_password("Bob", "not-secret").await.unwrap());
+        assert_eq!(
+            db.get_password_hash("Bob").await.unwrap().as_deref(),
+            game.state.descriptors[&conn].password_hash.as_deref(),
+            "creation must persist the already-generated session hash without a second KDF"
+        );
     }
 
     #[tokio::test]
-    async fn first_created_character_still_bootstraps_implementor() {
+    async fn first_created_character_is_not_implicitly_privileged() {
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db.clone());
         let conn = ConnId(3);
@@ -4581,9 +6610,9 @@ mod tests {
 
         let saved = db.load_player("First").await.unwrap();
         assert_eq!(saved.idnum, 1);
-        assert_eq!(saved.player.level, LVL_IMPL);
-        assert_eq!(saved.player.title.as_deref(), Some("the Implementor"));
-        assert_ne!(
+        assert_eq!(saved.player.level, 1);
+        assert_ne!(saved.player.title.as_deref(), Some("the Implementor"));
+        assert_eq!(
             saved.godcmds1 | saved.godcmds2 | saved.godcmds3 | saved.godcmds4,
             0
         );
@@ -4723,6 +6752,51 @@ mod tests {
         );
         let empty = temp_ban_lib("empty-select", "");
         crate::ban::boot_ban(&empty);
+    }
+
+    #[tokio::test]
+    async fn login_staff_exceptions_and_imotd_use_persisted_trust() {
+        let db = Arc::new(MockDatabase::new());
+        let mut display_high = crate::character::Character::new_player(
+            "Displayhigh".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        display_high.player.level = LVL_IMPL;
+        display_high.trust = 1;
+        db.create_player(&display_high, "secret").await.unwrap();
+        let mut game = test_game(db);
+        game.state.motd = "MORTAL MOTD\r\n".into();
+        game.state.imotd = "STAFF IMOTD\r\n".into();
+        let conn = ConnId(61);
+        attach_descriptor_at_name(&mut game, conn, "display-high.test").await;
+        game.nanny(conn, "Displayhigh".into()).await;
+        game.nanny(conn, "secret".into()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::ReadMotd);
+        let output = &game.state.descriptors[&conn].outbuf;
+        assert!(output.contains("MORTAL MOTD"));
+        assert!(!output.contains("STAFF IMOTD"));
+
+        let db = Arc::new(MockDatabase::new());
+        let mut trusted = crate::character::Character::new_player(
+            "Trustedlow".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        trusted.player.level = 1;
+        trusted.trust = i32::from(LVL_IMMORT);
+        db.create_player(&trusted, "secret").await.unwrap();
+        let mut game = test_game(db);
+        game.state.motd = "MORTAL MOTD\r\n".into();
+        game.state.imotd = "STAFF IMOTD\r\n".into();
+        let conn = ConnId(62);
+        attach_descriptor_at_name(&mut game, conn, "trusted-low.test").await;
+        game.nanny(conn, "Trustedlow".into()).await;
+        game.nanny(conn, "secret".into()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::ReadMotd);
+        let output = &game.state.descriptors[&conn].outbuf;
+        assert!(output.contains("STAFF IMOTD"));
+        assert!(!output.contains("MORTAL MOTD"));
     }
 
     #[test]
@@ -5357,12 +7431,6 @@ mod tests {
 
         // C denies probabilistically (qchance(15) + the 99-candidate lottery),
         // so retry until a target is assigned.
-        let live: Vec<u32> = g
-            .char_ids()
-            .into_iter()
-            .filter(|c| g.get_char(*c).map(|c| c.is_npc).unwrap_or(false))
-            .filter_map(|c| g.get_char(c).map(|c| c.nr as u32))
-            .collect();
         // C rolls 50/50 between kill quests and object quests, denies
         // probabilistically, and locks out re-requests on deny — so retry,
         // clearing the deny lockout, until a KILL quest is assigned.
@@ -5399,6 +7467,508 @@ mod tests {
         let pts = g.get_char(pl).unwrap().quest_points;
         assert!(pts > 0, "reward quest points must be granted, got {}", pts);
         let _ = qm;
+    }
+
+    fn bare_sha256(password: &str) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(password.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn current_login_caches_the_exact_stored_hash_without_rehashing() {
+        let db = Arc::new(MockDatabase::new());
+        let character = crate::character::Character::new_player(
+            "Currenthash".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        db.create_player(&character, "secret").await.unwrap();
+        let stored = db.get_password_hash("Currenthash").await.unwrap().unwrap();
+        let mut game = test_game(db);
+        let conn = ConnId(501);
+        attach_descriptor_at_name(&mut game, conn, "example.test").await;
+
+        game.nanny(conn, "Currenthash".to_string()).await;
+        game.nanny(conn, "secret".to_string()).await;
+
+        assert_eq!(descriptor_state(&game, conn), ConState::ReadMotd);
+        assert_eq!(
+            game.state.descriptors[&conn].password_hash.as_deref(),
+            Some(stored.as_str())
+        );
+        assert_eq!(
+            game.db_get_password_hash("Currenthash").await.unwrap(),
+            Some(stored)
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_login_upgrade_is_targeted_and_failure_does_not_block_login() {
+        for fail_update in [false, true] {
+            let db = Arc::new(MockDatabase::new());
+            let character = crate::character::Character::new_player(
+                "Legacyhash".to_string(),
+                Class::Warrior,
+                Race::Human,
+            );
+            db.create_player(&character, "secret").await.unwrap();
+            let legacy = bare_sha256("secret");
+            db.set_password_hash_for_test("Legacyhash", &legacy);
+            if fail_update {
+                db.fail_next_password_update();
+            }
+            let mut game = test_game(db.clone());
+            let conn = ConnId(if fail_update { 503 } else { 502 });
+            attach_descriptor_at_name(&mut game, conn, "example.test").await;
+
+            game.nanny(conn, "Legacyhash".to_string()).await;
+            game.nanny(conn, "secret".to_string()).await;
+
+            assert_eq!(descriptor_state(&game, conn), ConState::ReadMotd);
+            let durable = db.get_password_hash("Legacyhash").await.unwrap().unwrap();
+            if fail_update {
+                assert_eq!(durable, legacy);
+            } else {
+                assert_ne!(durable, legacy);
+                assert!(durable.starts_with("$argon2id$"));
+            }
+            assert_eq!(
+                game.state.descriptors[&conn].password_hash.as_deref(),
+                Some(durable.as_str())
+            );
+        }
+    }
+
+    async fn password_change_menu_session(
+        db: Arc<MockDatabase>,
+        conn: ConnId,
+    ) -> (Game, i64, String) {
+        let character = crate::character::Character::new_player(
+            "Menuaccount".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        let idnum = db.create_player(&character, "oldpass").await.unwrap();
+        let old_hash = db.get_password_hash("Menuaccount").await.unwrap().unwrap();
+        let mut game = test_game(db.clone());
+        attach_descriptor_host(&mut game, conn, "example.test");
+        let loaded = db.load_player("Menuaccount").await.unwrap();
+        game.pending_load.insert(conn, loaded);
+        let descriptor = game.state.descriptors.get_mut(&conn).unwrap();
+        descriptor.temp_name = Some("Menuaccount".to_string());
+        descriptor.temp_password = Some("newpass".to_string());
+        descriptor.password_hash = Some(old_hash.clone());
+        descriptor.password_change_expected_hash = Some(old_hash.clone());
+        descriptor.state = ConState::ChPwdVerify;
+        (game, idnum, old_hash)
+    }
+
+    #[tokio::test]
+    async fn menu_password_change_publishes_success_only_after_targeted_update() {
+        let db = Arc::new(MockDatabase::new());
+        let conn = ConnId(504);
+        let (mut game, _idnum, old_hash) = password_change_menu_session(db.clone(), conn).await;
+
+        game.nanny(conn, "newpass".to_string()).await;
+
+        assert_eq!(descriptor_state(&game, conn), ConState::Menu);
+        assert!(game.state.descriptors[&conn].outbuf.contains("Done."));
+        assert!(!db.verify_password("Menuaccount", "oldpass").await.unwrap());
+        assert!(db.verify_password("Menuaccount", "newpass").await.unwrap());
+        let durable = db.get_password_hash("Menuaccount").await.unwrap().unwrap();
+        assert_ne!(durable, old_hash);
+        assert_eq!(
+            game.state.descriptors[&conn].password_hash.as_deref(),
+            Some(durable.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn menu_password_change_failure_keeps_old_credential_and_session_state() {
+        let db = Arc::new(MockDatabase::new());
+        let conn = ConnId(505);
+        let (mut game, _idnum, old_hash) = password_change_menu_session(db.clone(), conn).await;
+        db.fail_next_password_update();
+
+        game.nanny(conn, "newpass".to_string()).await;
+
+        assert_eq!(descriptor_state(&game, conn), ConState::Menu);
+        assert!(!game.state.descriptors[&conn].outbuf.contains("Done."));
+        assert!(
+            game.state.descriptors[&conn]
+                .outbuf
+                .contains("requested password was not installed")
+        );
+        assert!(db.verify_password("Menuaccount", "oldpass").await.unwrap());
+        assert!(!db.verify_password("Menuaccount", "newpass").await.unwrap());
+        assert_eq!(
+            game.state.descriptors[&conn].password_hash.as_deref(),
+            Some(old_hash.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn menu_password_change_cannot_overwrite_a_concurrent_security_reset() {
+        let db = Arc::new(MockDatabase::new());
+        let conn = ConnId(5_051);
+        let (mut game, _idnum, old_hash) = password_change_menu_session(db.clone(), conn).await;
+        let security_reset_hash = crate::password::hash_password("security-reset");
+        db.set_password_hash_for_test("Menuaccount", &security_reset_hash);
+
+        game.nanny(conn, "newpass".to_string()).await;
+
+        assert_eq!(descriptor_state(&game, conn), ConState::Menu);
+        assert!(!game.state.descriptors[&conn].outbuf.contains("Done."));
+        assert!(
+            game.state.descriptors[&conn]
+                .outbuf
+                .contains("changed during this operation")
+        );
+        assert_eq!(
+            db.get_password_hash("Menuaccount")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(security_reset_hash.as_str())
+        );
+        assert!(!db.verify_password("Menuaccount", "newpass").await.unwrap());
+        assert_eq!(
+            game.state.descriptors[&conn].password_hash.as_deref(),
+            Some(old_hash.as_str()),
+            "the session cache must not claim the rejected credential is active"
+        );
+        assert!(
+            game.state.descriptors[&conn]
+                .password_change_expected_hash
+                .is_none()
+        );
+    }
+
+    fn attach_admin_password_target(
+        game: &mut Game,
+        admin_conn: ConnId,
+        target_conn: ConnId,
+        target: crate::character::Character,
+    ) -> (CharId, CharId) {
+        attach_descriptor_host(game, admin_conn, "admin.example.test");
+        let mut admin = crate::character::Character::new_player(
+            "Implementor".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        admin.idnum = 8001;
+        admin.player.level = LVL_IMPL;
+        admin.trust = i32::from(LVL_IMPL);
+        (
+            admin.godcmds1,
+            admin.godcmds2,
+            admin.godcmds3,
+            admin.godcmds4,
+        ) = crate::implementor_command_grants();
+        admin.desc = Some(admin_conn);
+        let admin_id = game.state.create_char(admin);
+        game.state
+            .players_by_name
+            .insert("implementor".to_string(), admin_id);
+        {
+            let descriptor = game.state.descriptors.get_mut(&admin_conn).unwrap();
+            descriptor.character = Some(admin_id);
+            descriptor.state = ConState::Playing;
+        }
+
+        attach_descriptor_host(game, target_conn, "target.example.test");
+        let mut target = target;
+        let target_key = target.get_name().to_lowercase();
+        target.desc = Some(target_conn);
+        let target_id = game.state.create_char(target);
+        game.state.players_by_name.insert(target_key, target_id);
+        {
+            let descriptor = game.state.descriptors.get_mut(&target_conn).unwrap();
+            descriptor.character = Some(target_id);
+            descriptor.state = ConState::Playing;
+        }
+        (admin_id, target_id)
+    }
+
+    #[tokio::test]
+    async fn admin_password_update_reports_durable_success_and_updates_live_cache() {
+        let db = Arc::new(MockDatabase::new());
+        let target = crate::character::Character::new_player(
+            "Admintarget".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        let idnum = db.create_player(&target, "oldpass").await.unwrap();
+        let target = db.load_player("Admintarget").await.unwrap();
+        assert_eq!(target.idnum, idnum);
+        let mut game = test_game(db.clone());
+        let (admin, target_id) =
+            attach_admin_password_target(&mut game, ConnId(506), ConnId(507), target);
+
+        run_authenticated_command(&mut game.state, admin, "set Admintarget passwd newpass");
+        assert!(db.verify_password("Admintarget", "oldpass").await.unwrap());
+        assert!(
+            game.state
+                .get_char(target_id)
+                .unwrap()
+                .pending_password_hash
+                .is_none()
+        );
+        game.drain_password_update_requests().await;
+
+        assert!(!db.verify_password("Admintarget", "oldpass").await.unwrap());
+        assert!(db.verify_password("Admintarget", "newpass").await.unwrap());
+        assert!(
+            game.state.descriptors[&ConnId(506)]
+                .outbuf
+                .contains("Password changed for Admintarget.")
+        );
+        let live_hash = game.state.descriptors[&ConnId(507)]
+            .password_hash
+            .as_deref()
+            .unwrap();
+        assert!(crate::password::check_password(live_hash, "newpass"));
+    }
+
+    #[tokio::test]
+    async fn admin_password_update_failure_keeps_old_credential_and_live_cache() {
+        let db = Arc::new(MockDatabase::new());
+        let target = crate::character::Character::new_player(
+            "Admintarget".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        db.create_player(&target, "oldpass").await.unwrap();
+        let target = db.load_player("Admintarget").await.unwrap();
+        let old_hash = db.get_password_hash("Admintarget").await.unwrap().unwrap();
+        let mut game = test_game(db.clone());
+        let (admin, _) = attach_admin_password_target(&mut game, ConnId(508), ConnId(509), target);
+        game.state
+            .descriptors
+            .get_mut(&ConnId(509))
+            .unwrap()
+            .password_hash = Some(old_hash.clone());
+        db.fail_next_password_update();
+
+        run_authenticated_command(&mut game.state, admin, "set Admintarget passwd newpass");
+        game.drain_password_update_requests().await;
+
+        assert!(db.verify_password("Admintarget", "oldpass").await.unwrap());
+        assert!(!db.verify_password("Admintarget", "newpass").await.unwrap());
+        assert_eq!(
+            game.state.descriptors[&ConnId(509)]
+                .password_hash
+                .as_deref(),
+            Some(old_hash.as_str())
+        );
+        assert!(
+            !game.state.descriptors[&ConnId(508)]
+                .outbuf
+                .contains("Password changed for Admintarget.")
+        );
+        assert!(
+            game.state.descriptors[&ConnId(508)]
+                .outbuf
+                .contains("requested credential was not active at durable readback")
+        );
+    }
+
+    #[tokio::test]
+    async fn password_drain_uses_target_trust_not_spoofable_display_level() {
+        let db = Arc::new(MockDatabase::new());
+        let mut target = crate::character::Character::new_player(
+            "Admintarget".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        target.player.level = 1;
+        target.trust = i32::from(LVL_GRGOD);
+        let idnum = db.create_player(&target, "oldpass").await.unwrap();
+        let target = db.load_player("Admintarget").await.unwrap();
+        let mut game = test_game(db.clone());
+        let (admin, target_id) =
+            attach_admin_password_target(&mut game, ConnId(5_081), ConnId(5_082), target);
+        let authorization = authenticated_request(&game, admin);
+        game.state.queue_password_update(
+            authorization,
+            target_id,
+            idnum,
+            "Admintarget",
+            "newpass".to_string(),
+        );
+
+        game.drain_password_update_requests().await;
+
+        assert!(db.verify_password("Admintarget", "oldpass").await.unwrap());
+        assert!(!db.verify_password("Admintarget", "newpass").await.unwrap());
+        assert!(
+            game.state.descriptors[&ConnId(5_081)]
+                .outbuf
+                .contains("authority or the player identity changed")
+        );
+    }
+
+    #[tokio::test]
+    async fn password_drain_rechecks_authenticated_requester_trust() {
+        let db = Arc::new(MockDatabase::new());
+        let target = crate::character::Character::new_player(
+            "Admintarget".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        let idnum = db.create_player(&target, "oldpass").await.unwrap();
+        let target = db.load_player("Admintarget").await.unwrap();
+        let mut game = test_game(db.clone());
+        let (admin, target_id) =
+            attach_admin_password_target(&mut game, ConnId(5_083), ConnId(5_084), target);
+        let authorization = authenticated_request(&game, admin);
+        game.state.queue_password_update(
+            authorization,
+            target_id,
+            idnum,
+            "Admintarget",
+            "newpass".to_string(),
+        );
+        let admin_record = game.state.get_char_mut(admin).unwrap();
+        admin_record.player.level = LVL_IMPL;
+        admin_record.trust = 1;
+
+        game.drain_password_update_requests().await;
+
+        assert!(db.verify_password("Admintarget", "oldpass").await.unwrap());
+        assert!(!db.verify_password("Admintarget", "newpass").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn password_update_rejects_a_descriptor_body_change_before_kdf() {
+        let db = Arc::new(MockDatabase::new());
+        let target = crate::character::Character::new_player(
+            "Bodytarget".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        db.create_player(&target, "oldpass").await.unwrap();
+        let target = db.load_player("Bodytarget").await.unwrap();
+        let mut game = test_game(db.clone());
+        let admin_conn = ConnId(5_085);
+        let (admin, target_id) =
+            attach_admin_password_target(&mut game, admin_conn, ConnId(5_086), target);
+
+        run_authenticated_command(&mut game.state, admin, "set Bodytarget passwd newpass");
+        assert_eq!(game.state.password_update_requests.len(), 1);
+        game.state
+            .descriptors
+            .get_mut(&admin_conn)
+            .unwrap()
+            .character = Some(target_id);
+
+        game.drain_password_update_requests().await;
+
+        assert!(db.verify_password("Bodytarget", "oldpass").await.unwrap());
+        assert!(!db.verify_password("Bodytarget", "newpass").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn password_update_disconnect_during_kdf_cancels_the_durable_write() {
+        let db = Arc::new(MockDatabase::new());
+        let target = crate::character::Character::new_player(
+            "Kdfvictim".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        db.create_player(&target, "oldpass").await.unwrap();
+        let target = db.load_player("Kdfvictim").await.unwrap();
+        let mut game = test_game(db.clone());
+        let admin_conn = ConnId(5_087);
+        let (admin, _) = attach_admin_password_target(&mut game, admin_conn, ConnId(5_088), target);
+
+        run_authenticated_command(&mut game.state, admin, "set Kdfvictim passwd newpass");
+        assert_eq!(game.state.password_update_requests.len(), 1);
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        game.game_rx = Some(rx);
+        tx.send(GameMessage::Disconnect {
+            conn_id: admin_conn,
+        })
+        .await
+        .unwrap();
+
+        game.drain_password_update_requests().await;
+
+        assert!(!game.state.descriptors.contains_key(&admin_conn));
+        assert!(db.verify_password("Kdfvictim", "oldpass").await.unwrap());
+        assert!(!db.verify_password("Kdfvictim", "newpass").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn offline_admin_password_update_skips_the_generic_character_save() {
+        let db = Arc::new(MockDatabase::new());
+        let target = crate::character::Character::new_player(
+            "Offlinetarget".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        let idnum = db.create_player(&target, "oldpass").await.unwrap();
+        let mut game = test_game(db.clone());
+        attach_descriptor_host(&mut game, ConnId(510), "admin.example.test");
+        let mut admin = crate::character::Character::new_player(
+            "Implementor".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        admin.idnum = 8002;
+        admin.player.level = LVL_IMPL;
+        admin.trust = i32::from(LVL_IMPL);
+        (
+            admin.godcmds1,
+            admin.godcmds2,
+            admin.godcmds3,
+            admin.godcmds4,
+        ) = crate::implementor_command_grants();
+        admin.desc = Some(ConnId(510));
+        let admin = game.state.create_char(admin);
+        game.state
+            .players_by_name
+            .insert("implementor".to_string(), admin);
+        {
+            let descriptor = game.state.descriptors.get_mut(&ConnId(510)).unwrap();
+            descriptor.character = Some(admin);
+            descriptor.state = ConState::Playing;
+        }
+        game.state
+            .update_player_index(idnum, "Offlinetarget", 1, 0, "offline");
+        // If the offline replay accidentally queues its historical broad save,
+        // this injected failure is consumed. The typed password path must leave
+        // it untouched.
+        db.fail_next_save();
+
+        run_authenticated_command(
+            &mut game.state,
+            admin,
+            "set file Offlinetarget passwd newpass",
+        );
+        game.drain_offline_ops().await;
+        assert_eq!(game.state.password_update_requests.len(), 1);
+        game.drain_password_update_requests().await;
+
+        assert!(
+            !db.verify_password("Offlinetarget", "oldpass")
+                .await
+                .unwrap()
+        );
+        assert!(
+            db.verify_password("Offlinetarget", "newpass")
+                .await
+                .unwrap()
+        );
+        assert!(game.state.find_player_by_name("Offlinetarget").is_none());
+        let loaded = db.load_player("Offlinetarget").await.unwrap();
+        assert!(
+            db.save_player(&loaded).await.is_err(),
+            "password-only replay must not consume the generic save failure"
+        );
     }
 
     #[tokio::test]
@@ -5450,6 +8020,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn name_lookup_error_never_enters_the_character_creation_flow() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        let conn = ConnId(512);
+        attach_descriptor_at_name(&mut game, conn, "example.test").await;
+        db.fail_next_exists();
+
+        game.nanny(conn, "Uncertain".to_string()).await;
+
+        assert_eq!(descriptor_state(&game, conn), ConState::GetName);
+        assert!(game.state.descriptors[&conn].temp_name.is_none());
+        assert!(
+            game.state.descriptors[&conn]
+                .outbuf
+                .contains("Unable to check that name right now; please try again.")
+        );
+        assert!(!db.player_exists("Uncertain").await.unwrap());
+    }
+
+    #[tokio::test]
     async fn sex_retry_uses_c_inline_prompt() {
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db);
@@ -5495,6 +8085,7 @@ mod offline_inspection_tests {
             Character::new_player("Requester".to_string(), Class::Warrior, Race::Human);
         requester.desc = Some(conn);
         requester.player.level = level;
+        requester.trust = i32::from(level);
         requester.godcmds1 = !0;
         requester.godcmds2 = !0;
         requester.godcmds3 = !0;
@@ -5512,6 +8103,7 @@ mod offline_inspection_tests {
     async fn seed_target(db: &MockDatabase, name: &str, level: u8) -> i64 {
         let mut target = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
         target.player.level = level;
+        target.trust = i32::from(level);
         db.create_player(&target, "secret").await.unwrap()
     }
 
@@ -5577,12 +8169,12 @@ mod offline_inspection_tests {
     }
 
     #[tokio::test]
-    async fn db_level_change_between_queue_and_replay_is_denied_for_every_route() {
+    async fn db_trust_change_between_queue_and_replay_is_denied_for_every_route() {
         for (route, record_marker) in ROUTES {
             let (mut game, db, _requester, _idnum) =
                 queued_game(route, LVL_GOD - 1, LVL_GOD - 1).await;
             let mut changed = db.load_player("Target").await.unwrap();
-            changed.player.level = LVL_GOD + 1;
+            changed.trust = i32::from(LVL_GOD + 1);
             db.save_player(&changed).await.unwrap();
 
             game.drain_offline_ops().await;
@@ -5601,14 +8193,15 @@ mod offline_inspection_tests {
     }
 
     #[tokio::test]
-    async fn target_racing_online_at_a_higher_level_is_denied_for_every_route() {
+    async fn target_racing_online_at_higher_trust_is_denied_for_every_route() {
         for (route, record_marker) in ROUTES {
             let (mut game, _db, requester, idnum) =
                 queued_game(route, LVL_GOD - 1, LVL_GOD - 1).await;
             let mut target =
                 Character::new_player("Target".to_string(), Class::Warrior, Race::Human);
             target.idnum = idnum;
-            target.player.level = LVL_GOD + 1;
+            target.player.level = 1;
+            target.trust = i32::from(LVL_GOD + 1);
             let live_target = game.state.create_char(target);
             game.state
                 .players_by_name
@@ -5650,7 +8243,7 @@ mod offline_inspection_tests {
 
 #[cfg(test)]
 mod self_delete_tests {
-    use super::tests::{attach_descriptor_host, test_game};
+    use super::tests::{attach_descriptor_host, persistent_connected_player, test_game};
     use super::*;
     use crate::DatabaseInterface;
     use crate::alias::AliasEntry;
@@ -5842,6 +8435,34 @@ mod self_delete_tests {
     }
 
     #[tokio::test]
+    async fn self_delete_protects_persisted_staff_trust_before_sidecar_cleanup() {
+        let conn = ConnId(216);
+        let name = "Trustedstaff";
+        let (mut game, db, idnum) = deletion_session(conn, name, 0).await;
+        let (rent, alias) = seed_sidecars(&game, name, idnum);
+        let mut durable = db.load_player(name).await.unwrap();
+        durable.player.level = 1;
+        durable.trust = i32::from(LVL_GRGOD);
+        db.save_player(&durable).await.unwrap();
+
+        game.nanny(conn, "yes".to_string()).await;
+
+        assert_eq!(
+            db.load_player(name).await.unwrap().act_flags & crate::flags::PLR_DELETED,
+            0
+        );
+        assert!(rent.exists() && alias.exists());
+        assert!(
+            game.state.descriptors[&conn]
+                .outbuf
+                .contains("Privileged characters cannot self-delete")
+        );
+
+        std::fs::remove_file(rent).unwrap();
+        std::fs::remove_file(alias).unwrap();
+    }
+
+    #[tokio::test]
     async fn administrative_pfileclean_removes_sidecars_before_deleting_the_db_row() {
         let db = Arc::new(MockDatabase::new());
         let mut character =
@@ -5854,13 +8475,62 @@ mod self_delete_tests {
         let mut game = test_game(db.clone());
         game.lib_path = game.state.config.lib_path.clone();
         let (rent, alias) = seed_sidecars(&game, "AdminGone", idnum);
+        let cleaner = persistent_connected_player(
+            &mut game,
+            db.as_ref(),
+            ConnId(217),
+            "Cleanerone",
+            LVL_IMPL,
+        )
+        .await;
 
-        game.state.queue_pfileclean();
+        run_authenticated_command(&mut game.state, cleaner, "pfileclean OptimisePfile");
         game.drain_pfileclean().await;
 
         assert!(db.load_player("AdminGone").await.is_err());
         assert!(!rent.exists() && !alias.exists());
         assert!(crate::alias::get_aliases(idnum).is_empty());
+    }
+
+    #[tokio::test]
+    async fn pfileclean_disconnect_during_discovery_preserves_rows_and_sidecars() {
+        let db = Arc::new(MockDatabase::new());
+        let mut deleted =
+            Character::new_player("CleanRace".to_string(), Class::Warrior, Race::Human);
+        deleted.act_flags |= crate::flags::PLR_DELETED;
+        let idnum = db.create_player(&deleted, "secret").await.unwrap();
+        let mut game = test_game(db.clone());
+        game.lib_path = game.state.config.lib_path.clone();
+        let (rent, alias) = seed_sidecars(&game, "CleanRace", idnum);
+        let cleaner_conn = ConnId(9_413_303);
+        let cleaner = persistent_connected_player(
+            &mut game,
+            db.as_ref(),
+            cleaner_conn,
+            "Cleanerrace",
+            LVL_IMPL,
+        )
+        .await;
+
+        run_authenticated_command(&mut game.state, cleaner, "pfileclean OptimisePfile");
+        assert!(game.state.pfileclean_requested.is_some());
+        db.set_list_delay(Some(Duration::from_millis(50)));
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        game.game_rx = Some(rx);
+        tx.send(GameMessage::Disconnect {
+            conn_id: cleaner_conn,
+        })
+        .await
+        .unwrap();
+
+        game.drain_pfileclean().await;
+        db.set_list_delay(None);
+
+        assert!(db.load_player("CleanRace").await.is_ok());
+        assert!(rent.is_file() && alias.is_file());
+        crate::alias::clear_aliases(idnum);
+        std::fs::remove_file(rent).unwrap();
+        std::fs::remove_file(alias).unwrap();
     }
 
     #[tokio::test]
@@ -5887,8 +8557,16 @@ mod self_delete_tests {
         );
         crate::alias::write_aliases(&game.lib_path, "AdminRetry", idnum).unwrap();
         let alias = crate::alias::alias_filename(&game.lib_path, "AdminRetry").unwrap();
+        let cleaner = persistent_connected_player(
+            &mut game,
+            db.as_ref(),
+            ConnId(218),
+            "Cleanertwo",
+            LVL_IMPL,
+        )
+        .await;
 
-        game.state.queue_pfileclean();
+        run_authenticated_command(&mut game.state, cleaner, "pfileclean OptimisePfile");
         game.drain_pfileclean().await;
 
         let retained = db.load_player("AdminRetry").await.unwrap();
@@ -5898,18 +8576,88 @@ mod self_delete_tests {
         assert!(crate::alias::get_aliases(idnum).is_empty());
 
         std::fs::remove_dir(&rent).unwrap();
-        game.state.queue_pfileclean();
+        run_authenticated_command(&mut game.state, cleaner, "pfileclean OptimisePfile");
         game.drain_pfileclean().await;
         assert!(db.load_player("AdminRetry").await.is_err());
     }
 }
 
 #[cfg(test)]
+mod queued_admin_request_tests {
+    use super::tests::{persistent_connected_player, test_game};
+    use super::*;
+    use crate::DatabaseInterface;
+    use crate::character::Character;
+    use crate::mock_database::MockDatabase;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn queued_destructive_actions_revalidate_session_trust_and_grants() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        let root = std::env::temp_dir().join(format!(
+            "deltamud-admin-request-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        game.lib_path = root.join("lib").to_string_lossy().into_owned();
+        game.state.config.lib_path = game.lib_path.clone();
+
+        let staff = persistent_connected_player(
+            &mut game,
+            db.as_ref(),
+            ConnId(8_801),
+            "Queuedstaff",
+            LVL_IMPL,
+        )
+        .await;
+
+        run_authenticated_command(&mut game.state, staff, "copyover");
+        assert!(game.state.copyover_requested.is_some());
+        game.state.get_char_mut(staff).unwrap().godcmds3 &= !crate::gcmd::GCMD3_COPYOVER;
+        assert_eq!(game.take_authorized_copyover_request(), None);
+        assert!(
+            game.state.descriptors[&ConnId(8_801)]
+                .outbuf
+                .contains("Copyover canceled")
+        );
+
+        game.state.get_char_mut(staff).unwrap().godcmds3 |= crate::gcmd::GCMD3_COPYOVER;
+        run_authenticated_command(&mut game.state, staff, "shutdown die");
+        assert!(game.state.shutdown_requested.is_some());
+        assert!(!root.join(".killscript").exists());
+        game.state.get_char_mut(staff).unwrap().trust = 1;
+        assert_eq!(game.take_authorized_shutdown_request(), None);
+        assert!(!root.join(".killscript").exists());
+
+        let mut deleted =
+            Character::new_player("Queuedgone".to_string(), Class::Warrior, Race::Human);
+        deleted.act_flags |= crate::flags::PLR_DELETED;
+        db.create_player(&deleted, "secret").await.unwrap();
+        {
+            let staff = game.state.get_char_mut(staff).unwrap();
+            staff.trust = i32::from(LVL_IMPL);
+            staff.godcmds3 |= crate::gcmd::GCMD3_PFILECLEAN;
+        }
+        run_authenticated_command(&mut game.state, staff, "pfileclean OptimisePfile");
+        assert!(game.state.pfileclean_requested.is_some());
+        game.state.get_char_mut(staff).unwrap().godcmds3 &= !crate::gcmd::GCMD3_PFILECLEAN;
+        game.drain_pfileclean().await;
+        assert!(db.load_player("Queuedgone").await.is_ok());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod gmcp_tests {
-    use super::tests::{attach_descriptor_host, test_game};
+    use super::tests::test_game;
     use super::*;
     use crate::character::Character;
-    use crate::config::Config;
     use crate::mock_database::MockDatabase;
     use crate::room::{Exit, Room};
     use crate::types::{Class, Race};
@@ -6034,11 +8782,69 @@ mod gmcp_tests {
         playing_char(&mut game, conn, "Plain", a);
         game.state.descriptors.get_mut(&conn).unwrap().gmcp = false;
 
+        // Core metadata without a negotiated DO must not enable GMCP or retain
+        // attacker-controlled client state.
+        game.handle_gmcp_event(
+            conn,
+            crate::connection::GmcpClientEvent::Hello {
+                client_name: "Unnegotiated".into(),
+                client_version: "1".into(),
+            },
+        );
+
         assert!(game.gmcp_snapshots(conn).is_empty());
+        assert_eq!(
+            game.state.descriptors.get(&conn).unwrap().gmcp_client,
+            crate::connection::GmcpClientState::default()
+        );
+        let (output_tx, mut output_rx) = mpsc::channel(4);
+        game.outputs.insert(conn, output_tx);
+        game.push_gmcp_update(conn);
+        assert!(matches!(
+            output_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
         // Marking still happens (cheap) but the drain filters by d.gmcp.
         game.state.note_gmcp_room(a);
         game.heartbeat_inner();
         assert!(game.state.gmcp_dirty.is_empty(), "drain clears everything");
+    }
+
+    #[test]
+    fn disabling_gmcp_clears_capabilities_and_stops_all_snapshots() {
+        let mut game = test_game(Arc::new(MockDatabase::new()));
+        let room = game
+            .state
+            .add_room(Room::new(100, 1, "A".into(), String::new()));
+        let conn = ConnId(65);
+        game.state
+            .descriptors
+            .insert(conn, Descriptor::new(conn, "t".into()));
+        playing_char(&mut game, conn, "FormerGmcp", room);
+
+        game.handle_gmcp_event(
+            conn,
+            crate::connection::GmcpClientEvent::Hello {
+                client_name: "Mudlet".into(),
+                client_version: "4.18.5".into(),
+            },
+        );
+        game.handle_gmcp_event(
+            conn,
+            crate::connection::GmcpClientEvent::SupportsSet(
+                [("char".to_string(), 1)].into_iter().collect(),
+            ),
+        );
+        assert!(!game.gmcp_snapshots(conn).is_empty());
+
+        game.handle_gmcp_event(conn, crate::connection::GmcpClientEvent::Disabled);
+        let descriptor = game.state.descriptors.get(&conn).unwrap();
+        assert!(!descriptor.gmcp);
+        assert_eq!(
+            descriptor.gmcp_client,
+            crate::connection::GmcpClientState::default()
+        );
+        assert!(game.gmcp_snapshots(conn).is_empty());
     }
 
     fn playing_char(game: &mut Game, conn: ConnId, name: &str, room: usize) -> CharId {
@@ -6142,21 +8948,35 @@ mod bounded_output_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod shutdown_tests {
-    use super::tests::test_game;
+    use super::tests::{persistent_connected_player, test_game};
     use super::*;
+    use crate::alias::AliasEntry;
     use crate::character::Character;
-    use crate::config::Config;
+    use crate::flags::{AFF_BLIND, AFF_INVISIBLE};
     use crate::mock_database::MockDatabase;
     use crate::room::Room;
     use crate::types::{Class, Race};
     use std::sync::Arc;
+
+    fn unique_shutdown_lib(label: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "deltamud-shutdown-{label}-{}-{unique}",
+            std::process::id()
+        ))
+    }
 
     /// W6: the extracted shutdown_save must persist a playing character
     /// (SQL row + alias sidecar + rent file) and report what it did, so a
     /// real SIGTERM shutdown is a verified path, not a hope.
     #[tokio::test]
     async fn shutdown_save_persists_player_inventory_and_reports() {
+        let _olc_guard = crate::olc::test_save_list_guard();
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db.clone());
         // test_game points lib_path at a fresh temp dir; plrobjs lives under it.
@@ -6235,7 +9055,7 @@ mod shutdown_tests {
             bytes
         });
 
-        let report = game.shutdown_save().await;
+        let report = game.shutdown_save().await.unwrap();
 
         assert_eq!(report.players_saved, 1);
         assert_eq!(report.save_errors, 0);
@@ -6298,7 +9118,255 @@ mod shutdown_tests {
     }
 
     #[tokio::test]
+    async fn shutdown_save_reports_every_persistence_failure_before_teardown() {
+        let _olc_guard = crate::olc::test_save_list_guard();
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        let conn = ConnId(1760);
+        let player =
+            persistent_connected_player(&mut game, db.as_ref(), conn, "Durabilityfail", 20).await;
+        let idnum = game.state.get_char(player).unwrap().idnum;
+        game.state.get_char_mut(player).unwrap().act_flags |= crate::objsave::PLR_CRASH;
+        crate::alias::set_aliases(
+            idnum,
+            vec![AliasEntry {
+                alias: "greet".into(),
+                replacement: "say hello".into(),
+                atype: 0,
+            }],
+        );
+
+        // A file where the configured library directory should be forces the
+        // crash-file, calendar, and non-empty alias writers to fail
+        // independently. SQL is failed by the mock on the same pass.
+        let lib = unique_shutdown_lib("all-persistence-failures");
+        std::fs::write(&lib, b"not a directory").unwrap();
+        game.lib_path = lib.to_string_lossy().into_owned();
+        game.state.config.lib_path = game.lib_path.clone();
+        db.fail_next_save();
+
+        let live_before = game.state.get_char(player).unwrap().clone();
+        let (tx, mut rx) = mpsc::channel(8);
+        game.outputs.insert(conn, tx);
+
+        let report = game.shutdown_save().await.unwrap();
+
+        assert_eq!(report.player_saves_attempted, 1);
+        assert_eq!(report.players_saved, 0);
+        assert_eq!(report.database_errors, 1);
+        assert_eq!(report.alias_writes_attempted, 1);
+        assert_eq!(report.aliases_written, 0);
+        assert_eq!(report.alias_errors, 1);
+        assert_eq!(report.crash_saves_attempted, 1);
+        assert_eq!(report.crash_saves_written, 0);
+        assert_eq!(report.crash_save_errors, 1);
+        assert!(!report.calendar_saved);
+        assert_eq!(report.calendar_errors, 1);
+        assert_eq!(report.save_errors, 4);
+        assert_eq!(report.output_attempted, 0);
+        assert!(game.outputs.contains_key(&conn));
+        assert!(game.state.descriptors.contains_key(&conn));
+        assert!(rx.try_recv().is_err(), "no shutdown notice is published");
+
+        let live_after = game.state.get_char(player).unwrap();
+        assert_eq!(live_after.last_logon, live_before.last_logon);
+        assert_eq!(
+            live_after.player.time_played,
+            live_before.player.time_played
+        );
+        assert_ne!(live_after.act_flags & crate::objsave::PLR_CRASH, 0);
+
+        crate::alias::clear_aliases(idnum);
+        std::fs::remove_file(lib).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_shutdown_preserves_switched_connection_and_arena_then_retry_commits() {
+        let _arena_guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
+        let _olc_guard = crate::olc::test_save_list_guard();
+        crate::arena::reset_for_tests();
+
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        let lib = unique_shutdown_lib("retry");
+        std::fs::create_dir_all(&lib).unwrap();
+        game.lib_path = lib.to_string_lossy().into_owned();
+        game.state.config.lib_path = game.lib_path.clone();
+
+        let conn = ConnId(1761);
+        let player =
+            persistent_connected_player(&mut game, db.as_ref(), conn, "Shutdownretry", 20).await;
+        {
+            let character = game.state.get_char_mut(player).unwrap();
+            character.wimp_level = 12;
+            character.recall_level = 34;
+            character.affect_flags = AFF_INVISIBLE;
+            character.affected.push(crate::character::Affect {
+                spell_type: 7,
+                duration: 8,
+                modifier: 9,
+                location: 10,
+                bitvector: AFF_INVISIBLE,
+                caster: None,
+            });
+            character.act_flags |= crate::objsave::PLR_CRASH;
+        }
+        crate::arena::set_stat_for_test(player, crate::arena::ARENA_COMBATANT1);
+        crate::arena::bup_affects(&mut game.state, player);
+        {
+            let character = game.state.get_char_mut(player).unwrap();
+            character.affect_flags = AFF_BLIND;
+            character.affected.push(crate::character::Affect {
+                spell_type: 11,
+                duration: 12,
+                modifier: 13,
+                location: 14,
+                bitvector: AFF_BLIND,
+                caster: None,
+            });
+        }
+        // A switched immortal's durable PC is reachable through `original`;
+        // the descriptor's current body is an NPC. Both persistence and abort
+        // notification must follow the connection rather than trusting only
+        // `descriptor.character` or Character::desc.
+        let mut npc = Character::new_npc(9901);
+        npc.desc = Some(conn);
+        let npc = game.state.create_char(npc);
+        game.state.get_char_mut(player).unwrap().desc = None;
+        {
+            let descriptor = game.state.descriptors.get_mut(&conn).unwrap();
+            descriptor.original = Some(player);
+            descriptor.character = Some(npc);
+        }
+        let live_time_before = game.state.get_char(player).unwrap().last_logon;
+
+        let (tx, mut rx) = mpsc::channel(16);
+        game.outputs.insert(conn, tx);
+        game.state.shutdown_requested = Some(ShutdownRequest::System(ProcessDisposition::Stop));
+        db.fail_next_save();
+
+        assert!(!game.shutdown().await);
+        assert_eq!(game.state.shutdown_requested, None);
+        assert!(game.outputs.contains_key(&conn));
+        assert!(game.state.descriptors.contains_key(&conn));
+        assert_eq!(game.state.descriptors[&conn].original, Some(player));
+        assert_eq!(game.state.descriptors[&conn].character, Some(npc));
+        assert_eq!(
+            crate::arena::arena_stat(player),
+            crate::arena::ARENA_COMBATANT1
+        );
+        let live = game.state.get_char(player).unwrap();
+        assert_eq!(live.last_logon, live_time_before);
+        assert_eq!(live.affect_flags, AFF_BLIND);
+        assert_eq!(live.affected[0].spell_type, 11);
+        assert_ne!(live.act_flags & crate::objsave::PLR_CRASH, 0);
+        let abort = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("shutdown-aborted notice timeout")
+            .expect("shutdown-aborted notice");
+        let abort = String::from_utf8_lossy(&abort.bytes);
+        assert!(abort.contains("Shutdown aborted"));
+        assert!(!abort.contains("server is shutting down"));
+
+        game.state.shutdown_requested = Some(ShutdownRequest::System(ProcessDisposition::Stop));
+        let writer = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            while let Some(frame) = rx.recv().await {
+                bytes.extend_from_slice(&frame.bytes);
+                if let Some(ack) = frame.ack {
+                    let _ = ack.send(true);
+                    break;
+                }
+            }
+            bytes
+        });
+
+        assert!(game.shutdown().await);
+        assert!(!game.outputs.contains_key(&conn));
+        assert_eq!(crate::arena::arena_stat(player), crate::arena::ARENA_NOT);
+        let restored = game.state.get_char(player).unwrap();
+        assert_eq!(restored.wimp_level, 12);
+        assert_eq!(restored.recall_level, 34);
+        assert_eq!(restored.affect_flags, AFF_INVISIBLE);
+        assert_eq!(restored.affected[0].spell_type, 7);
+        let final_output = writer.await.unwrap();
+        assert!(String::from_utf8_lossy(&final_output).contains("server is shutting down"));
+
+        let durable = db.load_player("Shutdownretry").await.unwrap();
+        assert_eq!(durable.wimp_level, 12);
+        assert_eq!(durable.recall_level, 34);
+        assert_eq!(durable.affect_flags, AFF_INVISIBLE);
+        assert_eq!(durable.affected[0].spell_type, 7);
+
+        crate::arena::reset_for_tests();
+        std::fs::remove_dir_all(lib).unwrap();
+    }
+
+    #[tokio::test]
+    async fn system_shutdown_acknowledges_refusal_then_a_committed_retry() {
+        let _olc_guard = crate::olc::test_save_list_guard();
+        const MISSING_ZONE: i32 = 29_994;
+        crate::olc::olc_add_to_save_list(MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
+
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        let lib = unique_shutdown_lib("system-ack");
+        std::fs::create_dir_all(&lib).unwrap();
+        game.lib_path = lib.to_string_lossy().into_owned();
+        game.state.config.lib_path = game.lib_path.clone();
+
+        let (game_tx, game_rx) = mpsc::channel(4);
+        let game_task = tokio::spawn(async move { game.run(game_rx).await });
+
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+        game_tx
+            .send(GameMessage::SystemShutdown {
+                result_tx: first_tx,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), first_rx)
+                .await
+                .expect("shutdown-refusal acknowledgement timeout")
+                .expect("shutdown-refusal acknowledgement sender"),
+            crate::connection::SystemShutdownResult::Refused
+        );
+        assert!(
+            !game_task.is_finished(),
+            "a durability refusal must keep the Game task alive"
+        );
+
+        crate::olc::olc_remove_from_save_list(MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
+        let (retry_tx, retry_rx) = tokio::sync::oneshot::channel();
+        game_tx
+            .send(GameMessage::SystemShutdown {
+                result_tx: retry_tx,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), retry_rx)
+                .await
+                .expect("shutdown-commit acknowledgement timeout")
+                .expect("shutdown-commit acknowledgement sender"),
+            crate::connection::SystemShutdownResult::Committed
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), game_task)
+                .await
+                .expect("committed Game shutdown timeout")
+                .expect("Game task join")
+                .expect("Game task result"),
+            ProcessDisposition::Stop
+        );
+
+        std::fs::remove_dir_all(lib).unwrap();
+    }
+
+    #[tokio::test]
     async fn shutdown_reports_closed_and_full_writer_channels_as_failures() {
+        let _olc_guard = crate::olc::test_save_list_guard();
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db);
 
@@ -6321,7 +9389,7 @@ mod shutdown_tests {
             .unwrap();
         game.outputs.insert(full, full_tx);
 
-        let report = game.shutdown_save().await;
+        let report = game.shutdown_save().await.unwrap();
         assert_eq!(report.output_attempted, 2);
         assert_eq!(report.output_acknowledged, 0);
         assert_eq!(report.output_failed, 2);
@@ -6331,6 +9399,7 @@ mod shutdown_tests {
 
     #[tokio::test]
     async fn one_timed_out_writer_does_not_hide_a_healthy_acknowledgement() {
+        let _olc_guard = crate::olc::test_save_list_guard();
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db);
 
@@ -6358,13 +9427,103 @@ mod shutdown_tests {
         let (stalled_tx, _stalled_rx) = mpsc::channel(4);
         game.outputs.insert(stalled, stalled_tx);
 
-        let report = game.shutdown_save().await;
+        let report = game.shutdown_save().await.unwrap();
         healthy_writer.await.unwrap();
         assert_eq!(report.output_attempted, 2);
         assert_eq!(report.output_acknowledged, 1);
         assert_eq!(report.output_failed, 0);
         assert_eq!(report.output_timed_out, 1);
         assert_eq!(report.output_failures, 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_is_aborted_and_dirty_state_retained_when_olc_flush_fails() {
+        let _olc_guard = crate::olc::test_save_list_guard();
+        const MISSING_ZONE: i32 = 29_991;
+        crate::olc::olc_add_to_save_list(MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
+
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        game.state.shutdown_requested = Some(ShutdownRequest::System(ProcessDisposition::Stop));
+        let conn = ConnId(175);
+        let mut builder = Character::new_player("Builder".into(), Class::Warrior, Race::Human);
+        builder.desc = Some(conn);
+        let builder = game.state.create_char(builder);
+        game.state.players_by_name.insert("builder".into(), builder);
+        let mut descriptor = Descriptor::new(conn, "builder.example.test".into());
+        descriptor.state = ConState::Playing;
+        descriptor.character = Some(builder);
+        game.state.descriptors.insert(conn, descriptor);
+        let (tx, mut rx) = mpsc::channel(4);
+        game.outputs.insert(conn, tx);
+
+        assert!(!game.shutdown().await);
+        assert_eq!(game.state.shutdown_requested, None);
+        assert!(
+            crate::olc::flush_save_list_to_disk(&mut game.state).is_err(),
+            "the failed target must remain pending for a later retry"
+        );
+        let frame = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("shutdown-aborted notice timeout")
+            .expect("shutdown-aborted notice");
+        assert!(String::from_utf8_lossy(&frame.bytes).contains("Shutdown aborted"));
+
+        crate::olc::olc_remove_from_save_list(MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
+    }
+}
+
+#[cfg(test)]
+mod autoreboot_tests {
+    use super::tests::test_game;
+    use super::*;
+    use crate::character::Character;
+    use crate::mock_database::MockDatabase;
+    use std::sync::Arc;
+
+    #[test]
+    fn scheduled_autoreboot_sets_shutdown_only_after_olc_flush_succeeds() {
+        let _olc_guard = crate::olc::test_save_list_guard();
+        let mut game = test_game(Arc::new(MockDatabase::new()));
+
+        game.autoreboot_check_at((4, 20, 4, 10), 4, 20);
+
+        assert_eq!(
+            game.state.shutdown_requested,
+            Some(ShutdownRequest::System(ProcessDisposition::Restart))
+        );
+    }
+
+    #[test]
+    fn scheduled_autoreboot_stays_online_and_retains_dirty_olc_on_failure() {
+        let _olc_guard = crate::olc::test_save_list_guard();
+        const MISSING_ZONE: i32 = 29_993;
+        crate::olc::olc_add_to_save_list(MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
+        let mut game = test_game(Arc::new(MockDatabase::new()));
+
+        let conn = ConnId(176);
+        let mut player = Character::new_player("Clockwatcher".into(), Class::Warrior, Race::Human);
+        player.desc = Some(conn);
+        let player = game.state.create_char(player);
+        game.state
+            .players_by_name
+            .insert("clockwatcher".into(), player);
+        let mut descriptor = Descriptor::new(conn, "builder.example.test".into());
+        descriptor.state = ConState::Playing;
+        descriptor.character = Some(player);
+        game.state.descriptors.insert(conn, descriptor);
+
+        game.autoreboot_check_at((4, 20, 4, 10), 4, 20);
+
+        assert_eq!(game.state.shutdown_requested, None);
+        assert!(
+            game.state.descriptors[&conn]
+                .outbuf
+                .contains("Automatic reboot aborted")
+        );
+        assert!(crate::olc::flush_save_list_to_disk(&mut game.state).is_err());
+
+        crate::olc::olc_remove_from_save_list(MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
     }
 }
 
@@ -6464,17 +9623,22 @@ mod async_message_isolation_tests {
         assert!(!game.state.descriptors.contains_key(&bad));
         assert!(game.state.descriptors.contains_key(&good));
 
-        game.handle_message_isolated(GameMessage::EnableGmcp { conn_id: good })
-            .await;
+        game.handle_message_isolated(GameMessage::Gmcp {
+            conn_id: good,
+            event: crate::connection::GmcpClientEvent::Enabled,
+        })
+        .await;
         assert!(game.state.descriptors.get(&good).unwrap().gmcp);
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod ordered_player_save_tests {
     use super::tests::test_game;
     use super::*;
-    use crate::character::Character;
+    use crate::character::{Affect, Character};
+    use crate::flags::{AFF_BLIND, AFF_INVISIBLE};
     use crate::mock_database::MockDatabase;
     use std::sync::Arc;
 
@@ -6551,12 +9715,22 @@ mod ordered_player_save_tests {
         assert_eq!(game.player_save_failures, 1);
     }
 
-    #[tokio::test]
-    async fn copyover_aborts_when_a_player_database_save_fails() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn copyover_database_failure_preserves_live_arena_and_session_state() {
+        let _arena_guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
+        let _olc_guard = crate::olc::test_save_list_guard();
+        crate::arena::reset_for_tests();
+
         let db = Arc::new(MockDatabase::new());
         let seed = Character::new_player("Copyfail".into(), Class::Warrior, Race::Human);
         let idnum = db.create_player(&seed, "pw").await.unwrap();
         let mut game = test_game(db.clone());
+        let room = game.state.add_room(crate::room::Room::new(
+            4242,
+            42,
+            "Copy Room".into(),
+            String::new(),
+        ));
         let conn = ConnId(94);
         game.state
             .descriptors
@@ -6564,20 +9738,188 @@ mod ordered_player_save_tests {
         let mut player = db.load_player("Copyfail").await.unwrap();
         player.idnum = idnum;
         player.desc = Some(conn);
+        player.wimp_level = 12;
+        player.recall_level = 34;
+        player.affect_flags = AFF_INVISIBLE;
+        player.affected.push(Affect {
+            spell_type: 7,
+            duration: 8,
+            modifier: 9,
+            location: 10,
+            bitvector: AFF_INVISIBLE,
+            caster: None,
+        });
+        player.tloadroom = 777;
         let player_id = game.state.create_char(player);
+        game.state.char_to_room(player_id, room);
         {
             let descriptor = game.state.descriptors.get_mut(&conn).unwrap();
             descriptor.state = ConState::Playing;
             descriptor.character = Some(player_id);
         }
+        crate::arena::set_stat_for_test(player_id, crate::arena::ARENA_COMBATANT1);
+        crate::arena::bup_affects(&mut game.state, player_id);
+        {
+            let player = game.state.get_char_mut(player_id).unwrap();
+            player.affect_flags = AFF_BLIND;
+            player.affected.push(Affect {
+                spell_type: 11,
+                duration: 12,
+                modifier: 13,
+                location: 14,
+                bitvector: AFF_BLIND,
+                caster: None,
+            });
+        }
+        let live_before = game.state.get_char(player_id).unwrap().clone();
         db.fail_next_save();
 
-        assert_eq!(game.persist_copyover_players().await, 1);
+        game.execute_copyover(player_id).await;
+
         assert!(game.pending_player_saves.is_empty());
+        assert!(game.state.descriptors.contains_key(&conn));
+        assert_eq!(game.state.descriptors[&conn].state, ConState::Playing);
+        assert_eq!(game.state.descriptors[&conn].character, Some(player_id));
+        assert_eq!(
+            crate::arena::arena_stat(player_id),
+            crate::arena::ARENA_COMBATANT1
+        );
+        let live_after = game.state.get_char(player_id).unwrap();
+        assert_eq!(live_after.last_logon, live_before.last_logon);
+        assert_eq!(
+            live_after.player.time_played,
+            live_before.player.time_played
+        );
+        assert_eq!(live_after.tloadroom, 777);
+        assert_eq!(live_after.affect_flags, AFF_BLIND);
+        assert_eq!(live_after.affected[0].spell_type, 11);
+        assert!(
+            game.state.descriptors[&conn]
+                .outbuf
+                .contains("Copyover database save failed")
+        );
+
+        crate::arena::reset_for_tests();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn copyover_output_failure_keeps_sessions_and_persists_exit_safe_clone() {
+        let _arena_guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
+        let _olc_guard = crate::olc::test_save_list_guard();
+        crate::arena::reset_for_tests();
+
+        let db = Arc::new(MockDatabase::new());
+        let mut seed = Character::new_player("Copyflush".into(), Class::Warrior, Race::Human);
+        seed.wimp_level = 12;
+        seed.recall_level = 34;
+        seed.affect_flags = AFF_INVISIBLE;
+        seed.affected.push(Affect {
+            spell_type: 7,
+            duration: 8,
+            modifier: 9,
+            location: 10,
+            bitvector: AFF_INVISIBLE,
+            caster: None,
+        });
+        db.create_player(&seed, "pw").await.unwrap();
+        let mut game = test_game(db.clone());
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let lib = std::env::temp_dir().join(format!(
+            "deltamud-copyover-output-failure-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&lib).unwrap();
+        game.lib_path = lib.to_string_lossy().into_owned();
+        game.state.config.lib_path = game.lib_path.clone();
+
+        let room = game.state.add_room(crate::room::Room::new(
+            4343,
+            43,
+            "Flush Room".into(),
+            String::new(),
+        ));
+        let conn = ConnId(941);
+        let mut player = db.load_player("Copyflush").await.unwrap();
+        player.desc = Some(conn);
+        player.tloadroom = 888;
+        let player_id = game.state.create_char(player);
+        game.state.char_to_room(player_id, room);
+        let mut descriptor = Descriptor::new(conn, "copy.example.test".into());
+        descriptor.state = ConState::Playing;
+        descriptor.character = Some(player_id);
+        game.state.descriptors.insert(conn, descriptor);
+        crate::arena::set_stat_for_test(player_id, crate::arena::ARENA_COMBATANT1);
+        crate::arena::bup_affects(&mut game.state, player_id);
+        {
+            let player = game.state.get_char_mut(player_id).unwrap();
+            player.affect_flags = AFF_BLIND;
+            player.affected.push(Affect {
+                spell_type: 11,
+                duration: 12,
+                modifier: 13,
+                location: 14,
+                bitvector: AFF_BLIND,
+                caster: None,
+            });
+        }
+        let mut npc = Character::new_npc(9902);
+        npc.desc = Some(conn);
+        let npc = game.state.create_char(npc);
+        game.state.get_char_mut(player_id).unwrap().desc = None;
+        {
+            let descriptor = game.state.descriptors.get_mut(&conn).unwrap();
+            descriptor.original = Some(player_id);
+            descriptor.character = Some(npc);
+        }
+        let live_before = game.state.get_char(player_id).unwrap().clone();
+        let (closed_tx, closed_rx) = mpsc::channel(1);
+        drop(closed_rx);
+        game.outputs.insert(conn, closed_tx);
+
+        game.execute_copyover(npc).await;
+
+        assert!(game.outputs.contains_key(&conn));
+        assert!(game.state.descriptors.contains_key(&conn));
+        assert_eq!(game.state.descriptors[&conn].state, ConState::Playing);
+        assert_eq!(game.state.descriptors[&conn].original, Some(player_id));
+        assert_eq!(game.state.descriptors[&conn].character, Some(npc));
+        assert_eq!(
+            crate::arena::arena_stat(player_id),
+            crate::arena::ARENA_COMBATANT1
+        );
+        let live_after = game.state.get_char(player_id).unwrap();
+        assert_eq!(live_after.last_logon, live_before.last_logon);
+        assert_eq!(
+            live_after.player.time_played,
+            live_before.player.time_played
+        );
+        assert_eq!(live_after.tloadroom, 888);
+        assert_eq!(live_after.affect_flags, AFF_BLIND);
+        assert_eq!(live_after.affected[0].spell_type, 11);
+        assert!(
+            game.state.descriptors[&conn]
+                .outbuf
+                .contains("Copyover socket flush failed")
+        );
+
+        let durable = db.load_player("Copyflush").await.unwrap();
+        assert_eq!(durable.tloadroom, 4343);
+        assert_eq!(durable.wimp_level, 12);
+        assert_eq!(durable.recall_level, 34);
+        assert_eq!(durable.affect_flags, AFF_INVISIBLE);
+        assert_eq!(durable.affected[0].spell_type, 7);
+        assert!(!lib.join("copyover.dat").exists());
+
+        crate::arena::reset_for_tests();
+        std::fs::remove_dir_all(lib).unwrap();
     }
 
     #[tokio::test]
     async fn copyover_aborts_when_the_configured_mud_date_cannot_be_saved() {
+        let _olc_guard = crate::olc::test_save_list_guard();
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db);
         let unique = std::time::SystemTime::now()
@@ -6614,6 +9956,34 @@ mod ordered_player_save_tests {
         assert!(!lib.join("copyover.dat").exists());
 
         let _ = std::fs::remove_dir_all(lib);
+    }
+
+    #[tokio::test]
+    async fn copyover_aborts_before_other_exit_work_when_olc_flush_fails() {
+        let _olc_guard = crate::olc::test_save_list_guard();
+        const MISSING_ZONE: i32 = 29_992;
+        crate::olc::olc_add_to_save_list(MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
+
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db);
+        let conn = ConnId(96);
+        let mut player = Character::new_player("Olcbuilder".into(), Class::Warrior, Race::Human);
+        player.desc = Some(conn);
+        let requester = game.state.create_char(player);
+        let mut descriptor = Descriptor::new(conn, "copy.example.test".into());
+        descriptor.state = ConState::Menu;
+        descriptor.character = Some(requester);
+        game.state.descriptors.insert(conn, descriptor);
+
+        game.execute_copyover(requester).await;
+
+        let output = &game.state.descriptors[&conn].outbuf;
+        assert!(output.contains("Copyover OLC save failed"));
+        assert!(!output.contains("Copyover calendar save failed"));
+        assert!(!output.contains("Copyover unavailable"));
+        assert!(crate::olc::flush_save_list_to_disk(&mut game.state).is_err());
+
+        crate::olc::olc_remove_from_save_list(MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
     }
 }
 
@@ -6661,6 +10031,7 @@ mod durable_player_rename_tests {
 
         let mut stored = Character::new_player("Oldname".into(), Class::Warrior, Race::Human);
         stored.player.level = 20;
+        stored.trust = 20;
         let idnum = db.create_player(&stored, "password").await.unwrap();
         let mut victim_record = db.load_player("Oldname").await.unwrap();
         victim_record.desc = Some(ConnId(202));
@@ -6675,6 +10046,12 @@ mod durable_player_rename_tests {
 
         let mut admin_record = Character::new_player("Admin".into(), Class::Warrior, Race::Human);
         admin_record.player.level = LVL_IMPL;
+        admin_record.trust = i32::from(LVL_IMPL);
+        let grants = crate::gcmd::canonical_advance_grants(LVL_IMPL, LVL_IMMORT, LVL_IMPL);
+        admin_record.godcmds1 = grants.0;
+        admin_record.godcmds2 = grants.1;
+        admin_record.godcmds3 = grants.2;
+        admin_record.godcmds4 = grants.3;
         admin_record.idnum = 9_413_900;
         admin_record.desc = Some(ConnId(201));
         let admin = game.state.create_char(admin_record);
@@ -6721,7 +10098,11 @@ mod durable_player_rename_tests {
     }
 
     fn queue_rename(fixture: &mut RenameFixture) {
-        crate::cmd_wizard::do_rename(&mut fixture.game.state, fixture.admin, "Oldname Newname", 0);
+        run_authenticated_command(
+            &mut fixture.game.state,
+            fixture.admin,
+            "rename Oldname Newname",
+        );
     }
 
     fn assert_old_live_identity(fixture: &RenameFixture) {
@@ -6802,6 +10183,36 @@ mod durable_player_rename_tests {
         );
         assert!(fixture.game.state.player_save_requests.is_empty());
 
+        cleanup(fixture);
+    }
+
+    #[tokio::test]
+    async fn rename_hierarchy_uses_trust_not_either_display_level() {
+        let db = Arc::new(MockDatabase::new());
+        let game_db: Arc<dyn DatabaseInterface> = db.clone();
+        let mut fixture = fixture("trust-hierarchy", db, game_db).await;
+        {
+            let admin = fixture.game.state.get_char_mut(fixture.admin).unwrap();
+            admin.player.level = 1;
+            admin.trust = i32::from(LVL_IMPL);
+        }
+        {
+            let victim = fixture.game.state.get_char_mut(fixture.victim).unwrap();
+            victim.player.level = LVL_IMPL;
+            victim.trust = 20;
+        }
+
+        queue_rename(&mut fixture);
+        assert_eq!(fixture.game.state.player_rename_requests.len(), 1);
+        fixture.game.drain_player_rename_requests().await;
+
+        assert!(fixture.db.load_player("Newname").await.is_ok());
+        assert!(fixture.db.load_player("Oldname").await.is_err());
+        assert!(
+            fixture.game.state.descriptors[&ConnId(201)]
+                .outbuf
+                .contains("You have renamed Oldname to Newname")
+        );
         cleanup(fixture);
     }
 
@@ -6931,8 +10342,7 @@ mod durable_player_rename_tests {
             .state
             .get_char_mut(fixture.admin)
             .unwrap()
-            .player
-            .level = 20;
+            .trust = 20;
 
         fixture.game.drain_player_rename_requests().await;
 
@@ -6946,6 +10356,29 @@ mod durable_player_rename_tests {
                 .contains("You have renamed")
         );
 
+        cleanup(fixture);
+    }
+
+    #[tokio::test]
+    async fn drain_rejects_a_quarantined_rename_requester_before_storage_mutation() {
+        let db = Arc::new(MockDatabase::new());
+        let game_db: Arc<dyn DatabaseInterface> = db.clone();
+        let mut fixture = fixture("quarantined-requester", db, game_db).await;
+        queue_rename(&mut fixture);
+        assert_eq!(fixture.game.state.player_rename_requests.len(), 1);
+        let requester_idnum = fixture.game.state.get_char(fixture.admin).unwrap().idnum;
+        fixture
+            .game
+            .state
+            .authority_quarantine
+            .insert(requester_idnum);
+
+        fixture.game.drain_player_rename_requests().await;
+
+        assert_old_live_identity(&fixture);
+        assert!(fixture.db.load_player("Oldname").await.is_ok());
+        assert!(fixture.old_rent.is_file() && fixture.old_alias.is_file());
+        assert!(!fixture.new_rent.exists() && !fixture.new_alias.exists());
         cleanup(fixture);
     }
 

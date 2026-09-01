@@ -2295,7 +2295,6 @@ fn send_weather_messages(
         _ => return,
     };
 
-    let mut delivered: HashSet<RoomRnum> = HashSet::new();
     let scan_radius = radius * 2;
     for y in (cy - scan_radius)..=(cy + scan_radius) {
         for x in (cx - scan_radius)..=(cx + scan_radius) {
@@ -2646,7 +2645,7 @@ fn flyby_step(g: &mut GameState, ch: CharId, nr: RoomRnum, flyby: &str) {
                 .map(|c| c.player.level < LVL_IMMORT)
                 .unwrap_or(false)
         })
-        .filter(|&t| g.rng.number(1, 100) <= 10);
+        .filter(|&_t| g.rng.number(1, 100) <= 10);
     if let Some(t) = eligible {
         let tname = g
             .get_char(t)
@@ -3073,20 +3072,7 @@ fn parse_leading_hex(s: &str) -> Result<u32, ()> {
 
 /// mudlog: broadcast an immortal log line (same shape as the other modules).
 fn mudlog(g: &mut GameState, line: &str, min_level: u8) {
-    let formatted = format!("[ {} ]\r\n", line);
-    let imms: Vec<CharId> = g
-        .players_by_name
-        .values()
-        .copied()
-        .filter(|&id| {
-            g.get_char(id)
-                .map(|c| c.player.level >= min_level && c.player.level >= LVL_IMMORT)
-                .unwrap_or(false)
-        })
-        .collect();
-    for id in imms {
-        g.send_to_char(id, &formatted);
-    }
+    crate::syslog::mudlog(g, line, crate::syslog::NRM, min_level);
 }
 
 #[cfg(test)]

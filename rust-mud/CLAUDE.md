@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `rust-mud/` is a from-scratch Rust reimplementation of DeltaMUD (a CircleMUD 3.0 derivative). It is a broad, near-complete Rust port with a layer of modern improvements. As of the 2026-08 parity program (GitHub issues #96-#347, epic #348) all confirmed fidelity gaps from the 12-subsystem audit are closed; the remaining deliberate divergences (C-bug repairs) are registered in `COMPATIBILITY.md`.
 
-For high-level status, read `README.md`. For operational compatibility caveats, read `COMPATIBILITY.md`. This file is the detailed agent/developer guide.
+For high-level status, read [`README.md`](README.md). For operational compatibility caveats, read [`COMPATIBILITY.md`](COMPATIBILITY.md). This file is the detailed agent/developer guide.
 
 ## The C source is the oracle
 
@@ -14,10 +14,11 @@ For high-level status, read `README.md`. For operational compatibility caveats, 
 
 The command surface is substantially ported: the Rust `CMD_INFO` table matches the C command table order, and real command handlers are wired rather than falling through to the generic unimplemented path. The major subsystems also exist: 83-column SQL player persistence, world loaders, DG VM and command sets, OLC editors, copyover, telnet/IAC filtering, GMCP/MSSP, shops, clans, boards, mail, houses, quest, auction, arena, combat, magic, and special procedures.
 
-Known remaining parity work is mostly integration and fidelity detail, not whole missing systems:
+Remaining compatibility considerations are mostly coexistence and migration
+policy rather than known parity gaps:
 
-- **Persistence compatibility:** SQL `player_main` is broad and current, and player aliases now round-trip through C-compatible `plralias/<bucket>/<name>.alias` sidecars. Rent/crash object files, houses, boards, clans, and mail still use Rust text formats rather than C raw on-disk records. Do not share live C persistence files with Rust without a migration/compatibility pass.
-- **OLC/editor fidelity:** the main OLC save dispatcher covers room, object, mobile, zone, and shop writers; redit/oedit/medit expose DG attachment editing; and inline OLC text buffers now share the C-style `modify.rs` string-editor command set (`/a /c /d /e /f /fi /i /h /l /n /r /ra /s`).
+- **Persistence compatibility:** SQL `player_main` is broad and current, and player aliases round-trip through C-compatible `plralias/<bucket>/<name>.alias` sidecars. Rent/crash objects, houses, boards, clans, and mail auto-detect supported C/Rust representations and preserve the detected format on atomic rewrite; legacy Rust representations remain readable. `MUD_CFORMAT_FILES` selects C format only for new or intrinsically ambiguous empty stores. Never let two servers write the same live `lib` tree.
+- **OLC/editor fidelity:** the main OLC save dispatcher covers room, object, mobile, zone, and shop writers; redit/oedit/medit expose DG attachment editing; and inline OLC text buffers share the C-style `modify.rs` string-editor command set (`/a /c /d /e /f /fi /i /h /l /n /r /ra /s`). The durability model is described below and in `docs/RUNBOOK.md`.
 
 Recently resolved tracker-backed parity fixes:
 
@@ -33,36 +34,68 @@ Recently resolved tracker-backed parity fixes:
 
 ## Build / run / test
 
+The repository pins Rust 1.98.0 through `rust-toolchain.toml` and dependency
+resolution through `Cargo.lock`. Keep both files under source control. Rustup
+selects the pinned toolchain automatically; every command that resolves
+dependencies must use `--locked`.
+
 ```bash
 cd /web/deltamud/rust-mud
-cargo build                 # debug
-cargo build --release       # optimized (LTO+strip; ~1.5 min from clean)
-cargo test                  # 328 tests across commands, combat, DG, OLC, nanny/login, persistence, and protocol helpers
-cargo test <name>           # a single test by substring
-cargo clippy --all-targets  # lint (CI runs this; not gated)
+cargo build --locked
+cargo build --release --locked       # thin LTO; symbols retained; panic=unwind
+cargo test --locked                  # complete suite
+cargo test --locked <name>           # a single test by substring
+scripts/clippy-check.sh                 # -D warnings + explicit legacy lint baseline
+cargo fmt --all -- --check
 
-# Run (default = in-memory mock DB; no MySQL needed):
-MUD_MOCK_DB=true MUD_PORT=4000 MUD_LIB_PATH=/web/deltamud/lib ./target/release/deltamud
+# Run explicitly with the ephemeral development database:
+MUD_MOCK_DB=true MUD_BIND=127.0.0.1 MUD_PORT=4000 \
+  MUD_LIB_PATH=/web/deltamud/lib ./target/release/deltamud
 ```
 
 Key env vars (read in `config.rs` + `main.rs`):
-- `MUD_MOCK_DB=true` — use the in-memory `MockDatabase` (default for dev; round-trips full player state within one run). Unset / `false` → real MySQL via `DATABASE_URL` (default `mysql://root:password@localhost/deltamud`).
-- `MUD_LIB_PATH` — the world/data dir (use `/web/deltamud/lib`, the shared C lib).
-- `MUD_PORT` (default 4000), `MUD_RNG_SEED=<n>` (pins the Lehmer PRNG for golden tests — same seed => identical zone prime / combat), `MUD_NO_SPECIALS` (or argv `-s`; C-compatible no-specials mode. `-q` is not treated as no-specials).
-- `MUD_METRICS_PORT=<port>` — enables a Prometheus `/metrics` + `/health` HTTP endpoint. **Never use 9200/9201 — this box's Elasticsearch owns them; use e.g. 19595.**
+- `MUD_MOCK_DB=true` selects the in-memory `MockDatabase` (ephemeral across a cold restart); `false` selects MySQL. Debug/test builds default to mock and release builds default to real, but commands and deployments must set the mode explicitly. Invalid boolean values fail configuration.
+- `DATABASE_URL` has no default and is required, non-empty, whenever the real backend is selected. Normal startup verifies the checksummed schema and fails closed if it is missing or stale; only `deltamud --migrate` applies migrations.
+- `MUD_BIND` is the game-listener IPv4/IPv6 address (default `0.0.0.0`); `MUD_PORT` defaults to 4000. The systemd scaffold intentionally uses `127.0.0.1` behind a separately reviewed edge proxy.
+- `MUD_LIB_PATH` is the world/data and writable runtime-state dir. A development process may use `/web/deltamud/lib` only when no C/Rust peer is writing it; production uses a private copy such as `/var/lib/deltamud/lib`.
+- `MUD_RNG_SEED=<n>` pins the Lehmer PRNG for golden tests (same seed => identical zone prime / combat); `MUD_NO_SPECIALS` or argv `-s` enables C-compatible no-specials mode. `-q` is not treated as no-specials.
+- `MUD_METRICS_PORT=<port>` enables `/metrics`, `/live`, `/ready`, `/health`, and `/api/who`. `/live` proves only that the HTTP task responds; `/ready` also requires completed boot and a heartbeat no more than two seconds old. Invalid metrics addresses/ports and bind failures abort startup. **Never use 9200/9201 — this box's Elasticsearch owns them; use e.g. 19595.**
+- `MUD_EXEC_PATH` optionally selects the copyover binary. A configured value must be absolute and resolve at copyover time to an executable regular file; production additionally requires the binary and both path chains to be root-owned and not group/world-writable. Production uses `/opt/deltamud/current/bin/deltamud`; development falls back to `current_exe()`.
 - `MUD_MAX_CONN` (default 256), `MUD_CONN_BURST`/`MUD_CONN_WINDOW_MS` (per-IP rate limit).
 - `MUD_REVERSE_DNS` (default true), `MUD_REVERSE_DNS_TIMEOUT_MS` (default 1000), and `MUD_REVERSE_DNS_MAX_INFLIGHT` (default 16) enable bounded FCrDNS host identity. Ban checks always include the canonical socket peer IP; lookup failure/timeout falls back to that IP.
 
+Real-database setup is deliberately offline and explicit:
+
+```bash
+MUD_MOCK_DB=false DATABASE_URL="mysql://deltamud:<pw>@127.0.0.1/deltamud" \
+  ./target/release/deltamud --migrate
+```
+
+The first created character is an ordinary level-1 mortal. On a new durable
+database, create the intended administrator normally, stop the server, then run
+the one-time offline promotion below. It refuses a nonexistent/non-player
+target, a mock database, or any database that already contains an Implementor.
+
+```bash
+MUD_MOCK_DB=false DATABASE_URL="mysql://deltamud:<pw>@127.0.0.1/deltamud" \
+  ./target/release/deltamud --bootstrap-implementor Founder
+```
+
 ### Testing against a running server
-Scripted-telnet test with raw `nc` (the IAC input filter now tolerates telnet negotiation, but `nc` avoids it entirely):
+Scripted Telnet with raw `nc` (it does not answer the server's initial `WILL GMCP`, so GMCP remains disabled; expect raw IAC bytes at the start of captured output):
 ```bash
 ( printf 'Tester\r\ny\r\npass\r\npass\r\ny\r\nm\r\na\r\na\r\nc\r\ny\r\n'; sleep 1; printf 'score\r\n'; sleep 0.5; printf 'quit\r\n' ) | nc -q9 127.0.0.1 4000
 ```
 Gotchas that waste time:
-- **First character created becomes the Implementor** (`idnum == 1`, level 105, all god-command bits). Later characters are mortals — many immortal commands (`goto`, `load`, `stat`, `set`, `skillset`) will return "Huh?!?" for them.
+- **No character is implicitly privileged.** Even `idnum == 1` starts as a mortal; use the one-time offline bootstrap above for the initial Implementor, then authenticated in-game administration.
 - `valid_name` is **alpha-only** — names with digits ("Test2") are rejected at the name prompt.
-- Kill the server with `pkill -x deltamud` (not `pkill -f` — that can match your own shell). `cargo clean` wipes `target/`, so rebuild before running.
-- `/tmp/soak.py <port>` is the 3-player concurrent soak (expects 0 panics).
+- Stop a development server by the exact PID captured when it was launched
+  (`kill -TERM "$server_pid"; wait "$server_pid"`). Never use `pkill`: this host
+  may have another DeltaMUD process whose lifecycle is outside your test.
+- Use `scripts/canary.sh` for the isolated concurrent live workload; it owns a
+  private world copy, ports, exact server PID, cleanup deadline, and evidence
+  directory.
+- `cargo clean` wipes `target/`, so rebuild before running.
 
 ## Architecture — the big picture
 
@@ -83,18 +116,18 @@ Gotchas that waste time:
 **Subsystem map** (find by name; each port is intended to track the C oracle, with current gaps listed above):
 - `act()` message engine (`act.rs`, from comm.c `perform_act`): `$n/$N/$m/$s/$e/$o/$p` substitution + per-recipient visibility.
 - DG Scripts VM: `dg_scripts.rs` (`script_driver`, depth guard 10 + while-loop guard 30), `dg_handler.rs`/`dg_event.rs`/`dg_db_scripts.rs`, `dg_{mob,obj,wld}cmd.rs`, fire-hooks in `dg_triggers.rs`. **Triggers must boot before the world** (`main.rs` calls `boot_dg_scripts` before `load_world`).
-- OLC: `olc.rs` + `redit/oedit/medit/zedit/sedit/aedit/hedit/trigedit.rs` (nested-input editors; per-conn state in module-static `OnceLock<Mutex<...>>` keyed by `ConnId`; room/object/mobile/zone/shop central save dispatch is wired; DG attachment editors are exposed in redit/oedit/medit; inline text buffers share the C-style `modify.rs` string-editor command parser).
-- Persistence: `database.rs` (real 83-column `player_main` + `player_affects`/`player_skills`), `database_compat.rs` (the column<->Character mapping), `mock_database.rs`, `objsave.rs` (Rust-format rent/crash object files, not C binary compatible), `password.rs` (crypt-compatible).
+- OLC: `olc.rs` + `redit/oedit/medit/zedit/sedit/aedit/hedit/trigedit.rs` (nested-input editors; per-conn state in module-static `OnceLock<Mutex<...>>` keyed by `ConnId`; room/object/mobile/zone/shop central save dispatch is wired; DG attachment editors are exposed in redit/oedit/medit; inline text buffers share the C-style `modify.rs` string-editor command parser). File publication is durable: unique sibling temp, checked write/flush/fsync, atomic rename, then parent-directory fsync. Disk-first editors publish live state only after replacement succeeds. REDIT/OEDIT retain the C two-stage model (commit to memory and mark the save list, then `olc save` writes the zone); central writers remove a save-list item only after durable replacement. A failed OLC flush blocks manual success, shutdown, auto-reboot, and copyover while retaining dirty entries.
+- Persistence: `database.rs` (real 83-column `player_main` + `player_affects`/`player_skills` and ordered checksummed migrations), `database_compat.rs` (the column<->Character mapping), `mock_database.rs`, `objsave.rs`, and `password.rs`. New passwords are Argon2id PHC strings using RustCrypto defaults and OS randomness; successful verification of supported DES, SHA-crypt, bare SHA-256, or weak Argon2id records attempts a credential-column compare-and-swap upgrade. Password verification rejects inputs above 64 bytes before invoking a KDF.
 - Spec procs (`spec_procs.rs`/`spec_assign.rs`), combat (`combat.rs`: DeltaMUD's `chance()`/`dam_multi()` from utils.c, not stock THAC0), magic (`magic.rs`/`spell_parser.rs`/`spells.rs`), economy (`shop/clan/boards/mail/house/quest/auction`).
 
 ## Things that are NOT obvious
 
 - **Surface map = ~9,801 synthetic rooms** spliced into `GameState.rooms` *after* the 600 real rooms (`maputils.rs::integrate_map_rooms`; vnums 2,000,000+, rnums ≥ `map_start_rnum`). Real-room rnums are untouched. Any "iterate all rooms" loop in a hot path must stop at `map_start_rnum` (see `script_trigger_check`).
-- **Copyover is real seamless reattach** (`do_copyover` in `cmd_wizard.rs` + recovery in `main.rs`): it `execv`s the binary with `--copyover`, inheriting the socket fds (FD_CLOEXEC cleared first; `execv` skips Rust drops so the fds survive). Connections stay attached across the reboot. Uses `libc`.
-- **Telnet/GMCP/MSSP layer** lives in `connection.rs` (`TelnetFilter`) + `game.rs`: IAC negotiation is stripped from input, passwords use `IAC WILL/WONT ECHO`, and GMCP `Char.Vitals`/`Room.Info` + MSSP status are pushed for modern clients.
+- **Copyover is real seamless reattach** (`do_copyover` in `cmd_wizard.rs` + recovery in `main.rs`): it resolves and validates `MUD_EXEC_PATH` (or the current executable in development), durably publishes a versioned/count-checked/SHA-256-checked snapshot, clears FD_CLOEXEC only after preconditions pass, and `execv`s with `--copyover`. Recovery validates the complete snapshot and inherited fds before adopting any socket; missing durable MySQL rows fail recovery instead of being silently recreated.
+- **Telnet/GMCP/MSSP layer** lives in `connection.rs` (`TelnetFilter`) + `game.rs`: fresh connections receive server-initiated `WILL GMCP`; recovered connections reset and re-offer it. Negotiated descriptors retain bounded `Core.Hello` and `Core.Supports.Set/Add/Remove` state and receive `Char.Vitals`/`Room.Info`; unsupported clients receive no GMCP payload. MSSP and plain Telnet remain compatible. UTF-8 negotiation, NAWS, TTYPE/MTTS, and MCCP are intentionally deferred.
 - **House style** (stated in `cmd_informative.rs`, followed throughout): copy scalars / clone collections into locals *before* any `send`/`act`, re-look-up entities by id, and never hold a borrow across a mutation — this keeps the borrow checker happy given `&mut GameState` everywhere.
 - Offline-player immortal commands (`set`/`stat` a logged-off player) go through an **async bridge** (`GameState.offline_ops` → `game.rs::drain_offline_ops`): load → instantiate → replay the command → save → extract.
 
 ## Git
 
-Repo is `/web/deltamud` (its own git repo, `github.com/faratech/deltamud`, branch `main`, pushes straight to origin). Stage explicit paths (`git add rust-mud/src`), not `git add -A` — `lib/` runtime artifacts (`lib/plrobjs/`, `lib/etc/clans.dat`) and `Cargo.lock` are gitignored/untracked and must not be committed. Commit messages end with the `Co-Authored-By:` trailer.
+Repo is `/web/deltamud` (its own git repo, `github.com/faratech/deltamud`, branch `main`, pushes straight to origin). Stage explicit paths (`git add rust-mud/src`), not `git add -A`; preserve unrelated runtime artifacts such as `lib/plrobjs/` and `lib/etc/clans.dat`. `rust-mud/Cargo.lock` and `rust-mud/rust-toolchain.toml` are release inputs and should be committed. Commit messages end with the `Co-Authored-By:` trailer.

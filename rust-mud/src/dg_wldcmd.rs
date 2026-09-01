@@ -27,7 +27,9 @@
 use crate::act::{ActArg, To, act};
 use crate::dg_comm::{TO_CHAR, TO_ROOM, send_to_zone, sub_write};
 use crate::dg_handler::ROOM_ID_BASE;
-use crate::interpreter::{command_interpreter, is_abbrev, search_block};
+use crate::interpreter::{
+    command_interpreter, indirect_command_target_is_forceable, is_abbrev, search_block,
+};
 use crate::object::ObjLoc;
 use crate::room::Exit;
 use crate::state::GameState;
@@ -859,11 +861,10 @@ const WLD_CMDS: &[WldCmd] = &[
     WldCmd("wat", |g, r, a, _| do_wat(g, r, a), 0),
 ];
 
-/// GET_LEVEL(ch) >= LVL_IMMORT.
+/// Staff principals (including switched or quarantined sessions) are immune
+/// to script force/damage/purge regardless of display level.
 fn is_immortal(g: &GameState, ch: CharId) -> bool {
-    g.get_char(ch)
-        .map(|c| c.player.level >= LVL_IMMORT)
-        .unwrap_or(false)
+    !indirect_command_target_is_forceable(g, ch)
 }
 
 #[cfg(test)]

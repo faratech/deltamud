@@ -1835,19 +1835,47 @@ fn get_char_vis(g: &GameState, ch: CharId, arg: &str) -> Option<CharId> {
     None
 }
 
+/// Resolve the persisted authority behind a character without allowing an
+/// indeterminate authority transition to disclose administrative data.
+fn visible_subject_authority(g: &GameState, target: CharId) -> Option<i32> {
+    let authority = g.principal_authority(target)?;
+    if authority.principal_is_player {
+        let principal = g.get_char(authority.principal)?;
+        if g.authority_quarantine.contains(&principal.idnum) {
+            return None;
+        }
+    }
+    Some(authority.authority)
+}
+
+/// Named player inspection must resolve to that exact account. A switched
+/// body may inherit its principal's authority for protection, but it must not
+/// be confused with the named player's account when revealing private data.
+fn exact_player_authority(g: &GameState, target: CharId) -> Option<i32> {
+    let authority = g.principal_authority(target)?;
+    (authority.principal_is_player && authority.principal == target)
+        .then(|| visible_subject_authority(g, target))?
+}
+
 /// do_status — 'status'/'score' (CircleMUD/DeltaMUD long score sheet).
 pub fn do_status(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     let (target_name, _) = half_chop(argument);
-    let ch_level = g.get_char(ch).map(|c| c.player.level).unwrap_or(1);
+    let private_viewer = crate::interpreter::authenticated_input_authority(g, ch)
+        .filter(|authority| authority.authority >= i32::from(LVL_IMMORT));
 
     let (vict, person) = if target_name.is_empty() {
         (ch, "You are".to_string())
-    } else if ch_level < LVL_IMMORT {
+    } else if private_viewer.is_none() {
         (ch, "You are".to_string())
     } else {
+        let viewer_authority = private_viewer.unwrap().authority;
         match get_char_vis(g, ch, &target_name) {
             Some(v) if !g.get_char(v).map(|c| c.is_npc).unwrap_or(true) => {
-                if ch_level < g.get_char(v).map(|c| c.player.level).unwrap_or(1) {
+                let Some(target_authority) = exact_player_authority(g, v) else {
+                    g.send_to_char(ch, "Who is that?\r\n");
+                    return;
+                };
+                if viewer_authority < target_authority {
                     g.send_to_char(
                         ch,
                         "You can't see the score of people above your level.\r\n",
@@ -2965,17 +2993,20 @@ fn perform_mortal_where(g: &mut GameState, ch: CharId, arg: &str) {
     }
 }
 
-fn perform_immort_where(g: &mut GameState, ch: CharId, arg: &str) {
+fn perform_immort_where(g: &mut GameState, ch: CharId, arg: &str, viewer_authority: i32) {
     if arg.is_empty() {
         g.send_to_char(ch, "Players\r\n-------\r\n");
-        let ch_level = g.get_char(ch).map(|c| c.player.level).unwrap_or(1);
         let players: Vec<CharId> = g.players_by_name.values().copied().collect();
         for i in players {
             let c = match g.get_char(i) {
                 Some(c) => c,
                 None => continue,
             };
-            if g.can_see(ch, i) && c.in_room.is_some() && !(ch_level < c.player.level) {
+            if g.can_see(ch, i)
+                && c.in_room.is_some()
+                && exact_player_authority(g, i)
+                    .is_some_and(|target_authority| target_authority <= viewer_authority)
+            {
                 let name = c.player.name.clone();
                 let rnum = c.in_room.unwrap();
                 let vcds = rcds(g, rnum);
@@ -2989,7 +3020,6 @@ fn perform_immort_where(g: &mut GameState, ch: CharId, arg: &str) {
     } else {
         let mut found = false;
         let mut num = 0;
-        let ch_level = g.get_char(ch).map(|c| c.player.level).unwrap_or(1);
         let chars: Vec<CharId> = g.char_ids();
         for i in chars {
             let c = match g.get_char(i) {
@@ -2999,7 +3029,8 @@ fn perform_immort_where(g: &mut GameState, ch: CharId, arg: &str) {
             if g.can_see(ch, i)
                 && c.in_room.is_some()
                 && isname(arg, &c.player.name)
-                && !(ch_level < c.player.level)
+                && visible_subject_authority(g, i)
+                    .is_some_and(|target_authority| target_authority <= viewer_authority)
             {
                 found = true;
                 num += 1;
@@ -3027,7 +3058,7 @@ fn perform_immort_where(g: &mut GameState, ch: CharId, arg: &str) {
             if matches {
                 found = true;
                 num += 1;
-                print_object_location(g, num, k, ch, true);
+                print_object_location(g, num, k, ch, viewer_authority, true);
             }
         }
         if !found {
@@ -3036,7 +3067,14 @@ fn perform_immort_where(g: &mut GameState, ch: CharId, arg: &str) {
     }
 }
 
-fn print_object_location(g: &mut GameState, num: i32, oid: ObjId, ch: CharId, recur: bool) {
+fn print_object_location(
+    g: &mut GameState,
+    num: i32,
+    oid: ObjId,
+    ch: CharId,
+    viewer_authority: i32,
+    recur: bool,
+) {
     let (short, loc) = match g.get_obj(oid) {
         Some(o) => (o.short_description.clone(), o.loc),
         None => return,
@@ -3054,16 +3092,18 @@ fn print_object_location(g: &mut GameState, num: i32, oid: ObjId, ch: CharId, re
             g.send_to_char(ch, &buf);
         }
         ObjLoc::Carried(cid) => {
-            let who = pers(g, ch, cid);
-            buf.push_str(&format!("carried by {}\r\n", who));
-            g.send_to_char(ch, &buf);
+            if visible_subject_authority(g, cid)
+                .is_some_and(|target_authority| target_authority <= viewer_authority)
+            {
+                let who = pers(g, ch, cid);
+                buf.push_str(&format!("carried by {}\r\n", who));
+                g.send_to_char(ch, &buf);
+            }
         }
         ObjLoc::Worn(cid, _) => {
-            let (their_level, ch_level) = (
-                g.get_char(cid).map(|c| c.player.level).unwrap_or(0),
-                g.get_char(ch).map(|c| c.player.level).unwrap_or(0),
-            );
-            if their_level <= ch_level {
+            if visible_subject_authority(g, cid)
+                .is_some_and(|target_authority| target_authority <= viewer_authority)
+            {
                 let who = pers(g, ch, cid);
                 buf.push_str(&format!("worn by {}\r\n", who));
                 g.send_to_char(ch, &buf);
@@ -3091,7 +3131,7 @@ fn print_object_location(g: &mut GameState, num: i32, oid: ObjId, ch: CharId, re
                 const MAX_LOC_DEPTH: u32 = 16;
                 if LOC_DEPTH.with(|d| d.get()) < MAX_LOC_DEPTH {
                     LOC_DEPTH.with(|d| d.set(d.get() + 1));
-                    print_object_location(g, 0, container, ch, recur);
+                    print_object_location(g, 0, container, ch, viewer_authority, recur);
                     LOC_DEPTH.with(|d| d.set(d.get() - 1));
                 } else {
                     g.send_to_char(ch, "... (containment too deep)\r\n");
@@ -3107,12 +3147,10 @@ fn print_object_location(g: &mut GameState, num: i32, oid: ObjId, ch: CharId, re
 
 pub fn do_where(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     let (arg, _) = one_argument(argument);
-    let imm = g
-        .get_char(ch)
-        .map(|c| c.player.level >= LVL_IMMORT)
-        .unwrap_or(false);
-    if imm {
-        perform_immort_where(g, ch, &arg);
+    let private_viewer = crate::interpreter::authenticated_input_authority(g, ch)
+        .filter(|authority| authority.authority >= i32::from(LVL_IMMORT));
+    if let Some(authority) = private_viewer {
+        perform_immort_where(g, ch, &arg, authority.authority);
     } else {
         perform_mortal_where(g, ch, &arg);
     }
@@ -3366,11 +3404,19 @@ pub fn do_commands(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
 
     let (arg, _) = one_argument(argument);
     let (vict, vname) = if !arg.is_empty() {
+        let Some(viewer) = crate::interpreter::authenticated_input_authority(g, ch)
+            .filter(|authority| authority.authority >= i32::from(LVL_IMMORT))
+        else {
+            g.send_to_char(ch, "You can't inspect another player's commands.\r\n");
+            return;
+        };
         match g.find_player_by_name(&arg) {
             Some(v) if !g.get_char(v).map(|c| c.is_npc).unwrap_or(true) && g.can_see(ch, v) => {
-                let vl = g.get_char(v).map(|c| c.player.level).unwrap_or(1);
-                let cl = g.get_char(ch).map(|c| c.player.level).unwrap_or(1);
-                if cl < vl {
+                let Some(target_authority) = exact_player_authority(g, v) else {
+                    g.send_to_char(ch, "Who is that?\r\n");
+                    return;
+                };
+                if viewer.authority < target_authority {
                     g.send_to_char(
                         ch,
                         "You can't see the commands of people above your level.\r\n",
@@ -3397,16 +3443,32 @@ pub fn do_commands(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
     let want_socials = subcmd == 1;
     let want_wiz = subcmd == 2;
 
-    let (vict_level, vict_npc, vict_gcmds) = g
-        .get_char(vict)
-        .map(|c| {
-            (
-                c.player.level,
-                c.is_npc,
-                [c.godcmds1, c.godcmds2, c.godcmds3, c.godcmds4],
-            )
-        })
-        .unwrap_or((1, false, [0; 4]));
+    let (vict_level, vict_npc, vict_gcmds) = match g.principal_authority(vict) {
+        Some(authority) if authority.principal_is_player => match g.get_char(authority.principal) {
+            Some(principal) if !g.authority_quarantine.contains(&principal.idnum) => (
+                u8::try_from(authority.authority).unwrap_or(0),
+                false,
+                [
+                    principal.godcmds1,
+                    principal.godcmds2,
+                    principal.godcmds3,
+                    principal.godcmds4,
+                ],
+            ),
+            _ => (0, false, [0; 4]),
+        },
+        Some(authority) => (u8::try_from(authority.authority).unwrap_or(0), true, [0; 4]),
+        None => g
+            .get_char(vict)
+            .map(|c| {
+                if c.is_npc {
+                    (c.player.level, true, [0; 4])
+                } else {
+                    (0, false, [0; 4])
+                }
+            })
+            .unwrap_or((0, false, [0; 4])),
+    };
     // IS_GOD(ch) (utils.h:560-561): !IS_NPC && any GCMD bitmap set. A granted
     // god-command bit bypasses the per-command minimum level (#341).
     let vict_is_god = !vict_npc && vict_gcmds.iter().any(|b| *b != 0);
@@ -3697,7 +3759,7 @@ pub fn do_whois(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     // (name/level/class/last_logon), which has no race column, so the race
     // degrades to races.c's out-of-range "Undefined" (#345).
     let online = g.find_player_by_name(arg);
-    let (name, level, race, class, logon) = match online {
+    let (name, level, race, class, logon, target_trust) = match online {
         Some(v) => match g.get_char(v) {
             Some(c) => (
                 c.player.name.clone(),
@@ -3705,17 +3767,22 @@ pub fn do_whois(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
                 race_name(c.player.race).to_string(),
                 class_name(c.player.class).to_string(),
                 c.last_logon.timestamp(),
+                exact_player_authority(g, v),
             ),
             None => return,
         },
         None => match g.player_index(arg).cloned() {
-            Some(p) => (
-                p.name,
-                p.level,
-                crate::races::race_name(-1).to_string(),
-                crate::class::class_name_i(p.class as i32).to_string(),
-                p.last_logon,
-            ),
+            Some(p) => {
+                let trust = (!g.authority_quarantine.contains(&p.idnum)).then_some(p.trust);
+                (
+                    p.name,
+                    p.level,
+                    crate::races::race_name(-1).to_string(),
+                    crate::class::class_name_i(p.class as i32).to_string(),
+                    p.last_logon,
+                    trust,
+                )
+            }
             None => {
                 g.send_to_char(ch, "There is no such player.\r\n");
                 return;
@@ -3723,8 +3790,17 @@ pub fn do_whois(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         },
     };
 
-    let ch_level = g.get_char(ch).map(|c| c.player.level).unwrap_or(1);
-    if ch_level < LVL_IMMORT && level >= LVL_IMMORT {
+    // Whois publishes private staff status and last-logon timing. Classify the
+    // target by persisted trust, and grant the exception only to direct input
+    // from an authenticated staff principal. Invalid/quarantined target
+    // authority fails closed as private.
+    let target_is_staff = match target_trust {
+        Some(trust) if (0..=i32::from(LVL_IMPL)).contains(&trust) => trust >= i32::from(LVL_IMMORT),
+        _ => true,
+    };
+    let requester_may_view_staff = crate::interpreter::authenticated_input_authority(g, ch)
+        .is_some_and(|authority| authority.authority >= i32::from(LVL_IMMORT));
+    if target_is_staff && !requester_may_view_staff {
         g.send_to_char(ch, "Information about immortals is unavailable.\r\n");
         return;
     }
@@ -3934,7 +4010,7 @@ mod tests {
     use super::*;
     use crate::character::Character;
     use crate::config::Config;
-    use crate::connection::Descriptor;
+    use crate::connection::{ConState, Descriptor};
     use crate::room::{Exit, Room};
 
     #[test]
@@ -3990,10 +4066,13 @@ mod tests {
     fn connected_player(g: &mut GameState, conn: ConnId, name: &str, level: Level) -> CharId {
         g.descriptors
             .insert(conn, Descriptor::new(conn, "test".to_string()));
+        g.descriptors.get_mut(&conn).unwrap().state = ConState::Playing;
         let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
         ch.desc = Some(conn);
         ch.player.level = level;
+        ch.trust = i32::from(level);
         let id = g.create_char(ch);
+        g.descriptors.get_mut(&conn).unwrap().character = Some(id);
         g.players_by_name.insert(name.to_lowercase(), id);
         id
     }
@@ -4046,7 +4125,7 @@ mod tests {
 
     #[test]
     fn do_commands_lists_loaded_socials() {
-        crate::cmd_social::boot_socials(Some("../lib/misc/socials"));
+        crate::cmd_social::boot_socials(Some("../lib/misc/socials")).unwrap();
         let mut g = GameState::new(Config::default());
         let ch = connected_player(&mut g, ConnId(1), "Reader", 1);
 
@@ -4062,7 +4141,7 @@ mod tests {
 
     #[test]
     fn social_min_level_is_enforced_at_dispatch() {
-        crate::cmd_social::boot_socials(Some("../lib/misc/socials"));
+        crate::cmd_social::boot_socials(Some("../lib/misc/socials")).unwrap();
         let mut g = GameState::new(Config::default());
         let ch = connected_player(&mut g, ConnId(1), "Reader", 1);
 
@@ -4337,6 +4416,66 @@ mod tests {
         );
     }
 
+    #[test]
+    fn do_whois_staff_privacy_uses_persisted_trust_not_display_level() {
+        let mut g = GameState::new(Config::default());
+        let viewer = connected_player(&mut g, ConnId(81), "Viewer", LVL_IMPL);
+        g.get_char_mut(viewer).unwrap().trust = 1;
+        let now = chrono::Utc::now().timestamp();
+
+        g.update_player_index(82, "HiddenStaff", 1, now, "staff.example");
+        g.player_table
+            .iter_mut()
+            .find(|player| player.name == "HiddenStaff")
+            .unwrap()
+            .trust = i32::from(LVL_IMMORT);
+        crate::interpreter::run_authenticated_command(&mut g, viewer, "whois HiddenStaff");
+        let output = out_of(&mut g, ConnId(81));
+        assert!(output.contains("Information about immortals is unavailable."));
+        assert!(!output.contains("HiddenStaff was last on at"));
+
+        g.descriptors.get_mut(&ConnId(81)).unwrap().outbuf.clear();
+        g.update_player_index(83, "DisplayOnly", LVL_IMPL, now, "mortal.example");
+        g.player_table
+            .iter_mut()
+            .find(|player| player.name == "DisplayOnly")
+            .unwrap()
+            .trust = 1;
+        crate::interpreter::run_authenticated_command(&mut g, viewer, "whois DisplayOnly");
+        let output = out_of(&mut g, ConnId(81));
+        assert!(output.contains("DisplayOnly is a level"));
+        assert!(output.contains("DisplayOnly was last on at"));
+    }
+
+    #[test]
+    fn do_whois_staff_disclosure_requires_direct_authenticated_input() {
+        let mut g = GameState::new(Config::default());
+        let viewer = connected_player(&mut g, ConnId(84), "TrustedViewer", 1);
+        {
+            let viewer = g.get_char_mut(viewer).unwrap();
+            viewer.trust = i32::from(LVL_IMMORT);
+            viewer.idnum = 84;
+        }
+        let now = chrono::Utc::now().timestamp();
+        g.update_player_index(85, "Staff", 1, now, "staff.example");
+        g.player_table
+            .iter_mut()
+            .find(|player| player.name == "Staff")
+            .unwrap()
+            .trust = i32::from(LVL_IMMORT);
+
+        do_whois(&mut g, viewer, "Staff", 0);
+        let output = out_of(&mut g, ConnId(84));
+        assert!(output.contains("Information about immortals is unavailable."));
+        assert!(!output.contains("Staff was last on at"));
+
+        g.descriptors.get_mut(&ConnId(84)).unwrap().outbuf.clear();
+        crate::interpreter::run_authenticated_command(&mut g, viewer, "whois Staff");
+        let output = out_of(&mut g, ConnId(84));
+        assert!(output.contains("Staff was last on at"));
+        assert!(!output.contains("Information about immortals is unavailable."));
+    }
+
     /// #346: the birthday line fires when the MUD age has month == 0 && day == 0.
     #[test]
     fn do_status_emits_the_birthday_line() {
@@ -4478,7 +4617,7 @@ mod tests {
     /// while a plain mortal does not.
     #[test]
     fn do_commands_god_bits_bypass_the_level_gate() {
-        crate::cmd_social::boot_socials(Some("../lib/misc/socials"));
+        crate::cmd_social::boot_socials(Some("../lib/misc/socials")).unwrap();
         let mut g = GameState::new(Config::default());
         let mortal = connected_player(&mut g, ConnId(1), "Plain", 5);
         let favoured = connected_player(&mut g, ConnId(2), "Favoured", 5);
@@ -4515,6 +4654,62 @@ mod tests {
             "the god-bit bypass must not add wiz commands"
         );
         assert!(!plain_cmds.contains("shutdown"));
+    }
+
+    #[test]
+    fn private_informative_paths_use_direct_persisted_authority() {
+        let mut g = GameState::new(Config::default());
+        let local = g.add_room(Room::new(1_100, 0, "Local".into(), String::new()));
+        let remote = g.add_room(Room::new(2_100, 1, "Remote".into(), String::new()));
+        let viewer = connected_player(&mut g, ConnId(31), "Viewer", LVL_IMPL);
+        let target = connected_player(&mut g, ConnId(32), "Target", 2);
+        g.char_to_room(viewer, local);
+        g.char_to_room(target, remote);
+        g.get_char_mut(viewer).unwrap().trust = 1;
+
+        crate::interpreter::run_authenticated_command(&mut g, viewer, "score Target");
+        let output = &g.descriptors[&ConnId(31)].outbuf;
+        assert!(!output.contains("Score for Target"));
+
+        g.descriptors.get_mut(&ConnId(31)).unwrap().outbuf.clear();
+        crate::interpreter::run_authenticated_command(&mut g, viewer, "where Target");
+        let output = &g.descriptors[&ConnId(31)].outbuf;
+        assert!(!output.contains("Remote"));
+
+        g.descriptors.get_mut(&ConnId(31)).unwrap().outbuf.clear();
+        crate::interpreter::run_authenticated_command(&mut g, viewer, "commands Target");
+        assert!(
+            g.descriptors[&ConnId(31)]
+                .outbuf
+                .contains("can't inspect another player's commands")
+        );
+
+        // Raising persisted trust while lowering the cosmetic/display level
+        // reverses all three decisions.
+        {
+            let viewer = g.get_char_mut(viewer).unwrap();
+            viewer.player.level = 1;
+            viewer.trust = i32::from(LVL_IMPL);
+        }
+        g.descriptors.get_mut(&ConnId(31)).unwrap().outbuf.clear();
+        crate::interpreter::run_authenticated_command(&mut g, viewer, "score Target");
+        assert!(
+            g.descriptors[&ConnId(31)]
+                .outbuf
+                .contains("Score for Target")
+        );
+
+        g.descriptors.get_mut(&ConnId(31)).unwrap().outbuf.clear();
+        crate::interpreter::run_authenticated_command(&mut g, viewer, "where Target");
+        assert!(g.descriptors[&ConnId(31)].outbuf.contains("Remote"));
+
+        g.descriptors.get_mut(&ConnId(31)).unwrap().outbuf.clear();
+        crate::interpreter::run_authenticated_command(&mut g, viewer, "commands Target");
+        assert!(
+            g.descriptors[&ConnId(31)]
+                .outbuf
+                .contains("available to Target")
+        );
     }
 
     /// #342: identical lines differing only by a trailing affect glow stack,

@@ -1,16 +1,16 @@
 // password.rs — full port of C `src/password.c` (DeltaMUD secure password layer).
 //
-// The C file leans on the libc `crypt(3)` for three on-disk formats:
+// The C file leans on the libc `crypt(3)` for three legacy on-disk formats:
 //   * legacy DES (13-char, or 10-char truncated leftovers from old player files)
-//   * `$5$` SHA-256 crypt (the modern format produced by create_secure_password_hash)
+//   * `$5$` SHA-256 crypt
 //   * `$6$` SHA-512 crypt (accepted on verify; some imported accounts use it)
 // plus the DeltaMUD `pwd_new` SHA path stored in `player_main.pwd` when
 // `pwd_new == 1`: a bare lowercase-hex SHA-256 of the plaintext (see the C/Rust
 // DB layers — database.rs::hash_password and database_compat.rs).
 //
-// Rust has no libc `crypt` in this build (only `sha2` is on the dependency
-// list), so every algorithm is reimplemented here from scratch against the
-// glibc/BSD specs so existing player files keep verifying byte-for-byte:
+// Existing player files keep verifying byte-for-byte via the legacy routines
+// below. New hashes use RustCrypto Argon2id in PHC string format with a salt
+// supplied by the operating system CSPRNG:
 //   * `des_crypt`  — the classic Unix DES password hash (Morris/Thompson),
 //                    producing the 13-char `[./0-9A-Za-z]{13}` output.
 //   * `sha_crypt`  — Ulrich Drepper's SHA-crypt (`$5$`/`$6$`), built on sha2.
@@ -24,7 +24,70 @@
 // No GameState/Character coupling and no command handlers: this is a pure
 // crypto helper module keyed by nothing but its &str arguments.
 
+use argon2::{
+    Argon2, Params, Version,
+    password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
+};
 use sha2::{Digest, Sha256, Sha512};
+use std::sync::{Arc, OnceLock};
+
+// Stored hashes are database input at verification time. Bound every
+// attacker-influenced work factor before invoking a password KDF so a corrupt
+// or imported row cannot turn one login attempt into unbounded CPU/memory use.
+const MAX_ARGON2_M_COST: u32 = 65_536;
+const MAX_ARGON2_T_COST: u32 = 4;
+const MAX_ARGON2_P_COST: u32 = 4;
+const MAX_ARGON2_OUTPUT_LEN: usize = 64;
+const MAX_ARGON2_SALT_LEN: usize = 64;
+const MAX_SHA_CRYPT_ROUNDS: u64 = 100_000;
+/// Bound attacker-controlled verifier input before every supported KDF. Legacy
+/// SHA-crypt work grows with both rounds and password length, and its
+/// synchronous computation cannot be cancelled by an async timeout.
+pub const MAX_PASSWORD_INPUT_BYTES: usize = 64;
+const MAX_CONCURRENT_PASSWORD_CHECKS: usize = 2;
+
+fn password_check_slots() -> Arc<tokio::sync::Semaphore> {
+    static SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    Arc::clone(
+        SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PASSWORD_CHECKS))),
+    )
+}
+
+/// Run an imported-password KDF outside Tokio's world/IO workers. The
+/// process-wide semaphore bounds simultaneous memory/CPU, and oversized input
+/// is rejected before waiting for a slot or spawning a blocking task.
+pub async fn check_password_async(stored: String, plain: String) -> bool {
+    if plain.len() > MAX_PASSWORD_INPUT_BYTES {
+        return false;
+    }
+    let permit = match password_check_slots().acquire_owned().await {
+        Ok(permit) => permit,
+        Err(_) => return false,
+    };
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        check_password(&stored, &plain)
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Create a new Argon2id credential outside the single-owner Game task. New
+/// account creation and authenticated password changes share the same bounded
+/// worker budget as verification, so neither path can stall world pulses or
+/// multiply Argon2's memory cost without limit.
+pub async fn hash_password_async(plain: String) -> Option<String> {
+    if plain.len() > MAX_PASSWORD_INPUT_BYTES {
+        return None;
+    }
+    let permit = password_check_slots().acquire_owned().await.ok()?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        hash_password(&plain)
+    })
+    .await
+    .ok()
+}
 
 // ===========================================================================
 // Public API
@@ -36,8 +99,19 @@ use sha2::{Digest, Sha256, Sha512};
 /// crypt-unavailable fallback, which cannot occur here — our crypt is always
 /// present — so the parameter is dropped). All comparisons are constant-time.
 pub fn check_password(stored: &str, plain: &str) -> bool {
-    if stored.is_empty() {
+    if stored.is_empty() || plain.len() > MAX_PASSWORD_INPUT_BYTES {
         return false;
+    }
+
+    // New hashes are PHC-encoded Argon2id. Restrict verification to Argon2id:
+    // other Argon2 variants are not formats this application has emitted.
+    if stored.starts_with("$argon2id$") {
+        return PasswordHash::new(stored).ok().is_some_and(|hash| {
+            argon2id_verification_is_bounded(&hash)
+                && Argon2::default()
+                    .verify_password(plain.as_bytes(), &hash)
+                    .is_ok()
+        });
     }
 
     // Legacy DES hash: 13-char full, or 10-char truncated (old player files).
@@ -53,7 +127,7 @@ pub fn check_password(stored: &str, plain: &str) -> bool {
         return ct_eq(computed.as_bytes(), stored.as_bytes());
     }
 
-    // Modern SHA-crypt: `$5$` (SHA-256) and `$6$` (SHA-512).
+    // Legacy SHA-crypt: `$5$` (SHA-256) and `$6$` (SHA-512).
     if stored.starts_with("$5$") || stored.starts_with("$6$") {
         if let Some(computed) = sha_crypt(plain.as_bytes(), stored) {
             return ct_eq(computed.as_bytes(), stored.as_bytes());
@@ -78,42 +152,75 @@ pub fn check_password(stored: &str, plain: &str) -> bool {
     false
 }
 
-/// Create a fresh secure hash for `plain`. Port of C
-/// `create_secure_password_hash()`: a `$5$` SHA-256 crypt with a random 16-char
-/// salt from the crypt alphabet. (The C version also took a `username`
-/// fallback for the never-reached crypt-failure path; omitted here.)
+/// Create a fresh Argon2id PHC hash for `plain` using the RustCrypto defaults
+/// and a 16-byte salt from the operating system CSPRNG.
 pub fn hash_password(plain: &str) -> String {
-    let salt = generate_salt();
-    let setting = format!("$5${}$", salt);
-    // sha_crypt cannot fail for a well-formed `$5$` setting we just built.
-    sha_crypt(plain.as_bytes(), &setting).unwrap_or_else(|| {
-        // Theoretically unreachable; degrade to bare SHA-256 hex rather than panic.
-        sha256_hex(plain)
-    })
+    Argon2::default()
+        .hash_password(plain.as_bytes())
+        .expect("operating-system CSPRNG and Argon2id hashing must be available")
+        .to_string()
 }
 
-/// Whether `stored` is in a legacy format that should be re-hashed on the next
-/// successful login. Port of C `password_needs_upgrade()`, extended for the
-/// DeltaMUD bare-SHA-256 path (treated as up-to-date, like `$5$`/`$6$`).
+/// Whether `stored` should be re-hashed on the next successful login. Every
+/// historical format is legacy; only an Argon2id v19 hash meeting the current
+/// minimum cost, salt, and output-size policy is current. An in-policy hash
+/// whose cost dimensions are all at least the defaults remains current.
 pub fn password_needs_upgrade(stored: &str) -> bool {
-    if stored.is_empty() {
-        return true; // No hash = needs upgrade.
-    }
-    let len = stored.len();
-    // DES hashes (10 or 13 chars) always need upgrade.
-    if (len == 13 || len == 10) && is_des_hash(stored) {
+    argon2id_needs_upgrade(stored)
+}
+
+fn argon2id_needs_upgrade(stored: &str) -> bool {
+    if !stored.starts_with("$argon2id$") {
         return true;
     }
-    // Modern crypt formats are current.
-    if stored.starts_with("$5$") || stored.starts_with("$6$") {
+
+    let Ok(hash) = PasswordHash::new(stored) else {
+        return true;
+    };
+    if !argon2id_verification_is_bounded(&hash) {
+        return true;
+    }
+    if hash.algorithm.as_str() != "argon2id"
+        || hash.version != Some(Version::V0x13 as u32)
+        || hash.params.get_decimal("m").is_none()
+        || hash.params.get_decimal("t").is_none()
+        || hash.params.get_decimal("p").is_none()
+    {
+        return true;
+    }
+
+    let Ok(params) = Params::try_from(&hash) else {
+        return true;
+    };
+    let Some(salt) = hash.salt else {
+        return true;
+    };
+    let Some(output) = hash.hash else {
+        return true;
+    };
+
+    params.m_cost() < Params::DEFAULT_M_COST
+        || params.t_cost() < Params::DEFAULT_T_COST
+        || params.p_cost() < Params::DEFAULT_P_COST
+        || salt.len() < 16
+        || output.len() < Params::DEFAULT_OUTPUT_LEN
+}
+
+fn argon2id_verification_is_bounded(hash: &PasswordHash) -> bool {
+    if hash.algorithm.as_str() != "argon2id" || hash.version != Some(Version::V0x13 as u32) {
         return false;
     }
-    // DeltaMUD pwd_new bare SHA-256: a modern format, no upgrade required.
-    if len == 64 && is_lower_hex(stored) {
+    let Ok(params) = Params::try_from(hash) else {
         return false;
-    }
-    // Unknown format - assume needs upgrade (matches C default).
-    true
+    };
+    let (Some(salt), Some(output)) = (hash.salt, hash.hash) else {
+        return false;
+    };
+    params.m_cost() <= MAX_ARGON2_M_COST
+        && params.t_cost() <= MAX_ARGON2_T_COST
+        && params.p_cost() <= MAX_ARGON2_P_COST
+        && salt.len() <= MAX_ARGON2_SALT_LEN
+        && output.len() <= MAX_ARGON2_OUTPUT_LEN
 }
 
 // ===========================================================================
@@ -135,59 +242,6 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 fn is_lower_hex(s: &str) -> bool {
     s.bytes()
         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
-// ===========================================================================
-// Salt generation (C generate_salt)
-// ===========================================================================
-
-/// The crypt base-64 alphabet used by glibc for salts (`./0-9A-Za-z`), and by
-/// the C `generate_salt()` (which lists it as A-Za-z0-9./ — same 64 chars).
-const SALT_CHARS: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-
-/// Generate a 16-char random salt. C uses `rand()` seeded once from
-/// `time(NULL) ^ getpid()`; we use a lazily-seeded xorshift so the module has
-/// no external RNG dependency and stays self-contained.
-fn generate_salt() -> String {
-    let mut s = String::with_capacity(16);
-    for _ in 0..16 {
-        let r = next_rand();
-        s.push(SALT_CHARS[(r % 64) as usize] as char);
-    }
-    s
-}
-
-use std::cell::Cell;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-thread_local! {
-    static RNG_STATE: Cell<u64> = const { Cell::new(0) };
-}
-
-fn next_rand() -> u64 {
-    RNG_STATE.with(|st| {
-        let mut x = st.get();
-        if x == 0 {
-            // Seed from wall clock + a per-process-ish nonce; xorshift never
-            // produces 0 from a non-zero seed.
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0x9E3779B97F4A7C15);
-            x = nanos
-                ^ 0xD1B54A32D192ED03
-                ^ (std::process::id() as u64).wrapping_mul(0x2545F491_4F6CDD1D);
-            if x == 0 {
-                x = 0x9E3779B97F4A7C15;
-            }
-        }
-        // xorshift64
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        st.set(x);
-        x
-    })
 }
 
 // ===========================================================================
@@ -238,7 +292,10 @@ fn sha_crypt(password: &[u8], setting: &str) -> Option<String> {
         let end = after.find('$').unwrap_or(after.len());
         let (digits, tail) = after.split_at(end);
         if let Ok(v) = digits.parse::<u64>() {
-            rounds = v.clamp(1000, 999_999_999);
+            if !(1000..=MAX_SHA_CRYPT_ROUNDS).contains(&v) {
+                return None;
+            }
+            rounds = v;
             rounds_custom = true;
             rest = tail.strip_prefix('$').unwrap_or(tail);
         } else {
@@ -787,28 +844,181 @@ mod tests {
     #[test]
     fn bare_sha256_hex_path() {
         // DeltaMUD pwd_new: bare lowercase hex SHA-256.
-        let stored = sha256_hex("letmein");
+        let stored = "1c8bfe8f801d79745c4631d09fff36c82aa37fc4cce4fc946683d7b336b63032";
+        assert_eq!(sha256_hex("letmein"), stored);
         assert_eq!(stored.len(), 64);
-        assert!(check_password(&stored, "letmein"));
-        assert!(!check_password(&stored, "letmeout"));
-        assert!(!password_needs_upgrade(&stored));
+        assert!(check_password(stored, "letmein"));
+        assert!(!check_password(stored, "letmeout"));
+        assert!(password_needs_upgrade(stored));
     }
 
     #[test]
-    fn hash_then_check_roundtrip() {
-        let h = hash_password("hunter2");
-        assert!(h.starts_with("$5$"));
-        assert!(check_password(&h, "hunter2"));
-        assert!(!check_password(&h, "hunter3"));
-        assert!(!password_needs_upgrade(&h));
+    fn new_hashes_are_argon2id_with_os_random_salts() {
+        let first = hash_password("hunter2");
+        let second = hash_password("hunter2");
+
+        assert!(first.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"));
+        assert!(second.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"));
+        assert_ne!(
+            first, second,
+            "independent CSPRNG salts must change the hash"
+        );
+        assert!(check_password(&first, "hunter2"));
+        assert!(!check_password(&first, "hunter3"));
+        assert!(!password_needs_upgrade(&first));
+
+        let parsed = PasswordHash::new(&first).unwrap();
+        assert_eq!(parsed.version, Some(Version::V0x13 as u32));
+        assert_eq!(parsed.salt.unwrap().len(), 16);
+        assert_eq!(parsed.hash.unwrap().len(), Params::DEFAULT_OUTPUT_LEN);
+    }
+
+    #[tokio::test]
+    async fn bounded_async_workers_hash_and_verify_credentials() {
+        let stored = hash_password_async("worker-secret".to_string())
+            .await
+            .expect("bounded hashing worker");
+        assert!(check_password_async(stored.clone(), "worker-secret".to_string()).await);
+        assert!(!check_password_async(stored, "wrong-secret".to_string()).await);
+        assert!(
+            hash_password_async("x".repeat(MAX_PASSWORD_INPUT_BYTES + 1))
+                .await
+                .is_none()
+        );
     }
 
     #[test]
-    fn needs_upgrade_classification() {
-        assert!(password_needs_upgrade(""));
-        assert!(password_needs_upgrade("ba4TuD1iozTxw")); // 13-char DES
-        assert!(password_needs_upgrade("ba4TuD1ioz")); // 10-char DES
-        assert!(!password_needs_upgrade("$5$saltstring$abc"));
-        assert!(!password_needs_upgrade("$6$saltstring$abc"));
+    fn official_argon2id_fixture_verifies_but_weak_parameters_require_rehash() {
+        // RustCrypto's PHC-string test vector, adapted from the reference
+        // Argon2 implementation: password="password", salt="somesalt".
+        let stored =
+            "$argon2id$v=19$m=256,t=2,p=1$c29tZXNhbHQ$nf65EOgLrQMR/uIPnA4rEsF5h7TKyQwu9U1bMCHGi/4";
+        assert!(check_password(stored, "password"));
+        assert!(!check_password(stored, "sassword"));
+        assert!(password_needs_upgrade(stored));
+    }
+
+    #[test]
+    fn imported_hash_work_factors_are_bounded_before_verification() {
+        let current = hash_password("bounded-work");
+        let too_much_memory = current.replacen("m=19456", "m=65537", 1);
+        let too_many_iterations = current.replacen("t=2", "t=5", 1);
+        let too_much_parallelism = current.replacen("p=1", "p=5", 1);
+
+        for oversized in [
+            too_much_memory.as_str(),
+            too_many_iterations.as_str(),
+            too_much_parallelism.as_str(),
+        ] {
+            assert!(!check_password(oversized, "bounded-work"));
+            assert!(password_needs_upgrade(oversized));
+        }
+
+        let excessive_sha = "$5$rounds=100001$salt$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        assert_eq!(sha_crypt(b"password", excessive_sha), None);
+        assert!(!check_password(excessive_sha, "password"));
+    }
+
+    #[test]
+    fn verifier_rejects_oversized_plaintext_before_every_kdf() {
+        let oversized = "x".repeat(MAX_PASSWORD_INPUT_BYTES + 1);
+        let argon2 = hash_password(&oversized);
+        let sha_crypt = sha_crypt(oversized.as_bytes(), "$5$rounds=1000$salt$").unwrap();
+        let bare_sha = sha256_hex(&oversized);
+
+        assert!(!check_password(&argon2, &oversized));
+        assert!(!check_password(&sha_crypt, &oversized));
+        assert!(!check_password(&bare_sha, &oversized));
+    }
+
+    #[test]
+    fn every_legacy_fixture_verifies_and_requires_rehash() {
+        let fixtures = [
+            ("DES", "ba4TuD1iozTxw", "foo"),
+            ("truncated DES", "ba4TuD1ioz", "foo"),
+            (
+                "SHA-256 crypt",
+                "$5$saltstring$5B8vYYiY.CVt1RlTTf8KbXBH3hsxY/GNooZaBBGWEc5",
+                "Hello world!",
+            ),
+            (
+                "SHA-256 crypt with rounds",
+                "$5$rounds=10000$saltstringsaltst$3xv.VbSHBb41AL9AvLeujZkZRBAwqFMz2.opqey6IcA",
+                "Hello world!",
+            ),
+            (
+                "SHA-512 crypt",
+                "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1",
+                "Hello world!",
+            ),
+            (
+                "bare SHA-256",
+                "1c8bfe8f801d79745c4631d09fff36c82aa37fc4cce4fc946683d7b336b63032",
+                "letmein",
+            ),
+        ];
+
+        for (label, stored, password) in fixtures {
+            assert!(check_password(stored, password), "{label} fixture");
+            assert!(
+                !check_password(stored, "definitely-wrong"),
+                "{label} fixture"
+            );
+            assert!(password_needs_upgrade(stored), "{label} fixture");
+        }
+    }
+
+    #[test]
+    fn rehash_policy_rejects_stale_or_malformed_argon2id_without_downgrading() {
+        let current = hash_password("policy-test");
+        assert!(!password_needs_upgrade(&current));
+
+        let stronger_params = Params::new(
+            Params::DEFAULT_M_COST,
+            Params::DEFAULT_T_COST + 1,
+            Params::DEFAULT_P_COST,
+            Some(Params::DEFAULT_OUTPUT_LEN),
+        )
+        .unwrap();
+        let stronger = Argon2::new(argon2::Algorithm::Argon2id, Version::V0x13, stronger_params)
+            .hash_password_with_salt(b"policy-test", b"0123456789abcdef")
+            .unwrap()
+            .to_string();
+        assert!(!password_needs_upgrade(&stronger));
+
+        let weak_memory = current.replacen("m=19456", "m=19455", 1);
+        let weak_iterations = current.replacen("t=2", "t=1", 1);
+        let old_version = current.replacen("v=19", "v=16", 1);
+        let mut fields: Vec<&str> = current.split('$').collect();
+        fields[4] = "c29tZXNhbHQ"; // "somesalt": valid but only 8 bytes.
+        let short_salt = fields.join("$");
+        fields = current.split('$').collect();
+        fields[5] = "AAAAAAAAAAAAAAAAAAAAAA"; // valid 16-byte output.
+        let short_output = fields.join("$");
+        let missing_parallelism = current.replacen(",p=1", "", 1);
+
+        for stale in [
+            weak_memory.as_str(),
+            weak_iterations.as_str(),
+            old_version.as_str(),
+            short_salt.as_str(),
+            short_output.as_str(),
+            missing_parallelism.as_str(),
+            "$argon2id$malformed",
+            "$argon2i$v=19$m=19456,t=2,p=1$MDEyMzQ1Njc4OWFiY2RlZg$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "$argon2d$v=19$m=19456,t=2,p=1$MDEyMzQ1Njc4OWFiY2RlZg$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "",
+            "not-a-password-hash",
+        ] {
+            assert!(
+                password_needs_upgrade(stale),
+                "unexpectedly current: {stale}"
+            );
+        }
+
+        assert!(!check_password(
+            "$argon2i$v=19$m=19456,t=2,p=1$MDEyMzQ1Njc4OWFiY2RlZg$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "policy-test"
+        ));
     }
 }

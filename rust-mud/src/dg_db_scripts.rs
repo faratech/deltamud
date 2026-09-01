@@ -176,10 +176,24 @@ pub fn boot_triggers(lib_path: &str) {
     crate::lock_ok::lock(&vnum_map()).clear();
     crate::lock_ok::lock(&proto_scripts()).clear();
 
+    let pending_new_zones = match crate::olc::pending_new_zone_publications(lib_path) {
+        Ok(pending) => pending,
+        Err(error) => {
+            log::error!(
+                "Refusing to load triggers because new-zone transaction state is unreadable: {error}"
+            );
+            return;
+        }
+    };
+
     let dir = Path::new(lib_path).join("world").join("trg");
     let files = read_index(&dir);
 
     for fname in files {
+        if crate::olc::new_zone_index_entry_is_pending(&pending_new_zones, &fname) {
+            log::warn!("Skipping incomplete new-zone trigger file {fname:?} during boot");
+            continue;
+        }
         let path = dir.join(&fname);
         let data = match std::fs::read_to_string(&path) {
             Ok(d) => d,

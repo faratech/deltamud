@@ -5,6 +5,7 @@
 
 use crate::types::{CharId, ConnId};
 use anyhow::Result;
+use std::collections::BTreeMap;
 use std::ffi::CStr;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -85,6 +86,168 @@ const SE: u8 = 240; // Subnegotiation end
 const TELOPT_GMCP: u8 = 201;
 const TELOPT_MSSP: u8 = 70;
 
+/// Hard bounds for client-supplied GMCP metadata. A malformed client can keep a
+/// subnegotiation open across arbitrarily many TCP reads, so neither the parser
+/// nor the Descriptor state may grow with untrusted input.
+const MAX_GMCP_SUBNEGOTIATION: usize = 8 * 1024;
+const MAX_GMCP_CLIENT_NAME: usize = 128;
+const MAX_GMCP_CLIENT_VERSION: usize = 64;
+const MAX_GMCP_PACKAGE_NAME: usize = 128;
+const MAX_GMCP_PACKAGES: usize = 256;
+
+/// Client identity and package versions learned through Core.Hello and
+/// Core.Supports.{Set,Add,Remove}. Package names are normalized to lowercase
+/// because GMCP package names are case-insensitive.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GmcpClientState {
+    pub client_name: Option<String>,
+    pub client_version: Option<String>,
+    pub packages: BTreeMap<String, u32>,
+}
+
+/// Parsed GMCP state change emitted by the socket-edge parser and applied to the
+/// Descriptor by the single-owner Game task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GmcpClientEvent {
+    Enabled,
+    Disabled,
+    Hello {
+        client_name: String,
+        client_version: String,
+    },
+    SupportsSet(BTreeMap<String, u32>),
+    SupportsAdd(BTreeMap<String, u32>),
+    SupportsRemove(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClientEvent {
+    Gmcp(GmcpClientEvent),
+    RequestMssp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GmcpNegotiationState {
+    /// The connection task queued `IAC WILL GMCP` before starting the reader.
+    Offered,
+    Enabled,
+    Refused,
+}
+
+/// Initial server-side negotiation. Recovered sockets may still have GMCP
+/// enabled in the client from the old process, so reset that option before
+/// offering it again. Fresh sockets need only the standards-required WILL.
+fn initial_telnet_negotiation(recovered: bool) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(if recovered { 6 } else { 3 });
+    if recovered {
+        bytes.extend_from_slice(&[IAC, WONT, TELOPT_GMCP]);
+    }
+    bytes.extend_from_slice(&[IAC, WILL, TELOPT_GMCP]);
+    bytes
+}
+
+fn safe_gmcp_text(value: &str, max_len: usize) -> bool {
+    !value.is_empty() && value.len() <= max_len && !value.chars().any(char::is_control)
+}
+
+fn normalize_gmcp_package(value: &str) -> Option<String> {
+    if value.is_empty()
+        || value.len() > MAX_GMCP_PACKAGE_NAME
+        || value.starts_with('.')
+        || value.ends_with('.')
+        || value.contains("..")
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return None;
+    }
+    Some(value.to_ascii_lowercase())
+}
+
+fn parse_gmcp_supports(data: &str) -> Option<BTreeMap<String, u32>> {
+    let entries: Vec<String> = serde_json::from_str(data).ok()?;
+    if entries.len() > MAX_GMCP_PACKAGES {
+        return None;
+    }
+
+    let mut packages = BTreeMap::new();
+    for entry in entries {
+        let mut parts = entry.split_whitespace();
+        let name = normalize_gmcp_package(parts.next()?)?;
+        let version = parts.next()?.parse::<u32>().ok()?;
+        if version == 0 || parts.next().is_some() {
+            return None;
+        }
+        packages.insert(name, version);
+    }
+    Some(packages)
+}
+
+fn parse_gmcp_removals(data: &str) -> Option<Vec<String>> {
+    let entries: Vec<String> = serde_json::from_str(data).ok()?;
+    if entries.len() > MAX_GMCP_PACKAGES {
+        return None;
+    }
+
+    let mut removals = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if entry.split_whitespace().count() != 1 {
+            return None;
+        }
+        removals.push(normalize_gmcp_package(&entry)?);
+    }
+    removals.sort();
+    removals.dedup();
+    Some(removals)
+}
+
+fn object_string_case_insensitive(
+    object: &serde_json::Map<String, serde_json::Value>,
+    wanted: &str,
+) -> Option<String> {
+    object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(wanted))
+        .and_then(|(_, value)| value.as_str())
+        .map(str::to_string)
+}
+
+fn parse_gmcp_message(payload: &[u8]) -> Option<GmcpClientEvent> {
+    let message = std::str::from_utf8(payload).ok()?.trim();
+    let split = message.find(char::is_whitespace).unwrap_or(message.len());
+    let package = &message[..split];
+    let data = message[split..].trim_start();
+
+    if package.eq_ignore_ascii_case("Core.Hello") {
+        let value: serde_json::Value = serde_json::from_str(data).ok()?;
+        let object = value.as_object()?;
+        // Real clients exist with both the documented Client/Version spelling
+        // and lowercase keys, so key matching is intentionally case-insensitive.
+        let client_name = object_string_case_insensitive(object, "Client")?;
+        let client_version = object_string_case_insensitive(object, "Version")?;
+        if !safe_gmcp_text(&client_name, MAX_GMCP_CLIENT_NAME)
+            || !safe_gmcp_text(&client_version, MAX_GMCP_CLIENT_VERSION)
+        {
+            return None;
+        }
+        return Some(GmcpClientEvent::Hello {
+            client_name,
+            client_version,
+        });
+    }
+    if package.eq_ignore_ascii_case("Core.Supports.Set") {
+        return Some(GmcpClientEvent::SupportsSet(parse_gmcp_supports(data)?));
+    }
+    if package.eq_ignore_ascii_case("Core.Supports.Add") {
+        return Some(GmcpClientEvent::SupportsAdd(parse_gmcp_supports(data)?));
+    }
+    if package.eq_ignore_ascii_case("Core.Supports.Remove") {
+        return Some(GmcpClientEvent::SupportsRemove(parse_gmcp_removals(data)?));
+    }
+    None
+}
+
 /// Byte-level telnet input filter. Strips IAC command sequences from a raw byte
 /// stream so negotiation a client sends on connect (Mudlet's NAWS/TTYPE/GMCP
 /// hello, plain `IAC DO/WILL` bursts) never corrupts the input line — notably
@@ -92,9 +255,9 @@ const TELOPT_MSSP: u8 = 70;
 /// (process_input's telnet scanner); we mirror it as a small state machine.
 ///
 /// `feed()` consumes a byte slice, emits any completed input lines via the
-/// `on_line` callback, and pushes refusal bytes (`IAC WONT/DONT <opt>`) into
-/// `refuse` for options we don't support so clients don't block waiting for a
-/// reply.
+/// `on_line` callback, pushes protocol events for the Game, and appends refusal
+/// bytes (`IAC WONT/DONT <opt>`) to the caller's reply buffer for unsupported
+/// options.
 struct TelnetFilter {
     state: TelnetState,
     /// Accumulated printable bytes of the line in progress.
@@ -104,6 +267,11 @@ struct TelnetFilter {
     /// it lets us recognize an incoming GMCP `IAC SB GMCP ... IAC SE` (e.g. the
     /// client's Core.Hello / Core.Supports.Set) without choking on it.
     subneg_opt: u8,
+    /// Bounded payload buffer used only for inbound GMCP. Unknown options are
+    /// still consumed without allocation.
+    subneg_data: Vec<u8>,
+    subneg_overflowed: bool,
+    gmcp_state: GmcpNegotiationState,
     /// True while we are inside a contiguous run of line-terminator bytes
     /// (`\r`/`\n`). C `process_input` collapses ANY such run into ONE line break
     /// via `while (ISNEWL(*nl_pos)) nl_pos++;` (both CR and LF are ISNEWL), so
@@ -133,40 +301,58 @@ enum TelnetState {
     SubnegIac,
 }
 
-/// A client capability we just learned about from telnet negotiation, surfaced
-/// out of `TelnetFilter::feed` so the input loop can notify the Game (which owns
-/// the live player/world data the client wants out-of-band).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClientCap {
-    /// Client sent `IAC DO GMCP`: it wants out-of-band JSON (gauges, mapper).
-    EnableGmcp,
-    /// Client sent `IAC DO MSSP`: it wants the one-shot server status block.
-    RequestMssp,
-}
-
 impl TelnetFilter {
     fn new() -> Self {
         TelnetFilter {
             state: TelnetState::Data,
             line: Vec::with_capacity(256),
             subneg_opt: 0,
+            subneg_data: Vec::with_capacity(256),
+            subneg_overflowed: false,
+            gmcp_state: GmcpNegotiationState::Offered,
             in_newline_run: false,
         }
+    }
+
+    fn push_subneg_byte(&mut self, byte: u8) {
+        if self.subneg_opt != TELOPT_GMCP || self.subneg_overflowed {
+            return;
+        }
+        if self.subneg_data.len() == MAX_GMCP_SUBNEGOTIATION {
+            self.subneg_data.clear();
+            self.subneg_overflowed = true;
+            return;
+        }
+        self.subneg_data.push(byte);
+    }
+
+    fn finish_subnegotiation(&mut self, events: &mut Vec<ClientEvent>) {
+        if self.subneg_opt == TELOPT_GMCP
+            && self.gmcp_state == GmcpNegotiationState::Enabled
+            && !self.subneg_overflowed
+            && let Some(event) = parse_gmcp_message(&self.subneg_data)
+        {
+            events.push(ClientEvent::Gmcp(event));
+        }
+        self.subneg_opt = 0;
+        self.subneg_data.clear();
+        self.subneg_overflowed = false;
     }
 
     /// Feed raw bytes. Completed lines (terminated by CR or LF, with a CRLF /
     /// LFCR pair collapsed to one break — comm.c ISNEWL semantics) are passed to
     /// `on_line` as owned Strings (lossy UTF-8). Control bytes are dropped and
     /// backspace/DEL erase the last char, matching comm.c process_input.
-    /// Reply bytes to send back to the client (option refusals, plus the
-    /// `IAC WILL <opt>` accepts for GMCP/MSSP) are appended to `reply`. Any
-    /// capabilities the client just enabled are pushed into `caps` so the input
-    /// loop can hand them to the Game.
+    /// Reply bytes to send back to the client (option refusals and MSSP's
+    /// client-initiated acceptance) are appended to `reply`. GMCP negotiation
+    /// and parsed Core messages are pushed into `events` for the Game. GMCP's
+    /// initial `IAC WILL` is queued by the connection task before this reader
+    /// starts, so the accepting `IAC DO` is deliberately not echoed back.
     fn feed<F: FnMut(String)>(
         &mut self,
         data: &[u8],
         reply: &mut Vec<u8>,
-        caps: &mut Vec<ClientCap>,
+        events: &mut Vec<ClientEvent>,
         mut on_line: F,
     ) {
         // C's newline-run skip is scoped to one process_input pass over the
@@ -241,27 +427,35 @@ impl TelnetFilter {
                     _ => self.state = TelnetState::Data,
                 },
                 TelnetState::Negotiate(verb) => {
-                    // We support GMCP and MSSP; for those, ACCEPT (IAC WILL <opt>)
-                    // when the client says DO, and notify the Game. All OTHER
-                    // options are still refused so the client doesn't wait:
-                    // answer DO/WILL with WONT/DONT respectively. We do not reply
-                    // to WONT/DONT (no further response is required).
+                    // GMCP is server-initiated: the connection task already sent
+                    // WILL, so DO is an acknowledgement and MUST NOT provoke a
+                    // second WILL (which can cause negotiation loops). We still
+                    // honor a later client-initiated DO as a state change. MSSP
+                    // retains its existing request/response behavior. All other
+                    // options are refused so clients do not wait indefinitely.
                     match (verb, b) {
                         (DO, TELOPT_GMCP) => {
-                            reply.extend_from_slice(&[IAC, WILL, TELOPT_GMCP]);
-                            caps.push(ClientCap::EnableGmcp);
+                            if self.gmcp_state != GmcpNegotiationState::Enabled {
+                                self.gmcp_state = GmcpNegotiationState::Enabled;
+                                events.push(ClientEvent::Gmcp(GmcpClientEvent::Enabled));
+                            }
                         }
                         (DO, TELOPT_MSSP) => {
                             reply.extend_from_slice(&[IAC, WILL, TELOPT_MSSP]);
-                            caps.push(ClientCap::RequestMssp);
+                            events.push(ClientEvent::RequestMssp);
                         }
-                        // Client agreeing to a WILL we never sent, or turning an
-                        // option off: nothing more to do for GMCP/MSSP.
+                        (DONT, TELOPT_GMCP) => {
+                            if self.gmcp_state == GmcpNegotiationState::Enabled {
+                                events.push(ClientEvent::Gmcp(GmcpClientEvent::Disabled));
+                            }
+                            self.gmcp_state = GmcpNegotiationState::Refused;
+                        }
+                        // A client should answer our GMCP WILL with DO/DONT, not
+                        // WILL/WONT. Ignore that wrong-direction pair rather than
+                        // creating a negotiation loop. MSSP disable remains a
+                        // no-op because its payload is one-shot.
                         (WILL, TELOPT_GMCP) | (WILL, TELOPT_MSSP) => {}
-                        (DONT, TELOPT_GMCP)
-                        | (DONT, TELOPT_MSSP)
-                        | (WONT, TELOPT_GMCP)
-                        | (WONT, TELOPT_MSSP) => {}
+                        (DONT, TELOPT_MSSP) | (WONT, TELOPT_GMCP) | (WONT, TELOPT_MSSP) => {}
                         (DO, _) => reply.extend_from_slice(&[IAC, WONT, b]),
                         (WILL, _) => reply.extend_from_slice(&[IAC, DONT, b]),
                         _ => {} // WONT / DONT for unsupported options: nothing to send.
@@ -270,10 +464,9 @@ impl TelnetFilter {
                 }
                 TelnetState::SubnegOpt => {
                     // The byte right after IAC SB is the option (GMCP, MSSP, ...).
-                    // We don't currently act on inbound subneg payloads (a GMCP
-                    // Core.Hello / Core.Supports.Set is consumed and ignored), but
-                    // record the option so the consume loop is explicit.
                     self.subneg_opt = b;
+                    self.subneg_data.clear();
+                    self.subneg_overflowed = false;
                     self.state = if b == IAC {
                         // Degenerate IAC SB IAC ...: treat as end-of-subneg scan.
                         TelnetState::SubnegIac
@@ -284,17 +477,23 @@ impl TelnetFilter {
                 TelnetState::Subneg => {
                     if b == IAC {
                         self.state = TelnetState::SubnegIac;
+                    } else {
+                        self.push_subneg_byte(b);
                     }
-                    // else: still inside subneg payload, consume the byte. This
-                    // swallows the whole GMCP `<package> <json>` blob safely.
                 }
                 TelnetState::SubnegIac => {
                     if b == SE {
-                        // End of subnegotiation.
+                        self.finish_subnegotiation(events);
                         self.state = TelnetState::Data;
+                    } else if b == IAC {
+                        // Escaped IAC inside the payload. It will make ordinary
+                        // GMCP JSON invalid UTF-8, but retaining it here preserves
+                        // correct telnet framing and keeps the parser stateful.
+                        self.push_subneg_byte(IAC);
+                        self.state = TelnetState::Subneg;
                     } else {
-                        // IAC IAC inside SB is an escaped 0xFF (still payload),
-                        // or a stray IAC <other>; either way stay in subneg.
+                        // A stray IAC command inside SB is invalid. Consume it and
+                        // continue scanning for the real IAC SE terminator.
                         self.state = TelnetState::Subneg;
                     }
                 }
@@ -393,10 +592,14 @@ pub struct Descriptor {
     pub state: ConState,
     /// Stack of nested input contexts; empty == normal command/menu input.
     pub editors: Vec<InputContext>,
-    /// True once the client negotiated GMCP (`IAC DO GMCP`). When set, the Game
-    /// pushes Char.Vitals + Room.Info out-of-band after each command so Mudlet's
-    /// gauges and the GMCP mapper stay live.
+    /// True only while the client has accepted the server's GMCP offer. When
+    /// set, the Game pushes Char.Vitals + Room.Info out-of-band after state
+    /// changes so Mudlet's gauges and mapper stay live.
     pub gmcp: bool,
+    /// Client identity and supported-package versions advertised over GMCP.
+    /// This state is cleared whenever GMCP is disabled and starts empty on
+    /// every fresh connection/copyover recovery.
+    pub gmcp_client: GmcpClientState,
     pub character: Option<CharId>,
     pub original: Option<CharId>, // for `switch`
     /// Output accumulated this pulse; flushed by the Game task.
@@ -418,6 +621,10 @@ pub struct Descriptor {
     // Scratch during login / char creation.
     pub temp_name: Option<String>,
     pub temp_password: Option<String>,
+    /// Exact durable hash authenticated at the start of a menu password
+    /// change. The final update uses it as a compare-and-swap guard so a
+    /// concurrent administrator/security reset cannot be overwritten.
+    pub password_change_expected_hash: Option<String>,
     /// C d->bad_pws: consecutive password failures THIS connection; at
     /// max_bad_pws (2) the connection is dropped (#194).
     pub bad_pws: u32,
@@ -471,6 +678,7 @@ impl Descriptor {
             state: ConState::QAnsi,
             editors: Vec::new(),
             gmcp: false,
+            gmcp_client: GmcpClientState::default(),
             character: None,
             original: None,
             outbuf: String::new(),
@@ -481,6 +689,7 @@ impl Descriptor {
             input_queue: std::collections::VecDeque::new(),
             temp_name: None,
             temp_password: None,
+            password_change_expected_hash: None,
             bad_pws: 0,
             wants_colour: None,
             temp_description: None,
@@ -488,6 +697,71 @@ impl Descriptor {
             suppress_prompt: false,
             password_hash: None,
         }
+    }
+
+    /// Apply one parsed client-side GMCP event. Returns true only when this
+    /// event transitions the descriptor from disabled to enabled; the Game uses
+    /// that edge to send one initial snapshot to an already-playing client.
+    pub fn apply_gmcp_event(&mut self, event: GmcpClientEvent) -> bool {
+        let was_enabled = self.gmcp;
+        match event {
+            GmcpClientEvent::Enabled => {
+                if !self.gmcp {
+                    self.gmcp_client = GmcpClientState::default();
+                }
+                self.gmcp = true;
+            }
+            GmcpClientEvent::Disabled => {
+                self.gmcp = false;
+                self.gmcp_client = GmcpClientState::default();
+            }
+            GmcpClientEvent::Hello {
+                client_name,
+                client_version,
+            } if self.gmcp
+                && safe_gmcp_text(&client_name, MAX_GMCP_CLIENT_NAME)
+                && safe_gmcp_text(&client_version, MAX_GMCP_CLIENT_VERSION) =>
+            {
+                self.gmcp_client.client_name = Some(client_name);
+                self.gmcp_client.client_version = Some(client_version);
+            }
+            GmcpClientEvent::SupportsSet(packages) if self.gmcp => {
+                self.gmcp_client.packages.clear();
+                for (name, version) in packages {
+                    if self.gmcp_client.packages.len() == MAX_GMCP_PACKAGES {
+                        break;
+                    }
+                    if version > 0
+                        && let Some(name) = normalize_gmcp_package(&name)
+                    {
+                        self.gmcp_client.packages.insert(name, version);
+                    }
+                }
+            }
+            GmcpClientEvent::SupportsAdd(packages) if self.gmcp => {
+                for (name, version) in packages {
+                    let Some(name) = normalize_gmcp_package(&name) else {
+                        continue;
+                    };
+                    if version > 0
+                        && (self.gmcp_client.packages.contains_key(&name)
+                            || self.gmcp_client.packages.len() < MAX_GMCP_PACKAGES)
+                    {
+                        self.gmcp_client.packages.insert(name, version);
+                    }
+                }
+            }
+            GmcpClientEvent::SupportsRemove(packages) if self.gmcp => {
+                for name in packages {
+                    if let Some(name) = normalize_gmcp_package(&name) {
+                        self.gmcp_client.packages.remove(&name);
+                    }
+                }
+            }
+            // Core data arriving before DO GMCP is not negotiated protocol data.
+            _ => {}
+        }
+        !was_enabled && self.gmcp
     }
 
     pub fn write(&mut self, msg: &str) {
@@ -673,8 +947,19 @@ enum WriterEnd {
 }
 
 // Messages from connection tasks to the single Game task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemShutdownResult {
+    Committed,
+    Refused,
+}
+
 #[derive(Debug)]
 pub enum GameMessage {
+    /// Process-local stop request emitted only by the main signal owner. Socket
+    /// tasks cannot construct this from client input.
+    SystemShutdown {
+        result_tx: tokio::sync::oneshot::Sender<SystemShutdownResult>,
+    },
     NewConnection {
         id: ConnId,
         host: String,
@@ -699,10 +984,11 @@ pub enum GameMessage {
         conn_id: ConnId,
         input: String,
     },
-    /// Client negotiated GMCP (`IAC DO GMCP`). The Game flips the descriptor's
-    /// gmcp flag and starts pushing out-of-band Char.Vitals/Room.Info.
-    EnableGmcp {
+    /// Negotiated GMCP state or parsed Core metadata. The socket edge validates
+    /// and bounds the payload; the Game applies it to the owned Descriptor.
+    Gmcp {
         conn_id: ConnId,
+        event: GmcpClientEvent,
     },
     /// Client requested the MSSP status block (`IAC DO MSSP`). The Game builds it
     /// (it needs the live player count / uptime) and sends it once.
@@ -721,9 +1007,10 @@ pub enum GameMessage {
 impl GameMessage {
     pub fn conn_id(&self) -> Option<ConnId> {
         match self {
+            GameMessage::SystemShutdown { .. } => None,
             GameMessage::NewConnection { id, .. } | GameMessage::Recover { id, .. } => Some(*id),
             GameMessage::Input { conn_id, .. }
-            | GameMessage::EnableGmcp { conn_id }
+            | GameMessage::Gmcp { conn_id, .. }
             | GameMessage::SendMssp { conn_id }
             | GameMessage::Disconnect { conn_id } => Some(*conn_id),
             #[cfg(test)]
@@ -733,10 +1020,11 @@ impl GameMessage {
 
     pub fn kind(&self) -> &'static str {
         match self {
+            GameMessage::SystemShutdown { .. } => "system-shutdown",
             GameMessage::NewConnection { .. } => "new-connection",
             GameMessage::Recover { .. } => "recover",
             GameMessage::Input { .. } => "input",
-            GameMessage::EnableGmcp { .. } => "enable-gmcp",
+            GameMessage::Gmcp { .. } => "gmcp",
             GameMessage::SendMssp { .. } => "send-mssp",
             GameMessage::Disconnect { .. } => "disconnect",
             #[cfg(test)]
@@ -1005,6 +1293,12 @@ pub async fn handle_client(
 
     let (output_tx, output_rx) = mpsc::channel::<OutputFrame>(256);
 
+    // Queue the standards-required server offer before registration can enqueue
+    // banners/prompts, so GMCP negotiation is the first socket output.
+    output_tx
+        .send(OutputFrame::data(initial_telnet_negotiation(false)))
+        .await?;
+
     game_tx
         .send(GameMessage::NewConnection {
             id: conn_id,
@@ -1048,13 +1342,13 @@ async fn run_input_loop<R: AsyncReadExt + Unpin>(
 
         let mut lines: Vec<String> = Vec::new();
         let mut reply: Vec<u8> = Vec::new();
-        let mut caps: Vec<ClientCap> = Vec::new();
-        filter.feed(&buf[..n], &mut reply, &mut caps, |line| lines.push(line));
+        let mut events: Vec<ClientEvent> = Vec::new();
+        filter.feed(&buf[..n], &mut reply, &mut events, |line| lines.push(line));
 
-        // Send negotiation replies (IAC WONT/DONT for refused options, IAC WILL
-        // for the GMCP/MSSP we accept) back to the client so it doesn't block
-        // waiting for a reply. The channel carries raw bytes: telnet frames
-        // are NOT valid UTF-8 (IAC = 0xFF), so a String here would be UB.
+        // Send negotiation replies (IAC WONT/DONT for refused options and the
+        // existing client-initiated MSSP acceptance) so the client does not
+        // block. GMCP's initial WILL was already queued before registration.
+        // The channel carries raw bytes because IAC is not valid UTF-8.
         if !reply.is_empty() {
             if output_tx
                 .send(OutputFrame::data(std::mem::take(&mut reply)))
@@ -1065,12 +1359,12 @@ async fn run_input_loop<R: AsyncReadExt + Unpin>(
             }
         }
 
-        // Forward any newly-negotiated capabilities to the Game, which owns the
-        // live player/world data the out-of-band channel needs.
-        for cap in caps {
-            let msg = match cap {
-                ClientCap::EnableGmcp => GameMessage::EnableGmcp { conn_id },
-                ClientCap::RequestMssp => GameMessage::SendMssp { conn_id },
+        // Forward negotiated protocol state to the Game, which owns the live
+        // Descriptor and all world data used by out-of-band snapshots.
+        for event in events {
+            let msg = match event {
+                ClientEvent::Gmcp(event) => GameMessage::Gmcp { conn_id, event },
+                ClientEvent::RequestMssp => GameMessage::SendMssp { conn_id },
             };
             if game_tx.send(msg).await.is_err() {
                 return;
@@ -1116,6 +1410,12 @@ pub async fn handle_recovered(
     let (mut reader, writer) = stream.into_split();
 
     let (output_tx, output_rx) = mpsc::channel::<OutputFrame>(256);
+
+    // The inherited client may remember GMCP as enabled from the old process.
+    // Reset then re-offer it while the new Descriptor starts from empty state.
+    output_tx
+        .send(OutputFrame::data(initial_telnet_negotiation(true)))
+        .await?;
 
     game_tx
         .send(GameMessage::Recover {
@@ -1200,17 +1500,196 @@ mod reverse_dns_tests {
 mod telnet_tests {
     use super::*;
 
+    fn drive_filter(chunks: &[&[u8]]) -> (Vec<String>, Vec<u8>, Vec<ClientEvent>) {
+        let mut filter = TelnetFilter::new();
+        let mut lines = Vec::new();
+        let mut reply = Vec::new();
+        let mut events = Vec::new();
+        for chunk in chunks {
+            filter.feed(chunk, &mut reply, &mut events, |line| lines.push(line));
+        }
+        (lines, reply, events)
+    }
+
     /// Drive the filter over `chunks` (each chunk simulates one TCP read) and
     /// return the completed input lines.
     fn lines_of(chunks: &[&[u8]]) -> Vec<String> {
-        let mut f = TelnetFilter::new();
-        let mut out = Vec::new();
+        drive_filter(chunks).0
+    }
+
+    fn gmcp_frame(message: &str) -> Vec<u8> {
+        let mut frame = vec![IAC, SB, TELOPT_GMCP];
+        frame.extend_from_slice(message.as_bytes());
+        frame.extend_from_slice(&[IAC, SE]);
+        frame
+    }
+
+    #[test]
+    fn server_initiates_gmcp_and_copyover_resets_before_reoffering() {
+        assert_eq!(
+            initial_telnet_negotiation(false),
+            vec![IAC, WILL, TELOPT_GMCP]
+        );
+        assert_eq!(
+            initial_telnet_negotiation(true),
+            vec![IAC, WONT, TELOPT_GMCP, IAC, WILL, TELOPT_GMCP]
+        );
+    }
+
+    #[test]
+    fn fragmented_do_acknowledges_offer_without_negotiation_loop() {
+        let (_, reply, events) =
+            drive_filter(&[&[IAC], &[DO], &[TELOPT_GMCP], &[IAC, DO, TELOPT_GMCP]]);
+        assert!(reply.is_empty(), "DO must not provoke a duplicate WILL");
+        assert_eq!(events, vec![ClientEvent::Gmcp(GmcpClientEvent::Enabled)]);
+    }
+
+    #[test]
+    fn fragmented_gmcp_subnegotiation_parses_hello() {
+        let mut bytes = vec![IAC, DO, TELOPT_GMCP];
+        bytes.extend(gmcp_frame(
+            r#"Core.Hello {"client":"Mudlet","version":"4.18.5"}"#,
+        ));
+        // A bare CR keeps this test focused on byte-fragmented telnet/GMCP;
+        // CR and LF arriving in separate reads intentionally form two lines in
+        // the inherited CircleMUD newline semantics tested below.
+        bytes.extend_from_slice(b"look\r");
+
+        let mut filter = TelnetFilter::new();
+        let mut lines = Vec::new();
         let mut reply = Vec::new();
-        let mut caps = Vec::new();
-        for c in chunks {
-            f.feed(c, &mut reply, &mut caps, |l| out.push(l));
+        let mut events = Vec::new();
+        for byte in &bytes {
+            filter.feed(
+                std::slice::from_ref(byte),
+                &mut reply,
+                &mut events,
+                |line| lines.push(line),
+            );
         }
-        out
+
+        assert!(reply.is_empty());
+        assert_eq!(lines, vec!["look"]);
+        assert_eq!(
+            events,
+            vec![
+                ClientEvent::Gmcp(GmcpClientEvent::Enabled),
+                ClientEvent::Gmcp(GmcpClientEvent::Hello {
+                    client_name: "Mudlet".to_string(),
+                    client_version: "4.18.5".to_string(),
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn supports_set_add_remove_update_bounded_descriptor_state() {
+        let set = gmcp_frame(r#"Core.Supports.Set ["Char 1","Room 1"]"#);
+        let add = gmcp_frame(r#"core.supports.add ["CHAR 2","Comm.Channel 1"]"#);
+        let remove = gmcp_frame(r#"Core.Supports.Remove ["ROOM"]"#);
+        let chunks: [&[u8]; 4] = [&[IAC, DO, TELOPT_GMCP], &set, &add, &remove];
+        let (_, reply, events) = drive_filter(&chunks);
+        assert!(reply.is_empty());
+
+        let mut descriptor = Descriptor::new(ConnId(900), "gmcp.test".to_string());
+        for event in events {
+            let ClientEvent::Gmcp(event) = event else {
+                panic!("unexpected non-GMCP event");
+            };
+            descriptor.apply_gmcp_event(event);
+        }
+        assert!(descriptor.gmcp);
+        assert_eq!(descriptor.gmcp_client.packages.get("char"), Some(&2));
+        assert_eq!(
+            descriptor.gmcp_client.packages.get("comm.channel"),
+            Some(&1)
+        );
+        assert!(!descriptor.gmcp_client.packages.contains_key("room"));
+
+        let oversized_add = (0..MAX_GMCP_PACKAGES + 32)
+            .map(|index| (format!("Package{index}"), 1))
+            .collect();
+        descriptor.apply_gmcp_event(GmcpClientEvent::SupportsAdd(oversized_add));
+        assert_eq!(descriptor.gmcp_client.packages.len(), MAX_GMCP_PACKAGES);
+    }
+
+    #[test]
+    fn dont_disables_gmcp_and_clears_client_capabilities() {
+        let set = gmcp_frame(r#"Core.Supports.Set ["Char 1"]"#);
+        let chunks: [&[u8]; 3] = [&[IAC, DO, TELOPT_GMCP], &set, &[IAC, DONT, TELOPT_GMCP]];
+        let (_, reply, events) = drive_filter(&chunks);
+        assert!(reply.is_empty());
+
+        let mut descriptor = Descriptor::new(ConnId(901), "gmcp.test".to_string());
+        for event in events {
+            if let ClientEvent::Gmcp(event) = event {
+                descriptor.apply_gmcp_event(event);
+            }
+        }
+        assert!(!descriptor.gmcp);
+        assert_eq!(descriptor.gmcp_client, GmcpClientState::default());
+    }
+
+    #[test]
+    fn oversized_gmcp_is_discarded_and_parser_recovers() {
+        let mut filter = TelnetFilter::new();
+        let mut reply = Vec::new();
+        let mut events = Vec::new();
+        let mut lines = Vec::new();
+        filter.feed(
+            &[IAC, DO, TELOPT_GMCP, IAC, SB, TELOPT_GMCP],
+            &mut reply,
+            &mut events,
+            |line| lines.push(line),
+        );
+        let oversized = vec![b'x'; MAX_GMCP_SUBNEGOTIATION + 1];
+        filter.feed(&oversized, &mut reply, &mut events, |line| lines.push(line));
+        assert!(filter.subneg_overflowed);
+        assert!(filter.subneg_data.is_empty());
+
+        filter.feed(&[IAC, SE], &mut reply, &mut events, |line| lines.push(line));
+        let valid = gmcp_frame(r#"Core.Supports.Set ["Char 1"]"#);
+        filter.feed(&valid, &mut reply, &mut events, |line| lines.push(line));
+
+        assert!(!filter.subneg_overflowed);
+        assert_eq!(
+            events,
+            vec![
+                ClientEvent::Gmcp(GmcpClientEvent::Enabled),
+                ClientEvent::Gmcp(GmcpClientEvent::SupportsSet(BTreeMap::from([(
+                    "char".to_string(),
+                    1,
+                )]))),
+            ]
+        );
+    }
+
+    #[test]
+    fn unsupported_options_are_refused_and_mssp_behavior_is_preserved() {
+        const UNKNOWN_CLIENT_OPTION: u8 = 42;
+        const UNKNOWN_SERVER_OPTION: u8 = 43;
+        let (_, reply, events) = drive_filter(&[
+            &[IAC],
+            &[DO, UNKNOWN_CLIENT_OPTION],
+            &[IAC, WILL],
+            &[UNKNOWN_SERVER_OPTION],
+            &[IAC, DO, TELOPT_MSSP],
+        ]);
+        assert_eq!(
+            reply,
+            vec![
+                IAC,
+                WONT,
+                UNKNOWN_CLIENT_OPTION,
+                IAC,
+                DONT,
+                UNKNOWN_SERVER_OPTION,
+                IAC,
+                WILL,
+                TELOPT_MSSP,
+            ]
+        );
+        assert_eq!(events, vec![ClientEvent::RequestMssp]);
     }
 
     #[test]
@@ -1634,7 +2113,7 @@ mod output_writer_tests {
 
     #[tokio::test]
     async fn fresh_connection_shutdown_ends_the_outer_task() {
-        let (_client, server, peer) = tcp_pair().await;
+        let (mut client, server, peer) = tcp_pair().await;
         let conn_id = ConnId(44);
         let (game_tx, mut game_rx) = mpsc::channel(4);
         let task = tokio::spawn(handle_client(
@@ -1650,6 +2129,12 @@ mod output_writer_tests {
             Some(GameMessage::NewConnection { id, output_tx, .. }) if id == conn_id => output_tx,
             other => panic!("unexpected registration: {other:?}"),
         };
+        let mut negotiation = [0; 3];
+        tokio::time::timeout(Duration::from_secs(1), client.read_exact(&mut negotiation))
+            .await
+            .expect("fresh connection never offered GMCP")
+            .unwrap();
+        assert_eq!(negotiation, [IAC, WILL, TELOPT_GMCP]);
         close_registered_writer(output_tx).await;
 
         assert!(matches!(
@@ -1665,7 +2150,7 @@ mod output_writer_tests {
 
     #[tokio::test]
     async fn recovered_connection_shutdown_ends_the_outer_task() {
-        let (_client, server, _peer) = tcp_pair().await;
+        let (mut client, server, _peer) = tcp_pair().await;
         let raw_fd = server.as_raw_fd();
         let conn_id = ConnId(45);
         let (game_tx, mut game_rx) = mpsc::channel(4);
@@ -1682,6 +2167,15 @@ mod output_writer_tests {
             Some(GameMessage::Recover { id, output_tx, .. }) if id == conn_id => output_tx,
             other => panic!("unexpected registration: {other:?}"),
         };
+        let mut negotiation = [0; 6];
+        tokio::time::timeout(Duration::from_secs(1), client.read_exact(&mut negotiation))
+            .await
+            .expect("recovered connection never reset/re-offered GMCP")
+            .unwrap();
+        assert_eq!(
+            negotiation,
+            [IAC, WONT, TELOPT_GMCP, IAC, WILL, TELOPT_GMCP]
+        );
         close_registered_writer(output_tx).await;
 
         assert!(matches!(

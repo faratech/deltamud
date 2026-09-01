@@ -70,6 +70,13 @@ const MAX_SPELL_AFFECTS: usize = 5;
 fn get_level(g: &GameState, ch: CharId) -> i32 {
     g.get_char(ch).map(|c| c.player.level as i32).unwrap_or(1)
 }
+/// NO_MAGIC and peaceful-room exceptions are administrative capabilities.
+/// Only direct input from a live authenticated Implementor principal may use
+/// them; indirect casts and high-level NPC bodies remain ordinary magic.
+fn has_direct_implementor_authority(g: &GameState, ch: CharId) -> bool {
+    crate::interpreter::authenticated_input_authority(g, ch)
+        .is_some_and(|authority| authority.authority >= i32::from(LVL_IMPL))
+}
 fn is_npc(g: &GameState, ch: CharId) -> bool {
     g.get_char(ch).map(|c| c.is_npc).unwrap_or(false)
 }
@@ -188,12 +195,12 @@ pub fn call_magic(
     let si = spell_info(spellnum);
 
     let rnum = g.get_char(caster).and_then(|c| c.in_room);
-    let caster_level = get_level(g, caster);
+    let administrative_override = has_direct_implementor_authority(g, caster);
 
     // ROOM_NOMAGIC fizzle.
     if let Some(r) = rnum {
         let nomagic = g.room(r).room_flags.bits() & ROOM_NOMAGIC != 0;
-        if nomagic && caster_level < LVL_IMPL as i32 {
+        if nomagic && !administrative_override {
             g.send_to_char(caster, "Your magic fizzles out and dies.\r\n");
             act(
                 g,
@@ -207,10 +214,7 @@ pub fn call_magic(
             return 0;
         }
         let peaceful = g.room(r).room_flags.contains(RoomFlags::PEACEFUL);
-        if caster_level < LVL_IMPL as i32
-            && peaceful
-            && (si.violent || si.routines & MAG_DAMAGE != 0)
-        {
+        if !administrative_override && peaceful && (si.violent || si.routines & MAG_DAMAGE != 0) {
             g.send_to_char(
                 caster,
                 "A flash of white light fills the room, dispelling your violent magic!\r\n",
@@ -1362,6 +1366,164 @@ mod affect_update_tests {
             bitvector: 0,
             caster: None,
         }
+    }
+
+    fn authority_magic_fixture(
+        flags: RoomFlags,
+        level: Level,
+        trust: i32,
+    ) -> (GameState, CharId, CharId, ConnId) {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(crate::room::Room::new(
+            86_100,
+            0,
+            "Ward".to_string(),
+            "A warded test room.".to_string(),
+        ));
+        g.room_mut(room).room_flags = flags;
+        let conn = ConnId(86_101);
+        let mut caster = Character::new_player(
+            "Caster".to_string(),
+            Class::MagicUser,
+            crate::types::Race::Human,
+        );
+        caster.desc = Some(conn);
+        caster.idnum = 86_101;
+        caster.player.level = level;
+        caster.trust = trust;
+        caster.points.mana = 10_000;
+        caster.points.max_mana = 10_000;
+        caster.set_skill(SPELL_ARMOR as u16, u8::MAX);
+        caster.set_skill(SPELL_CURSE as u16, u8::MAX);
+        let caster = g.create_char(caster);
+        let mut descriptor = Descriptor::new(conn, "magic-authority.test".to_string());
+        descriptor.state = crate::connection::ConState::Playing;
+        descriptor.character = Some(caster);
+        g.descriptors.insert(conn, descriptor);
+        g.players_by_name.insert("caster".to_string(), caster);
+
+        let mut victim = Character::new_npc(86_102);
+        victim.player.name = "Target".to_string();
+        let victim = g.create_char(victim);
+        g.char_to_room(caster, room);
+        g.char_to_room(victim, room);
+        (g, caster, victim, conn)
+    }
+
+    #[test]
+    fn no_magic_override_requires_direct_persisted_implementor_trust() {
+        // The DG runtime is process-global in production. Serialize this
+        // low-level command-dispatch regression with DG tests so a trigger
+        // attached to another test's room-rnum zero cannot consume `cast`.
+        let _dg = crate::lock_ok::lock(&crate::dg_handler::DG_TEST_LOCK);
+        crate::dg_handler::boot_handler();
+
+        let (mut display_g, display, _, display_conn) =
+            authority_magic_fixture(RoomFlags::NO_MAGIC, LVL_IMPL, 1);
+        crate::interpreter::run_authenticated_command(&mut display_g, display, "cast 'armor'");
+        assert!(
+            display_g.descriptors[&display_conn]
+                .outbuf
+                .contains("magic fizzles out")
+        );
+
+        let (mut trusted_g, trusted, _, trusted_conn) =
+            authority_magic_fixture(RoomFlags::NO_MAGIC, 50, i32::from(LVL_IMPL));
+        crate::interpreter::run_authenticated_command(&mut trusted_g, trusted, "cast 'armor'");
+        assert!(
+            !trusted_g.descriptors[&trusted_conn]
+                .outbuf
+                .contains("magic fizzles out")
+        );
+        assert!(
+            trusted_g
+                .get_char(trusted)
+                .unwrap()
+                .affected
+                .iter()
+                .any(|affect| affect.spell_type == SPELL_ARMOR),
+            "direct Implementor cast did not apply armor; output was {:?}",
+            trusted_g.descriptors[&trusted_conn].outbuf
+        );
+
+        let (mut indirect_g, indirect, _, indirect_conn) =
+            authority_magic_fixture(RoomFlags::NO_MAGIC, 50, i32::from(LVL_IMPL));
+        assert_eq!(
+            call_magic(
+                &mut indirect_g,
+                indirect,
+                Some(indirect),
+                None,
+                SPELL_ARMOR,
+                50,
+            ),
+            0
+        );
+        assert!(
+            indirect_g.descriptors[&indirect_conn]
+                .outbuf
+                .contains("magic fizzles out")
+        );
+    }
+
+    #[test]
+    fn peaceful_magic_override_rejects_display_level_and_indirect_casts() {
+        let _dg = crate::lock_ok::lock(&crate::dg_handler::DG_TEST_LOCK);
+        crate::dg_handler::boot_handler();
+
+        let (mut display_g, display, _, display_conn) =
+            authority_magic_fixture(RoomFlags::PEACEFUL, LVL_IMPL, 1);
+        crate::interpreter::run_authenticated_command(
+            &mut display_g,
+            display,
+            "cast 'curse' Target",
+        );
+        assert!(
+            display_g.descriptors[&display_conn]
+                .outbuf
+                .contains("dispelling your violent magic"),
+            "{}",
+            display_g.descriptors[&display_conn].outbuf
+        );
+
+        let (mut trusted_g, trusted, _, trusted_conn) =
+            authority_magic_fixture(RoomFlags::PEACEFUL, 50, i32::from(LVL_IMPL));
+        crate::interpreter::run_authenticated_command(
+            &mut trusted_g,
+            trusted,
+            "cast 'curse' Target",
+        );
+        assert!(
+            !trusted_g.descriptors[&trusted_conn]
+                .outbuf
+                .contains("dispelling your violent magic"),
+            "{}",
+            trusted_g.descriptors[&trusted_conn].outbuf
+        );
+        assert!(
+            trusted_g.descriptors[&trusted_conn].outbuf.contains("Ok."),
+            "direct Implementor input never reached the cast pipeline: {:?}",
+            trusted_g.descriptors[&trusted_conn].outbuf
+        );
+
+        let (mut indirect_g, indirect, target, indirect_conn) =
+            authority_magic_fixture(RoomFlags::PEACEFUL, 50, i32::from(LVL_IMPL));
+        assert_eq!(
+            call_magic(
+                &mut indirect_g,
+                indirect,
+                Some(target),
+                None,
+                SPELL_CURSE,
+                50,
+            ),
+            0
+        );
+        assert!(
+            indirect_g.descriptors[&indirect_conn]
+                .outbuf
+                .contains("dispelling your violent magic")
+        );
     }
 
     #[test]

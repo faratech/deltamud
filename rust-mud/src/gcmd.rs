@@ -124,3 +124,24 @@ pub fn grant_advance(
         *godcmds4 = !0;
     }
 }
+
+/// Canonical capability set for an administrative rank transition.
+///
+/// Historical `grant_advance` is additive, which is appropriate while normal
+/// leveling crosses a threshold but unsafe for an explicit demotion: stale
+/// Implementor bits would survive. `advance` therefore rebuilds the set from
+/// zero. Mortals receive no god commands, ordinary immortals receive only the
+/// general bit, and Implementors receive the historical full grant.
+pub fn canonical_advance_grants(level: u8, lvl_immort: u8, lvl_impl: u8) -> (i64, i64, i64, i64) {
+    let (mut godcmds1, mut godcmds2, mut godcmds3, mut godcmds4) = (0, 0, 0, 0);
+    grant_advance(
+        &mut godcmds1,
+        &mut godcmds2,
+        &mut godcmds3,
+        &mut godcmds4,
+        level,
+        lvl_immort,
+        lvl_impl,
+    );
+    (godcmds1, godcmds2, godcmds3, godcmds4)
+}

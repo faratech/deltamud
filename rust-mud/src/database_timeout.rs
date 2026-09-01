@@ -1,6 +1,9 @@
-use crate::DatabaseInterface;
 use crate::character::Character;
 use crate::state::PlayerIndex;
+use crate::{
+    AuthorityUpdateOutcome, DatabaseInterface, ImplementorBootstrapOutcome,
+    PasswordHashUpdateOutcome, PlayerAuthorityState,
+};
 use anyhow::{Result, anyhow};
 use std::future::Future;
 use std::sync::Arc;
@@ -39,6 +42,11 @@ impl DatabaseInterface for TimedDatabase {
         self.bounded("init_tables", self.inner.init_tables()).await
     }
 
+    async fn verify_schema(&self) -> Result<()> {
+        self.bounded("verify_schema", self.inner.verify_schema())
+            .await
+    }
+
     async fn player_exists(&self, name: &str) -> Result<bool> {
         self.bounded("player_exists", self.inner.player_exists(name))
             .await
@@ -48,6 +56,19 @@ impl DatabaseInterface for TimedDatabase {
         self.bounded(
             "create_player",
             self.inner.create_player(character, password),
+        )
+        .await
+    }
+
+    async fn create_player_with_password_hash(
+        &self,
+        character: &Character,
+        password_hash: &str,
+    ) -> Result<i64> {
+        self.bounded(
+            "create_player_with_password_hash",
+            self.inner
+                .create_player_with_password_hash(character, password_hash),
         )
         .await
     }
@@ -89,6 +110,51 @@ impl DatabaseInterface for TimedDatabase {
             .await
     }
 
+    async fn player_authority_by_id(
+        &self,
+        idnum: i64,
+    ) -> Result<Option<(String, PlayerAuthorityState)>> {
+        self.bounded(
+            "player_authority_by_id",
+            self.inner.player_authority_by_id(idnum),
+        )
+        .await
+    }
+
+    async fn update_authority_if_current(
+        &self,
+        idnum: i64,
+        expected_name: &str,
+        expected: PlayerAuthorityState,
+        replacement: PlayerAuthorityState,
+    ) -> Result<AuthorityUpdateOutcome> {
+        self.bounded(
+            "update_authority_if_current",
+            self.inner
+                .update_authority_if_current(idnum, expected_name, expected, replacement),
+        )
+        .await
+    }
+
+    async fn update_password_hash(
+        &self,
+        idnum: i64,
+        expected_name: &str,
+        expected_current_hash: Option<&str>,
+        password_hash: &str,
+    ) -> Result<PasswordHashUpdateOutcome> {
+        self.bounded(
+            "update_password_hash",
+            self.inner.update_password_hash(
+                idnum,
+                expected_name,
+                expected_current_hash,
+                password_hash,
+            ),
+        )
+        .await
+    }
+
     async fn verify_password(&self, name: &str, password: &str) -> Result<bool> {
         self.bounded(
             "verify_password",
@@ -100,6 +166,14 @@ impl DatabaseInterface for TimedDatabase {
     async fn get_password_hash(&self, name: &str) -> Result<Option<String>> {
         self.bounded("get_password_hash", self.inner.get_password_hash(name))
             .await
+    }
+
+    async fn bootstrap_implementor(&self, name: &str) -> Result<ImplementorBootstrapOutcome> {
+        self.bounded(
+            "bootstrap_implementor",
+            self.inner.bootstrap_implementor(name),
+        )
+        .await
     }
 
     async fn delete_deleted_players(&self) -> Result<u64> {

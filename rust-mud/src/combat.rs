@@ -61,6 +61,14 @@ const PK_VICTIM_MIN: Level = 10;
 // Position multiplier hack (fight.c) keys off POS_FIGHTING's ordinal (8).
 const POS_FIGHTING_ORD: i32 = Position::Fighting as i32;
 
+/// A peaceful-room exception is an administrative capability, not a body
+/// level mechanic.  It is available only while an Implementor's live Playing
+/// descriptor is directly dispatching this actor's command.
+fn has_direct_implementor_authority(g: &GameState, ch: CharId) -> bool {
+    crate::interpreter::authenticated_input_authority(g, ch)
+        .is_some_and(|authority| authority.authority >= i32::from(LVL_IMPL))
+}
+
 /// May `ch` attack `victim`? (self / immortal / peaceful room.)
 pub fn can_kill(g: &GameState, ch: CharId, victim: CharId) -> Result<(), String> {
     if ch == victim {
@@ -70,8 +78,7 @@ pub fn can_kill(g: &GameState, ch: CharId, victim: CharId) -> Result<(), String>
     if v_imm {
         return Err("You cannot attack an immortal!\r\n".to_string());
     }
-    let ch_imm = g.get_char(ch).map(|c| c.is_immortal()).unwrap_or(false);
-    if !ch_imm {
+    if !has_direct_implementor_authority(g, ch) {
         if let Some(rnum) = g.get_char(ch).and_then(|c| c.in_room) {
             if g.room(rnum).room_flags.contains(RoomFlags::PEACEFUL) {
                 return Err("This room just has such a peaceful, easy feeling...\r\n".to_string());
@@ -456,13 +463,12 @@ pub fn hit_type(g: &mut GameState, ch: CharId, victim: CharId, ty: i32) {
     // hit(), BEFORE the diceroll - no RNG draw and no DG fight triggers fire
     // in a peaceful room (#137).
     {
-        let ch_lvl = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
         let peaceful = g
             .get_char(ch)
             .and_then(|c| c.in_room)
             .map(|r| g.room(r).room_flags.contains(RoomFlags::PEACEFUL))
             .unwrap_or(false);
-        if peaceful && ch != victim && ch_lvl < LVL_IMPL {
+        if peaceful && ch != victim && !has_direct_implementor_authority(g, ch) {
             g.send_to_char(
                 ch,
                 "This room just has such a peaceful, easy feeling...\r\n",
@@ -969,13 +975,12 @@ fn do_actual_damage(
 
     // Peaceful room: ch != victim and ch's room is PEACEFUL (imps excepted).
     if ch != victim {
-        let ch_lvl = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
         let peaceful = g
             .get_char(ch)
             .and_then(|c| c.in_room)
             .map(|r| g.room(r).room_flags.contains(RoomFlags::PEACEFUL))
             .unwrap_or(false);
-        if peaceful && ch_lvl < LVL_IMPL {
+        if peaceful && !has_direct_implementor_authority(g, ch) {
             g.send_to_char(
                 ch,
                 "This room just has such a peaceful, easy feeling...\r\n",
@@ -1498,21 +1503,7 @@ pub fn check_killer(g: &mut GameState, ch: CharId, vict: CharId) {
 
 /// mudlog(): broadcast a brief log line to immortals at/above `min_level`.
 fn mudlog(g: &mut GameState, line: &str, min_level: u8) {
-    let formatted = format!("[ {} ]\r\n", line);
-    let imms: Vec<CharId> = g
-        .players_by_name
-        .values()
-        .copied()
-        .filter(|&id| {
-            g.get_char(id)
-                .map(|c| c.player.level >= min_level && c.player.level >= LVL_IMMORT)
-                .unwrap_or(false)
-        })
-        .collect();
-    for id in imms {
-        g.send_to_char(id, &formatted);
-    }
-    eprintln!("[ {} ]", line);
+    crate::syslog::mudlog(g, line, crate::syslog::NRM, min_level);
 }
 
 fn update_position(g: &mut GameState, ch: CharId) {
@@ -2372,7 +2363,80 @@ mod tests {
         let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
         ch.desc = Some(conn);
         ch.player.level = PK_VICTIM_MIN;
-        g.create_char(ch)
+        ch.trust = i32::from(PK_VICTIM_MIN);
+        let ch = g.create_char(ch);
+        let descriptor = g.descriptors.get_mut(&conn).unwrap();
+        descriptor.state = crate::connection::ConState::Playing;
+        descriptor.character = Some(ch);
+        ch
+    }
+
+    fn peaceful_combat_fixture(level: Level, trust: i32) -> (GameState, CharId, CharId, ConnId) {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(
+            88_100,
+            0,
+            "Sanctuary".to_string(),
+            "A peaceful test room.".to_string(),
+        ));
+        g.room_mut(room).room_flags.insert(RoomFlags::PEACEFUL);
+        let conn = ConnId(88_101);
+        let attacker = connected_player(&mut g, "Attacker", conn);
+        {
+            let attacker = g.get_char_mut(attacker).unwrap();
+            attacker.player.level = level;
+            attacker.trust = trust;
+            attacker.idnum = 88_101;
+        }
+        let mut target = Character::new_npc(88_102);
+        target.player.name = "Target".to_string();
+        target.position = Position::Sleeping;
+        target.points.hit = 100;
+        target.points.max_hit = 100;
+        let target = g.create_char(target);
+        g.char_to_room(attacker, room);
+        g.char_to_room(target, room);
+        (g, attacker, target, conn)
+    }
+
+    #[test]
+    fn peaceful_combat_override_requires_direct_persisted_implementor_trust() {
+        let (mut display_g, display, _, display_conn) = peaceful_combat_fixture(LVL_IMPL, 1);
+        crate::interpreter::run_authenticated_command(&mut display_g, display, "murder Target");
+        assert!(
+            display_g.descriptors[&display_conn]
+                .outbuf
+                .contains("peaceful, easy feeling")
+        );
+
+        let (mut trusted_g, trusted, _, trusted_conn) =
+            peaceful_combat_fixture(1, i32::from(LVL_IMPL));
+        crate::interpreter::run_authenticated_command(&mut trusted_g, trusted, "murder Target");
+        assert!(
+            !trusted_g.descriptors[&trusted_conn]
+                .outbuf
+                .contains("peaceful, easy feeling")
+        );
+
+        let (mut indirect_g, indirect, target, indirect_conn) =
+            peaceful_combat_fixture(1, i32::from(LVL_IMPL));
+        damage_type(&mut indirect_g, indirect, target, 25, TYPE_HIT);
+        assert_eq!(indirect_g.get_char(target).unwrap().points.hit, 100);
+        assert!(
+            indirect_g.descriptors[&indirect_conn]
+                .outbuf
+                .contains("peaceful, easy feeling")
+        );
+    }
+
+    #[test]
+    fn descriptorless_high_level_npc_has_no_peaceful_admin_override() {
+        let mut g = GameState::new(Config::default());
+        let mut npc = Character::new_npc(88_103);
+        npc.player.level = LVL_IMPL;
+        let npc = g.create_char(npc);
+
+        assert!(!has_direct_implementor_authority(&g, npc));
     }
 
     fn durable_item(g: &mut GameState, wearer: CharId, curr_slots: i32, total_slots: i32) -> ObjId {
@@ -3395,7 +3459,14 @@ mod tests {
             let v = g.get_char_mut(victim).unwrap();
             v.player.level = 10;
         }
-        g.get_char_mut(imm).unwrap().player.level = LVL_IMMORT;
+        {
+            let imm = g.get_char_mut(imm).unwrap();
+            imm.player.level = LVL_IMMORT;
+            imm.trust = i32::from(LVL_IMMORT);
+            // Normal/Perfect syslog preference: the shared mudlog facility
+            // respects the recipient's PRF_LOG bit triple.
+            imm.prf_flags |= (1 << 16) | (1 << 17);
+        }
         g.char_to_room(killer, room);
         g.char_to_room(victim, room);
         g.char_to_room(imm, room);

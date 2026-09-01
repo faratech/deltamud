@@ -129,6 +129,10 @@ impl Shop {
 #[derive(Clone, Debug)]
 struct SeditState {
     ch: CharId,
+    /// Exact authenticated session which opened this editor. Test-only
+    /// low-level publication fixtures may omit it because they bypass the
+    /// real confirmation boundary.
+    authorization: Option<olc::OlcAuthorization>,
     /// The shop vnum being edited (C OLC_NUM).
     vnum: i32,
     /// Zone number for this shop (vnum / 100), used by the save path.
@@ -224,7 +228,9 @@ fn take_state(conn: ConnId) -> Option<SeditState> {
 /// abort: drop this conn's editor state without saving (player disconnected
 /// mid-edit). `olc::abort_editor` calls `olc::clear_active`.
 pub fn abort(conn: ConnId) {
-    take_state(conn);
+    if let Some(state) = take_state(conn) {
+        olc::discard_unresolved_save(EditorKind::Sedit, state.vnum);
+    }
 }
 
 fn set_state(conn: ConnId, st: SeditState) {
@@ -258,12 +264,9 @@ fn shp_path(lib_path: &str, zone: i32) -> String {
 }
 
 /// Load every shop in `<lib>/world/shp/<zone>.shp` into editable structs.
-fn load_zone_shops(lib_path: &str, zone: i32) -> Vec<Shop> {
+fn load_zone_shops(lib_path: &str, zone: i32) -> IoResult<Vec<Shop>> {
     let path = shp_path(lib_path, zone);
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
+    let raw = std::fs::read_to_string(&path)?;
     parse_shop_file(&raw)
 }
 
@@ -271,32 +274,59 @@ fn load_zone_shops(lib_path: &str, zone: i32) -> Vec<Shop> {
 /// `sedit <vnum>` finds the right zone file even when vnum/100 != file name.
 /// (DeltaMUD shop files are named by zone == vnum/100, so the direct lookup is
 /// the common path; the index scan is the fallback.)
-fn find_shop_zone(lib_path: &str, vnum: i32) -> Option<i32> {
+fn find_shop_zone(lib_path: &str, vnum: i32) -> IoResult<Option<i32>> {
     // Primary: the conventional zone == vnum/100 file.
     let zone = vnum / 100;
-    if load_zone_shops(lib_path, zone)
-        .iter()
-        .any(|s| s.vnum == vnum)
-    {
-        return Some(zone);
+    match load_zone_shops(lib_path, zone) {
+        Ok(shops) if shops.iter().any(|s| s.vnum == vnum) => return Ok(Some(zone)),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
     // Fallback: scan the shp index for any file that contains this shop.
     let dir = format!("{}/{}", lib_path.trim_end_matches('/'), SHP_REL_DIR);
-    let index = std::fs::read_to_string(format!("{}/index", dir)).ok()?;
+    let index = std::fs::read_to_string(format!("{}/index", dir))?;
+    let mut terminated = false;
     for line in index.lines() {
         let fname = line.trim();
-        if fname.is_empty() || fname == "$" {
+        if fname.is_empty() {
+            continue;
+        }
+        if fname == "$" {
+            terminated = true;
             break;
         }
         if let Some(stem) = fname.strip_suffix(".shp") {
             if let Ok(z) = stem.parse::<i32>() {
-                if load_zone_shops(lib_path, z).iter().any(|s| s.vnum == vnum) {
-                    return Some(z);
+                let shops = load_zone_shops(lib_path, z).map_err(|error| {
+                    std::io::Error::new(
+                        error.kind(),
+                        format!("cannot read indexed shop file {fname}: {error}"),
+                    )
+                })?;
+                if shops.iter().any(|s| s.vnum == vnum) {
+                    return Ok(Some(z));
                 }
+            } else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid shop index entry {fname:?}"),
+                ));
             }
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid shop index entry {fname:?}"),
+            ));
         }
     }
-    None
+    if !terminated {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "shop index has no terminator",
+        ));
+    }
+    Ok(None)
 }
 
 // --- the inverse of the writer: a faithful re-parser (matches shop.rs) -------
@@ -325,7 +355,7 @@ impl<'a> Reader<'a> {
         }
         None
     }
-    fn fread_string(&mut self) -> String {
+    fn fread_string(&mut self) -> IoResult<String> {
         let mut out = String::new();
         let mut first = true;
         while self.pos < self.lines.len() {
@@ -336,7 +366,7 @@ impl<'a> Reader<'a> {
                     out.push_str("\r\n");
                 }
                 out.push_str(&raw[..idx]);
-                return out;
+                return Ok(out);
             } else {
                 if !first {
                     out.push_str("\r\n");
@@ -345,7 +375,10 @@ impl<'a> Reader<'a> {
                 first = false;
             }
         }
-        out
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unterminated shop string",
+        ))
     }
     fn peek_significant(&self) -> Option<&'a str> {
         let mut p = self.pos;
@@ -361,7 +394,7 @@ impl<'a> Reader<'a> {
     }
 }
 
-fn parse_int_lead(t: &str) -> Option<i32> {
+fn parse_int_lead(t: &str) -> IoResult<i32> {
     let t = t.trim();
     let bytes = t.as_bytes();
     let mut i = 0;
@@ -374,58 +407,79 @@ fn parse_int_lead(t: &str) -> Option<i32> {
         end = i;
     }
     if end == 0 {
-        return None;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("shop numeric field has no integer: {t:?}"),
+        ));
     }
     match t[..end].parse::<i32>() {
-        Ok(value) => Some(value),
-        Err(_) => {
-            let clamped = if t.starts_with('-') {
-                i32::MIN
-            } else {
-                i32::MAX
-            };
-            log::warn!(
-                "SYSERR: shop numeric field overflow; clamped to {clamped}: {}",
+        Ok(value) => Ok(value),
+        Err(error) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "shop numeric field is out of range {:?}: {error}",
                 &t[..end]
-            );
-            Some(clamped)
-        }
+            ),
+        )),
     }
 }
 
-fn r_int(r: &mut Reader) -> i32 {
-    r.get_line()
-        .and_then(|l| l.trim().split_whitespace().next().and_then(parse_int_lead))
-        .unwrap_or(0)
+fn r_int(r: &mut Reader) -> IoResult<i32> {
+    let line = r.get_line().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unexpected end of shop file while reading an integer",
+        )
+    })?;
+    let token = line.trim().split_whitespace().next().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "empty shop integer line")
+    })?;
+    parse_int_lead(token)
 }
-fn r_float(r: &mut Reader) -> f32 {
-    r.get_line()
-        .and_then(|l| {
-            l.trim()
-                .split_whitespace()
-                .next()
-                .and_then(|t| t.parse::<f32>().ok())
-        })
-        .unwrap_or(0.0)
+fn r_float(r: &mut Reader) -> IoResult<f32> {
+    let line = r.get_line().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unexpected end of shop file while reading a decimal",
+        )
+    })?;
+    let token = line.trim().split_whitespace().next().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "empty shop decimal line")
+    })?;
+    let value = token.parse::<f32>().map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid shop decimal {token:?}: {error}"),
+        )
+    })?;
+    if !value.is_finite() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("non-finite shop decimal {token:?}"),
+        ));
+    }
+    Ok(value)
 }
-fn r_int_list(r: &mut Reader) -> Vec<i32> {
+fn r_int_list(r: &mut Reader) -> IoResult<Vec<i32>> {
     let mut out = Vec::new();
     loop {
-        let v = r_int(r);
+        let v = r_int(r)?;
         if v < 0 {
             break;
         }
         out.push(v);
     }
-    out
+    Ok(out)
 }
-fn r_type_list(r: &mut Reader) -> Vec<ShopBuyData> {
+fn r_type_list(r: &mut Reader) -> IoResult<Vec<ShopBuyData>> {
     let mut out = Vec::new();
     loop {
-        let line = match r.get_line() {
-            Some(l) => l,
-            None => break,
-        };
+        let line = r.get_line().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unexpected end of shop file in trade-type list",
+            )
+        })?;
         let body = match line.find(';') {
             Some(i) => &line[..i],
             None => line,
@@ -450,7 +504,7 @@ fn r_type_list(r: &mut Reader) -> Vec<ShopBuyData> {
             }
         }
         if num == -1 {
-            if let Some(n) = parse_int_lead(trimmed) {
+            if let Ok(n) = parse_int_lead(trimmed) {
                 num = n;
                 let bytes = trimmed.as_bytes();
                 let mut i = 0;
@@ -465,7 +519,10 @@ fn r_type_list(r: &mut Reader) -> Vec<ShopBuyData> {
                 }
                 rest = &trimmed[i.min(trimmed.len())..];
             } else {
-                break;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid shop trade-type line {line:?}"),
+                ));
             }
         }
         let kw = rest.trim();
@@ -482,159 +539,325 @@ fn r_type_list(r: &mut Reader) -> Vec<ShopBuyData> {
             keywords: kw,
         });
     }
-    out
+    Ok(out)
 }
 
-fn parse_shop_file(contents: &str) -> Vec<Shop> {
+fn parse_shop_file(contents: &str) -> IoResult<Vec<Shop>> {
     let mut r = Reader::new(contents);
-    let _opening = r.fread_string(); // "CircleMUD v3.0 Shop File~"
+    let opening = r.fread_string()?; // "CircleMUD v3.0 Shop File~"
+    if opening.trim() != "CircleMUD v3.0 Shop File" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid shop file header {opening:?}"),
+        ));
+    }
     let mut table = Vec::new();
 
     loop {
         let nxt = match r.peek_significant() {
             Some(l) => l,
-            None => break,
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "shop file has no terminator",
+                ));
+            }
         };
         let nt = nxt.trim();
         if nt.starts_with('$') {
             break;
         }
         if !nt.starts_with('#') {
-            let _ = r.fread_string();
-            continue;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unexpected shop record header {nt:?}"),
+            ));
         }
-        let header = r.fread_string();
-        let vnum = parse_int_lead(header.trim_start_matches('#')).unwrap_or(0);
+        let header = r.fread_string()?;
+        let vnum = parse_int_lead(header.trim_start_matches('#'))?;
+        if table.iter().any(|shop: &Shop| shop.vnum == vnum) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("duplicate shop vnum {vnum}"),
+            ));
+        }
         let mut shop = Shop::new(vnum);
-        shop.producing = r_int_list(&mut r);
-        shop.profit_buy = r_float(&mut r);
-        shop.profit_sell = r_float(&mut r);
-        shop.type_ = r_type_list(&mut r);
-        shop.no_such_item1 = r.fread_string();
-        shop.no_such_item2 = r.fread_string();
-        shop.do_not_buy = r.fread_string();
-        shop.missing_cash1 = r.fread_string();
-        shop.missing_cash2 = r.fread_string();
-        shop.message_buy = r.fread_string();
-        shop.message_sell = r.fread_string();
-        shop.temper1 = r_int(&mut r);
-        shop.bitvector = r_int(&mut r);
-        shop.keeper = r_int(&mut r);
-        shop.with_who = r_int(&mut r);
-        shop.in_room = r_int_list(&mut r);
-        shop.open1 = r_int(&mut r);
-        shop.close1 = r_int(&mut r);
-        shop.open2 = r_int(&mut r);
-        shop.close2 = r_int(&mut r);
+        shop.producing = r_int_list(&mut r)?;
+        shop.profit_buy = r_float(&mut r)?;
+        shop.profit_sell = r_float(&mut r)?;
+        shop.type_ = r_type_list(&mut r)?;
+        shop.no_such_item1 = r.fread_string()?;
+        shop.no_such_item2 = r.fread_string()?;
+        shop.do_not_buy = r.fread_string()?;
+        shop.missing_cash1 = r.fread_string()?;
+        shop.missing_cash2 = r.fread_string()?;
+        shop.message_buy = r.fread_string()?;
+        shop.message_sell = r.fread_string()?;
+        shop.temper1 = r_int(&mut r)?;
+        shop.bitvector = r_int(&mut r)?;
+        shop.keeper = r_int(&mut r)?;
+        shop.with_who = r_int(&mut r)?;
+        shop.in_room = r_int_list(&mut r)?;
+        shop.open1 = r_int(&mut r)?;
+        shop.close1 = r_int(&mut r)?;
+        shop.open2 = r_int(&mut r)?;
+        shop.close2 = r_int(&mut r)?;
         table.push(shop);
     }
-    table
+    Ok(table)
 }
 
 /// Write a zone's shop table back to <zone>.shp, byte-faithful with C
 /// sedit_save_to_disk: shops are emitted in ascending vnum order over the
 /// zone's vnum range.
 fn sedit_save_to_disk(lib_path: &str, zone: i32, shops: &[Shop]) -> IoResult<()> {
-    let dir = format!("{}/{}", lib_path.trim_end_matches('/'), SHP_REL_DIR);
-    let tmp = format!("{}/{}.new", dir, zone);
-    let final_path = shp_path(lib_path, zone);
+    sedit_save_to_disk_with_replacers(
+        lib_path,
+        zone,
+        shops,
+        crate::olc::atomic_replace,
+        crate::olc::atomic_replace,
+    )
+}
 
+fn sedit_save_to_disk_with<F>(lib_path: &str, zone: i32, shops: &[Shop], replace: F) -> IoResult<()>
+where
+    F: FnOnce(&std::path::Path, &[u8]) -> IoResult<()>,
+{
+    sedit_save_to_disk_with_replacers(lib_path, zone, shops, replace, crate::olc::atomic_replace)
+}
+
+fn sedit_save_to_disk_with_replacers<F, G>(
+    lib_path: &str,
+    zone: i32,
+    shops: &[Shop],
+    replace_shop: F,
+    replace_index: G,
+) -> IoResult<()>
+where
+    F: FnOnce(&std::path::Path, &[u8]) -> IoResult<()>,
+    G: FnOnce(&std::path::Path, &[u8]) -> IoResult<()>,
+{
+    let dir = format!("{}/{}", lib_path.trim_end_matches('/'), SHP_REL_DIR);
+    let final_path = shp_path(lib_path, zone);
+    let final_path = std::path::Path::new(&final_path);
+    let index_path = std::path::Path::new(&dir).join("index");
+    let index_content = std::fs::read_to_string(&index_path)?;
+    let index_update = shop_index_update(&index_path, &index_content, zone)?;
+    let previous_shop = match std::fs::read(final_path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+
+    let out = render_shop_file(shops);
+
+    std::fs::create_dir_all(&dir)?;
+    let shop_result = replace_shop(final_path, out.as_bytes());
+    let shop_publication_error = match shop_result {
+        Ok(()) => None,
+        Err(error) if crate::olc::replacement_was_published(&error) => Some(error),
+        Err(error) => return Err(error),
+    };
+    if let Some(updated) = index_update {
+        if let Err(index_error) = replace_index(&index_path, updated.as_bytes()) {
+            if crate::olc::replacement_was_published(&index_error) {
+                return Err(crate::olc::published_but_incomplete(
+                    "shop data and index were published, but index durability is unconfirmed",
+                    index_error,
+                ));
+            }
+
+            // The index never changed, so restore the old data representation
+            // before returning an ordinary pre-publication failure. If that
+            // rollback itself cannot be confirmed, classify the state as a
+            // partial publication so callers reconcile live state and retain
+            // the retry marker.
+            if let Err(rollback_error) = rollback_shop_file(final_path, previous_shop.as_deref()) {
+                return Err(crate::olc::published_but_incomplete(
+                    format!(
+                        "shop data was published, index update failed ({index_error}), and rollback failed"
+                    ),
+                    rollback_error,
+                ));
+            }
+            return Err(index_error);
+        }
+    }
+    if let Some(error) = shop_publication_error {
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn render_shop_file(shops: &[Shop]) -> String {
     let mut out = String::new();
     out.push_str("CircleMUD v3.0 Shop File~\n");
 
-    // C iterates i from zone*100..=zone_top and emits real_shop(i); we emit the
-    // zone's shops sorted by vnum to reproduce that ascending order.
     let mut ordered: Vec<&Shop> = shops.iter().collect();
-    ordered.sort_by_key(|s| s.vnum);
-
+    ordered.sort_by_key(|shop| shop.vnum);
     for shop in ordered {
         out.push_str(&format!("#{}~\n", shop.vnum));
-
-        // Products: each obj vnum, then -1.
-        for &p in &shop.producing {
-            out.push_str(&format!("{}\n", p));
+        for &product in &shop.producing {
+            out.push_str(&format!("{}\n", product));
         }
-        // Rates: "-1\n%.2f\n%.2f\n".
         out.push_str(&format!(
             "-1\n{:.2}\n{:.2}\n",
             shop.profit_buy, shop.profit_sell
         ));
-
-        // Trade types + namelists. C: do { j++; print "%d%s\n" } while != -1,
-        // i.e. each entry then the -1 terminator with no keyword.
-        for t in &shop.type_ {
+        for trade in &shop.type_ {
             out.push_str(&format!(
                 "{}{}\n",
-                t.type_,
-                t.keywords.as_deref().unwrap_or("")
+                trade.type_,
+                trade.keywords.as_deref().unwrap_or("")
             ));
         }
         out.push_str("-1\n");
 
-        // 7 messages, each '~'-terminated. C emits in this order with "Ke?!"
-        // fallbacks for empties.
-        let msg = |s: &str, fallback: &str| -> String {
-            if s.is_empty() {
+        let message = |value: &str, fallback: &str| -> String {
+            if value.is_empty() {
                 fallback.to_string()
             } else {
-                s.to_string()
+                value.to_string()
             }
         };
-        out.push_str(&format!("{}~\n", msg(&shop.no_such_item1, "%s Ke?!")));
-        out.push_str(&format!("{}~\n", msg(&shop.no_such_item2, "%s Ke?!")));
-        out.push_str(&format!("{}~\n", msg(&shop.do_not_buy, "%s Ke?!")));
-        out.push_str(&format!("{}~\n", msg(&shop.missing_cash1, "%s Ke?!")));
-        out.push_str(&format!("{}~\n", msg(&shop.missing_cash2, "%s Ke?!")));
-        out.push_str(&format!("{}~\n", msg(&shop.message_buy, "%s Ke?! %d?")));
-        out.push_str(&format!("{}~\n", msg(&shop.message_sell, "%s Ke?! %d?")));
-
-        // temper1, bitvector, keeper mob vnum, with_who.
+        out.push_str(&format!("{}~\n", message(&shop.no_such_item1, "%s Ke?!")));
+        out.push_str(&format!("{}~\n", message(&shop.no_such_item2, "%s Ke?!")));
+        out.push_str(&format!("{}~\n", message(&shop.do_not_buy, "%s Ke?!")));
+        out.push_str(&format!("{}~\n", message(&shop.missing_cash1, "%s Ke?!")));
+        out.push_str(&format!("{}~\n", message(&shop.missing_cash2, "%s Ke?!")));
+        out.push_str(&format!("{}~\n", message(&shop.message_buy, "%s Ke?! %d?")));
+        out.push_str(&format!(
+            "{}~\n",
+            message(&shop.message_sell, "%s Ke?! %d?")
+        ));
         out.push_str(&format!(
             "{}\n{}\n{}\n{}\n",
             shop.temper1, shop.bitvector, shop.keeper, shop.with_who
         ));
-
-        // Rooms, then -1.
         for &room in &shop.in_room {
             out.push_str(&format!("{}\n", room));
         }
         out.push_str("-1\n");
-
-        // open1, close1, open2, close2.
         out.push_str(&format!(
             "{}\n{}\n{}\n{}\n",
             shop.open1, shop.close1, shop.open2, shop.close2
         ));
     }
-
     out.push_str("$~\n");
+    out
+}
 
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(&tmp, &out)?;
-    // rename replaces the existing file atomically on this Unix host. Do not
-    // unlink first: that creates a missing-file window if rename fails.
-    std::fs::rename(&tmp, &final_path)?;
-    Ok(())
+fn rollback_shop_file(path: &std::path::Path, previous: Option<&[u8]>) -> IoResult<()> {
+    match previous {
+        Some(bytes) => crate::olc::atomic_replace(path, bytes),
+        None => {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            std::fs::File::open(parent)?.sync_all()
+        }
+    }
+}
+
+fn shop_index_update(path: &std::path::Path, content: &str, zone: i32) -> IoResult<Option<String>> {
+    let entry = format!("{zone}.shp");
+    let mut seen = std::collections::HashSet::new();
+    let mut terminator_offset = None;
+    let mut offset = 0usize;
+    for segment in content.split_inclusive('\n') {
+        let line = segment.trim();
+        if line == "$" {
+            terminator_offset = Some(offset);
+            offset += segment.len();
+            break;
+        }
+        if !line.is_empty() && !line.starts_with('*') {
+            let stem = line.strip_suffix(".shp").ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid shop index entry {line:?} in {}", path.display()),
+                )
+            })?;
+            crate::text::parse_i32_strict(stem).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "invalid shop index entry {line:?} in {}: {error:?}",
+                        path.display()
+                    ),
+                )
+            })?;
+            if !seen.insert(line.to_string()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("duplicate shop index entry {line:?} in {}", path.display()),
+                ));
+            }
+        }
+        offset += segment.len();
+    }
+    let terminator_offset = terminator_offset.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("shop index {} has no terminator", path.display()),
+        )
+    })?;
+    if !content[offset..].trim().is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "shop index {} has content after its terminator",
+                path.display()
+            ),
+        ));
+    }
+    if seen.contains(&entry) {
+        return Ok(None);
+    }
+    let mut updated = String::with_capacity(content.len() + entry.len() + 1);
+    updated.push_str(&content[..terminator_offset]);
+    updated.push_str(&entry);
+    updated.push('\n');
+    updated.push_str(&content[terminator_offset..]);
+    Ok(Some(updated))
 }
 
 /// Central OLC save dispatcher entry. The live shop table is private to
 /// shop.rs, so this path preserves the current zone shop file by reading it and
 /// rewriting it through the canonical C-shaped renderer.
-pub fn sedit_save_zone_to_disk(g: &mut GameState, zone_rnum: usize) {
+pub fn sedit_save_zone_to_disk(g: &mut GameState, zone_rnum: usize) -> IoResult<()> {
     if let Some(z) = g.zones.get(zone_rnum) {
         // C sedit.c:532 (#274).
         crate::olc::olc_add_to_save_list(z.number, crate::olc::OLC_SAVE_SHOP);
     }
-    let zone = match g.zones.get(zone_rnum) {
-        Some(z) => z.number,
-        None => return,
+    let (zone, zone_start, zone_top) = match g.zones.get(zone_rnum) {
+        Some(z) => (
+            z.number,
+            z.vnum_start().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "zone number is outside the supported range",
+                )
+            })?,
+            z.top,
+        ),
+        None => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "zone index is not loaded",
+            ));
+        }
     };
     let lib_path = g.config.lib_path.clone();
-    let shops = load_zone_shops(&lib_path, zone);
-    match sedit_save_to_disk(&lib_path, zone, &shops) {
-        Ok(()) => crate::olc::olc_remove_from_save_list(zone, crate::olc::OLC_SAVE_SHOP),
-        Err(err) => log::warn!("SYSERR: OLC: Cannot save shop zone {}: {}", zone, err),
-    }
+    let shops = load_zone_shops(&lib_path, zone)?;
+    sedit_save_to_disk(&lib_path, zone, &shops)?;
+    crate::olc::olc_remove_from_save_list(zone, crate::olc::OLC_SAVE_SHOP);
+    crate::olc::clear_published_unresolved_numeric_range(EditorKind::Sedit, zone_start, zone_top);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -649,6 +872,14 @@ pub fn do_sedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         Some(c) => c,
         None => return,
     };
+    let Some(authorization) = olc::capture_olc_authorization(g, ch) else {
+        send(g, ch, "You do not have access to the shop editor.\r\n");
+        return;
+    };
+    if olc::validated_olc_trust(g, ch).unwrap_or(-1) < i32::from(LVL_IMMORT) {
+        send(g, ch, "You do not have access to the shop editor.\r\n");
+        return;
+    }
     let lib_path = g.config.lib_path.clone();
 
     // two_arguments(argument, buf1, buf2).
@@ -679,14 +910,25 @@ pub fn do_sedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 send(g, ch, "Save which zone?\r\n");
                 return;
             }
+            let zone_rnum = crate::world::zone_vnum_bounds(zone)
+                .and_then(|(first, _)| olc::real_zone(g, first));
+            let Some(zone_rnum) = zone_rnum else {
+                send(g, ch, "You do not have permission to edit this zone.\r\n");
+                return;
+            };
+            if olc::revalidate_olc_authorization(g, authorization, false, Some(zone_rnum)).is_err()
+            {
+                send(g, ch, "You do not have permission to edit this zone.\r\n");
+                return;
+            }
             send(g, ch, &format!("Saving all shops in zone {}.\r\n", zone));
             let name = g
                 .get_char(ch)
                 .map(|c| c.player.name.clone())
                 .unwrap_or_default();
             log::info!("OLC: {} saves shop info for zone {}.", name, zone);
-            let shops = load_zone_shops(&lib_path, zone);
-            if let Err(err) = sedit_save_to_disk(&lib_path, zone, &shops) {
+            let save_result = sedit_save_zone_to_disk(g, zone_rnum);
+            if let Err(err) = save_result {
                 log::warn!("SYSERR: OLC: Cannot save shop zone {}: {}", zone, err);
                 send(g, ch, "Could not save that shop zone.\r\n");
             }
@@ -714,21 +956,48 @@ pub fn do_sedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
     // Determine the zone and whether the shop exists.
     let (zone, existing) = match find_shop_zone(&lib_path, vnum) {
-        Some(z) => {
-            let shop = load_zone_shops(&lib_path, z)
-                .into_iter()
-                .find(|s| s.vnum == vnum);
+        Err(error) => {
+            log::warn!("SYSERR: OLC: cannot inspect shop {}: {}", vnum, error);
+            send(
+                g,
+                ch,
+                "The shop files could not be read safely; no editor was opened.\r\n",
+            );
+            return;
+        }
+        Ok(Some(z)) => {
+            let shop = match load_zone_shops(&lib_path, z) {
+                Ok(shops) => shops.into_iter().find(|s| s.vnum == vnum),
+                Err(error) => {
+                    log::warn!("SYSERR: OLC: cannot load shop {}: {}", vnum, error);
+                    send(
+                        g,
+                        ch,
+                        "The shop file could not be read safely; no editor was opened.\r\n",
+                    );
+                    return;
+                }
+            };
             (z, shop)
         }
-        None => (vnum / 100, None),
+        Ok(None) => (vnum / 100, None),
     };
 
     let shop = existing.unwrap_or_else(|| Shop::new(vnum));
+
+    let owned = crate::world::zone_vnum_bounds(zone)
+        .and_then(|(first, _)| olc::real_zone(g, first))
+        .is_some_and(|zr| olc::can_edit_zone(g, ch, zr));
+    if !owned {
+        send(g, ch, "You do not have permission to edit this zone.\r\n");
+        return;
+    }
 
     set_state(
         conn,
         SeditState {
             ch,
+            authorization: Some(authorization),
             vnum,
             zone,
             shop,
@@ -1360,11 +1629,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             } else {
                 // C sedit.c:1130-1134: the keeper mob must be in a zone the
                 // builder can edit (< LVL_IMMORT) (#267).
-                let level = conn_char(g, conn)
-                    .and_then(|c| g.get_char(c))
-                    .map(|c| c.player.level)
-                    .unwrap_or(LVL_IMPL);
-                if level < LVL_IMMORT && !crate::olc::can_edit_zone(g, ch, zone_rnum_of(g, i)) {
+                if !crate::olc::can_edit_zone(g, ch, zone_rnum_of(g, i)) {
                     send(
                         g,
                         ch,
@@ -1453,11 +1718,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             }
             // C sedit.c:1181-1188: a builder below LVL_GRGOD may only stock
             // objects from zones they own (#267).
-            let level = conn_char(g, conn)
-                .and_then(|c| g.get_char(c))
-                .map(|c| c.player.level)
-                .unwrap_or(LVL_IMPL);
-            if level < LVL_GRGOD && !crate::olc::obj_proto_in_owned_zone(g, ch, i) {
+            if !crate::olc::obj_proto_in_owned_zone(g, ch, i) {
                 send(
                     g,
                     ch,
@@ -1495,17 +1756,13 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             }
             // C sedit.c:1199-1206: the shop room's zone must be owned
             // (< LVL_IMMORT) (#267).
-            let level = conn_char(g, conn)
-                .and_then(|c| g.get_char(c))
-                .map(|c| c.player.level)
-                .unwrap_or(LVL_IMPL);
             let owned = g
                 .real_room(i)
                 .and_then(|r| g.room_opt(r))
                 .and_then(|room| crate::olc::real_zone(g, room.number))
                 .map(|zr| crate::olc::can_edit_zone(g, ch, zr))
                 .unwrap_or(false);
-            if level < LVL_IMMORT && !owned {
+            if !owned {
                 send(
                     g,
                     ch,
@@ -1574,14 +1831,83 @@ fn modify_string(conn: ConnId, new: &str, apply: impl FnOnce(&mut Shop, String))
 // ---------------------------------------------------------------------------
 
 fn sedit_save_internally(g: &mut GameState, conn: ConnId) -> IoResult<()> {
+    let (vnum, zone_number, authorization) =
+        with_state(conn, |state| (state.vnum, state.zone, state.authorization)).ok_or_else(
+            || {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "shop editor state is missing",
+                )
+            },
+        )?;
+    let authorization = authorization.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "shop editor authorization is missing",
+        )
+    })?;
+    let zone_rnum = olc::real_zone(g, vnum).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "shop editor zone mapping changed",
+        )
+    })?;
+    if g.zones.get(zone_rnum).map(|zone| zone.number) != Some(zone_number) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "shop editor zone mapping changed",
+        ));
+    }
+    olc::revalidate_olc_authorization(g, authorization, false, Some(zone_rnum))?;
+    sedit_save_internally_with(g, conn, crate::olc::atomic_replace)
+}
+
+fn sedit_save_internally_with<F>(g: &mut GameState, conn: ConnId, replace: F) -> IoResult<()>
+where
+    F: FnOnce(&std::path::Path, &[u8]) -> IoResult<()>,
+{
+    let vnum = with_state(conn, |state| state.vnum);
+    let result = sedit_save_internally_with_reconcile(g, conn, replace, |contents, vnum| {
+        crate::shop::upsert_shop_from_zone_contents(contents, vnum)
+    });
+    if let Some(vnum) = vnum {
+        match &result {
+            Ok(()) => crate::olc::clear_unresolved_publication(EditorKind::Sedit, vnum),
+            Err(error) => crate::olc::mark_unresolved_save_failure(EditorKind::Sedit, vnum, error),
+        }
+    }
+    result
+}
+
+fn sedit_save_internally_with_reconcile<F, R>(
+    g: &mut GameState,
+    conn: ConnId,
+    replace: F,
+    reconcile: R,
+) -> IoResult<()>
+where
+    F: FnOnce(&std::path::Path, &[u8]) -> IoResult<()>,
+    R: FnOnce(&str, i32) -> IoResult<()>,
+{
     let (shop, vnum, zone) = match with_state(conn, |st| (st.shop.clone(), st.vnum, st.zone)) {
         Some(v) => v,
         None => return Ok(()),
     };
     let lib_path = g.config.lib_path.clone();
-
     // Load the zone's existing shops, replace/insert this one by vnum, write.
-    let mut shops = load_zone_shops(&lib_path, zone);
+    let mut shops = match load_zone_shops(&lib_path, zone) {
+        Ok(shops) => shops,
+        // A genuinely new shop component is allowed to create its zone file;
+        // every other read failure is fail-closed so a transient error cannot
+        // turn into a destructive one-record replacement.
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && !std::path::Path::new(&shp_path(&lib_path, zone)).exists() =>
+        {
+            Vec::new()
+        }
+        Err(error) => return Err(error),
+    };
     let mut this = shop;
     this.vnum = vnum;
     if let Some(slot) = shops.iter_mut().find(|s| s.vnum == vnum) {
@@ -1589,8 +1915,36 @@ fn sedit_save_internally(g: &mut GameState, conn: ConnId) -> IoResult<()> {
     } else {
         shops.push(this);
     }
-    sedit_save_to_disk(&lib_path, zone, &shops)?;
-    crate::shop::upsert_shop_from_zone_file(&lib_path, zone, vnum)
+    let candidate = render_shop_file(&shops);
+    let publication_error = match sedit_save_to_disk_with(&lib_path, zone, &shops, replace) {
+        Ok(()) => None,
+        Err(error) if crate::olc::replacement_was_published(&error) => Some(error),
+        Err(error) => return Err(error),
+    };
+
+    if let Err(reconcile_error) = reconcile(&candidate, vnum) {
+        crate::olc::olc_add_to_save_list(zone, crate::olc::OLC_SAVE_SHOP);
+        let context = publication_error.as_ref().map_or_else(
+            || "shop data was published, but the live shop could not be reconciled".to_string(),
+            |publication_error| {
+                format!(
+                    "shop data was published with an unconfirmed durability outcome ({publication_error}), and the live shop could not be reconciled"
+                )
+            },
+        );
+        return Err(crate::olc::published_but_incomplete(
+            context,
+            reconcile_error,
+        ));
+    }
+
+    if let Some(error) = publication_error {
+        crate::olc::olc_add_to_save_list(zone, crate::olc::OLC_SAVE_SHOP);
+        Err(error)
+    } else {
+        crate::olc::olc_remove_from_save_list(zone, crate::olc::OLC_SAVE_SHOP);
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1598,7 +1952,9 @@ fn sedit_save_internally(g: &mut GameState, conn: ConnId) -> IoResult<()> {
 // ---------------------------------------------------------------------------
 
 fn cleanup(conn: ConnId) {
-    take_state(conn);
+    if let Some(state) = take_state(conn) {
+        olc::discard_unresolved_save(EditorKind::Sedit, state.vnum);
+    }
     olc::clear_active(conn);
 }
 
@@ -1636,10 +1992,18 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!(
+        let path = std::env::temp_dir().join(format!(
             "deltamud-sedit-{label}-{}-{unique}",
             std::process::id()
-        ))
+        ));
+        initialize_shop_index(&path);
+        path
+    }
+
+    fn initialize_shop_index(path: &std::path::Path) {
+        let directory = path.join(SHP_REL_DIR);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("index"), "$\n").unwrap();
     }
 
     #[test]
@@ -1654,6 +2018,7 @@ mod tests {
             std::process::id(),
             unique
         ));
+        initialize_shop_index(&dir);
 
         let zone = 9876;
         let vnum = 987600;
@@ -1681,6 +2046,7 @@ mod tests {
             conn,
             SeditState {
                 ch,
+                authorization: None,
                 vnum,
                 zone,
                 shop: edited,
@@ -1690,9 +2056,9 @@ mod tests {
             },
         );
 
-        sedit_save_internally(&mut g, conn).unwrap();
+        sedit_save_internally_with(&mut g, conn, crate::olc::atomic_replace).unwrap();
 
-        let persisted = load_zone_shops(dir.to_str().unwrap(), zone);
+        let persisted = load_zone_shops(dir.to_str().unwrap(), zone).unwrap();
         assert_eq!(persisted.len(), 1);
         assert_eq!(persisted[0].keeper, new_keeper);
         assert_eq!(persisted[0].profit_buy, 1.75);
@@ -1758,6 +2124,7 @@ mod tests {
             conn,
             SeditState {
                 ch: buyer,
+                authorization: None,
                 vnum,
                 zone,
                 shop: closed,
@@ -1766,7 +2133,7 @@ mod tests {
                 pending_type: 0,
             },
         );
-        sedit_save_internally(&mut g, conn).unwrap();
+        sedit_save_internally_with(&mut g, conn, crate::olc::atomic_replace).unwrap();
 
         // The newly created live definition binds only the edited room.
         assert!(!crate::shop::shop_keeper(&mut g, buyer, keeper, "list", ""));
@@ -1798,6 +2165,7 @@ mod tests {
             conn,
             SeditState {
                 ch: buyer,
+                authorization: None,
                 vnum,
                 zone,
                 shop: open,
@@ -1806,7 +2174,7 @@ mod tests {
                 pending_type: 0,
             },
         );
-        sedit_save_internally(&mut g, conn).unwrap();
+        sedit_save_internally_with(&mut g, conn, crate::olc::atomic_replace).unwrap();
 
         g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
         assert!(crate::shop::shop_keeper(
@@ -1858,9 +2226,6 @@ mod tests {
         sedit_save_to_disk(dir.to_str().unwrap(), zone, &[original]).unwrap();
         crate::shop::upsert_shop_from_zone_file(dir.to_str().unwrap(), zone, vnum).unwrap();
 
-        // Force the atomic temporary-file write itself to fail while leaving
-        // the prior durable zone file intact.
-        std::fs::create_dir(dir.join(format!("world/shp/{zone}.new"))).unwrap();
         let mut config = Config::default();
         config.lib_path = dir.to_string_lossy().into_owned();
         let mut g = GameState::new(config);
@@ -1876,6 +2241,7 @@ mod tests {
             conn,
             SeditState {
                 ch,
+                authorization: None,
                 vnum,
                 zone,
                 shop: edited,
@@ -1885,8 +2251,13 @@ mod tests {
             },
         );
 
-        assert!(sedit_save_internally(&mut g, conn).is_err());
-        let persisted = load_zone_shops(dir.to_str().unwrap(), zone);
+        assert!(
+            sedit_save_internally_with(&mut g, conn, |_path, _bytes| {
+                Err(std::io::Error::other("injected replacement failure"))
+            })
+            .is_err()
+        );
+        let persisted = load_zone_shops(dir.to_str().unwrap(), zone).unwrap();
         assert_eq!(persisted[0].keeper, 987_801);
         assert_eq!(persisted[0].profit_buy, 1.25);
         let live = crate::shop::test_shop_definition(vnum).unwrap();
@@ -1899,8 +2270,157 @@ mod tests {
     }
 
     #[test]
+    fn post_publication_reconcile_failures_are_typed_and_keep_the_shop_dirty() {
+        for (zone, post_rename_error) in [(9_881, false), (9_882, true)] {
+            let dir = temp_shop_lib("reconcile-failure");
+            let vnum = zone * 100;
+            let conn = ConnId(zone as u64);
+            let mut original = Shop::new(vnum);
+            original.keeper = vnum + 1;
+            sedit_save_to_disk(dir.to_str().unwrap(), zone, &[original]).unwrap();
+            crate::shop::upsert_shop_from_zone_file(dir.to_str().unwrap(), zone, vnum).unwrap();
+
+            let mut config = Config::default();
+            config.lib_path = dir.to_string_lossy().into_owned();
+            let mut g = GameState::new(config);
+            let ch = g.create_char(Character::new_player(
+                "Root".into(),
+                Class::Cleric,
+                Race::Human,
+            ));
+            let mut edited = Shop::new(vnum);
+            edited.keeper = vnum + 2;
+            set_state(
+                conn,
+                SeditState {
+                    ch,
+                    authorization: None,
+                    vnum,
+                    zone,
+                    shop: edited,
+                    changed: true,
+                    mode: SeditMode::ConfirmSave,
+                    pending_type: 0,
+                },
+            );
+
+            let error = sedit_save_internally_with_reconcile(
+                &mut g,
+                conn,
+                move |path, bytes| {
+                    if post_rename_error {
+                        crate::olc::atomic_replace_with_hooks(
+                            path,
+                            bytes,
+                            |_| Ok(()),
+                            |_| Err(std::io::Error::other("injected directory sync failure")),
+                        )
+                    } else {
+                        crate::olc::atomic_replace(path, bytes)
+                    }
+                },
+                |_contents, _vnum| Err(std::io::Error::other("injected live reconcile failure")),
+            )
+            .unwrap_err();
+
+            assert!(crate::olc::replacement_was_published(&error));
+            assert_eq!(
+                load_zone_shops(dir.to_str().unwrap(), zone).unwrap()[0].keeper,
+                vnum + 2
+            );
+            assert_eq!(crate::shop::test_shop_definition(vnum).unwrap().0, vnum + 1);
+            assert!(crate::olc::test_pending_save(
+                zone,
+                crate::olc::OLC_SAVE_SHOP
+            ));
+
+            crate::olc::olc_remove_from_save_list(zone, crate::olc::OLC_SAVE_SHOP);
+            take_state(conn);
+            crate::shop::test_remove_shop(vnum);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn failed_new_index_publication_rolls_back_the_shop_file() {
+        let dir = temp_shop_lib("index-rollback");
+        let zone = 9_879;
+        let vnum = 987_900;
+        let mut original = Shop::new(vnum);
+        original.keeper = 987_901;
+        sedit_save_to_disk(dir.to_str().unwrap(), zone, &[original]).unwrap();
+
+        let index = dir.join(SHP_REL_DIR).join("index");
+        std::fs::write(&index, "$\n").unwrap();
+        let shop_path = std::path::PathBuf::from(shp_path(dir.to_str().unwrap(), zone));
+        let before = std::fs::read(&shop_path).unwrap();
+
+        let mut edited = Shop::new(vnum);
+        edited.keeper = 987_902;
+        let error = sedit_save_to_disk_with_replacers(
+            dir.to_str().unwrap(),
+            zone,
+            &[edited],
+            crate::olc::atomic_replace,
+            |_path, _bytes| Err(std::io::Error::other("injected index failure")),
+        )
+        .unwrap_err();
+
+        assert!(!crate::olc::replacement_was_published(&error));
+        assert_eq!(std::fs::read(&shop_path).unwrap(), before);
+        assert_eq!(
+            load_zone_shops(dir.to_str().unwrap(), zone).unwrap()[0].keeper,
+            987_901
+        );
+        assert_eq!(std::fs::read_to_string(index).unwrap(), "$\n");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn post_rename_index_failure_is_classified_as_partial_publication() {
+        let dir = temp_shop_lib("index-published");
+        let zone = 9_880;
+        let vnum = 988_000;
+        let mut edited = Shop::new(vnum);
+        edited.keeper = 988_001;
+
+        let error = sedit_save_to_disk_with_replacers(
+            dir.to_str().unwrap(),
+            zone,
+            &[edited],
+            crate::olc::atomic_replace,
+            |path, bytes| {
+                crate::olc::atomic_replace_with_hooks(
+                    path,
+                    bytes,
+                    |_| Ok(()),
+                    |_| Err(std::io::Error::other("injected index sync failure")),
+                )
+            },
+        )
+        .unwrap_err();
+
+        assert!(crate::olc::replacement_was_published(&error));
+        assert_eq!(
+            load_zone_shops(dir.to_str().unwrap(), zone).unwrap()[0].keeper,
+            988_001
+        );
+        assert!(
+            std::fs::read_to_string(dir.join(SHP_REL_DIR).join("index"))
+                .unwrap()
+                .contains(&format!("{zone}.shp"))
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn profit_parse_keeps_previous_value_on_garbage() {
-        let mut g = GameState::new(Config::default());
+        let lib = temp_shop_lib("profit-parse");
+        let mut config = Config::default();
+        config.lib_path = lib.to_string_lossy().into_owned();
+        let mut g = GameState::new(config);
         g.zones.push(Zone {
             number: 1,
             name: "Zone 1".to_string(),
@@ -1918,6 +2438,7 @@ mod tests {
         });
         let mut ch = Character::new_player("Root".into(), Class::Cleric, Race::Human);
         ch.player.level = LVL_IMPL;
+        ch.trust = i32::from(LVL_IMPL);
         let ch = g.create_char(ch);
         let conn = ConnId(81);
         g.get_char_mut(ch).unwrap().desc = Some(conn);
@@ -1940,5 +2461,7 @@ mod tests {
             1.25,
             "garbage must not zero the rate"
         );
+        take_state(conn);
+        let _ = std::fs::remove_dir_all(lib);
     }
 }

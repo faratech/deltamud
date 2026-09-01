@@ -90,22 +90,11 @@ const SOCMESS_FILE: &str = "lib/misc/socials";
 /// before the interpreter dispatches any commands. `lib_path` is the path to
 /// the `socials` file; pass `None` to use the default `lib/misc/socials`
 /// (relative to the process CWD, matching the C server which chdirs to lib).
-pub fn boot_socials(lib_path: Option<&str>) {
+pub fn boot_socials(lib_path: Option<&str>) -> std::io::Result<()> {
     let path = lib_path.unwrap_or(SOCMESS_FILE);
-    let table = match load_socials(path) {
-        Ok(t) => t,
-        Err(e) => {
-            // C does perror + exit(1); here we surface to stderr and install an
-            // empty table so the server still boots (commands report "not
-            // supported", matching C's find_action() == -1 path).
-            eprintln!("SYSERR: can't open socials file '{}': {}", path, e);
-            SocialTable {
-                list: Vec::new(),
-                by_command: HashMap::new(),
-            }
-        }
-    };
+    let table = load_socials(path)?;
     install_socials(table);
+    Ok(())
 }
 
 /// Reload the live social table from disk after OLC writes `misc/socials`.
@@ -130,6 +119,13 @@ fn install_socials(table: SocialTable) {
     }
 }
 
+/// Install an already validated OLC candidate without re-reading the file that
+/// was just published.  This keeps the durable editor table and live command
+/// lookup in one explicit success path; parsing remains a boot/import concern.
+pub(crate) fn install_social_messages(list: Vec<SocialMessg>) {
+    install_socials(finalize(list));
+}
+
 fn load_socials(path: &str) -> std::io::Result<SocialTable> {
     let raw = std::fs::read_to_string(path)?;
     // The C reader is line-oriented: a header line "~cmd sort hide cpos vpos
@@ -144,7 +140,12 @@ fn load_socials(path: &str) -> std::io::Result<SocialTable> {
             match lines.next() {
                 Some(l) if l.trim().is_empty() => continue,
                 Some(l) => break l,
-                None => return Ok(finalize(list)),
+                None => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "socials file has no terminator",
+                    ));
+                }
             }
         };
 
@@ -153,46 +154,70 @@ fn load_socials(path: &str) -> std::io::Result<SocialTable> {
             break;
         }
         if !header.starts_with('~') {
-            // Unexpected; skip defensively rather than abort the whole boot.
-            continue;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid social header {header:?}"),
+            ));
         }
 
         // Parse "~command sort_as hide min_char_pos min_vict_pos min_lvl".
         let mut it = header.split_whitespace();
         let command = it.next().unwrap_or("~").trim_start_matches('~').to_string();
-        let sort_as = it.next().unwrap_or("").to_string();
-        let loader_i32 = |raw: Option<&str>, field: &str| match raw {
-            Some(raw) => match crate::text::parse_i32_strict(raw) {
-                Ok(value) => value,
-                Err(crate::text::ParseIntError::Overflow) => {
-                    let clamped = if raw.trim_start().starts_with('-') {
-                        i32::MIN
-                    } else {
-                        i32::MAX
-                    };
-                    log::warn!(
-                        "SYSERR: social {command} {field} overflow in {path}; clamped to {clamped}"
-                    );
-                    clamped
-                }
-                Err(_) => 0,
-            },
-            None => 0,
+        let sort_as = it
+            .next()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("social {command:?} is missing sort key"),
+                )
+            })?
+            .to_string();
+        if command.is_empty() || sort_as.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "social command and sort key must be non-empty",
+            ));
+        }
+        let loader_i32 = |raw: Option<&str>, field: &str| -> std::io::Result<i32> {
+            let raw = raw.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("social {command} is missing {field}"),
+                )
+            })?;
+            crate::text::parse_i32_strict(raw).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("social {command} has invalid {field} {raw:?}: {error:?}"),
+                )
+            })
         };
-        let hide = loader_i32(it.next(), "hide");
-        let min_char_pos = loader_i32(it.next(), "minimum character position");
-        let min_vict_pos = loader_i32(it.next(), "minimum victim position");
-        let min_lvl = loader_i32(it.next(), "minimum level");
+        let hide = loader_i32(it.next(), "hide")?;
+        let min_char_pos = loader_i32(it.next(), "minimum character position")?;
+        let min_vict_pos = loader_i32(it.next(), "minimum victim position")?;
+        let min_lvl = loader_i32(it.next(), "minimum level")?;
+        if it.next().is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("social {command} header has unexpected extra fields"),
+            ));
+        }
 
         // Read the 13 message slots (C fread_action: a line starting with '#'
         // is the NULL/placeholder, otherwise the verbatim line is the text).
-        let read = |lines: &mut std::str::Lines| -> Option<String> {
+        let record_name = command.clone();
+        let read = |lines: &mut std::str::Lines| -> std::io::Result<Option<String>> {
             // fread_action does NOT skip blank lines; it reads exactly one.
-            let l = lines.next().unwrap_or("#");
+            let l = lines.next().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("social {record_name} has an incomplete message block"),
+                )
+            })?;
             if l.starts_with('#') {
-                None
+                Ok(None)
             } else {
-                Some(l.to_string())
+                Ok(Some(l.to_string()))
             }
         };
 
@@ -203,19 +228,19 @@ fn load_socials(path: &str) -> std::io::Result<SocialTable> {
             min_victim_position: min_vict_pos,
             min_char_position: min_char_pos,
             min_level_char: min_lvl,
-            char_no_arg: read(&mut lines),
-            others_no_arg: read(&mut lines),
-            char_found: read(&mut lines),
-            others_found: read(&mut lines),
-            vict_found: read(&mut lines),
-            not_found: read(&mut lines),
-            char_auto: read(&mut lines),
-            others_auto: read(&mut lines),
-            char_body_found: read(&mut lines),
-            others_body_found: read(&mut lines),
-            vict_body_found: read(&mut lines),
-            char_obj_found: read(&mut lines),
-            others_obj_found: read(&mut lines),
+            char_no_arg: read(&mut lines)?,
+            others_no_arg: read(&mut lines)?,
+            char_found: read(&mut lines)?,
+            others_found: read(&mut lines)?,
+            vict_found: read(&mut lines)?,
+            not_found: read(&mut lines)?,
+            char_auto: read(&mut lines)?,
+            others_auto: read(&mut lines)?,
+            char_body_found: read(&mut lines)?,
+            others_body_found: read(&mut lines)?,
+            vict_body_found: read(&mut lines)?,
+            char_obj_found: read(&mut lines)?,
+            others_obj_found: read(&mut lines)?,
         };
         list.push(s);
     }
@@ -1192,11 +1217,42 @@ mod tests {
         &g.descriptors.get(&conn).unwrap().outbuf
     }
 
+    #[test]
+    fn social_loader_requires_complete_strictly_typed_records_and_terminator() {
+        let path = std::env::temp_dir().join(format!(
+            "deltamud-social-loader-{}-{:?}.socials",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let messages = std::iter::repeat_n("#", 13).collect::<Vec<_>>().join("\n");
+        let valid = format!("~wave wave 0 8 0 0\n{messages}\n\n$\n");
+        std::fs::write(&path, &valid).unwrap();
+        let table = load_socials(path.to_str().unwrap()).unwrap();
+        assert_eq!(table.list.len(), 1);
+
+        let invalid = [
+            format!("~wave wave 0 8 0 0\n{messages}\n"),
+            format!("wave wave 0 8 0 0\n{messages}\n$\n"),
+            format!("~wave wave nope 8 0 0\n{messages}\n$\n"),
+            format!("~wave wave 0 8 0 0 extra\n{messages}\n$\n"),
+            "~wave wave 0 8 0 0\n#\n$\n".to_string(),
+        ];
+        for body in invalid {
+            std::fs::write(&path, body).unwrap();
+            let error = match load_socials(path.to_str().unwrap()) {
+                Ok(_) => panic!("invalid social source was accepted"),
+                Err(error) => error,
+            };
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
     /// #324: a player who `ignore <someone> pub` must not receive that
     /// player's no-argument socials (act.social.c:96).
     #[test]
     fn no_arg_social_skips_a_public_ignorer_324() {
-        boot_socials(Some("../lib/misc/socials"));
+        boot_socials(Some("../lib/misc/socials")).unwrap();
         let mut g = GameState::new(Config::default());
         let a = connected_player(&mut g, ConnId(1), "Screamer", 10);
         let b = connected_player(&mut g, ConnId(2), "Deafer", 10);
@@ -1224,7 +1280,7 @@ mod tests {
     /// socials (act.social.c:97).
     #[test]
     fn no_arg_social_skips_a_writing_player_324() {
-        boot_socials(Some("../lib/misc/socials"));
+        boot_socials(Some("../lib/misc/socials")).unwrap();
         let mut g = GameState::new(Config::default());
         let a = connected_player(&mut g, ConnId(1), "Waver", 10);
         let b = connected_player(&mut g, ConnId(2), "Writer", 10);
@@ -1244,7 +1300,7 @@ mod tests {
     /// Sanity for the same path: an uninvolved room-mate still sees it.
     #[test]
     fn no_arg_social_reaches_an_ordinary_room_mate() {
-        boot_socials(Some("../lib/misc/socials"));
+        boot_socials(Some("../lib/misc/socials")).unwrap();
         let mut g = GameState::new(Config::default());
         let a = connected_player(&mut g, ConnId(1), "Waver", 10);
         let b = connected_player(&mut g, ConnId(2), "Watcher", 10);
@@ -1259,7 +1315,7 @@ mod tests {
     /// the per-viewer colour level (comm.c:2469-2483).
     #[test]
     fn gmote_skips_writers_and_ignorers_and_forces_no_colour_325() {
-        boot_socials(Some("../lib/misc/socials"));
+        boot_socials(Some("../lib/misc/socials")).unwrap();
         let mut g = GameState::new(Config::default());
         let a = connected_player(&mut g, ConnId(1), "Gossiper", 10);
         let b = connected_player(&mut g, ConnId(2), "Writer", 10);
@@ -1309,7 +1365,7 @@ mod tests {
     /// #325 sanity: a colour-enabled viewer still gets the yellow framing.
     #[test]
     fn gmote_frames_colour_viewers_in_yellow_325() {
-        boot_socials(Some("../lib/misc/socials"));
+        boot_socials(Some("../lib/misc/socials")).unwrap();
         let mut g = GameState::new(Config::default());
         let a = connected_player(&mut g, ConnId(1), "Gossiper", 10);
         let d = connected_player(&mut g, ConnId(4), "Colour", 10);

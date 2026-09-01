@@ -3,9 +3,11 @@
 // 343-entry CMD_INFO table, gates on level/position, and dispatches.
 
 use crate::command_table::{CMD_INFO, HandlerId};
+use crate::connection::ConState;
 use crate::flags::{AFF_HIDE, PLR_FROZEN, PRF2_INTANGIBLE, PRF2_LOCKOUT, PRF2_MBUILDING};
-use crate::state::GameState;
+use crate::state::{GameState, PrincipalAuthority};
 use crate::types::*;
+use std::cell::Cell;
 
 const CMD_LOCKOUT_MSG: &str =
     "Your terminal is currently locked!\r\nTo unlock please type 'unlock <yourpassword>'\r\n";
@@ -91,6 +93,98 @@ pub fn command_interpreter(g: &mut GameState, ch: CharId, input: &str) {
     run_command(g, ch, input);
 }
 
+/// Dispatch a line which came from the active descriptor's bounded input
+/// queue (or an explicitly revalidated continuation of that input, such as
+/// `at`). Only this provenance may select privileged command-table entries.
+pub(crate) fn command_interpreter_authenticated(g: &mut GameState, ch: CharId, input: &str) {
+    run_authenticated_command(g, ch, input);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CommandSource {
+    Indirect,
+    AuthenticatedInput,
+}
+
+thread_local! {
+    static COMMAND_SOURCE: Cell<CommandSource> = const { Cell::new(CommandSource::Indirect) };
+}
+
+struct CommandSourceGuard(CommandSource);
+
+impl CommandSourceGuard {
+    fn enter(source: CommandSource) -> Self {
+        let previous = COMMAND_SOURCE.with(|current| current.replace(source));
+        Self(previous)
+    }
+}
+
+impl Drop for CommandSourceGuard {
+    fn drop(&mut self) {
+        COMMAND_SOURCE.with(|current| current.set(self.0));
+    }
+}
+
+/// Return the exact authenticated principal only while the current command is
+/// being dispatched from its live Playing descriptor. Level-zero handlers
+/// with administrative subcommands use this to reject force/script re-entry.
+pub(crate) fn authenticated_input_authority(
+    g: &GameState,
+    ch: CharId,
+) -> Option<PrincipalAuthority> {
+    if !COMMAND_SOURCE.with(|source| source.get() == CommandSource::AuthenticatedInput) {
+        return None;
+    }
+    let authority = g
+        .principal_authority(ch)
+        .filter(|authority| authority.is_authenticated_player())?;
+    let principal = g.get_char(authority.principal)?;
+    if g.authority_quarantine.contains(&principal.idnum) {
+        return None;
+    }
+    let descriptor = authority.descriptor?;
+    let session = g.descriptors.get(&descriptor)?;
+    (authority.descriptor_controls_target
+        && session.state == ConState::Playing
+        && session.character == Some(ch))
+    .then_some(authority)
+}
+
+/// Capture the exact live session tuple for an action which will execute only
+/// after the synchronous handler returns. The consumer still has to recheck
+/// authority and the action's granular grant immediately before use.
+pub(crate) fn authenticated_command_request(
+    g: &GameState,
+    ch: CharId,
+) -> Option<crate::state::AuthenticatedCommandRequest> {
+    let authority = authenticated_input_authority(g, ch)?;
+    let descriptor = authority.descriptor?;
+    let principal = g.get_char(authority.principal)?;
+    Some(crate::state::AuthenticatedCommandRequest {
+        requester_body: ch,
+        requester_principal: authority.principal,
+        descriptor,
+        idnum: principal.idnum,
+    })
+}
+
+/// DG/order/force sources may drive ordinary mortal and NPC commands, but a
+/// persisted staff principal (including a switched session) is never a valid
+/// forced-command target. Invalid or quarantined player authority fails closed.
+pub(crate) fn indirect_command_target_is_forceable(g: &GameState, ch: CharId) -> bool {
+    let Some(authority) = g.principal_authority(ch) else {
+        return false;
+    };
+    if !authority.principal_is_player {
+        return authority.authority < i32::from(LVL_IMMORT);
+    }
+    let Some(principal) = g.get_char(authority.principal) else {
+        return false;
+    };
+    !g.authority_quarantine.contains(&principal.idnum)
+        && authority.authority < i32::from(LVL_IMMORT)
+}
+
 /// The position-refusal text C emits when `GET_POS(ch) < minimum_position`
 /// (interpreter.c:828-853). An empty string means "no message" (positions that
 /// are never below any command minimum, e.g. Standing). Shared so socials —
@@ -114,25 +208,71 @@ pub fn position_refusal_msg(pos: Position) -> &'static str {
 /// The central dispatcher body (CircleMUD command_interpreter proper), run on
 /// input that has already passed alias expansion.
 pub(crate) fn run_command(g: &mut GameState, ch: CharId, input: &str) {
+    let _source = CommandSourceGuard::enter(CommandSource::Indirect);
+    run_command_body(g, ch, input);
+}
+
+pub(crate) fn run_authenticated_command(g: &mut GameState, ch: CharId, input: &str) {
+    let _source = CommandSourceGuard::enter(CommandSource::AuthenticatedInput);
+    run_command_body(g, ch, input);
+}
+
+fn run_command_body(g: &mut GameState, ch: CharId, input: &str) {
     if !crate::handler::check_perm_duration(g, ch, AFF_HIDE) {
         if let Some(c) = g.get_char_mut(ch) {
             c.affect_flags &= !AFF_HIDE;
         }
     }
 
-    let (level, is_npc, pos, gcmds, act_flags, prf2_flags) = match g.get_char(ch) {
+    let (level, is_npc, pos, act_flags, prf2_flags, body_idnum) = match g.get_char(ch) {
         Some(c) => (
             c.player.level,
             c.is_npc,
             c.position,
-            // The four god-command bitvectors (godcmds1..4), indexed by
-            // godcmd_set-1 in the gate below. NPCs have all-zero godcmds.
-            [c.godcmds1, c.godcmds2, c.godcmds3, c.godcmds4],
             c.act_flags,
             c.prf2_flags,
+            c.idnum,
         ),
         None => return,
     };
+    let principal = g.principal_authority(ch);
+    // Command triggers receive the complete unredacted argument string before
+    // normal dispatch. Persisted staff authority therefore makes a player
+    // ineligible regardless of the body's display level (including while
+    // switched), and malformed player authority fails closed. Ordinary NPCs
+    // retain C's display-level trigger rule.
+    let command_triggers_allowed = match principal {
+        Some(authority) if authority.principal_is_player => {
+            authority.authority < i32::from(LVL_IMMORT)
+        }
+        Some(_) => level < LVL_IMMORT,
+        None => is_npc && level < LVL_IMMORT,
+    };
+    let (mut trust, mut gcmds, authority_idnum, authority_is_player) = match principal {
+        Some(authority) if authority.principal_is_player => {
+            let Some(character) = g.get_char(authority.principal) else {
+                return;
+            };
+            (
+                authority.authority,
+                [
+                    character.godcmds1,
+                    character.godcmds2,
+                    character.godcmds3,
+                    character.godcmds4,
+                ],
+                character.idnum,
+                true,
+            )
+        }
+        Some(authority) => (authority.authority, [0; 4], body_idnum, false),
+        None => (0, [0; 4], body_idnum, !is_npc),
+    };
+    if authority_is_player && g.authority_quarantine.contains(&authority_idnum) {
+        trust = 0;
+        gcmds = [0; 4];
+    }
+    let authenticated_input = authenticated_input_authority(g, ch).is_some();
 
     let input = input.trim_start();
     if input.is_empty() {
@@ -156,9 +296,10 @@ pub(crate) fn run_command(g: &mut GameState, ch: CharId, input: &str) {
 
     // DG command triggers (room/mob/obj) get first refusal on ANY typed word
     // (dg_triggers command_*trigger). A consuming trigger ends the command.
-    // C (interpreter.c:772) gates on `GET_LEVEL(ch) < LVL_IMMORT`, NOT on PC-ness:
-    // mortal NPCs DO fire command triggers, and immortals do NOT — match that.
-    if level < LVL_IMMORT
+    // C gates this on display level. Rust keeps that rule for NPC mechanics,
+    // but uses persisted principal authority for players so secrets in staff
+    // commands cannot be disclosed to room/mob/object scripts.
+    if command_triggers_allowed
         && (crate::dg_triggers::command_wtrigger(g, ch, &arg, line)
             || crate::dg_triggers::command_mtrigger(g, ch, &arg, line)
             || crate::dg_triggers::command_otrigger(g, ch, &arg, line))
@@ -166,7 +307,7 @@ pub(crate) fn run_command(g: &mut GameState, ch: CharId, input: &str) {
         return;
     }
 
-    if act_flags & PLR_FROZEN != 0 && level < LVL_IMPL {
+    if act_flags & PLR_FROZEN != 0 && trust < i32::from(LVL_IMPL) {
         g.send_to_char(ch, CMD_FROZEN_MSG);
         return;
     }
@@ -180,29 +321,34 @@ pub(crate) fn run_command(g: &mut GameState, ch: CharId, input: &str) {
     }
 
     // Abbreviation match: first table entry whose name is prefixed by `arg`,
-    // whose min_level the actor meets, AND (for god commands) whose required
+    // whose min_level the actor's persisted trust meets, AND (for god
+    // commands) whose required
     // godcmd bit the actor holds in the matching godcmds bitvector. Table order
     // is load-bearing.
     //
-    // The godcmd gate mirrors interpreter.c:786-789: a god command is usable
+    // The authority gate mirrors interpreter.c:785-789: `trust`, not character
+    // level, is the dispatch authority, and a god command is usable
     // only if `(cmd.godcmd & GCMDn_FLAGS(ch))` is set in the godcmds<set>
-    // bitvector named by the command's GOD_CMD/2/3/4 marker. The C OR-clause at
-    // 790-791 also lets `GET_LEVEL(ch) >= LVL_IMPL` bypass the gate entirely
-    // (so e.g. `citizen`/`mobdie`/`slowns`, whose godcmd bit is 0 and thus can
-    // never match, remain reachable by the Implementor). A god command that
-    // fails the gate is SKIPPED — the loop walks on, exactly as in C, so the
-    // word falls through to a later match / "Huh?!?" rather than erroring.
+    // bitvector named by the command's GOD_CMD/2/3/4 marker. Level never
+    // substitutes for a revoked bit. The three historical zero-bit commands
+    // remain an explicit Implementor-only compatibility repair. A command
+    // that fails the gate is skipped so abbreviation resolution continues.
     let mut found = None;
     for e in CMD_INFO {
         if e.name == "\n" {
             break;
         }
-        if !(e.name.starts_with(arg.as_str()) && level >= e.min_level) {
+        if !(e.name.starts_with(arg.as_str()) && trust >= i32::from(e.min_level)) {
             continue;
         }
-        if e.godcmd_set != 0 && level < LVL_IMPL {
+        if (e.min_level >= LVL_IMMORT || e.godcmd_set != 0) && !authenticated_input {
+            continue;
+        }
+        if e.godcmd_set != 0 {
             let bits = gcmds[(e.godcmd_set - 1) as usize];
-            if (e.godcmd & bits) == 0 {
+            if (e.godcmd == 0 && trust < i32::from(LVL_IMPL))
+                || (e.godcmd != 0 && (e.godcmd & bits) == 0)
+            {
                 continue; // lacks the required god-command bit; keep searching
             }
         }
@@ -221,7 +367,7 @@ pub(crate) fn run_command(g: &mut GameState, ch: CharId, input: &str) {
             // ordering (interpreter.c:800-804).
             if let Some(name) = crate::cmd_social::find_social(&arg) {
                 let allowed = crate::cmd_social::social_min_level(&name)
-                    .map(|min| level as i32 >= min)
+                    .map(|min| trust >= min)
                     .unwrap_or(false);
                 if !allowed {
                     g.send_to_char(ch, "Huh?!?\r\n");
@@ -501,7 +647,6 @@ fn dispatch(g: &mut GameState, ch: CharId, handler: HandlerId, arg: &str, subcmd
         DoCitizen => cmd_wizard::do_citizen(g, ch, arg, subcmd),
         DoAddsnow => cmd_wizard::do_addsnow(g, ch, arg, subcmd),
         DoDelsnow => cmd_wizard::do_delsnow(g, ch, arg, subcmd),
-        DoLevelme => cmd_wizard::do_levelme(g, ch, arg, subcmd),
         DoCopyover => cmd_wizard::do_copyover(g, ch, arg, subcmd),
         // --- content / economy (Batch 11) ---
         DoBuy => shop::do_buy(g, ch, arg, subcmd),
@@ -613,6 +758,7 @@ mod tests {
     use crate::config::Config;
     use crate::connection::{ConState, Descriptor};
     use crate::flags::{AFF_HIDE, PLR_FROZEN, PRF2_INTANGIBLE, PRF2_LOCKOUT, PRF2_MBUILDING};
+    use crate::gcmd::GCMD_GEN;
     use crate::types::{Class, ConnId, Race};
 
     fn test_game_with_player() -> (GameState, CharId, ConnId) {
@@ -673,14 +819,20 @@ mod tests {
     }
 
     #[test]
-    fn lockout_unlock_routes_to_lockout_handler() {
+    fn lockout_unlock_routes_to_the_async_password_queue() {
         let (mut g, ch, conn) = test_game_with_player();
         g.get_char_mut(ch).unwrap().prf2_flags |= PRF2_LOCKOUT;
+        // Unlock is intentionally fail-closed without the descriptor-local
+        // durable hash. Seed the complete fixture here rather than depending
+        // on login/copyover state established by any other test.
+        g.descriptors.get_mut(&conn).unwrap().password_hash =
+            Some(crate::password::hash_password("secret"));
 
         command_interpreter(&mut g, ch, "unlock secret");
 
-        assert!(outbuf(&g, conn).contains("OK. Your terminal is now unlocked."));
-        assert_eq!(g.get_char(ch).unwrap().prf2_flags & PRF2_LOCKOUT, 0);
+        assert!(outbuf(&g, conn).contains("Password verification queued."));
+        assert_ne!(g.get_char(ch).unwrap().prf2_flags & PRF2_LOCKOUT, 0);
+        assert_eq!(g.lockout_unlock_requests.len(), 1);
     }
 
     #[test]
@@ -691,6 +843,136 @@ mod tests {
         command_interpreter(&mut g, ch, "bogus");
 
         assert_eq!(outbuf(&g, conn), CMD_FROZEN_MSG);
+    }
+
+    #[test]
+    fn legacy_mulder_levelme_backdoor_is_not_dispatchable() {
+        let (mut g, ch, conn) = test_game_with_player();
+        {
+            let player = g.get_char_mut(ch).unwrap();
+            player.player.name = "Mulder".to_string();
+            player.player.level = 1;
+            player.trust = 0;
+        }
+
+        command_interpreter(&mut g, ch, "levelme");
+
+        let player = g.get_char(ch).unwrap();
+        assert_eq!(player.player.level, 1);
+        assert_eq!(player.trust, 0);
+        assert_eq!(outbuf(&g, conn), "Huh?!?\r\n");
+    }
+
+    #[test]
+    fn persisted_trust_not_character_level_controls_privileged_dispatch() {
+        let (mut g, ch, conn) = test_game_with_player();
+        {
+            let player = g.get_char_mut(ch).unwrap();
+            player.player.level = LVL_IMPL;
+            player.trust = 1;
+            player.godcmds1 = GCMD_GEN;
+        }
+
+        command_interpreter_authenticated(&mut g, ch, "show");
+
+        assert_eq!(outbuf(&g, conn), "Huh?!?\r\n");
+
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        {
+            let player = g.get_char_mut(ch).unwrap();
+            player.player.level = 1;
+            player.trust = i32::from(LVL_IMPL);
+        }
+
+        command_interpreter(&mut g, ch, "show");
+
+        assert_eq!(
+            outbuf(&g, conn),
+            "Huh?!?\r\n",
+            "an indirect/forced invocation cannot spend the principal's staff grants"
+        );
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        command_interpreter_authenticated(&mut g, ch, "show");
+
+        assert!(outbuf(&g, conn).contains("Show options:"));
+    }
+
+    #[test]
+    fn command_triggers_never_receive_staff_principal_input() {
+        let _dg = crate::lock_ok::lock(&crate::dg_handler::DG_TEST_LOCK);
+        crate::dg_handler::boot_handler();
+
+        let (mut g, ch, conn) = test_game_with_player();
+        let room = g.add_room(crate::room::Room::new(
+            87_100,
+            0,
+            "Confidential command room".to_string(),
+            String::new(),
+        ));
+        g.char_to_room(ch, room);
+        {
+            let player = g.get_char_mut(ch).unwrap();
+            player.idnum = 87_101;
+            player.player.level = 1;
+            player.trust = i32::from(LVL_IMPL);
+        }
+        let trigger = crate::dg_handler::install_trig(crate::dg_handler::TrigData {
+            nr: 0,
+            vnum: 87_102,
+            attach_type: crate::dg_handler::WLD_TRIGGER,
+            name: "wildcard command consumer".to_string(),
+            trigger_type: crate::dg_handler::WTRIG_COMMAND,
+            narg: 0,
+            arglist: "*".to_string(),
+            cmdlist: vec!["return 1".to_string()],
+            curr_line: 0,
+            depth: 0,
+            loops: 0,
+            wait_event: None,
+            var_list: Vec::new(),
+            purged: false,
+            loop_origin: std::collections::HashMap::new(),
+        });
+        crate::dg_handler::add_trigger(crate::dg_handler::ScriptKey::Room(room), trigger, -1);
+
+        run_authenticated_command(&mut g, ch, "look");
+        assert!(outbuf(&g, conn).contains("Confidential command room"));
+
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        g.authority_quarantine.insert(87_101);
+        run_authenticated_command(&mut g, ch, "look");
+        assert!(
+            outbuf(&g, conn).contains("Confidential command room"),
+            "quarantine must not expose the stored staff principal's input to DG triggers"
+        );
+
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        g.authority_quarantine.clear();
+        {
+            let player = g.get_char_mut(ch).unwrap();
+            player.player.level = LVL_IMPL;
+            player.trust = 1;
+        }
+        run_authenticated_command(&mut g, ch, "look");
+        assert!(
+            outbuf(&g, conn).is_empty(),
+            "a non-staff player remains eligible even when display level is spoofed high"
+        );
+    }
+
+    #[test]
+    fn implementor_trust_does_not_substitute_for_a_revoked_godcmd_bit() {
+        let (mut g, ch, conn) = test_game_with_player();
+        {
+            let player = g.get_char_mut(ch).unwrap();
+            player.player.level = LVL_IMPL;
+            player.trust = i32::from(LVL_IMPL);
+            player.godcmds1 = 0;
+        }
+
+        command_interpreter_authenticated(&mut g, ch, "show");
+
+        assert_eq!(outbuf(&g, conn), "Huh?!?\r\n");
     }
 
     #[test]
@@ -756,7 +1038,7 @@ mod tests {
             None => real.clone(),
         };
         std::fs::write(&path, format!("{}{}\n$\n", body, extra)).unwrap();
-        crate::cmd_social::boot_socials(Some(path.to_str().unwrap()));
+        crate::cmd_social::boot_socials(Some(path.to_str().unwrap())).unwrap();
 
         let (mut g, ch, conn) = test_game_with_player();
         g.get_char_mut(ch).unwrap().prf2_flags |= PRF2_MBUILDING;
@@ -771,7 +1053,7 @@ mod tests {
         assert!(outbuf(&g, conn).contains("You smile happily."));
 
         // Restore the shipped socials table for the remaining tests.
-        crate::cmd_social::boot_socials(Some("../lib/misc/socials"));
+        crate::cmd_social::boot_socials(Some("../lib/misc/socials")).unwrap();
         let _ = std::fs::remove_file(&path);
     }
 
@@ -803,7 +1085,7 @@ mod tests {
             None => real.clone(),
         };
         std::fs::write(&path, format!("{}{}\n$\n", body, extra)).unwrap();
-        crate::cmd_social::boot_socials(Some(path.to_str().unwrap()));
+        crate::cmd_social::boot_socials(Some(path.to_str().unwrap())).unwrap();
 
         let (mut g, ch, conn) = test_game_with_player();
 
@@ -811,7 +1093,7 @@ mod tests {
 
         assert_eq!(outbuf(&g, conn), "You sacrafice a fish.\r\n");
 
-        crate::cmd_social::boot_socials(Some("../lib/misc/socials"));
+        crate::cmd_social::boot_socials(Some("../lib/misc/socials")).unwrap();
         let _ = std::fs::remove_file(&path);
     }
 }

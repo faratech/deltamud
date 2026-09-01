@@ -36,7 +36,10 @@ use crate::act::{ActArg, To, act};
 use crate::character::Character;
 use crate::flags::AFF_CHARM;
 use crate::handler::isname;
-use crate::interpreter::{command_interpreter, is_abbrev, one_argument};
+use crate::interpreter::{
+    authenticated_input_authority, command_interpreter, indirect_command_target_is_forceable,
+    is_abbrev, one_argument,
+};
 use crate::object::{ObjLoc, WearFlags};
 use crate::state::GameState;
 use crate::types::*;
@@ -81,25 +84,41 @@ fn mob_log(g: &GameState, mob: CharId, msg: &str) {
 // ---------------------------------------------------------------------------
 // MOB_OR_IMPL(ch): permitted to run m* commands?  (dg_mobcmd.c macro)
 //   IS_NPC(ch) && (!ch->desc || GET_LEVEL(ch->desc->original) >= LVL_IMPL)
-// In the Rust port a switched immortal keeps is_npc=false on their PC record
-// and possesses the mob; we model the relevant case directly: a real NPC is
-// always allowed, and a connected PC is allowed only at implementor level.
+//
+// The static command table retains the C-visible level-zero m* rows, so this is
+// the security boundary for a descriptor-controlled invocation. Display level
+// is gameplay state and must never authorize these world-mutating commands.
+// A genuine descriptorless NPC may execute its script; a live descriptor may
+// do so only for the exact authenticated input/body relationship of an
+// Implementor principal. Indirect/forced calls, quarantined authority, and
+// malformed descriptor aliases fail closed.
 // ---------------------------------------------------------------------------
-fn mob_or_impl(g: &GameState, ch: CharId) -> bool {
-    match g.get_char(ch) {
-        Some(c) => {
-            if c.is_npc {
-                // A real mob: allowed unless a (switched) descriptor below IMPL
-                // is driving it. NPC records never carry a PC desc here, so a
-                // bare NPC qualifies.
-                c.desc.is_none() || c.player.level >= LVL_IMPL
-            } else {
-                // A switched-in PC body: only implementors may script.
-                c.player.level >= LVL_IMPL
-            }
-        }
-        None => false,
+fn authenticated_impl_input(g: &GameState, ch: CharId) -> bool {
+    let Some(actor) = g.get_char(ch) else {
+        return false;
+    };
+    let Some(authority) = authenticated_input_authority(g, ch) else {
+        return false;
+    };
+    if authority.authority != i32::from(LVL_IMPL) || !(authority.principal == ch || actor.is_npc) {
+        return false;
     }
+    g.get_char(authority.principal)
+        .is_some_and(|principal| !g.authority_quarantine.contains(&principal.idnum))
+}
+
+fn mob_or_impl(g: &GameState, ch: CharId) -> bool {
+    let Some(actor) = g.get_char(ch) else {
+        return false;
+    };
+    if actor.is_npc && actor.desc.is_none() {
+        return g.principal_authority(ch).is_some_and(|authority| {
+            !authority.principal_is_player
+                && authority.principal == ch
+                && authority.descriptor.is_none()
+        });
+    }
+    actor.desc.is_some() && authenticated_impl_input(g, ch)
 }
 
 /// C: `if (AFF_FLAGGED(ch, AFF_CHARM)) return;`
@@ -109,14 +128,14 @@ fn is_charmed(g: &GameState, ch: CharId) -> bool {
         .unwrap_or(false)
 }
 
-/// C: the extra implementor gate several commands carry —
-/// `if (ch->desc && GET_LEVEL(ch->desc->original) < LVL_IMPL) return;`
-/// True means "blocked" (a switched mortal cannot run this privileged command).
+/// C's extra implementor check on the more destructive m* commands. The shared
+/// entry gate above already enforces it, but keep the command-local guard and
+/// make it consult the same authenticated principal instead of body level.
 fn blocked_by_desc_level(g: &GameState, ch: CharId) -> bool {
-    match g.get_char(ch) {
-        Some(c) => c.desc.is_some() && c.player.level < LVL_IMPL,
-        None => true,
-    }
+    let Some(character) = g.get_char(ch) else {
+        return true;
+    };
+    character.desc.is_some() && !authenticated_impl_input(g, ch)
 }
 
 // ---------------------------------------------------------------------------
@@ -1073,10 +1092,7 @@ fn do_mteleport(g: &mut GameState, ch: CharId, argument: &str) {
         }
         let people = g.room(here).people.clone();
         for vict in people {
-            if g.get_char(vict)
-                .map(|c| c.player.level < LVL_IMMORT)
-                .unwrap_or(false)
-            {
+            if crate::interpreter::indirect_command_target_is_forceable(g, vict) {
                 g.char_from_room(vict);
                 g.char_to_room(vict, target);
             }
@@ -1107,10 +1123,7 @@ fn do_mteleport(g: &mut GameState, ch: CharId, argument: &str) {
                 }
             }
         };
-        if g.get_char(vict)
-            .map(|c| c.player.level < LVL_IMMORT)
-            .unwrap_or(false)
-        {
+        if crate::interpreter::indirect_command_target_is_forceable(g, vict) {
             g.char_from_room(vict);
             g.char_to_room(vict, target);
         }
@@ -1153,7 +1166,9 @@ fn do_mforce(g: &mut GameState, ch: CharId, argument: &str) {
                 Some(c) => {
                     // i->character && !i->connected — a playing PC; mobs have no
                     // descriptor so this naturally restricts to players.
-                    c.desc.is_some() && c.player.level < ch_level && c.player.level < LVL_IMMORT
+                    c.desc.is_some()
+                        && c.player.level < ch_level
+                        && indirect_command_target_is_forceable(g, vch)
                 }
                 None => false,
             };
@@ -1187,10 +1202,7 @@ fn do_mforce(g: &mut GameState, ch: CharId, argument: &str) {
             mob_log(g, ch, "mforce: forcing self");
             return;
         }
-        if g.get_char(victim)
-            .map(|c| c.player.level < LVL_IMMORT)
-            .unwrap_or(false)
-        {
+        if indirect_command_target_is_forceable(g, victim) {
             command_interpreter(g, victim, command);
         }
     }
@@ -1759,6 +1771,40 @@ fn stop_fighting(g: &mut GameState, ch: CharId) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::connection::{ConState, Descriptor};
+
+    fn connected_player(
+        g: &mut GameState,
+        conn: ConnId,
+        name: &str,
+        level: Level,
+        trust: i32,
+    ) -> CharId {
+        let mut player = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        player.player.level = level;
+        player.trust = trust;
+        player.idnum = conn.0 as i64;
+        player.desc = Some(conn);
+        let player = g.create_char(player);
+        let mut descriptor = Descriptor::new(conn, "dg-mobcmd.test".to_string());
+        descriptor.state = ConState::Playing;
+        descriptor.character = Some(player);
+        g.descriptors.insert(conn, descriptor);
+        player
+    }
+
+    fn target_player(g: &mut GameState) -> CharId {
+        let mut target = Character::new_player("Victim".to_string(), Class::Warrior, Race::Human);
+        target.idnum = 9_999;
+        g.create_char(target)
+    }
+
+    fn carried_gold(g: &GameState, ch: CharId) -> i32 {
+        g.get_char(ch)
+            .map(|character| character.points.gold)
+            .unwrap_or(0)
+    }
 
     #[test]
     fn dg_target_tokenizer_never_slices_a_multibyte_scalar() {
@@ -1776,5 +1822,126 @@ mod tests {
         assert_eq!(parsed.toks.len(), 1);
         assert_eq!(parsed.toks[0].1, "Ġtarget".to_ascii_lowercase());
         assert_eq!(parsed.literals, vec![String::new(), " waves".to_string()]);
+    }
+
+    #[test]
+    fn display_level_does_not_authorize_direct_mob_commands() {
+        let mut g = GameState::new(Config::default());
+        let actor = connected_player(&mut g, ConnId(1), "Display", LVL_IMPL, 1);
+        let victim = target_player(&mut g);
+
+        crate::interpreter::run_authenticated_command(&mut g, actor, "mgold Victim 50");
+
+        assert_eq!(carried_gold(&g, victim), 0);
+        assert!(g.descriptors[&ConnId(1)].outbuf.contains("Huh?!?"));
+    }
+
+    #[test]
+    fn implementor_mob_command_requires_direct_authenticated_input() {
+        let mut g = GameState::new(Config::default());
+        let actor = connected_player(&mut g, ConnId(2), "Trusted", 1, i32::from(LVL_IMPL));
+        let victim = target_player(&mut g);
+
+        command_interpreter(&mut g, actor, "mgold Victim 50");
+        assert_eq!(carried_gold(&g, victim), 0);
+
+        crate::interpreter::run_authenticated_command(&mut g, actor, "mgold Victim 50");
+        assert_eq!(carried_gold(&g, victim), 50);
+
+        let idnum = g.get_char(actor).unwrap().idnum;
+        g.authority_quarantine.insert(idnum);
+        crate::interpreter::run_authenticated_command(&mut g, actor, "mgold Victim 50");
+        assert_eq!(carried_gold(&g, victim), 50);
+    }
+
+    #[test]
+    fn switched_implementor_and_descriptorless_npc_keep_script_access() {
+        let mut g = GameState::new(Config::default());
+        let victim = target_player(&mut g);
+
+        let mut script_mob = Character::new_npc(7_001);
+        script_mob.player.name = "scriptmob".to_string();
+        let script_mob = g.create_char(script_mob);
+        assert!(dispatch_mob_command(
+            &mut g,
+            script_mob,
+            "mgold",
+            "Victim 25"
+        ));
+        assert_eq!(carried_gold(&g, victim), 25);
+
+        let principal = connected_player(&mut g, ConnId(3), "Root", 1, i32::from(LVL_IMPL));
+        let mut vessel = Character::new_npc(7_002);
+        vessel.player.name = "vessel".to_string();
+        vessel.desc = Some(ConnId(3));
+        let vessel = g.create_char(vessel);
+        g.get_char_mut(principal).unwrap().desc = None;
+        {
+            let descriptor = g.descriptors.get_mut(&ConnId(3)).unwrap();
+            descriptor.character = Some(vessel);
+            descriptor.original = Some(principal);
+        }
+
+        crate::interpreter::run_authenticated_command(&mut g, vessel, "mgold Victim 25");
+        assert_eq!(carried_gold(&g, victim), 50);
+    }
+
+    #[test]
+    fn malformed_descriptor_alias_cannot_invoke_mob_commands() {
+        let mut g = GameState::new(Config::default());
+        let actor = connected_player(&mut g, ConnId(4), "Root", 1, i32::from(LVL_IMPL));
+        let victim = target_player(&mut g);
+        let mut duplicate = Descriptor::new(ConnId(5), "dg-mobcmd.test".to_string());
+        duplicate.state = ConState::Playing;
+        duplicate.original = Some(actor);
+        g.descriptors.insert(ConnId(5), duplicate);
+
+        crate::interpreter::run_authenticated_command(&mut g, actor, "mgold Victim 50");
+
+        assert_eq!(carried_gold(&g, victim), 0);
+    }
+
+    #[test]
+    fn mteleport_staff_immunity_uses_principal_trust_and_quarantine() {
+        let mut g = GameState::new(Config::default());
+        let source = g.add_room(crate::room::Room::new(
+            87_200,
+            0,
+            "Source".to_string(),
+            String::new(),
+        ));
+        let destination = g.add_room(crate::room::Room::new(
+            87_201,
+            0,
+            "Destination".to_string(),
+            String::new(),
+        ));
+        let mut script_mob = Character::new_npc(87_202);
+        script_mob.player.name = "teleporter".to_string();
+        let script_mob = g.create_char(script_mob);
+        let staff = connected_player(&mut g, ConnId(87_203), "Staff", 1, i32::from(LVL_IMPL));
+        let spoofed = connected_player(&mut g, ConnId(87_204), "Spoofed", LVL_IMPL, 1);
+        let quarantined = connected_player(
+            &mut g,
+            ConnId(87_205),
+            "Quarantined",
+            1,
+            i32::from(LVL_IMPL),
+        );
+        g.authority_quarantine.insert(87_205);
+        for character in [script_mob, staff, spoofed, quarantined] {
+            g.char_to_room(character, source);
+        }
+
+        assert!(dispatch_mob_command(
+            &mut g,
+            script_mob,
+            "mteleport",
+            "all 87201"
+        ));
+
+        assert_eq!(g.get_char(staff).unwrap().in_room, Some(source));
+        assert_eq!(g.get_char(quarantined).unwrap().in_room, Some(source));
+        assert_eq!(g.get_char(spoofed).unwrap().in_room, Some(destination));
     }
 }

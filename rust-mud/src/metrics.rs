@@ -9,12 +9,14 @@
 // The HTTP exposition is hand-rolled Prometheus text format (no prometheus
 // crate, no hyper/axum) to keep the dependency surface at zero new crates.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 /// All MUD observability counters. Gauges and monotonic counters share the
 /// struct; `render_prometheus` labels each with the correct `# TYPE`.
 pub struct Metrics {
+    /// True after database, world, and player-index boot have completed.
+    boot_complete: AtomicBool,
     /// Current number of in-game (Playing) players. Gauge.
     pub players: AtomicU64,
     /// Total TCP connections accepted since boot. Monotonic counter.
@@ -39,6 +41,9 @@ pub struct Metrics {
     pub objs: AtomicU64,
     /// Heartbeat pulse counter (mirrors GameState.pulse). Monotonic counter.
     pub pulse: AtomicU64,
+    /// Milliseconds since process start when the latest pulse was published,
+    /// stored as elapsed+1 so zero remains the unambiguous "never pulsed" value.
+    last_pulse_elapsed_ms: AtomicU64,
     /// Process start, for uptime. Not exported directly; see `uptime_seconds`.
     start_instant: Instant,
 }
@@ -46,6 +51,7 @@ pub struct Metrics {
 impl Metrics {
     pub fn new() -> Self {
         Metrics {
+            boot_complete: AtomicBool::new(false),
             players: AtomicU64::new(0),
             connections_total: AtomicU64::new(0),
             commands_total: AtomicU64::new(0),
@@ -58,6 +64,7 @@ impl Metrics {
             mobs: AtomicU64::new(0),
             objs: AtomicU64::new(0),
             pulse: AtomicU64::new(0),
+            last_pulse_elapsed_ms: AtomicU64::new(0),
             start_instant: Instant::now(),
         }
     }
@@ -103,6 +110,50 @@ impl Metrics {
     #[inline]
     pub fn set_pulse(&self, p: u64) {
         self.pulse.store(p, Ordering::Relaxed);
+        let elapsed = self
+            .start_instant
+            .elapsed()
+            .as_millis()
+            .min((u64::MAX - 1) as u128) as u64;
+        self.last_pulse_elapsed_ms
+            .store(elapsed.saturating_add(1), Ordering::Relaxed);
+    }
+
+    /// Mark the immutable boot prerequisites complete. Readiness additionally
+    /// requires at least one recent heartbeat, so setting this before the Game
+    /// task begins cannot produce a false-positive ready response.
+    pub fn mark_boot_complete(&self) {
+        self.boot_complete.store(true, Ordering::Release);
+    }
+
+    /// Revoke readiness before a fatal process-level invariant failure begins
+    /// shutdown. This closes the brief window in which the heartbeat is still
+    /// recent even though the game task has already been aborted.
+    pub fn mark_not_ready(&self) {
+        self.boot_complete.store(false, Ordering::Release);
+    }
+
+    /// Return the latest heartbeat age when the process is ready. A stale or
+    /// never-started heartbeat is not ready even though the HTTP task is alive.
+    pub fn readiness(&self, max_pulse_age: Duration) -> Result<Duration, &'static str> {
+        if !self.boot_complete.load(Ordering::Acquire) {
+            return Err("boot incomplete");
+        }
+        let encoded = self.last_pulse_elapsed_ms.load(Ordering::Relaxed);
+        if encoded == 0 || self.pulse.load(Ordering::Relaxed) == 0 {
+            return Err("heartbeat not started");
+        }
+        let last_ms = encoded - 1;
+        let now_ms = self
+            .start_instant
+            .elapsed()
+            .as_millis()
+            .min(u64::MAX as u128) as u64;
+        let age = Duration::from_millis(now_ms.saturating_sub(last_ms));
+        if age > max_pulse_age {
+            return Err("heartbeat stale");
+        }
+        Ok(age)
     }
 
     #[inline]
@@ -153,6 +204,11 @@ impl Metrics {
         let mobs = self.mobs.load(Ordering::Relaxed);
         let objs = self.objs.load(Ordering::Relaxed);
         let pulse = self.pulse.load(Ordering::Relaxed);
+        let ready = u8::from(self.readiness(Duration::from_secs(2)).is_ok());
+        let heartbeat_age_ms = self
+            .readiness(Duration::from_secs(u64::MAX))
+            .map(|age| age.as_millis().min(u64::MAX as u128) as u64)
+            .unwrap_or(u64::MAX);
         let uptime = self.uptime_seconds();
 
         let mut s = String::with_capacity(1024);
@@ -222,6 +278,17 @@ impl Metrics {
         s.push_str("# TYPE deltamud_pulse counter\n");
         s.push_str(&format!("deltamud_pulse {}\n", pulse));
 
+        s.push_str("# HELP deltamud_ready Whether boot completed and the heartbeat is recent.\n");
+        s.push_str("# TYPE deltamud_ready gauge\n");
+        s.push_str(&format!("deltamud_ready {}\n", ready));
+
+        s.push_str("# HELP deltamud_heartbeat_age_milliseconds Age of the most recently published heartbeat; u64 max means unavailable.\n");
+        s.push_str("# TYPE deltamud_heartbeat_age_milliseconds gauge\n");
+        s.push_str(&format!(
+            "deltamud_heartbeat_age_milliseconds {}\n",
+            heartbeat_age_ms
+        ));
+
         s.push_str("# HELP deltamud_uptime_seconds Seconds since process start.\n");
         s.push_str("# TYPE deltamud_uptime_seconds counter\n");
         s.push_str(&format!("deltamud_uptime_seconds {}\n", uptime));
@@ -233,5 +300,31 @@ impl Metrics {
 impl Default for Metrics {
     fn default() -> Self {
         Metrics::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn readiness_requires_boot_and_a_recent_pulse() {
+        let metrics = Metrics::new();
+        assert_eq!(
+            metrics.readiness(Duration::from_secs(2)),
+            Err("boot incomplete")
+        );
+        metrics.mark_boot_complete();
+        assert_eq!(
+            metrics.readiness(Duration::from_secs(2)),
+            Err("heartbeat not started")
+        );
+        metrics.set_pulse(1);
+        assert!(metrics.readiness(Duration::from_secs(2)).is_ok());
+        metrics.mark_not_ready();
+        assert_eq!(
+            metrics.readiness(Duration::from_secs(2)),
+            Err("boot incomplete")
+        );
     }
 }

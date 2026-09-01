@@ -22,4 +22,4 @@ if [ "${1:-}" = "--audit" ]; then
     ARGS+=(--nocapture)
 fi
 
-MUD_LIB_PATH="$LIB" cargo test "${ARGS[@]}"
+MUD_LIB_PATH="$LIB" cargo test --locked "${ARGS[@]}"

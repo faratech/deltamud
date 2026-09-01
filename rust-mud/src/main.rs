@@ -103,7 +103,7 @@ use anyhow::{Context, Result, bail};
 use config::Config;
 use log::{info, warn};
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -134,23 +134,25 @@ const DEFAULT_CONN_WINDOW_MS: u64 = 1000;
 const METRICS_MAX_CONNECTIONS: usize = 32;
 const METRICS_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const METRICS_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
-const PROCESS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+const READY_MAX_PULSE_AGE: Duration = Duration::from_secs(2);
+/// A live MySQL-backed server owns a dedicated advisory-lock session. Polling
+/// bounds the interval in which a broken DB connection could leave the server
+/// running after MySQL has released its process-lifetime exclusion lease.
+const RUNTIME_LEASE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+const RUNTIME_LEASE_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+/// EX_TEMPFAIL is reserved here as the clean, explicit "restart me" status.
+/// Normal operator/service stops return zero; unexpected errors return one.
+const PROCESS_RESTART_EXIT_CODE: u8 = 75;
 
-async fn await_game_shutdown(
-    game_handle: &mut tokio::task::JoinHandle<Result<()>>,
-    deadline: Duration,
-) -> Result<()> {
-    match timeout(deadline, &mut *game_handle).await {
-        Ok(joined) => joined.context("game task failed to join")?,
-        Err(_) => {
-            game_handle.abort();
-            let _ = (&mut *game_handle).await;
-            bail!(
-                "game task exceeded the {} second shutdown deadline and was aborted",
-                deadline.as_secs_f64()
-            )
-        }
+fn process_exit_status(disposition: state::ProcessDisposition) -> u8 {
+    match disposition {
+        state::ProcessDisposition::Stop => 0,
+        state::ProcessDisposition::Restart => PROCESS_RESTART_EXIT_CODE,
     }
+}
+
+fn process_exit_code(disposition: state::ProcessDisposition) -> std::process::ExitCode {
+    std::process::ExitCode::from(process_exit_status(disposition))
 }
 
 #[derive(Clone, Copy)]
@@ -211,8 +213,91 @@ fn parse_copyover_args_from(args: &[String]) -> Result<Option<CopyoverArgs>> {
     Ok(Some(CopyoverArgs { port, listener_fd }))
 }
 
-fn parse_copyover_args() -> Result<Option<CopyoverArgs>> {
-    parse_copyover_args_from(&std::env::args().collect::<Vec<_>>())
+fn parse_bootstrap_implementor_from(args: &[String]) -> Result<Option<String>> {
+    let positions: Vec<usize> = args
+        .iter()
+        .enumerate()
+        .filter_map(|(index, arg)| (arg == "--bootstrap-implementor").then_some(index))
+        .collect();
+    let Some(&position) = positions.first() else {
+        return Ok(None);
+    };
+    if positions.len() != 1 {
+        bail!("bootstrap arguments contain duplicate --bootstrap-implementor flags");
+    }
+    if args.iter().any(|arg| arg == "--copyover") {
+        bail!("bootstrap and copyover modes cannot be combined");
+    }
+    let name = args
+        .get(position + 1)
+        .ok_or_else(|| anyhow::anyhow!("--bootstrap-implementor requires a character name"))?;
+    if !(2..=20).contains(&name.len()) || !name.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        bail!("bootstrap character name must be 2-20 ASCII letters");
+    }
+    if args.get(position + 2).is_some() {
+        bail!("unexpected arguments after bootstrap character name");
+    }
+    Ok(Some(name.clone()))
+}
+
+fn parse_migrate_from(args: &[String]) -> Result<bool> {
+    let count = args
+        .iter()
+        .filter(|arg| arg.as_str() == "--migrate")
+        .count();
+    if count == 0 {
+        return Ok(false);
+    }
+    if count != 1 {
+        bail!("migration arguments contain duplicate --migrate flags");
+    }
+    if args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--copyover" | "--bootstrap-implementor"))
+    {
+        bail!("migration, bootstrap, and copyover modes are mutually exclusive");
+    }
+    if args.len() != 2 {
+        bail!("--migrate does not accept additional arguments");
+    }
+    Ok(true)
+}
+
+fn parse_metrics_addr(port: Option<&str>, bind: Option<&str>) -> Result<Option<SocketAddr>> {
+    let Some(port) = port else {
+        if bind.is_some() {
+            bail!("MUD_METRICS_BIND requires MUD_METRICS_PORT");
+        }
+        return Ok(None);
+    };
+    let port = port
+        .parse::<u16>()
+        .context("MUD_METRICS_PORT must be a nonzero u16")?;
+    if port == 0 {
+        bail!("MUD_METRICS_PORT must be a nonzero u16");
+    }
+    let bind = bind.unwrap_or("127.0.0.1");
+    let ip = bind
+        .parse::<IpAddr>()
+        .context("MUD_METRICS_BIND must be a valid IPv4 or IPv6 address")?;
+    Ok(Some(SocketAddr::new(ip, port)))
+}
+
+async fn bootstrap_implementor(db: &Arc<dyn DatabaseInterface>, name: &str) -> Result<()> {
+    match db
+        .bootstrap_implementor(name)
+        .await
+        .with_context(|| format!("bootstrap Implementor identity {name}"))?
+    {
+        ImplementorBootstrapOutcome::Promoted => Ok(()),
+        ImplementorBootstrapOutcome::AlreadyExists(implementor) => bail!(
+            "an Implementor already exists ({}); use authenticated in-game administration",
+            implementor
+        ),
+        ImplementorBootstrapOutcome::TargetNotFound => {
+            bail!("bootstrap character {name} is not a durable player character")
+        }
+    }
 }
 
 /// Verify every durable player row before socket adoption. Only an explicitly
@@ -343,12 +428,31 @@ where
                 "text/plain; version=0.0.4",
                 metrics.render_prometheus(),
             )
+        } else if path == Some("/live") || path.is_some_and(|path| path.starts_with("/live?")) {
+            ("200 OK", "text/plain; version=0.0.4", "live\n".to_string())
         } else if path == Some("/health") || path.is_some_and(|path| path.starts_with("/health?")) {
             (
                 "200 OK",
                 "text/plain; version=0.0.4",
                 format!("ok\nplayers {}\n", metrics.players_now()),
             )
+        } else if path == Some("/ready") || path.is_some_and(|path| path.starts_with("/ready?")) {
+            match metrics.readiness(READY_MAX_PULSE_AGE) {
+                Ok(age) => (
+                    "200 OK",
+                    "text/plain; version=0.0.4",
+                    format!(
+                        "ready\npulse {}\nage_ms {}\n",
+                        metrics.pulse.load(std::sync::atomic::Ordering::Relaxed),
+                        age.as_millis()
+                    ),
+                ),
+                Err(reason) => (
+                    "503 Service Unavailable",
+                    "text/plain; version=0.0.4",
+                    format!("not ready: {reason}\n"),
+                ),
+            }
         } else if path == Some("/api/who") || path.is_some_and(|path| path.starts_with("/api/who?"))
         {
             let snapshot = who_snapshot.read().map(|s| s.clone()).unwrap_or_default();
@@ -504,11 +608,81 @@ fn enable_tcp_keepalive(fd: RawFd) {
 /// C sysdep.h MAX_RAW_INPUT_LENGTH: the per-connection raw input bound.
 pub const MAX_RAW_INPUT_LENGTH: usize = 2048;
 
+/// Result of the one-time, offline administrative bootstrap. The concrete
+/// database owns the check-and-promote critical section so two processes
+/// cannot both pass an application-side "no Implementor" check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImplementorBootstrapOutcome {
+    Promoted,
+    AlreadyExists(String),
+    TargetNotFound,
+}
+
+/// Result of a targeted credential write. Login-time legacy upgrades use the
+/// hash-mismatch distinction as a compare-and-swap guard so they never replace
+/// a password another session changed after authentication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasswordHashUpdateOutcome {
+    Updated,
+    IdentityMismatch,
+    CurrentHashMismatch,
+}
+
+/// The complete durable command-authority state changed by `advance`.
+/// Keeping this snapshot narrow lets the database compare every security-
+/// relevant precondition without rewriting unrelated Character fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerAuthorityState {
+    pub level: u8,
+    pub trust: i32,
+    pub exp: i64,
+    pub godcmds1: i64,
+    pub godcmds2: i64,
+    pub godcmds3: i64,
+    pub godcmds4: i64,
+}
+
+/// Result of a targeted authority compare-and-swap. A changed precondition is
+/// an ordinary race outcome: the caller must not apply its stale replacement
+/// to the live Character.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorityUpdateOutcome {
+    Updated,
+    PreconditionsChanged,
+}
+
+/// Exact permission values granted by the historical `do_advance` path when a
+/// mortal reaches Implementor. Shared by the durable and mock targeted update
+/// implementations so bootstrap never needs a broad Character save.
+pub(crate) fn implementor_command_grants() -> (i64, i64, i64, i64) {
+    let (mut godcmds1, mut godcmds2, mut godcmds3, mut godcmds4) = (0, 0, 0, 0);
+    gcmd::grant_advance(
+        &mut godcmds1,
+        &mut godcmds2,
+        &mut godcmds3,
+        &mut godcmds4,
+        types::LVL_IMPL,
+        types::LVL_IMMORT,
+        types::LVL_IMPL,
+    );
+    (godcmds1, godcmds2, godcmds3, godcmds4)
+}
+
 #[async_trait::async_trait]
 pub trait DatabaseInterface: Send + Sync {
     async fn init_tables(&self) -> Result<()>;
+    async fn verify_schema(&self) -> Result<()>;
     async fn player_exists(&self, name: &str) -> Result<bool>;
     async fn create_player(&self, character: &character::Character, password: &str) -> Result<i64>;
+    /// Create a player using a freshly generated, policy-compliant Argon2id
+    /// PHC string. The caller owns hashing so interactive creation never keeps
+    /// plaintext through the remaining character-creation questionnaire or
+    /// performs the KDF twice.
+    async fn create_player_with_password_hash(
+        &self,
+        character: &character::Character,
+        password_hash: &str,
+    ) -> Result<i64>;
     async fn load_player(&self, name: &str) -> Result<character::Character>;
     async fn save_player(&self, character: &character::Character) -> Result<()>;
     async fn save_player_with_host(
@@ -531,10 +705,40 @@ pub trait DatabaseInterface: Send + Sync {
     /// Narrow identity read used to resolve an indeterminate rename/rollback
     /// error without loading the player's child rows.
     async fn player_name_by_id(&self, idnum: i64) -> Result<Option<String>>;
+    /// Read the exact durable state which governs a player's command authority,
+    /// without loading the broad Character row or its child tables.
+    async fn player_authority_by_id(
+        &self,
+        idnum: i64,
+    ) -> Result<Option<(String, PlayerAuthorityState)>>;
+    /// Atomically replace only command-authority fields when durable identity
+    /// and every expected authority value still match.
+    async fn update_authority_if_current(
+        &self,
+        idnum: i64,
+        expected_name: &str,
+        expected: PlayerAuthorityState,
+        replacement: PlayerAuthorityState,
+    ) -> Result<AuthorityUpdateOutcome>;
+    /// Update only the credential column when both durable identity fields are
+    /// still current. Supplying `expected_current_hash` adds an exact CAS guard;
+    /// `None` intentionally gives interactive/admin changes last-writer-wins
+    /// semantics within that stable identity.
+    async fn update_password_hash(
+        &self,
+        idnum: i64,
+        expected_name: &str,
+        expected_current_hash: Option<&str>,
+        password_hash: &str,
+    ) -> Result<PasswordHashUpdateOutcome>;
     async fn verify_password(&self, name: &str, password: &str) -> Result<bool>;
     /// The stored password hash, for the automatic legacy-hash upgrade at
     /// login (C interpreter.c:1914-1952 password_needs_upgrade path) (#219).
     async fn get_password_hash(&self, name: &str) -> Result<Option<String>>;
+    /// Serialize the one-time no-existing-Implementor check with the narrow
+    /// identity promotion in the database's own scope, excluding the live
+    /// server and every other offline maintenance mode on the same schema.
+    async fn bootstrap_implementor(&self, name: &str) -> Result<ImplementorBootstrapOutcome>;
     async fn delete_deleted_players(&self) -> Result<u64>;
     /// Delete only the already-audited/tombstoned identities supplied by
     /// pfileclean. The explicit ids prevent a row flagged after sidecar
@@ -548,7 +752,7 @@ pub trait DatabaseInterface: Send + Sync {
     /// C clan.c:388-405 lower_entire_clan: set clan_rank = 1 for every
     /// member of `clan` whose rank != -1 (#165).
     async fn clan_lower_ranks(&self, clan: i32) -> Result<()>;
-    /// Every player's index row {idnum,name,level,last_logon,host} for the
+    /// Every player's index row {idnum,name,level,trust,last_logon,host} for the
     /// boot-time player_table build (C build_player_index, db.c).
     async fn list_players(&self) -> Result<Vec<crate::state::PlayerIndex>>;
 }
@@ -558,11 +762,22 @@ impl DatabaseInterface for database::Database {
     async fn init_tables(&self) -> Result<()> {
         self.init_tables().await
     }
+    async fn verify_schema(&self) -> Result<()> {
+        self.verify_schema().await
+    }
     async fn player_exists(&self, name: &str) -> Result<bool> {
         self.player_exists(name).await
     }
     async fn create_player(&self, c: &character::Character, p: &str) -> Result<i64> {
         self.create_player(c, p).await
+    }
+    async fn create_player_with_password_hash(
+        &self,
+        c: &character::Character,
+        password_hash: &str,
+    ) -> Result<i64> {
+        self.create_player_with_password_hash(c, password_hash)
+            .await
     }
     async fn load_player(&self, name: &str) -> Result<character::Character> {
         self.load_player(name).await
@@ -585,11 +800,40 @@ impl DatabaseInterface for database::Database {
     async fn player_name_by_id(&self, idnum: i64) -> Result<Option<String>> {
         self.player_name_by_id(idnum).await
     }
+    async fn player_authority_by_id(
+        &self,
+        idnum: i64,
+    ) -> Result<Option<(String, PlayerAuthorityState)>> {
+        self.player_authority_by_id(idnum).await
+    }
+    async fn update_authority_if_current(
+        &self,
+        idnum: i64,
+        expected_name: &str,
+        expected: PlayerAuthorityState,
+        replacement: PlayerAuthorityState,
+    ) -> Result<AuthorityUpdateOutcome> {
+        self.update_authority_if_current(idnum, expected_name, expected, replacement)
+            .await
+    }
+    async fn update_password_hash(
+        &self,
+        idnum: i64,
+        expected_name: &str,
+        expected_current_hash: Option<&str>,
+        password_hash: &str,
+    ) -> Result<PasswordHashUpdateOutcome> {
+        self.update_password_hash(idnum, expected_name, expected_current_hash, password_hash)
+            .await
+    }
     async fn verify_password(&self, name: &str, p: &str) -> Result<bool> {
         self.verify_password(name, p).await
     }
     async fn get_password_hash(&self, name: &str) -> Result<Option<String>> {
         self.get_password_hash(name).await
+    }
+    async fn bootstrap_implementor(&self, name: &str) -> Result<ImplementorBootstrapOutcome> {
+        self.bootstrap_implementor(name).await
     }
     async fn delete_deleted_players(&self) -> Result<u64> {
         self.delete_deleted_players().await
@@ -611,8 +855,7 @@ impl DatabaseInterface for database::Database {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+async fn run_server() -> Result<state::ProcessDisposition> {
     env_logger::Builder::from_default_env()
         .filter_level(log::LevelFilter::Info)
         .init();
@@ -637,17 +880,20 @@ async fn main() -> Result<()> {
     }));
 
     info!("DeltaMUD (Rust) starting...");
-    let mut config = Config::from_env();
+    let process_args = std::env::args().collect::<Vec<_>>();
+    let bootstrap_name = parse_bootstrap_implementor_from(&process_args)?;
+    let migrate = parse_migrate_from(&process_args)?;
+    let mut config = Config::from_env()?;
 
     // Faithful port of the C `-s` command-line flag (comm.c:272
     // `no_specials = 1`, "Suppressing assignment of special routines.").
     // `-q` is quickboot in C and must not suppress specials.
-    apply_cli_flags(&mut config, std::env::args().skip(1));
+    apply_cli_flags(&mut config, process_args.iter().skip(1).cloned());
 
     // Parse and validate recovery evidence before database/world startup opens
     // more descriptors that a stale numeric fd could otherwise be confused
     // with. The inherited port is authoritative across the exec.
-    let copyover_args = parse_copyover_args()?;
+    let copyover_args = parse_copyover_args_from(&process_args)?;
     if let Some(args) = copyover_args {
         config.port = args.port;
     }
@@ -663,18 +909,60 @@ async fn main() -> Result<()> {
     // can call time_now()/sunlight() and lock in Config::default().lib_path.
     weather::initialize_clock(&config.lib_path);
 
+    let mut runtime_lease = None;
     let raw_db: Arc<dyn DatabaseInterface> = if config.use_mock_db {
         info!("Using in-memory mock database");
         Arc::new(mock_database::MockDatabase::new())
     } else {
         info!("Using MySQL database");
-        Arc::new(database::Database::new(&config.database_url)?)
+        let mysql = Arc::new(database::Database::new(&config.database_url)?);
+        if !migrate && bootstrap_name.is_none() {
+            runtime_lease = Some(
+                timeout(
+                    Duration::from_secs(config.db_timeout_secs),
+                    mysql.acquire_runtime_lease(),
+                )
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "database runtime exclusion lease acquisition timed out after {}s",
+                        config.db_timeout_secs
+                    )
+                })??,
+            );
+            info!("Acquired database runtime exclusion lease");
+        }
+        mysql
     };
     let db: Arc<dyn DatabaseInterface> = Arc::new(database_timeout::TimedDatabase::new(
         raw_db,
         Duration::from_secs(config.db_timeout_secs),
     ));
-    db.init_tables().await?;
+    if migrate {
+        if config.use_mock_db {
+            bail!("--migrate requires the durable MySQL database");
+        }
+        db.init_tables().await?;
+        info!(
+            "Database migrated to schema version {}; server startup intentionally skipped",
+            database::EXPECTED_SCHEMA_VERSION
+        );
+        return Ok(state::ProcessDisposition::Stop);
+    }
+
+    db.verify_schema().await?;
+
+    if let Some(name) = bootstrap_name {
+        if config.use_mock_db {
+            bail!("--bootstrap-implementor requires the durable MySQL database");
+        }
+        bootstrap_implementor(&db, &name).await?;
+        info!(
+            "Promoted {} to Implementor; server startup intentionally skipped",
+            name
+        );
+        return Ok(state::ProcessDisposition::Stop);
+    }
 
     // Build the world.
     let mut state = state::GameState::new(config.clone());
@@ -692,11 +980,23 @@ async fn main() -> Result<()> {
     // call dg_db_scripts::record_proto, which rejects (and logs "non-existant")
     // any trigger vnum not yet in trig_index. C orders index_boot(DB_BOOT_TRG)
     // ahead of WLD/MOB/OBJ for exactly this reason.
+    // Validate the durable OLC journal before any independent legacy loader
+    // consumes an index. An unreadable marker set is a startup error: ignoring
+    // it could expose a zone whose six files were only partly committed.
+    let pending_new_zones = olc::pending_new_zone_publications(&config.lib_path)
+        .context("validate durable new-zone publication gates")?;
+    olc::register_pending_new_zone_publication_blockers(&pending_new_zones);
+    for zone_number in &pending_new_zones {
+        warn!(
+            "New-zone publication {} is incomplete; all of its indexed components will stay hidden until an Implementor retries `zedit new {}`",
+            zone_number, zone_number
+        );
+    }
     dg_scripts::boot_dg_scripts(&config.lib_path);
 
-    if let Err(e) = file_loader::FileLoader::load_world(&mut state, &config.lib_path).await {
-        warn!("World load failed: {} (continuing with whatever loaded)", e);
-    }
+    file_loader::FileLoader::load_world(&mut state, &config.lib_path)
+        .await
+        .context("load world")?;
 
     // Splice the surface ("outside") world-map cells into the room table as real
     // rooms (maputils.c read_map). This MUST come straight after the real world
@@ -712,10 +1012,11 @@ async fn main() -> Result<()> {
 
     // Load socials (CircleMUD boot_social_messages); spliced into command
     // lookup as a fallback since they are not in the static command table.
-    cmd_social::boot_socials(Some(&format!("{}/misc/socials", config.lib_path)));
+    cmd_social::boot_socials(Some(&format!("{}/misc/socials", config.lib_path)))
+        .context("load mandatory social command table")?;
     // db.c:299-300 index_boot(DB_BOOT_HLP) - serve the 73k-line help index
     // to the live `help` command (#232).
-    hedit::boot_help_table(&config.lib_path);
+    hedit::boot_help_table(&config.lib_path).context("load mandatory help table")?;
 
     // Load the combat hit-messages (fight.c load_messages, lib/misc/messages):
     // flavourful per-skill / per-weapon death/hit/miss/god messages.
@@ -806,63 +1107,31 @@ async fn main() -> Result<()> {
     // Game task, served read-only here.
     let who_snapshot = Arc::new(std::sync::RwLock::new(String::new()));
 
-    // Optional metrics/health HTTP endpoint. Disabled unless MUD_METRICS_PORT is
-    // set (no extra listening socket in the default config). Raw-TCP responder —
-    // no web framework, no new crates.
-    if let Ok(mport) = std::env::var("MUD_METRICS_PORT") {
-        match mport.parse::<u16>() {
-            Ok(port) if port > 0 => {
-                // Loopback is the fail-safe default. Operators who explicitly
-                // expose metrics must choose a concrete IP and enforce access
-                // at the host/network boundary; hostnames and wildcard text
-                // are deliberately not accepted here.
-                let bind =
-                    std::env::var("MUD_METRICS_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
-                match bind.parse::<std::net::IpAddr>() {
-                    Ok(ip) => {
-                        let addr = std::net::SocketAddr::new(ip, port);
-                        match TcpListener::bind(&addr).await {
-                            Ok(mlistener) => {
-                                info!("Metrics endpoint listening on {} (/metrics, /health)", addr);
-                                let m = metrics.clone();
-                                let who = who_snapshot.clone();
-                                info!("  (also serving /api/who)");
-                                tokio::spawn(async move { serve_metrics(mlistener, m, who).await });
-                            }
-                            Err(e) => warn!("Could not bind metrics address {}: {}", addr, e),
-                        }
-                    }
-                    Err(error) => {
-                        warn!(
-                            "MUD_METRICS_BIND={bind:?} is not a valid IP ({error}); metrics disabled"
-                        );
-                    }
-                }
-            }
-            _ => warn!(
-                "MUD_METRICS_PORT={:?} is not a valid port; metrics disabled",
-                mport
-            ),
-        }
-    }
+    // Optional metrics/health HTTP endpoint. Invalid explicit configuration or
+    // a bind failure is fatal: the release manager relies on /ready and must
+    // never mistake a running-but-unobservable process for a healthy one.
+    let metrics_port = std::env::var("MUD_METRICS_PORT").ok();
+    let metrics_bind = std::env::var("MUD_METRICS_BIND").ok();
+    let metrics_addr = parse_metrics_addr(metrics_port.as_deref(), metrics_bind.as_deref())?;
+    let metrics_listener = match metrics_addr {
+        Some(addr) => Some((
+            TcpListener::bind(addr)
+                .await
+                .with_context(|| format!("bind metrics endpoint {addr}"))?,
+            addr,
+        )),
+        None => None,
+    };
 
     // Keep a handle to the shared DB for checked copyover preparation. Only an
     // explicitly configured in-memory mock may be re-seeded after exec.
     let db_for_recovery = db.clone();
 
-    let game_metrics = metrics.clone();
-    let game_who = who_snapshot.clone();
-    let mut game_handle = tokio::spawn(async move {
-        let mut game = game::Game::new(state, db);
-        game.set_metrics(game_metrics);
-        game.set_who_snapshot(game_who);
-        game.load_text_files(&lib_path).await;
-        game.prime_zones();
-        // `run` returns only after its graceful shutdown path, or with a real
-        // failure that the process supervisor must propagate rather than
-        // misclassifying as a clean exit.
-        game.run(game_rx).await
-    });
+    let mut game = game::Game::new(state, db);
+    game.set_metrics(metrics.clone());
+    game.set_who_snapshot(who_snapshot.clone());
+    game.load_text_files(&lib_path).await;
+    game.prime_zones();
 
     // Copyover detection (comm.c init_game: `if (!fCopyOver) init_socket(port)`).
     // When re-exec'd by do_copyover, the listener fd was inherited (FD_CLOEXEC
@@ -878,7 +1147,7 @@ async fn main() -> Result<()> {
         std_listener.set_nonblocking(true)?;
         TcpListener::from_std(std_listener)?
     } else {
-        let addr = format!("0.0.0.0:{}", config.port);
+        let addr = std::net::SocketAddr::new(config.bind_ip, config.port);
         let l = TcpListener::bind(&addr).await?;
         info!("Server listening on {}", addr);
         l
@@ -890,6 +1159,37 @@ async fn main() -> Result<()> {
         use std::os::unix::io::AsRawFd;
         state::set_listener_fd(listener.as_raw_fd());
     }
+
+    // World/database boot may be lengthy. Re-prove ownership immediately
+    // before readiness/acceptance so a lease session lost during startup can
+    // never expose a server built concurrently with offline maintenance.
+    if let Some(lease) = runtime_lease.as_mut() {
+        timeout(RUNTIME_LEASE_CHECK_TIMEOUT, lease.verify_owned())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "runtime database exclusion lease pre-readiness check timed out after {}s",
+                    RUNTIME_LEASE_CHECK_TIMEOUT.as_secs_f64()
+                )
+            })??;
+    }
+
+    // World content, database/index state, both configured listeners, and the
+    // Game object are now initialized. Only now may /ready become green.
+    metrics.mark_boot_complete();
+    if let Some((mlistener, addr)) = metrics_listener {
+        info!(
+            "Metrics endpoint listening on {} (/metrics, /live, /ready, /api/who)",
+            addr
+        );
+        let m = metrics.clone();
+        let who = who_snapshot.clone();
+        tokio::spawn(async move { serve_metrics(mlistener, m, who).await });
+    }
+    // `run` returns only after its graceful shutdown path, or with a real
+    // failure that the process supervisor must propagate rather than
+    // misclassifying as a clean exit.
+    let mut game_handle = tokio::spawn(async move { game.run(game_rx).await });
 
     let mut next_conn: u64 = 1;
     let mut client_tasks = tokio::task::JoinSet::new();
@@ -971,13 +1271,20 @@ async fn main() -> Result<()> {
     // Pruned lazily so the map can't grow without bound.
     let mut recent_connects: HashMap<IpAddr, Vec<Instant>> = HashMap::new();
 
-    // SIGTERM stream for the accept loop (the Game task installs its own; both
-    // need to know so the process exits, not just the game loop). On either
-    // signal — or when the game task itself returns (it returns only on its own
-    // graceful shutdown) — break the accept loop and exit the process cleanly.
+    // Main is the sole OS-signal owner. It forwards stop requests through the
+    // Game queue so failed OLC persistence can deliberately abort shutdown and
+    // keep the server online without a process-level timeout killing the task.
     let mut sigterm =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+    let mut external_shutdown_requested = false;
     let mut shutdown_error = None;
+    let mut process_disposition = state::ProcessDisposition::Stop;
+    let mut runtime_lease_tick = tokio::time::interval(RUNTIME_LEASE_CHECK_INTERVAL);
+    runtime_lease_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // `interval` fires immediately; acquisition already proved ownership, so
+    // begin health checks after one real interval instead of issuing a bonus
+    // startup query.
+    runtime_lease_tick.tick().await;
 
     loop {
         let sigterm_fut = async {
@@ -998,30 +1305,42 @@ async fn main() -> Result<()> {
                 }
             },
             _ = tokio::signal::ctrl_c() => {
-                info!("main: received Ctrl-C; waiting for game task to finish saving.");
-                if let Err(error) = await_game_shutdown(
-                    &mut game_handle,
-                    PROCESS_SHUTDOWN_TIMEOUT,
-                ).await {
-                    warn!("graceful shutdown failed: {error:#}");
-                    shutdown_error = Some(error);
+                info!("main: received Ctrl-C; requesting an OLC-safe graceful shutdown.");
+                external_shutdown_requested = true;
+                let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+                if game_tx.send(connection::GameMessage::SystemShutdown { result_tx }).await.is_err() {
+                    warn!("game task command channel closed while forwarding Ctrl-C");
+                } else if matches!(
+                    result_rx.await,
+                    Ok(connection::SystemShutdownResult::Refused)
+                ) {
+                    external_shutdown_requested = false;
                 }
-                break;
+                continue;
             }
             _ = sigterm_fut => {
-                info!("main: received SIGTERM; waiting for game task to finish saving.");
-                if let Err(error) = await_game_shutdown(
-                    &mut game_handle,
-                    PROCESS_SHUTDOWN_TIMEOUT,
-                ).await {
-                    warn!("graceful shutdown failed: {error:#}");
-                    shutdown_error = Some(error);
+                info!("main: received SIGTERM; requesting an OLC-safe graceful shutdown.");
+                external_shutdown_requested = true;
+                let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+                if game_tx.send(connection::GameMessage::SystemShutdown { result_tx }).await.is_err() {
+                    warn!("game task command channel closed while forwarding SIGTERM");
+                } else if matches!(
+                    result_rx.await,
+                    Ok(connection::SystemShutdownResult::Refused)
+                ) {
+                    external_shutdown_requested = false;
                 }
-                break;
+                continue;
             }
             result = &mut game_handle => {
                 match result {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(disposition)) => {
+                        process_disposition = if external_shutdown_requested {
+                            state::ProcessDisposition::Stop
+                        } else {
+                            disposition
+                        };
+                    }
                     Ok(Err(error)) => {
                         warn!("game task ended with an error: {error:#}");
                         shutdown_error = Some(error);
@@ -1036,6 +1355,38 @@ async fn main() -> Result<()> {
             result = client_tasks.join_next(), if !client_tasks.is_empty() => {
                 if let Some(Err(error)) = result {
                     warn!("client task failed: {}", error);
+                }
+                continue;
+            }
+            _ = runtime_lease_tick.tick(), if runtime_lease.is_some() => {
+                let verification = timeout(
+                    RUNTIME_LEASE_CHECK_TIMEOUT,
+                    runtime_lease
+                        .as_mut()
+                        .expect("select guard requires a runtime lease")
+                        .verify_owned(),
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!(
+                    "runtime database exclusion lease verification timed out after {}s",
+                    RUNTIME_LEASE_CHECK_TIMEOUT.as_secs_f64()
+                ))
+                .and_then(|result| result);
+                if let Err(error) = verification {
+                    // Once exclusion is uncertain, do not perform a DB-backed
+                    // graceful save: an offline maintenance process may now be
+                    // changing the same rows. Stop the world task immediately
+                    // and let the supervisor surface a hard failure.
+                    warn!(
+                        "Runtime database exclusion lease was lost; stopping immediately: {error:#}"
+                    );
+                    metrics.mark_not_ready();
+                    game_handle.abort();
+                    let _ = (&mut game_handle).await;
+                    shutdown_error = Some(error.context(
+                        "runtime database exclusion lease lost; server stopped fail-closed"
+                    ));
+                    break;
                 }
                 continue;
             }
@@ -1117,10 +1468,39 @@ async fn main() -> Result<()> {
             }
         }
     }
+    if let Some(lease) = runtime_lease.take() {
+        let release_result = timeout(RUNTIME_LEASE_CHECK_TIMEOUT, lease.release())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "runtime database exclusion lease release timed out after {}s",
+                    RUNTIME_LEASE_CHECK_TIMEOUT.as_secs_f64()
+                )
+            })
+            .and_then(|result| result);
+        if let Err(error) = release_result {
+            warn!("Runtime database exclusion lease release failed: {error:#}");
+            if shutdown_error.is_none() {
+                shutdown_error = Some(error);
+            }
+        }
+    }
     info!("Server exiting.");
     match shutdown_error {
         Some(error) => Err(error),
-        None => Ok(()),
+        None => Ok(process_disposition),
+    }
+}
+
+#[tokio::main]
+async fn main() -> std::process::ExitCode {
+    match run_server().await {
+        Ok(disposition) => process_exit_code(disposition),
+        Err(error) => {
+            log::error!("server failed: {error:#}");
+            eprintln!("Error: {error:#}");
+            std::process::ExitCode::FAILURE
+        }
     }
 }
 
@@ -1128,30 +1508,14 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn stalled_game_shutdown_is_aborted_at_the_global_deadline() {
-        let mut handle = tokio::spawn(async {
-            std::future::pending::<()>().await;
-            Ok::<(), anyhow::Error>(())
-        });
-
-        let error = await_game_shutdown(&mut handle, Duration::from_millis(20))
-            .await
-            .expect_err("a stalled game task must fail shutdown");
-
-        assert!(error.to_string().contains("shutdown deadline"));
-        assert!(handle.is_finished(), "aborted game task must be joined");
-    }
-
-    #[tokio::test]
-    async fn game_task_error_is_not_reported_as_a_graceful_exit() {
-        let mut handle = tokio::spawn(async { anyhow::bail!("synthetic game failure") });
-
-        let error = await_game_shutdown(&mut handle, Duration::from_secs(1))
-            .await
-            .expect_err("game error must propagate");
-
-        assert!(error.to_string().contains("synthetic game failure"));
+    #[test]
+    fn process_disposition_has_distinct_systemd_exit_statuses() {
+        assert_eq!(process_exit_status(state::ProcessDisposition::Stop), 0);
+        assert_eq!(
+            process_exit_status(state::ProcessDisposition::Restart),
+            PROCESS_RESTART_EXIT_CODE
+        );
+        assert_ne!(PROCESS_RESTART_EXIT_CODE, 0);
     }
 
     #[tokio::test]
@@ -1394,8 +1758,7 @@ mod tests {
         drop(stalled_clients);
     }
 
-    async fn metrics_response(request: &[u8]) -> String {
-        let metrics = Arc::new(metrics::Metrics::new());
+    async fn metrics_response_with(request: &[u8], metrics: Arc<metrics::Metrics>) -> String {
         let who_snapshot = Arc::new(std::sync::RwLock::new(String::new()));
         let (mut client, server) = tokio::io::duplex(4096);
         client.write_all(request).await.unwrap();
@@ -1403,6 +1766,10 @@ mod tests {
         let mut response = Vec::new();
         client.read_to_end(&mut response).await.unwrap();
         String::from_utf8(response).unwrap()
+    }
+
+    async fn metrics_response(request: &[u8]) -> String {
+        metrics_response_with(request, Arc::new(metrics::Metrics::new())).await
     }
 
     #[tokio::test]
@@ -1419,6 +1786,21 @@ mod tests {
         let healthy = metrics_response(b"GET /health HTTP/1.1\r\n\r\n").await;
         assert!(healthy.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(healthy.ends_with("ok\nplayers 0\n"));
+
+        let live = metrics_response(b"GET /live HTTP/1.1\r\n\r\n").await;
+        assert!(live.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(live.ends_with("live\n"));
+
+        let not_ready = metrics_response(b"GET /ready HTTP/1.1\r\n\r\n").await;
+        assert!(not_ready.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+        assert!(not_ready.ends_with("not ready: boot incomplete\n"));
+
+        let metrics = Arc::new(metrics::Metrics::new());
+        metrics.mark_boot_complete();
+        metrics.set_pulse(1);
+        let ready = metrics_response_with(b"GET /ready HTTP/1.1\r\n\r\n", metrics).await;
+        assert!(ready.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(ready.contains("\r\n\r\nready\npulse 1\nage_ms "));
     }
 
     #[test]
@@ -1430,6 +1812,102 @@ mod tests {
         let mut s_config = Config::default();
         apply_cli_flags(&mut s_config, ["-s".to_string()]);
         assert!(s_config.no_specials);
+    }
+
+    #[test]
+    fn bootstrap_arguments_are_explicit_and_exclusive() {
+        let strings = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            parse_bootstrap_implementor_from(&strings(&[
+                "mud",
+                "--bootstrap-implementor",
+                "Founder"
+            ]))
+            .unwrap(),
+            Some("Founder".to_string())
+        );
+        assert!(
+            parse_bootstrap_implementor_from(&strings(&["mud", "--bootstrap-implementor"]))
+                .is_err()
+        );
+        assert!(
+            parse_bootstrap_implementor_from(&strings(&["mud", "--bootstrap-implementor", "Bad1"]))
+                .is_err()
+        );
+        assert!(
+            parse_bootstrap_implementor_from(&strings(&[
+                "mud",
+                "--bootstrap-implementor",
+                "Founder",
+                "--copyover",
+                "4000",
+                "7"
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn metrics_configuration_is_optional_strict_and_loopback_by_default() {
+        assert_eq!(parse_metrics_addr(None, None).unwrap(), None);
+        assert_eq!(
+            parse_metrics_addr(Some("19595"), None).unwrap(),
+            Some("127.0.0.1:19595".parse().unwrap())
+        );
+        assert_eq!(
+            parse_metrics_addr(Some("19595"), Some("::1")).unwrap(),
+            Some("[::1]:19595".parse().unwrap())
+        );
+        for invalid in [
+            parse_metrics_addr(None, Some("127.0.0.1")),
+            parse_metrics_addr(Some("0"), None),
+            parse_metrics_addr(Some("not-a-port"), None),
+            parse_metrics_addr(Some("19595"), Some("localhost")),
+        ] {
+            assert!(invalid.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_bootstrap_promotes_once_and_refuses_a_second_implementor() {
+        let mock = Arc::new(mock_database::MockDatabase::new());
+        let mut founder = character::Character::new_player(
+            "Founder".to_string(),
+            types::Class::Warrior,
+            types::Race::Human,
+        );
+        founder.idnum = mock.create_player(&founder, "secret").await.unwrap();
+        let mut successor = character::Character::new_player(
+            "Successor".to_string(),
+            types::Class::Cleric,
+            types::Race::Human,
+        );
+        successor.idnum = mock
+            .create_player(&successor, "another-secret")
+            .await
+            .unwrap();
+        let db: Arc<dyn DatabaseInterface> = mock.clone();
+
+        bootstrap_implementor(&db, "Founder").await.unwrap();
+        let promoted = mock.load_player("Founder").await.unwrap();
+        assert_eq!(promoted.player.level, types::LVL_IMPL);
+        assert_eq!(promoted.trust, i32::from(types::LVL_IMPL));
+        assert_eq!(promoted.player.title.as_deref(), Some("the Implementor"));
+        assert_ne!(
+            promoted.godcmds1 | promoted.godcmds2 | promoted.godcmds3 | promoted.godcmds4,
+            0
+        );
+
+        let error = bootstrap_implementor(&db, "Successor")
+            .await
+            .expect_err("a second Implementor must require in-game administration");
+        assert!(error.to_string().contains("already exists"));
+        assert_eq!(mock.load_player("Successor").await.unwrap().player.level, 1);
     }
 
     #[test]

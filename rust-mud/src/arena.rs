@@ -566,6 +566,33 @@ pub fn restore_bup_affects(g: &mut GameState, ch: CharId) {
     g.affect_total(ch);
 }
 
+/// Apply the state that `prepare_process_exit` will restore to a detached
+/// player snapshot without consuming the live arena backup. Shutdown uses
+/// this before its durability decision so a failed save can leave the player
+/// in the arena and retry, while a successful SQL row still contains the
+/// pre-arena affects, wimpy level, and recall level needed after restart.
+pub fn apply_process_exit_state_to_snapshot(
+    ch: CharId,
+    snapshot: &mut crate::character::Character,
+) {
+    let key = arena_char_key(ch);
+    let saved = arena().lock().ok().and_then(|w| {
+        w.chars.get(&key).and_then(|arena_char| {
+            (arena_char.stat >= ARENA_COMBATANT1 && arena_char.stat <= ARENA_COMBATANTZ)
+                .then(|| arena_char.bup.clone())
+                .flatten()
+        })
+    });
+    let Some(saved) = saved else {
+        return;
+    };
+
+    snapshot.affect_flags = saved.aff_flags;
+    snapshot.affected = saved.affected;
+    snapshot.wimp_level = saved.wimp_level;
+    snapshot.recall_level = saved.recall_level;
+}
+
 // ===========================================================================
 // Observer chain (utils.c deobserve/linkobserve/clearobservers,
 // comm.c send_to_observers/findanyinarena). The C struct links become
@@ -1388,6 +1415,9 @@ mod output_fanout_tests {
 }
 
 #[cfg(test)]
+// The synchronous guard serializes process-global arena fixtures; these tests
+// use a current-thread runtime and intentionally retain it through DB awaits.
+#[allow(clippy::await_holding_lock)]
 mod process_exit_tests {
     use super::*;
     use crate::DatabaseInterface;
@@ -1395,6 +1425,66 @@ mod process_exit_tests {
     use crate::config::Config;
     use crate::flags::{AFF_BLIND, AFF_INVISIBLE};
     use crate::mock_database::MockDatabase;
+
+    #[test]
+    fn process_exit_snapshot_restores_backup_without_consuming_live_arena_state() {
+        let _guard = crate::lock_ok::lock(&ARENA_TEST_LOCK);
+        reset_for_tests();
+
+        let mut player =
+            Character::new_player("ArenaSnapshot".to_string(), Class::Warrior, Race::Human);
+        player.wimp_level = 12;
+        player.recall_level = 34;
+        player.affect_flags = AFF_INVISIBLE;
+        player.affected.push(Affect {
+            spell_type: 7,
+            duration: 8,
+            modifier: 9,
+            location: 10,
+            bitvector: AFF_INVISIBLE,
+            caster: None,
+        });
+        let mut g = GameState::new(Config::default());
+        let ch = g.create_char(player);
+        set_stat_for_test(ch, ARENA_COMBATANT1);
+        bup_affects(&mut g, ch);
+        {
+            let arena_state = g.get_char_mut(ch).unwrap();
+            arena_state.wimp_level = 0;
+            arena_state.recall_level = 0;
+            arena_state.affect_flags = AFF_BLIND;
+            arena_state.affected.push(Affect {
+                spell_type: 11,
+                duration: 12,
+                modifier: 13,
+                location: 14,
+                bitvector: AFF_BLIND,
+                caster: None,
+            });
+        }
+
+        let mut snapshot = g.get_char(ch).unwrap().clone();
+        apply_process_exit_state_to_snapshot(ch, &mut snapshot);
+
+        assert_eq!(snapshot.wimp_level, 12);
+        assert_eq!(snapshot.recall_level, 34);
+        assert_eq!(snapshot.affect_flags, AFF_INVISIBLE);
+        assert_eq!(snapshot.affected.len(), 1);
+        assert_eq!(snapshot.affected[0].spell_type, 7);
+
+        let live = g.get_char(ch).unwrap();
+        assert_eq!(live.wimp_level, 0);
+        assert_eq!(live.recall_level, 0);
+        assert_eq!(live.affect_flags, AFF_BLIND);
+        assert_eq!(live.affected.len(), 1);
+        assert_eq!(live.affected[0].spell_type, 11);
+        assert_eq!(arena_stat(ch), ARENA_COMBATANT1);
+
+        prepare_process_exit(&mut g);
+        assert_eq!(arena_stat(ch), ARENA_NOT);
+        assert_eq!(g.get_char(ch).unwrap().wimp_level, 12);
+        reset_for_tests();
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn process_exit_restores_arena_backup_before_persisting_player() {

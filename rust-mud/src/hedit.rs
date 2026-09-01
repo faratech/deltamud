@@ -41,6 +41,7 @@ const MAX_HELP_ENTRY: usize = 2048;
 // CircleMUD db.h: HLP_PREFIX "world/.."? No — text/help, HELP_FILE help.hlp.
 const HLP_REL_DIR: &str = "text/help";
 const HELP_FILE: &str = "help.hlp";
+const HEDIT_GLOBAL_SAVE_KEY: &str = "<all help>";
 
 // ---------------------------------------------------------------------------
 // help_index_element (db.h) — only the fields hedit touches.
@@ -70,8 +71,8 @@ static HELP_LOADED: OnceLock<Mutex<bool>> = OnceLock::new();
 /// Boot the help table for the live `help` command (db.c:299-300
 /// index_boot(DB_BOOT_HLP)); the hedit editor loaded lazily before, but
 /// nothing booted the table for the command path (#232).
-pub fn boot_help_table(lib_path: &str) {
-    ensure_loaded(lib_path);
+pub fn boot_help_table(lib_path: &str) -> std::io::Result<()> {
+    ensure_loaded(lib_path)
 }
 
 /// The general page: C's `help` global is the FIRST entry's body (the
@@ -87,7 +88,7 @@ pub fn general_help_page() -> Option<String> {
 /// find_help + min-level gate; returns the formatted page
 /// "keywords\r\nentry" (act.informative.c:1620-1654).
 pub fn lookup_help(lib_path: &str, keyword: &str, level: i32) -> Option<String> {
-    ensure_loaded(lib_path);
+    ensure_loaded(lib_path).ok()?;
     if crate::hedit::find_help_rnum(keyword).is_none() {
         return None;
     }
@@ -103,70 +104,76 @@ pub fn lookup_help(lib_path: &str, keyword: &str, level: i32) -> Option<String> 
     Some(format!("{}\r\n{}", e.keywords, e.entry))
 }
 
-fn ensure_loaded(lib_path: &str) {
+fn ensure_loaded(lib_path: &str) -> std::io::Result<()> {
     let flag = HELP_LOADED.get_or_init(|| Mutex::new(false));
-    let mut loaded = match flag.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
+    let mut loaded = crate::lock_ok::lock(flag);
     if *loaded {
-        return;
+        return Ok(());
     }
-    let table = load_help_file(lib_path);
-    if let Ok(mut guard) = help_table().lock() {
-        *guard = table;
-    }
+    let table = load_help_file(lib_path)?;
+    *crate::lock_ok::lock(help_table()) = table;
     *loaded = true;
+    Ok(())
 }
 
 /// Read text/help/help.hlp into the in-memory table (inverse of save). Mirrors
 /// db.c load_help: keyword line, body lines until a '#', min_level = tail.
-fn load_help_file(lib_path: &str) -> Vec<HelpEntry> {
+fn load_help_file(lib_path: &str) -> std::io::Result<Vec<HelpEntry>> {
     let path = format!(
         "{}/{}/{}",
         lib_path.trim_end_matches('/'),
         HLP_REL_DIR,
         HELP_FILE
     );
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
+    let raw = std::fs::read_to_string(&path)?;
     let mut out: Vec<HelpEntry> = Vec::new();
     // get_one_line(): strips the trailing newline; we iterate over .lines()
     // which already drops '\n' (and we additionally drop a trailing '\r').
     let mut lines = raw.lines().map(|l| l.trim_end_matches('\r'));
 
     // First keyword line.
-    let mut key = match lines.next() {
-        Some(k) => k,
-        None => return out,
-    };
+    let mut key = lines.next().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "help file is empty")
+    })?;
     while !key.starts_with('$') {
+        if key.trim().is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "help entry has empty keywords",
+            ));
+        }
         let mut entry = String::new();
-        let mut line = lines.next().unwrap_or("#");
+        let mut line = lines.next().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("help entry {key:?} has no level marker"),
+            )
+        })?;
         while !line.starts_with('#') {
             entry.push_str(line);
             entry.push_str("\r\n");
-            line = lines.next().unwrap_or("#");
+            line = lines.next().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("help entry {key:?} has no level marker"),
+                )
+            })?;
         }
-        // line starts with '#': min_level = atoi(line+1).
-        let mut min_level = 0i32;
-        if line.len() > 1 {
-            min_level = match crate::text::parse_i32_atoi(&line[1..]) {
-                Ok(value) => value,
-                Err(crate::text::ParseIntError::Overflow) => {
-                    log::warn!(
-                        "SYSERR: help min-level overflow in {}; clamped to {}",
-                        path,
-                        LVL_IMPL
-                    );
-                    LVL_IMPL as i32
-                }
-                Err(_) => 0,
-            };
-        }
-        min_level = min_level.clamp(0, LVL_IMPL as i32);
+        // C load_help treats a bare `#` as level zero and only calls atoi
+        // when at least one byte follows it. The shipped help file contains
+        // legacy generated entries with that exact marker.
+        let min_level = if line.len() == 1 {
+            0
+        } else {
+            crate::text::parse_i32_strict(&line[1..])
+                .map_err(|error| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("help entry {key:?} has invalid level marker {line:?}: {error:?}"),
+                    )
+                })?
+                .clamp(0, LVL_IMPL as i32)
+        };
 
         out.push(HelpEntry {
             keywords: key.to_string(),
@@ -174,12 +181,14 @@ fn load_help_file(lib_path: &str) -> Vec<HelpEntry> {
             min_level,
         });
 
-        key = match lines.next() {
-            Some(k) => k,
-            None => break,
-        };
+        key = lines.next().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "help file has no terminator",
+            )
+        })?;
     }
-    out
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +199,7 @@ fn load_help_file(lib_path: &str) -> Vec<HelpEntry> {
 struct HeditState {
     /// The character doing the editing (for log/permission/output).
     ch: CharId,
+    authorization: olc::OlcAuthorization,
     /// The scratch help entry being edited (C OLC_HELP).
     help: HelpEntry,
     /// Real index into HELP_TABLE of the entry being edited, or None for a new
@@ -237,7 +247,12 @@ fn take_state(conn: ConnId) -> Option<HeditState> {
 /// abort: drop this conn's editor state without saving (player disconnected
 /// mid-edit). `olc::abort_editor` calls `olc::clear_active`.
 pub fn abort(conn: ConnId) {
-    take_state(conn);
+    if let Some(state) = take_state(conn) {
+        olc::discard_unresolved_named_save(
+            EditorKind::Hedit,
+            &state.help.keywords.to_ascii_lowercase(),
+        );
+    }
 }
 
 fn set_state(conn: ConnId, st: HeditState) {
@@ -287,9 +302,21 @@ pub fn do_hedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         Some(c) => c,
         None => return,
     };
+    let Some(authorization) = olc::capture_olc_authorization(g, ch) else {
+        send(g, ch, "You do not have access to the help editor.\r\n");
+        return;
+    };
 
     let lib_path = g.config.lib_path.clone();
-    ensure_loaded(&lib_path);
+    if let Err(error) = ensure_loaded(&lib_path) {
+        log::warn!("SYSERR: OLC: cannot load help table: {}", error);
+        send(
+            g,
+            ch,
+            "The help file could not be read safely; no editor was opened.\r\n",
+        );
+        return;
+    }
 
     // two_arguments(argument, buf1, buf2): we only need the first word.
     let (buf1, _rest) = crate::interpreter::one_argument(arg);
@@ -305,33 +332,43 @@ pub fn do_hedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     {
         // Match strn_cmp("save", buf1, 4): a prefix of "save" of length up to 4.
         if "save".starts_with(&buf1.to_lowercase()) && !buf1.is_empty() {
-            send(g, ch, "Saving all help entries.\r\n");
+            if let Err(error) = olc::revalidate_olc_authorization(g, authorization, true, None) {
+                log::warn!("SYSERR: OLC: refused help publication: {error}");
+                send(
+                    g,
+                    ch,
+                    "Your OLC authorization changed; help was not saved.\r\n",
+                );
+                return;
+            }
             let name = g
                 .get_char(ch)
                 .map(|c| c.player.name.clone())
                 .unwrap_or_default();
-            log::info!("OLC: {} saves help entries.", name);
-            hedit_save_to_disk(&lib_path);
+            match save_all_help(g) {
+                Ok(()) => {
+                    send(g, ch, "Saving all help entries.\r\n");
+                    log::info!("OLC: {} saves help entries.", name);
+                }
+                Err(err) => {
+                    log::warn!("SYSERR: OLC: cannot save help entries: {}", err);
+                    send(g, ch, "Could not save the help file.\r\n");
+                }
+            }
             return;
         }
     }
 
-    // Guard: is this entry already being edited by someone? (C olc.c:201-202
-    // names the other editor in the message; #299).
-    let rnum = find_help_rnum(&buf1);
-    if hedit_keyword_busy(rnum, conn) {
-        let other = states()
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|&(c, st)| *c != conn && st.rnum == rnum)
-            .and_then(|(c, _)| {
-                g.descriptors
-                    .get(c)
-                    .and_then(|d| d.character)
-                    .and_then(|cid| g.get_char(cid))
-                    .map(|c| c.player.name.clone())
-            })
+    // Every save rewrites the whole help table, and a newly inserted entry
+    // shifts every numeric rnum. Serialize Hedit sessions globally so an editor
+    // cannot later publish a scratch copy against a stale rnum.
+    if let Some(other_conn) = other_hedit_session(conn) {
+        let other = g
+            .descriptors
+            .get(&other_conn)
+            .and_then(|d| d.character)
+            .and_then(|cid| g.get_char(cid))
+            .map(|c| c.player.name.clone())
             .unwrap_or_else(|| "someone".to_string());
         g.send_to_char(
             ch,
@@ -339,6 +376,7 @@ pub fn do_hedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         );
         return;
     }
+    let rnum = find_help_rnum(&buf1);
 
     // Set up the scratch entry: existing or new.
     let help = match rnum {
@@ -360,6 +398,7 @@ pub fn do_hedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         conn,
         HeditState {
             ch,
+            authorization,
             help,
             rnum,
             changed: false,
@@ -383,21 +422,14 @@ pub fn do_hedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     hedit_disp_menu(g, conn);
 }
 
-/// True if another connection is currently editing the same help entry.
-/// C's OLC_NUM(d) == number check degrades to 0 == 0 for hedit (every session
-/// collides with every other); keying on the help rnum is the sane reading of
-/// that intent (#299).
-fn hedit_keyword_busy(rnum: Option<usize>, exclude: ConnId) -> bool {
-    let guard = match states().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    match rnum {
-        Some(r) => guard
-            .iter()
-            .any(|(&c, st)| c != exclude && st.rnum == Some(r)),
-        None => false,
-    }
+/// Return another active Hedit connection, if any. Hedit stores table indexes,
+/// and a save may insert at index zero, so distinct entries cannot be edited
+/// concurrently without invalidating one session's identity.
+fn other_hedit_session(exclude: ConnId) -> Option<ConnId> {
+    crate::lock_ok::lock(&states())
+        .keys()
+        .copied()
+        .find(|conn| *conn != exclude)
 }
 
 // ---------------------------------------------------------------------------
@@ -457,18 +489,35 @@ pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
 
     match mode {
         HeditMode::ConfirmSave => match arg.chars().next() {
-            Some('y') | Some('Y') => {
-                hedit_save_internally(g, conn);
-                let (name, kw) = (
-                    g.get_char(ch)
-                        .map(|c| c.player.name.clone())
-                        .unwrap_or_default(),
-                    with_state(conn, |st| st.help.keywords.clone()).unwrap_or_default(),
-                );
-                log::info!("OLC: {} edits help for {}.", name, kw);
-                send(g, ch, "Help entry saved to memory.\r\n");
-                cleanup(conn);
-            }
+            Some('y') | Some('Y') => match hedit_save_internally(g, conn) {
+                Ok(()) => {
+                    let (name, kw) = (
+                        g.get_char(ch)
+                            .map(|c| c.player.name.clone())
+                            .unwrap_or_default(),
+                        with_state(conn, |st| st.help.keywords.clone()).unwrap_or_default(),
+                    );
+                    log::info!("OLC: {} edits help for {}.", name, kw);
+                    send(g, ch, "Help entry saved to disk and memory.\r\n");
+                    cleanup(conn);
+                }
+                Err(err) => {
+                    log::warn!("SYSERR: OLC: cannot save help entry: {}", err);
+                    if crate::olc::replacement_was_published(&err) {
+                        send(
+                            g,
+                            ch,
+                            "The help file was published and live help was reconciled, but crash durability could not be confirmed.\r\nDo you wish to retry saving this help entry? : ",
+                        );
+                    } else {
+                        send(
+                            g,
+                            ch,
+                            "Could not save the help entry to disk; the live help table was not changed.\r\nDo you wish to retry saving this help entry? : ",
+                        );
+                    }
+                }
+            },
             Some('n') | Some('N') => {
                 cleanup(conn);
             }
@@ -614,54 +663,118 @@ fn hedit_text_input(g: &mut GameState, conn: ConnId, line: &str) {
 // Internal save (hedit_save_internally) + disk save (hedit_save_to_disk).
 // ---------------------------------------------------------------------------
 
-fn hedit_save_internally(g: &mut GameState, conn: ConnId) {
-    let (help, rnum) = match with_state(conn, |st| (st.help.clone(), st.rnum)) {
-        Some(v) => v,
-        None => return,
-    };
-    {
-        let mut guard = match help_table().lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
+fn hedit_save_internally(g: &mut GameState, conn: ConnId) -> std::io::Result<()> {
+    hedit_save_internally_with(g, conn, crate::olc::atomic_replace)
+}
+
+fn hedit_save_internally_with<F>(g: &mut GameState, conn: ConnId, replace: F) -> std::io::Result<()>
+where
+    F: FnOnce(&std::path::Path, &[u8]) -> std::io::Result<()>,
+{
+    let (help, rnum, authorization) =
+        match with_state(conn, |st| (st.help.clone(), st.rnum, st.authorization)) {
+            Some(v) => v,
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "help editor state is missing",
+                ));
+            }
         };
-        match rnum {
-            // C: rnum > 0 ⇒ replace existing. (rnum 0, the first slot, is also a
-            // real entry in our Vec model; we replace whenever we have an index.)
-            Some(r) if r < guard.len() => {
-                guard[r] = help;
+    olc::revalidate_olc_authorization(g, authorization, true, None)?;
+    let unresolved_key = help.keywords.to_ascii_lowercase();
+    let mut entries = crate::lock_ok::lock(&help_table()).clone();
+    let inserted = match rnum {
+        // C: rnum > 0 ⇒ replace existing. (rnum 0, the first slot, is also a
+        // real entry in our Vec model; we replace whenever we have an index.)
+        Some(r) if r < entries.len() => {
+            entries[r] = help;
+            false
+        }
+        _ => {
+            // New entry: C inserts at the top of the table.
+            entries.insert(0, help);
+            true
+        }
+    };
+    let lib_path = g.config.lib_path.clone();
+    match hedit_save_to_disk_with(&lib_path, &entries, replace) {
+        Ok(()) => {
+            *crate::lock_ok::lock(&help_table()) = entries;
+            crate::olc::olc_remove_from_save_list(0, crate::olc::OLC_SAVE_HELP);
+            crate::olc::clear_unresolved_named_save(EditorKind::Hedit, &unresolved_key);
+            crate::olc::clear_unresolved_named_save(EditorKind::Hedit, HEDIT_GLOBAL_SAVE_KEY);
+            crate::olc::clear_published_unresolved_kind(EditorKind::Hedit);
+            Ok(())
+        }
+        Err(error) if crate::olc::replacement_was_published(&error) => {
+            *crate::lock_ok::lock(&help_table()) = entries;
+            if inserted {
+                // The candidate is already live at index zero. Retrying the
+                // still-open editor must replace that entry, not insert a
+                // duplicate and shift the table again.
+                with_state(conn, |state| state.rnum = Some(0));
             }
-            _ => {
-                // New entry: C inserts at the top of the table.
-                guard.insert(0, help);
-            }
+            crate::olc::olc_add_to_save_list(0, crate::olc::OLC_SAVE_HELP);
+            crate::olc::mark_unresolved_named_save_failure(
+                EditorKind::Hedit,
+                &unresolved_key,
+                &error,
+            );
+            Err(error)
+        }
+        Err(error) => {
+            crate::olc::mark_unresolved_named_save_failure(
+                EditorKind::Hedit,
+                &unresolved_key,
+                &error,
+            );
+            Err(error)
         }
     }
-    // C olc_add_to_save_list(...) then the player saves with `hedit save`; we
-    // also flush to disk immediately so the edit survives a crash, matching the
-    // "saved to memory" + builder convention.
-    let lib_path = g.config.lib_path.clone();
-    hedit_save_to_disk(&lib_path);
 }
 
 /// Write the entire help table back to text/help/help.hlp in load_help format.
 /// olc.rs 'olc hedit save' entry (#275).
-pub fn save_all_help(g: &mut GameState) {
-    let lib = g.config.lib_path.clone();
-    hedit_save_to_disk(&lib);
+pub fn save_all_help(g: &mut GameState) -> std::io::Result<()> {
+    let result = (|| {
+        let lib = g.config.lib_path.clone();
+        ensure_loaded(&lib)?;
+        let entries = crate::lock_ok::lock(&help_table()).clone();
+        hedit_save_to_disk(&lib, &entries)
+    })();
+    match &result {
+        Ok(()) => {
+            crate::olc::olc_remove_from_save_list(0, crate::olc::OLC_SAVE_HELP);
+            crate::olc::clear_unresolved_named_save(EditorKind::Hedit, HEDIT_GLOBAL_SAVE_KEY);
+            crate::olc::clear_published_unresolved_kind(EditorKind::Hedit);
+        }
+        Err(error) => crate::olc::mark_unresolved_named_save_failure(
+            EditorKind::Hedit,
+            HEDIT_GLOBAL_SAVE_KEY,
+            error,
+        ),
+    }
+    result
 }
 
-fn hedit_save_to_disk(lib_path: &str) {
+fn hedit_save_to_disk(lib_path: &str, entries: &[HelpEntry]) -> std::io::Result<()> {
+    hedit_save_to_disk_with(lib_path, entries, crate::olc::atomic_replace)
+}
+
+fn hedit_save_to_disk_with<F>(
+    lib_path: &str,
+    entries: &[HelpEntry],
+    replace: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce(&std::path::Path, &[u8]) -> std::io::Result<()>,
+{
     let dir = format!("{}/{}", lib_path.trim_end_matches('/'), HLP_REL_DIR);
-    let tmp = format!("{}/{}.new", dir, HELP_FILE);
     let final_path = format!("{}/{}", dir, HELP_FILE);
 
-    let guard = match help_table().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-
     let mut out = String::new();
-    for help in guard.iter() {
+    for help in entries {
         // strip_string(entry): remove every '\r', leaving bare '\n' line breaks.
         let stripped = strip_string(if help.entry.is_empty() {
             "Empty"
@@ -687,12 +800,8 @@ fn hedit_save_to_disk(lib_path: &str) {
     }
     out.push_str("$~\n");
 
-    if std::fs::write(&tmp, &out).is_err() {
-        log::warn!("SYSERR: OLC: Cannot open help file!");
-        return;
-    }
-    let _ = std::fs::remove_file(&final_path);
-    let _ = std::fs::rename(&tmp, &final_path);
+    std::fs::create_dir_all(&dir)?;
+    replace(std::path::Path::new(&final_path), out.as_bytes())
 }
 
 /// strip_string(buffer) (olc.c): delete every '\r'. Leaves '\n' intact.
@@ -710,7 +819,12 @@ fn delete_doubledollar(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 fn cleanup(conn: ConnId) {
-    take_state(conn);
+    if let Some(state) = take_state(conn) {
+        olc::discard_unresolved_named_save(
+            EditorKind::Hedit,
+            &state.help.keywords.to_ascii_lowercase(),
+        );
+    }
     olc::clear_active(conn);
 }
 
@@ -735,9 +849,33 @@ mod tests {
     use crate::config::Config;
     use crate::connection::Descriptor;
 
+    fn test_help_lib(label: &str) -> (std::sync::MutexGuard<'static, ()>, std::path::PathBuf) {
+        static TEST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let guard = TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *HELP_LOADED
+            .get_or_init(|| Mutex::new(false))
+            .lock()
+            .unwrap() = false;
+        crate::lock_ok::lock(&help_table()).clear();
+        crate::lock_ok::lock(&states()).clear();
+        let lib =
+            std::env::temp_dir().join(format!("deltamud-hedit-{label}-{}", std::process::id()));
+        let help_dir = lib.join(HLP_REL_DIR);
+        let _ = std::fs::remove_dir_all(&lib);
+        std::fs::create_dir_all(&help_dir).unwrap();
+        std::fs::write(help_dir.join(HELP_FILE), "$~\n").unwrap();
+        (guard, lib)
+    }
+
     #[test]
     fn min_level_uses_c_atoi_semantics() {
-        let mut g = GameState::new(Config::default());
+        let (_guard, lib) = test_help_lib("atoi");
+        let mut config = Config::default();
+        config.lib_path = lib.to_string_lossy().into_owned();
+        let mut g = GameState::new(config);
         let mut ch = Character::new_player("Root".into(), Class::Cleric, Race::Human);
         ch.player.level = LVL_IMPL;
         let ch = g.create_char(ch);
@@ -756,11 +894,37 @@ mod tests {
         hedit_parse(&mut g, conn, "-4");
         assert_eq!(with_state(conn, |st| st.help.min_level), Some(0));
         cleanup(conn);
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
+    #[test]
+    fn legacy_bare_level_marker_loads_as_zero_and_rewrites_canonically() {
+        let (_guard, lib) = test_help_lib("bare-level-marker");
+        let path = lib.join(HLP_REL_DIR).join(HELP_FILE);
+        std::fs::write(
+            &path,
+            "affected\naffected\n\nLegacy generated help body.\n#\n$~\n",
+        )
+        .unwrap();
+
+        let entries = load_help_file(lib.to_str().unwrap()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].keywords, "affected");
+        assert_eq!(entries[0].min_level, 0);
+
+        hedit_save_to_disk(lib.to_str().unwrap(), &entries).unwrap();
+        let rewritten = std::fs::read_to_string(&path).unwrap();
+        assert!(rewritten.contains("\n#0\n"));
+        assert!(!rewritten.contains("\n#\n"));
+        let _ = std::fs::remove_dir_all(lib);
     }
 
     #[test]
     fn keyword_editor_truncates_multibyte_scalars_on_character_boundaries() {
-        let mut g = GameState::new(Config::default());
+        let (_guard, lib) = test_help_lib("utf8");
+        let mut config = Config::default();
+        config.lib_path = lib.to_string_lossy().into_owned();
+        let mut g = GameState::new(config);
         let mut ch = Character::new_player("Root".into(), Class::Cleric, Race::Human);
         ch.player.level = LVL_IMPL;
         let ch = g.create_char(ch);
@@ -781,5 +945,99 @@ mod tests {
             assert!(!keyword.contains(scalar));
         }
         cleanup(conn);
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
+    #[test]
+    fn distinct_help_entries_are_serialized_to_prevent_stale_rnum_overwrite() {
+        let (_guard, lib) = test_help_lib("serialized");
+        std::fs::write(
+            lib.join(HLP_REL_DIR).join(HELP_FILE),
+            "alpha\nAlpha body.\n#0\nbeta\nBeta body.\n#0\n$~\n",
+        )
+        .unwrap();
+        let mut config = Config::default();
+        config.lib_path = lib.to_string_lossy().into_owned();
+        let mut g = GameState::new(config);
+
+        let first_conn = ConnId(93);
+        let mut first = Character::new_player("First".into(), Class::Cleric, Race::Human);
+        first.player.level = LVL_IMPL;
+        let first = g.create_char(first);
+        g.get_char_mut(first).unwrap().desc = Some(first_conn);
+        let mut first_descriptor = Descriptor::new(first_conn, "first.example".to_string());
+        first_descriptor.character = Some(first);
+        g.descriptors.insert(first_conn, first_descriptor);
+
+        let second_conn = ConnId(94);
+        let mut second = Character::new_player("Second".into(), Class::Cleric, Race::Human);
+        second.player.level = LVL_IMPL;
+        let second = g.create_char(second);
+        g.get_char_mut(second).unwrap().desc = Some(second_conn);
+        let mut second_descriptor = Descriptor::new(second_conn, "second.example".to_string());
+        second_descriptor.character = Some(second);
+        g.descriptors.insert(second_conn, second_descriptor);
+
+        do_hedit(&mut g, first, "alpha", 0);
+        assert_eq!(with_state(first_conn, |state| state.rnum), Some(Some(0)));
+
+        // A distinct new entry would insert at zero and shift alpha's rnum.
+        do_hedit(&mut g, second, "gamma", 0);
+        assert!(with_state(second_conn, |_| ()).is_none());
+        assert!(
+            g.descriptors[&second_conn]
+                .outbuf
+                .contains("already being editted by First")
+        );
+
+        cleanup(first_conn);
+        do_hedit(&mut g, second, "gamma", 0);
+        assert!(with_state(second_conn, |_| ()).is_some());
+
+        cleanup(second_conn);
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
+    #[test]
+    fn post_publication_retry_of_new_help_replaces_instead_of_inserting_twice() {
+        let (_guard, lib) = test_help_lib("published-new-retry");
+        let _save_guard = crate::olc::test_save_list_guard();
+        let mut config = Config::default();
+        config.lib_path = lib.to_string_lossy().into_owned();
+        let mut g = GameState::new(config);
+        let conn = ConnId(95);
+        let mut editor = Character::new_player("Editor".into(), Class::Cleric, Race::Human);
+        editor.player.level = LVL_IMPL;
+        editor.trust = i32::from(LVL_IMPL);
+        editor.godcmds3 |= crate::gcmd::GCMD3_IMPOLC;
+        let editor = g.create_char(editor);
+        g.get_char_mut(editor).unwrap().desc = Some(conn);
+        let mut descriptor = Descriptor::new(conn, "editor.example".to_string());
+        descriptor.state = crate::connection::ConState::Playing;
+        descriptor.character = Some(editor);
+        g.descriptors.insert(conn, descriptor);
+
+        do_hedit(&mut g, editor, "gamma", 0);
+        let error = hedit_save_internally_with(&mut g, conn, |path, bytes| {
+            crate::olc::atomic_replace_with_hooks(
+                path,
+                bytes,
+                |_| Ok(()),
+                |_| Err(std::io::Error::other("injected directory sync failure")),
+            )
+        })
+        .unwrap_err();
+
+        assert!(crate::olc::replacement_was_published(&error));
+        assert_eq!(crate::lock_ok::lock(&help_table()).len(), 1);
+        assert_eq!(with_state(conn, |state| state.rnum), Some(Some(0)));
+
+        hedit_save_internally(&mut g, conn).unwrap();
+        assert_eq!(crate::lock_ok::lock(&help_table()).len(), 1);
+        let saved = std::fs::read_to_string(lib.join(HLP_REL_DIR).join(HELP_FILE)).unwrap();
+        assert_eq!(saved.lines().filter(|line| *line == "gamma").count(), 1);
+
+        cleanup(conn);
+        let _ = std::fs::remove_dir_all(lib);
     }
 }

@@ -2,6 +2,8 @@
 name = "deltamud"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.98"
+license-file = "../AGREEMENT"
 
 [dependencies]
 tokio = { version = "1.53", features = ["full"] }
@@ -11,6 +13,7 @@ sha2 = "0.11"
 log = "0.4"
 env_logger = "0.11"
 anyhow = "1.0"
+argon2 = { version = "0.6", default-features = false, features = ["alloc", "getrandom", "password-hash"] }
 bitflags = "2.13"
 async-trait = "0.1"
 libc = "0.2"

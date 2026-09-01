@@ -190,7 +190,6 @@ pub fn render(report: &AuditReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::character::Character;
     use crate::config::Config;
     use crate::world::MobileProto;
 

@@ -367,6 +367,17 @@ pub fn is_shop_keeper_vnum(keeper_vnum: MobVnum) -> bool {
 /// "no shop" everywhere — if the index or any file is missing/garbled, exactly
 /// as the C boot path leaves top_shop at 0 when shp/ is absent.
 pub fn boot_shops(lib_path: &str) {
+    let pending_new_zones = match crate::olc::pending_new_zone_publications(lib_path) {
+        Ok(pending) => pending,
+        Err(error) => {
+            log::error!(
+                "Refusing to load shops because new-zone transaction state is unreadable: {error}"
+            );
+            let _ = shops().lock().map(|mut shops| shops.clear());
+            invalidate_shop_funcs();
+            return;
+        }
+    };
     let dir = format!("{}/world/shp", lib_path.trim_end_matches('/'));
     let index_path = format!("{}/index", dir);
     let index = match std::fs::read_to_string(&index_path) {
@@ -384,6 +395,10 @@ pub fn boot_shops(lib_path: &str) {
         let fname = line.trim();
         if fname.is_empty() || fname == "$" {
             break;
+        }
+        if crate::olc::new_zone_index_entry_is_pending(&pending_new_zones, fname) {
+            log::warn!("Skipping incomplete new-zone shop file {fname:?} during boot");
+            continue;
         }
         let path = format!("{}/{}", dir, fname);
         if let Ok(contents) = std::fs::read_to_string(&path) {
@@ -711,15 +726,27 @@ pub(crate) fn upsert_shop_from_zone_file(
         .join("shp")
         .join(format!("{zone}.shp"));
     let contents = std::fs::read_to_string(&path)?;
+    upsert_shop_from_zone_contents(&contents, shop_vnum).map_err(|error| {
+        Error::new(
+            error.kind(),
+            format!("{} while reading {}", error, path.display()),
+        )
+    })
+}
+
+/// Install one shop from bytes which have already passed SEDIT validation and
+/// were rendered for publication. This avoids a second fallible disk read
+/// after rename, when durable state has already changed.
+pub(crate) fn upsert_shop_from_zone_contents(contents: &str, shop_vnum: i32) -> IoResult<()> {
     let mut parsed = Vec::new();
-    boot_the_shops(&contents, &mut parsed);
+    boot_the_shops(contents, &mut parsed);
     let incoming = parsed
         .into_iter()
         .find(|shop| shop.vnum == shop_vnum)
         .ok_or_else(|| {
             Error::new(
                 ErrorKind::InvalidData,
-                format!("shop {shop_vnum} missing from {}", path.display()),
+                format!("shop {shop_vnum} missing from rendered zone candidate"),
             )
         })?;
 
@@ -2904,9 +2931,8 @@ mod shop_hours_tests {
     use super::*;
     use crate::character::Character;
     use crate::config::Config;
-    use crate::connection::Descriptor;
     use crate::room::Room;
-    use crate::types::{ConnId, Gender, Level, Position};
+    use crate::types::{ConnId, Position};
 
     /// The living-world piece of shop hours (Deltania Breathes W3): the
     /// three after-hours refusals are exact C strings, chosen by where the

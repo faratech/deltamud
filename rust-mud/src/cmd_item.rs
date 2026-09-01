@@ -1032,8 +1032,17 @@ fn is_killer(g: &GameState, ch: CharId) -> bool {
 /// `mudlog(buf, CMP, LVL_IMPL, TRUE)` whenever an immortal manipulates
 /// items/gold.
 fn watchdog_mudlog(g: &mut GameState, ch: CharId, what: String) {
-    let lvl = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
-    if lvl >= LVL_IMMORT {
+    let staff_or_invalid_player = match g.principal_authority(ch) {
+        Some(authority) if authority.principal_is_player => {
+            g.get_char(authority.principal).is_none_or(|principal| {
+                g.authority_quarantine.contains(&principal.idnum)
+                    || authority.authority >= i32::from(LVL_IMMORT)
+            })
+        }
+        Some(_) => false,
+        None => g.get_char(ch).is_some_and(|character| !character.is_npc),
+    };
+    if staff_or_invalid_player {
         crate::syslog::mudlog(g, &what, crate::syslog::CMP, LVL_IMPL);
     }
 }
@@ -1553,13 +1562,15 @@ fn perform_give_gold(g: &mut GameState, ch: CharId, vict: CharId, amount: i32) {
         return;
     }
     let gold = g.get_char(ch).map(|c| c.points.gold).unwrap_or(0);
-    let level = get_level(g, ch);
     let is_npc = g.get_char(ch).map(|c| c.is_npc).unwrap_or(false);
-    if gold < amount && (is_npc || level < LVL_GOD) {
+    let may_mint = !is_npc
+        && crate::interpreter::authenticated_input_authority(g, ch)
+            .is_some_and(|authority| authority.authority >= i32::from(LVL_GOD));
+    if gold < amount && !may_mint {
         g.send_to_char(ch, "You don't have that many coins!\r\n");
         return;
     }
-    let debited = is_npc || level < LVL_GOD;
+    let debited = !may_mint;
     let moved = if debited {
         crate::gold::transfer_between(
             g,
@@ -1600,18 +1611,25 @@ fn perform_give_gold(g: &mut GameState, ch: CharId, vict: CharId, amount: i32) {
     act(g, &line, false, ch, None, ActArg::Char(vict), To::Vict);
     let line = format!("$n gives {} to $N.", money_desc(amount));
     act(g, &line, true, ch, None, ActArg::Char(vict), To::NotVict);
-    if debited {
-        watchdog_mudlog(
-            g,
-            ch,
+    watchdog_mudlog(
+        g,
+        ch,
+        if debited {
             format!(
                 "[WATCHDOG] {} gives {} gold coins to {}.",
                 name_of(g, ch),
                 amount,
                 name_of(g, vict)
-            ),
-        );
-    }
+            )
+        } else {
+            format!(
+                "[WATCHDOG] {} mints {} gold coins for {}.",
+                name_of(g, ch),
+                amount,
+                name_of(g, vict)
+            )
+        },
+    );
     // C act.item.c:823: MTRIG_BRIBE fires after the gold changes hands (#142).
     crate::dg_triggers::bribe_mtrigger(g, vict, ch, amount);
 }
@@ -3289,6 +3307,59 @@ mod tests {
                 "command={command}, input={input:?}"
             );
         }
+    }
+
+    #[test]
+    fn direct_staff_gold_mint_uses_persisted_trust_and_is_audited() {
+        let lib = std::env::temp_dir().join(format!(
+            "deltamud-mint-audit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&lib).unwrap();
+        let mut config = Config::default();
+        config.lib_path = lib.to_string_lossy().into_owned();
+        let mut g = GameState::new(config);
+        let room = g.add_room(crate::room::Room::new(100, 0, "Room".into(), String::new()));
+
+        let staff_conn = ConnId(101);
+        let mut staff = Character::new_player("Staff".into(), Class::Warrior, Race::Human);
+        staff.desc = Some(staff_conn);
+        staff.player.level = 1;
+        staff.trust = i32::from(LVL_GOD);
+        let staff = g.create_char(staff);
+        let mut descriptor = Descriptor::new(staff_conn, "staff.test".into());
+        descriptor.state = crate::connection::ConState::Playing;
+        descriptor.character = Some(staff);
+        g.descriptors.insert(staff_conn, descriptor);
+        g.players_by_name.insert("staff".into(), staff);
+
+        let target_conn = ConnId(102);
+        let mut target = Character::new_player("Target".into(), Class::Warrior, Race::Human);
+        target.desc = Some(target_conn);
+        target.player.level = LVL_GOD;
+        target.trust = 1;
+        let target = g.create_char(target);
+        let mut descriptor = Descriptor::new(target_conn, "target.test".into());
+        descriptor.state = crate::connection::ConState::Playing;
+        descriptor.character = Some(target);
+        g.descriptors.insert(target_conn, descriptor);
+        g.players_by_name.insert("target".into(), target);
+        g.char_to_room(staff, room);
+        g.char_to_room(target, room);
+
+        crate::interpreter::run_authenticated_command(&mut g, target, "give 10 coins Staff");
+        assert_eq!(g.get_char(staff).unwrap().points.gold, 0);
+
+        crate::interpreter::run_authenticated_command(&mut g, staff, "give 10 coins Target");
+        assert_eq!(g.get_char(target).unwrap().points.gold, 10);
+        let syslog = std::fs::read_to_string(lib.join("syslog")).unwrap();
+        assert!(syslog.contains("[WATCHDOG] Staff mints 10 gold coins for Target."));
+
+        std::fs::remove_dir_all(lib).unwrap();
     }
 
     fn assert_zapped(mut g: GameState, ch: CharId, obj: ObjId, conn: ConnId) {

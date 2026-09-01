@@ -5,7 +5,7 @@
 
 use crate::character::Character;
 use crate::config::Config;
-use crate::connection::Descriptor;
+use crate::connection::{ConState, Descriptor};
 use crate::object::{ObjLoc, Object, ObjectGraphOrder, walk_object_graph};
 use crate::rng::Rng;
 use crate::room::Room;
@@ -182,6 +182,116 @@ mod object_extraction_tests {
     }
 }
 
+#[cfg(test)]
+mod principal_authority_tests {
+    use super::*;
+    use crate::character::Character;
+
+    fn connected_player(
+        g: &mut GameState,
+        conn: ConnId,
+        name: &str,
+        level: Level,
+        trust: i32,
+    ) -> CharId {
+        let mut character = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        character.player.level = level;
+        character.trust = trust;
+        character.desc = Some(conn);
+        let character = g.create_char(character);
+        let mut descriptor = Descriptor::new(conn, "authority.test".to_string());
+        descriptor.character = Some(character);
+        g.descriptors.insert(conn, descriptor);
+        character
+    }
+
+    #[test]
+    fn connected_pc_authority_is_exact_persisted_trust_not_display_level() {
+        let mut g = GameState::new(Config::default());
+        let high_level = connected_player(&mut g, ConnId(801), "Display", LVL_IMPL, 1);
+        let high_trust = connected_player(&mut g, ConnId(802), "Trusted", 1, i32::from(LVL_IMPL));
+
+        assert_eq!(g.principal_authority(high_level).unwrap().authority, 1);
+        let trusted = g.principal_authority(high_trust).unwrap();
+        assert_eq!(trusted.authority, i32::from(LVL_IMPL));
+        assert!(trusted.is_authenticated_player());
+    }
+
+    #[test]
+    fn switched_body_resolves_original_pc_and_duplicate_alias_fails_closed() {
+        let mut g = GameState::new(Config::default());
+        let principal = connected_player(&mut g, ConnId(803), "Principal", 1, i32::from(LVL_GRGOD));
+        let mut body = Character::new_npc(7001);
+        body.player.level = LVL_IMPL;
+        body.desc = Some(ConnId(803));
+        let body = g.create_char(body);
+        g.get_char_mut(principal).unwrap().desc = None;
+        {
+            let descriptor = g.descriptors.get_mut(&ConnId(803)).unwrap();
+            descriptor.character = Some(body);
+            descriptor.original = Some(principal);
+        }
+
+        for target in [principal, body] {
+            let authority = g.principal_authority(target).unwrap();
+            assert_eq!(authority.principal, principal);
+            assert_eq!(authority.authority, i32::from(LVL_GRGOD));
+            assert!(authority.switched_session);
+            assert!(authority.is_authenticated_player());
+        }
+
+        let mut alias_body = Character::new_npc(7002);
+        alias_body.desc = Some(ConnId(804));
+        let alias_body = g.create_char(alias_body);
+        let mut duplicate = Descriptor::new(ConnId(804), "authority.test".to_string());
+        duplicate.character = Some(alias_body);
+        duplicate.original = Some(principal);
+        g.descriptors.insert(ConnId(804), duplicate);
+
+        assert_eq!(g.principal_authority(principal), None);
+        assert_eq!(g.principal_authority(body), None);
+    }
+
+    #[test]
+    fn invalid_pc_trust_fails_closed_but_descriptorless_npc_keeps_level_mechanics() {
+        let mut g = GameState::new(Config::default());
+        let corrupt = connected_player(&mut g, ConnId(805), "Corrupt", LVL_IMPL, 106);
+        assert_eq!(g.principal_authority(corrupt), None);
+
+        let mut npc = Character::new_npc(7003);
+        npc.player.level = LVL_GRGOD;
+        let npc = g.create_char(npc);
+        let authority = g.principal_authority(npc).unwrap();
+        assert_eq!(authority.authority, i32::from(LVL_GRGOD));
+        assert!(!authority.principal_is_player);
+        assert!(!authority.is_authenticated_player());
+    }
+
+    #[test]
+    fn inspection_and_player_index_use_trust_not_display_level() {
+        let mut g = GameState::new(Config::default());
+        let trusted = connected_player(&mut g, ConnId(806), "Trusted", 1, 104);
+        let spoofed = connected_player(&mut g, ConnId(807), "Spoofed", LVL_IMPL, 1);
+
+        assert!(g.can_inspect_player_authority(trusted, 104));
+        assert!(!g.can_inspect_player_authority(spoofed, 2));
+        assert!(!g.can_inspect_player_authority(trusted, 106));
+
+        let mut indexed = Character::new_player(
+            "Indexed".to_string(),
+            crate::types::Class::Warrior,
+            crate::types::Race::Human,
+        );
+        indexed.idnum = 9_999;
+        indexed.player.level = LVL_IMPL;
+        indexed.trust = 3;
+        g.update_player_index_from_character(&indexed, 123, "index.test");
+        let row = g.player_index("Indexed").unwrap();
+        assert_eq!(row.level, LVL_IMPL);
+        assert_eq!(row.trust, 3);
+    }
+}
+
 /// Read the published listener fd (do_copyover). -1 if not yet bound.
 pub fn listener_fd() -> std::os::unix::io::RawFd {
     LISTENER_FD.load(Ordering::SeqCst)
@@ -200,6 +310,9 @@ pub struct PlayerIndex {
     pub idnum: i64,
     pub name: String,
     pub level: u8,
+    /// Persisted command authority. Display level remains available for
+    /// gameplay/reporting, but offline authorization must use this field.
+    pub trust: i32,
     pub class: crate::types::Class,
     pub last_logon: i64,
     pub host: String,
@@ -233,11 +346,130 @@ pub struct OfflineOp {
 /// one conditional database rename, and only then updates the live indexes.
 #[derive(Debug, Clone)]
 pub struct PlayerRenameRequest {
-    pub requester: CharId,
+    pub authorization: AuthenticatedCommandRequest,
     pub victim: CharId,
     pub idnum: i64,
     pub old_name: String,
     pub new_name: String,
+}
+
+/// A password-only write queued by the synchronous authenticated `set passwd`
+/// command. Carrying resolved identity fields keeps the async bridge typed and
+/// prevents replay or string re-parsing from selecting a different account.
+pub struct PasswordUpdateRequest {
+    pub authorization: AuthenticatedCommandRequest,
+    pub victim: CharId,
+    pub idnum: i64,
+    pub name: String,
+    /// Held only until the async bridge can enter the bounded off-thread KDF.
+    /// Deliberately lacks Debug/Clone so the credential cannot be copied into
+    /// routine diagnostics or queue snapshots.
+    pub plaintext_password: String,
+}
+
+/// An AFK-terminal unlock verification queued by the synchronous command
+/// dispatcher. The async Game shell runs the KDF on the bounded password
+/// worker pool, then rechecks this exact live session before clearing the lock.
+pub struct LockoutUnlockRequest {
+    pub character: CharId,
+    pub principal: CharId,
+    pub descriptor: ConnId,
+    pub idnum: i64,
+    pub name: String,
+    pub expected_hash: String,
+    /// Deliberately not Debug/Clone: typed password material must live only
+    /// until the bounded off-thread verifier consumes it.
+    pub plaintext_password: String,
+}
+
+/// A rank/capability transition queued by a synchronous immortal command.
+/// The async Game shell compares this complete tuple against durable storage
+/// before changing live authority or publishing success.
+#[derive(Debug, Clone)]
+pub struct AuthorityUpdateRequest {
+    pub authorization: AuthenticatedCommandRequest,
+    pub victim: CharId,
+    pub idnum: i64,
+    pub name: String,
+    pub expected: crate::PlayerAuthorityState,
+    pub replacement: crate::PlayerAuthorityState,
+}
+
+/// Why the graceful game loop is exiting. The process wrapper maps Restart to
+/// a dedicated non-zero status for systemd, while operator/service stops remain
+/// successful exits that `Restart=on-failure` must not revive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessDisposition {
+    Stop,
+    Restart,
+}
+
+/// Exact authenticated session identity captured by a synchronous command
+/// before an asynchronous/destructive action is queued. The async consumer
+/// must re-resolve this tuple and its required grant after all earlier durable
+/// authority transitions have drained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthenticatedCommandRequest {
+    pub requester_body: CharId,
+    pub requester_principal: CharId,
+    pub descriptor: ConnId,
+    pub idnum: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownMode {
+    Shutdown,
+    Reboot,
+    Now,
+    Die,
+    Pause,
+}
+
+impl ShutdownMode {
+    pub fn disposition(self) -> ProcessDisposition {
+        match self {
+            Self::Shutdown | Self::Reboot | Self::Now => ProcessDisposition::Restart,
+            Self::Die | Self::Pause => ProcessDisposition::Stop,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownRequest {
+    /// Internal scheduler/signal-equivalent path; no player capability is
+    /// being carried across an async boundary.
+    System(ProcessDisposition),
+    Command {
+        authorization: AuthenticatedCommandRequest,
+        mode: ShutdownMode,
+    },
+}
+
+/// The authority principal resolved for a live character identity.
+///
+/// A switched descriptor controls one body (`Descriptor::character`) on
+/// behalf of its authenticated player (`Descriptor::original`).  Privileged
+/// callers must use `authority`, which is the player's persisted `trust`, not
+/// the display level of whichever body happens to be active.  Descriptorless
+/// NPCs have no authenticated player principal; their level is exposed only so
+/// ordinary NPC mechanics can retain the historical level hierarchy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrincipalAuthority {
+    pub principal: CharId,
+    pub authority: i32,
+    pub descriptor: Option<ConnId>,
+    pub descriptor_controls_target: bool,
+    pub switched_session: bool,
+    pub principal_is_player: bool,
+}
+
+impl PrincipalAuthority {
+    /// True only when this authority belongs to the player authenticated on a
+    /// live descriptor.  Destructive administrative exceptions should require
+    /// this in addition to their trust threshold.
+    pub fn is_authenticated_player(self) -> bool {
+        self.principal_is_player && self.descriptor.is_some()
+    }
 }
 
 /// Authorization contract carried across the synchronous-command/async-DB
@@ -318,11 +550,28 @@ pub struct GameState {
     /// files; `Game::drain_player_rename_requests` owns the commit protocol.
     pub player_rename_requests: Vec<PlayerRenameRequest>,
 
+    /// Password-only writes queued by authenticated Implementors. Success is
+    /// not published until the async Game shell confirms the targeted update.
+    pub password_update_requests: Vec<PasswordUpdateRequest>,
+
+    /// Password checks for terminal unlock. The command path never performs a
+    /// KDF synchronously on the single-owner world thread.
+    pub lockout_unlock_requests: Vec<LockoutUnlockRequest>,
+
+    /// Rank/capability CAS operations. These are drained before ordinary
+    /// player saves so an older broad snapshot cannot resurrect revoked trust.
+    pub authority_update_requests: Vec<AuthorityUpdateRequest>,
+
+    /// Player identities whose durable authority could not be observed after
+    /// an ambiguous write. Privileged dispatch and process exit stay blocked
+    /// until an exact readback or retry reconciles the tuple.
+    pub authority_quarantine: std::collections::HashSet<i64>,
+
     /// Deferred async DB operations queued from sync command paths - e.g.
     /// clan destroy/rank-lower SQL that must also cover OFFLINE players'
     /// rows (C runs the UPDATEs synchronously; #165).
     pub deferred_db_ops: Vec<DeferredDbOp>,
-    pub pfileclean_requested: bool,
+    pub pfileclean_requested: Option<AuthenticatedCommandRequest>,
     pub player_save_requests: Vec<CharId>,
 
     /// do_who's `boot_high` (act.informative.c): the highest simultaneous
@@ -353,14 +602,13 @@ pub struct GameState {
     /// executing, so VM-originated act() lines do not re-fire act triggers
     /// recursively (#138).
     pub dg_act_check: bool,
-    /// Set by `do_shutdown` (C `circle_shutdown = 1`). The Game run loop checks
-    /// it after each command/pulse and exits via the graceful-shutdown path, so
-    /// the `shutdown` immortal command actually halts the server (it previously
-    /// only broadcast a message and logged — the process never stopped).
-    pub shutdown_requested: bool,
+    /// Set by `do_shutdown` or the scheduled reboot clock. The Game run loop
+    /// exits through the graceful save path and returns this explicit process
+    /// disposition to the systemd-facing wrapper.
+    pub shutdown_requested: Option<ShutdownRequest>,
     /// Immortal copyover command request. The async Game shell consumes this
     /// so it can durably await database saves before the synchronous exec.
-    pub copyover_requested: Option<CharId>,
+    pub copyover_requested: Option<AuthenticatedCommandRequest>,
     /// C `pk_allowed` (config.c:53, `int pk_allowed = NO`). The live PvP gate
     /// read by do_hit/do_kill/murder, the killer-flagging path in fight.c and
     /// the PvP spell guards; toggled by `set Legal_PKS ON|OFF`
@@ -399,14 +647,18 @@ impl GameState {
             player_table: Vec::new(),
             offline_ops: Vec::new(),
             player_rename_requests: Vec::new(),
+            password_update_requests: Vec::new(),
+            lockout_unlock_requests: Vec::new(),
+            authority_update_requests: Vec::new(),
+            authority_quarantine: std::collections::HashSet::new(),
             deferred_db_ops: Vec::new(),
-            pfileclean_requested: false,
+            pfileclean_requested: None,
             player_save_requests: Vec::new(),
             boot_high: 0,
             next_char_id: 1,
             next_obj_id: 1,
             rng: Rng::default(),
-            shutdown_requested: false,
+            shutdown_requested: None,
             copyover_requested: None,
             pk_allowed: false,
             // config.c:254 `int nameserver_is_slow = YES;`
@@ -528,6 +780,215 @@ impl GameState {
         self.chars.contains_key(&id)
     }
 
+    /// Resolve the player principal behind `target`, including either half of
+    /// a switched descriptor relationship.
+    ///
+    /// The relationship is accepted only when every forward/reverse alias is
+    /// unique and symmetric: the descriptor map key must equal its embedded
+    /// id, its active body must point back to that descriptor, a switched
+    /// original must be a detached PC, and neither identity may be referenced
+    /// by another descriptor.  Broken aliases and persisted PC trust outside
+    /// 0..=LVL_IMPL fail closed.  A genuinely descriptorless NPC is the sole
+    /// case where display level is returned as authority, for non-admin game
+    /// mechanics that historically compare NPC levels.
+    pub fn principal_authority(&self, target: CharId) -> Option<PrincipalAuthority> {
+        let target_character = self.get_char(target)?;
+        let mut matching = self.descriptors.iter().filter(|(_, descriptor)| {
+            descriptor.character == Some(target) || descriptor.original == Some(target)
+        });
+        let descriptor = matching.next();
+        if matching.next().is_some() {
+            return None;
+        }
+
+        let Some((&descriptor_key, descriptor)) = descriptor else {
+            // A stale Character::desc is a broken session link, not an
+            // ordinary descriptorless character.
+            if target_character.desc.is_some() {
+                return None;
+            }
+            if target_character.is_npc {
+                return Some(PrincipalAuthority {
+                    principal: target,
+                    authority: i32::from(target_character.player.level),
+                    descriptor: None,
+                    descriptor_controls_target: false,
+                    switched_session: false,
+                    principal_is_player: false,
+                });
+            }
+            let trust = target_character.trust;
+            if !(0..=i32::from(LVL_IMPL)).contains(&trust) {
+                return None;
+            }
+            return Some(PrincipalAuthority {
+                principal: target,
+                authority: trust,
+                descriptor: None,
+                descriptor_controls_target: false,
+                switched_session: false,
+                principal_is_player: true,
+            });
+        };
+
+        if descriptor.id != descriptor_key {
+            return None;
+        }
+        let body = descriptor.character?;
+        let original = descriptor.original;
+        if original == Some(body) {
+            return None;
+        }
+        let body_character = self.get_char(body)?;
+        if body_character.desc != Some(descriptor_key) {
+            return None;
+        }
+
+        let principal = original.unwrap_or(body);
+        let principal_character = self.get_char(principal)?;
+        if principal_character.is_npc {
+            return None;
+        }
+        if original.is_some() && principal_character.desc.is_some() {
+            return None;
+        }
+        let trust = principal_character.trust;
+        if !(0..=i32::from(LVL_IMPL)).contains(&trust) {
+            return None;
+        }
+        // A malformed switched-to PC row is not allowed to hide invalid
+        // persisted authority merely because that PC is not the principal.
+        if !body_character.is_npc && !(0..=i32::from(LVL_IMPL)).contains(&body_character.trust) {
+            return None;
+        }
+
+        // The matching descriptor must be the only descriptor that aliases
+        // either side of this session.  This catches duplicate forward links,
+        // duplicate originals, and cross-linked switched sessions.
+        if self.descriptors.iter().any(|(&other_key, other)| {
+            other_key != descriptor_key
+                && [other.character, other.original]
+                    .into_iter()
+                    .flatten()
+                    .any(|id| id == body || id == principal)
+        }) {
+            return None;
+        }
+
+        Some(PrincipalAuthority {
+            principal,
+            authority: trust,
+            descriptor: Some(descriptor_key),
+            descriptor_controls_target: descriptor.character == Some(target),
+            switched_session: original.is_some(),
+            principal_is_player: true,
+        })
+    }
+
+    /// Revalidate the live account, hierarchy, and granular grant behind a
+    /// snoop. Snoop is a continuing disclosure, so authorization must remain
+    /// true for every relayed write rather than only when the link is created.
+    pub(crate) fn can_start_snoop(&self, snooper: CharId, target: CharId) -> bool {
+        if snooper == target {
+            return false;
+        }
+        let Some(snooper_authority) = self
+            .principal_authority(snooper)
+            .filter(|authority| authority.is_authenticated_player())
+        else {
+            return false;
+        };
+        let Some(descriptor) = snooper_authority.descriptor else {
+            return false;
+        };
+        let Some(session) = self.descriptors.get(&descriptor) else {
+            return false;
+        };
+        if !snooper_authority.descriptor_controls_target
+            || session.state != ConState::Playing
+            || session.character != Some(snooper)
+        {
+            return false;
+        }
+        let Some(principal) = self.get_char(snooper_authority.principal) else {
+            return false;
+        };
+        if self.authority_quarantine.contains(&principal.idnum)
+            || snooper_authority.authority < i32::from(LVL_IMMORT)
+            || principal.godcmds1 & crate::gcmd::GCMD_SNOOP == 0
+        {
+            return false;
+        }
+
+        let Some(target_authority) = self.principal_authority(target) else {
+            return false;
+        };
+        if target_authority.principal_is_player {
+            let Some(target_principal) = self.get_char(target_authority.principal) else {
+                return false;
+            };
+            if self.authority_quarantine.contains(&target_principal.idnum) {
+                return false;
+            }
+        }
+        snooper_authority.authority > target_authority.authority
+    }
+
+    pub(crate) fn snoop_link_is_authorized(&self, snooper: CharId, target: CharId) -> bool {
+        self.get_char(snooper)
+            .is_some_and(|character| character.snooping == Some(target))
+            && self
+                .get_char(target)
+                .is_some_and(|character| character.snoop_by == Some(snooper))
+            && self.can_start_snoop(snooper, target)
+    }
+
+    fn sever_snoop_pair(&mut self, snooper: CharId, target: CharId) {
+        if let Some(character) = self.get_char_mut(snooper)
+            && character.snooping == Some(target)
+        {
+            character.snooping = None;
+        }
+        if let Some(character) = self.get_char_mut(target)
+            && character.snoop_by == Some(snooper)
+        {
+            character.snoop_by = None;
+        }
+    }
+
+    /// Tear down stale or newly unauthorized disclosure links immediately
+    /// after authority/grant changes. send_to_char repeats the same check at
+    /// use time so no other mutation path can leave a usable stale link.
+    pub(crate) fn revalidate_snoop_links(&mut self) {
+        let links: Vec<(CharId, CharId)> = self
+            .chars
+            .iter()
+            .filter_map(|(&snooper, character)| character.snooping.map(|target| (snooper, target)))
+            .collect();
+        for (snooper, target) in links {
+            if !self.snoop_link_is_authorized(snooper, target) {
+                self.sever_snoop_pair(snooper, target);
+            }
+        }
+
+        // Also clear one-sided reverse links which had no outgoing entry.
+        let stale_reverse: Vec<(CharId, CharId)> = self
+            .chars
+            .iter()
+            .filter_map(|(&target, character)| {
+                character.snoop_by.and_then(|snooper| {
+                    (!self
+                        .get_char(snooper)
+                        .is_some_and(|character| character.snooping == Some(target)))
+                    .then_some((snooper, target))
+                })
+            })
+            .collect();
+        for (snooper, target) in stale_reverse {
+            self.sever_snoop_pair(snooper, target);
+        }
+    }
+
     /// Insert a character into the world (assigns id, appends to the ordered
     /// arena — CircleMUD prepends to character_list, but iteration order is
     /// internal-only here, so O(1) append is used). Does NOT place it in a room.
@@ -610,6 +1071,11 @@ impl GameState {
         if let Some(p) = self.player_table.iter_mut().find(|p| p.idnum == idnum) {
             p.name = name.to_string();
             p.level = level;
+            // This compatibility helper is primarily used by fixtures and
+            // callers without a Character. Treat its supplied rank as both
+            // display and authority; production Character updates overwrite
+            // trust with the exact persisted value below.
+            p.trust = i32::from(level);
             p.last_logon = last_logon;
             // Preserve a known host if the caller has none (a save with no live
             // descriptor shouldn't blank the host the last login recorded).
@@ -621,6 +1087,7 @@ impl GameState {
                 idnum,
                 name: name.to_string(),
                 level,
+                trust: i32::from(level),
                 class: crate::types::Class::Warrior,
                 last_logon,
                 host: host.to_string(),
@@ -639,6 +1106,7 @@ impl GameState {
     ) {
         self.update_player_index(ch.idnum, ch.get_name(), ch.player.level, last_logon, host);
         if let Some(p) = self.player_table.iter_mut().find(|p| p.idnum == ch.idnum) {
+            p.trust = ch.trust;
             p.class = ch.player.class;
             p.act_flags = ch.act_flags;
             p.clan = ch.clan;
@@ -668,14 +1136,14 @@ impl GameState {
 
     pub fn queue_player_rename(
         &mut self,
-        requester: CharId,
+        authorization: AuthenticatedCommandRequest,
         victim: CharId,
         idnum: i64,
         old_name: &str,
         new_name: &str,
     ) {
         self.player_rename_requests.push(PlayerRenameRequest {
-            requester,
+            authorization,
             victim,
             idnum,
             old_name: old_name.to_string(),
@@ -687,25 +1155,144 @@ impl GameState {
         std::mem::take(&mut self.player_rename_requests)
     }
 
+    pub fn queue_password_update(
+        &mut self,
+        authorization: AuthenticatedCommandRequest,
+        victim: CharId,
+        idnum: i64,
+        name: &str,
+        plaintext_password: String,
+    ) {
+        self.password_update_requests.push(PasswordUpdateRequest {
+            authorization,
+            victim,
+            idnum,
+            name: name.to_string(),
+            plaintext_password,
+        });
+    }
+
+    pub fn take_password_update_requests(&mut self) -> Vec<PasswordUpdateRequest> {
+        std::mem::take(&mut self.password_update_requests)
+    }
+
+    pub fn queue_lockout_unlock(&mut self, request: LockoutUnlockRequest) {
+        self.lockout_unlock_requests.push(request);
+    }
+
+    pub fn take_lockout_unlock_requests(&mut self) -> Vec<LockoutUnlockRequest> {
+        std::mem::take(&mut self.lockout_unlock_requests)
+    }
+
+    pub fn queue_authority_update(&mut self, request: AuthorityUpdateRequest) {
+        self.authority_update_requests.push(request);
+    }
+
+    pub fn take_authority_update_requests(&mut self) -> Vec<AuthorityUpdateRequest> {
+        std::mem::take(&mut self.authority_update_requests)
+    }
+
     /// One target-authority predicate for `stat player`, `stat file`, and
     /// `show player`, whether the target is online, indexed, freshly loaded,
     /// or raced online while a deferred operation was waiting. DeltaMUD's C
     /// `stat file` rule denies only a target *above* the requester, so equal
-    /// levels remain inspectable.
-    pub fn can_inspect_player_level(&self, requester: CharId, target_level: u8) -> bool {
-        self.get_char(requester)
-            .is_some_and(|character| character.player.level >= target_level)
+    /// authority ranks remain inspectable.
+    pub fn can_inspect_player_authority(&self, requester: CharId, target_trust: i32) -> bool {
+        (0..=i32::from(crate::types::LVL_IMPL)).contains(&target_trust)
+            && self
+                .principal_authority(requester)
+                .filter(|authority| authority.is_authenticated_player())
+                .is_some_and(|authority| authority.authority >= target_trust)
+    }
+
+    /// Revalidate an authenticated request immediately before its queued
+    /// destructive effect. This deliberately repeats the dispatcher gate:
+    /// descriptor ownership, principal identity, persisted trust, quarantine,
+    /// and the granular command bit may all change while earlier async work is
+    /// draining.
+    pub(crate) fn authenticated_command_request_is_current(
+        &self,
+        request: AuthenticatedCommandRequest,
+        minimum_authority: i32,
+        godcmd_set: usize,
+        godcmd: i64,
+    ) -> bool {
+        if !self.authenticated_session_request_is_current(request, minimum_authority) {
+            return false;
+        }
+        let Some(principal) = self.get_char(request.requester_principal) else {
+            return false;
+        };
+        let grants = [
+            principal.godcmds1,
+            principal.godcmds2,
+            principal.godcmds3,
+            principal.godcmds4,
+        ];
+        let Some(bits) = godcmd_set
+            .checked_sub(1)
+            .and_then(|index| grants.get(index))
+        else {
+            return false;
+        };
+        godcmd != 0 && bits & godcmd != 0
+    }
+
+    /// Revalidate an exact authenticated session without imposing a granular
+    /// administrator grant. Long-lived ordinary editors (notably boards) use
+    /// this to recheck descriptor ownership, persisted trust and quarantine at
+    /// their eventual publication boundary.
+    pub(crate) fn authenticated_session_request_is_current(
+        &self,
+        request: AuthenticatedCommandRequest,
+        minimum_authority: i32,
+    ) -> bool {
+        let Some(authority) = self
+            .principal_authority(request.requester_body)
+            .filter(|authority| authority.is_authenticated_player())
+        else {
+            return false;
+        };
+        if authority.principal != request.requester_principal
+            || authority.descriptor != Some(request.descriptor)
+            || !authority.descriptor_controls_target
+            || authority.authority < minimum_authority
+        {
+            return false;
+        }
+        let Some(descriptor) = self.descriptors.get(&request.descriptor) else {
+            return false;
+        };
+        if descriptor.state != ConState::Playing
+            || descriptor.character != Some(request.requester_body)
+        {
+            return false;
+        }
+        let Some(principal) = self.get_char(request.requester_principal) else {
+            return false;
+        };
+        if principal.is_npc
+            || principal.idnum != request.idnum
+            || self.authority_quarantine.contains(&request.idnum)
+        {
+            return false;
+        }
+        true
     }
 
     /// Queue `pfileclean`'s async DB cleanup. The command path is synchronous,
     /// so game.rs drains this between awaits and rebuilds player_table after
     /// deleting PLR_DELETED rows from persistent storage.
-    pub fn queue_pfileclean(&mut self) {
-        self.pfileclean_requested = true;
+    pub fn queue_pfileclean(&mut self, request: AuthenticatedCommandRequest) -> bool {
+        if self.pfileclean_requested.is_some() {
+            return false;
+        }
+        self.pfileclean_requested = Some(request);
+        true
     }
 
-    pub fn take_pfileclean_request(&mut self) -> bool {
-        std::mem::take(&mut self.pfileclean_requested)
+    pub fn take_pfileclean_request(&mut self) -> Option<AuthenticatedCommandRequest> {
+        self.pfileclean_requested.take()
     }
 
     /// Queue a live PC row save for the async game loop. This is the sync
@@ -908,6 +1495,15 @@ impl GameState {
         if msg.is_empty() {
             return;
         }
+        let snooper = self.chars.get(&id).and_then(|c| c.snoop_by);
+        let authorized_snooper =
+            snooper.filter(|&snooper| self.snoop_link_is_authorized(snooper, id));
+        if let Some(snooper) = snooper
+            && authorized_snooper.is_none()
+        {
+            self.sever_snoop_pair(snooper, id);
+        }
+
         let conn = match self.chars.get(&id).and_then(|c| c.desc) {
             Some(c) => c,
             None => return,
@@ -917,7 +1513,7 @@ impl GameState {
         }
         // Snoop relay (comm.c process_output): if this character is being
         // snooped, tee its output to the snooper, prefixed "% " / suffixed "%%".
-        if let Some(snooper) = self.chars.get(&id).and_then(|c| c.snoop_by) {
+        if let Some(snooper) = authorized_snooper {
             if let Some(sconn) = self.chars.get(&snooper).and_then(|c| c.desc) {
                 if let Some(sd) = self.descriptors.get_mut(&sconn) {
                     sd.write("% ");

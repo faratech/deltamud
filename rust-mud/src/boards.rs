@@ -217,9 +217,16 @@ struct BoardRuntime {
     /// Pending bodies being composed, keyed by the writer's ConnId. Maps to
     /// (board_type, message_index) so the editor-completion hook knows where
     /// to drop the finished text.
-    pending: HashMap<u64, (usize, usize)>,
+    pending: HashMap<u64, PendingBoardWrite>,
     /// The lib path captured at boot (for save-on-write/remove).
     lib_path: String,
+}
+
+#[derive(Clone, Copy)]
+struct PendingBoardWrite {
+    board_type: usize,
+    msg_index: usize,
+    authorization: crate::state::AuthenticatedCommandRequest,
 }
 
 static BOARDS: OnceLock<Mutex<BoardRuntime>> = OnceLock::new();
@@ -364,9 +371,21 @@ fn find_board(g: &GameState, ch: CharId) -> Option<usize> {
 /// the body slot, push the string editor, and record the pending write so the
 /// editor-completion hook can install the body.
 pub fn board_write(g: &mut GameState, board_type: usize, ch: CharId, arg: &str) {
-    let level = char_level_i32(g, ch);
+    let Some(authorization) = capture_board_authorization(g, ch) else {
+        g.send_to_char(ch, "You are not holy enough to write on this board.\r\n");
+        return;
+    };
+    let Some(level) = char_authority_i32(g, ch) else {
+        g.send_to_char(ch, "You are not holy enough to write on this board.\r\n");
+        return;
+    };
 
-    if level < WRITE_LVL(board_type) as i32 {
+    if board_type >= BOARD_INFO.len()
+        || !g.authenticated_session_request_is_current(
+            authorization,
+            i32::from(WRITE_LVL(board_type)),
+        )
+    {
         g.send_to_char(ch, "You are not holy enough to write on this board.\r\n");
         return;
     }
@@ -417,7 +436,14 @@ pub fn board_write(g: &mut GameState, board_type: usize, ch: CharId, arg: &str) 
 
         // Record the pending write keyed by the writer's connection.
         if let Some(conn) = g.get_char(ch).and_then(|c| c.desc) {
-            guard.pending.insert(conn.0, (board_type, msg_index));
+            guard.pending.insert(
+                conn.0,
+                PendingBoardWrite {
+                    board_type,
+                    msg_index,
+                    authorization,
+                },
+            );
         }
     }
 
@@ -445,18 +471,32 @@ pub fn board_write(g: &mut GameState, board_type: usize, ch: CharId, arg: &str) 
 /// without saving — we drop the just-pushed message). On save, the body is
 /// installed, PLR_WRITING is cleared, and the board is flushed to disk.
 ///
-/// Returns `true` if a pending board write existed for this connection (so the
-/// caller knows the edit belonged to a board).
-pub fn board_finish_write(g: &mut GameState, conn: ConnId, body: &str, save: bool) -> bool {
+/// Reports whether the edit belonged to a board and whether publication was
+/// refused because the opening session no longer owns sufficient authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoardFinishOutcome {
+    NotBoard,
+    Finished,
+    AuthorizationDenied,
+}
+
+pub fn board_finish_write(
+    g: &mut GameState,
+    conn: ConnId,
+    body: &str,
+    save: bool,
+) -> BoardFinishOutcome {
     let pending = {
         let rt = boards();
         let mut guard = crate::lock_ok::lock(&rt);
         guard.pending.remove(&conn.0)
     };
-    let (board_type, msg_index) = match pending {
+    let pending = match pending {
         Some(p) => p,
-        None => return false,
+        None => return BoardFinishOutcome::NotBoard,
     };
+    let board_type = pending.board_type;
+    let msg_index = pending.msg_index;
 
     // Clear PLR_WRITING on the owning character, if any.
     let cid = g.descriptors.get(&conn).and_then(|d| d.character);
@@ -469,7 +509,25 @@ pub fn board_finish_write(g: &mut GameState, conn: ConnId, body: &str, save: boo
     let rt = boards();
     let mut guard = crate::lock_ok::lock(&rt);
     if board_type >= guard.boards.len() {
-        return true;
+        return BoardFinishOutcome::Finished;
+    }
+    if save
+        && !g.authenticated_session_request_is_current(
+            pending.authorization,
+            i32::from(WRITE_LVL(board_type)),
+        )
+    {
+        if msg_index < guard.boards[board_type].len()
+            && guard.boards[board_type][msg_index].message.is_empty()
+        {
+            guard.boards[board_type].remove(msg_index);
+            for pending in guard.pending.values_mut() {
+                if pending.board_type == board_type && pending.msg_index > msg_index {
+                    pending.msg_index -= 1;
+                }
+            }
+        }
+        return BoardFinishOutcome::AuthorizationDenied;
     }
     if save {
         if let Some(msg) = guard.boards[board_type].get_mut(msg_index) {
@@ -495,14 +553,24 @@ pub fn board_finish_write(g: &mut GameState, conn: ConnId, body: &str, save: boo
             BOARD_INFO[board_type].filename, e
         );
     }
-    true
+    BoardFinishOutcome::Finished
 }
 
 #[cfg(test)]
 pub(crate) fn seed_pending_write_for_test(conn: ConnId) {
-    crate::lock_ok::lock(&boards())
-        .pending
-        .insert(conn.0, (usize::MAX, usize::MAX));
+    crate::lock_ok::lock(&boards()).pending.insert(
+        conn.0,
+        PendingBoardWrite {
+            board_type: usize::MAX,
+            msg_index: usize::MAX,
+            authorization: crate::state::AuthenticatedCommandRequest {
+                requester_body: CharId(u64::MAX),
+                requester_principal: CharId(u64::MAX),
+                descriptor: conn,
+                idnum: -1,
+            },
+        },
+    );
 }
 
 #[cfg(test)]
@@ -528,7 +596,7 @@ pub fn board_show(g: &mut GameState, board_type: usize, ch: CharId, arg: &str) -
         return false;
     }
 
-    if char_level_i32(g, ch) < READ_LVL(board_type) as i32 {
+    if char_authority_i32(g, ch).is_none_or(|level| level < READ_LVL(board_type) as i32) {
         g.send_to_char(ch, "You try but fail to understand the holy words.\r\n");
         return true;
     }
@@ -613,7 +681,7 @@ pub fn board_display(g: &mut GameState, board_type: usize, ch: CharId, arg: &str
         return false;
     }
 
-    if char_level_i32(g, ch) < READ_LVL(board_type) as i32 {
+    if char_authority_i32(g, ch).is_none_or(|level| level < READ_LVL(board_type) as i32) {
         g.send_to_char(ch, "You try but fail to understand the holy words.\r\n");
         return true;
     }
@@ -710,7 +778,13 @@ pub fn board_remove(g: &mut GameState, board_type: usize, ch: CharId, arg: &str)
         .map(|c| c.player.name.clone())
         .unwrap_or_default();
     let namebuf = format!("({})", name);
-    let level = char_level_i32(g, ch);
+    let Some(level) = char_authority_i32(g, ch) else {
+        g.send_to_char(
+            ch,
+            "You are not holy enough to remove other people's messages.\r\n",
+        );
+        return true;
+    };
 
     // Permission: high enough to remove others' messages, OR it's your own.
     // Author match runs against the FIXED author column (bytes 11..23) only:
@@ -740,7 +814,7 @@ pub fn board_remove(g: &mut GameState, board_type: usize, ch: CharId, arg: &str)
         let authoring = guard
             .pending
             .values()
-            .any(|&(bt, mi)| bt == board_type && mi == ind);
+            .any(|pending| pending.board_type == board_type && pending.msg_index == ind);
         if authoring {
             drop(guard);
             g.send_to_char(
@@ -760,9 +834,9 @@ pub fn board_remove(g: &mut GameState, board_type: usize, ch: CharId, arg: &str)
         if ind < guard.boards[board_type].len() {
             guard.boards[board_type].remove(ind);
         }
-        for (_, (bt, mi)) in guard.pending.iter_mut() {
-            if *bt == board_type && *mi > ind {
-                *mi -= 1;
+        for pending in guard.pending.values_mut() {
+            if pending.board_type == board_type && pending.msg_index > ind {
+                pending.msg_index -= 1;
             }
         }
         let path = board_file_path(&guard.lib_path, board_type);
@@ -986,8 +1060,39 @@ fn board_msgs(board_type: usize) -> Vec<BoardMsg> {
     guard.boards.get(board_type).cloned().unwrap_or_default()
 }
 
-fn char_level_i32(g: &GameState, ch: CharId) -> i32 {
-    g.get_char(ch).map(|c| c.player.level as i32).unwrap_or(0)
+fn char_authority_i32(g: &GameState, ch: CharId) -> Option<i32> {
+    // Invalid descriptor aliases and corrupt persisted trust return no
+    // authority instead of inheriting the body's display level. Callers deny
+    // explicitly, including the remove-your-own-message exception.
+    g.principal_authority(ch)
+        .map(|principal| principal.authority)
+}
+
+fn capture_board_authorization(
+    g: &GameState,
+    ch: CharId,
+) -> Option<crate::state::AuthenticatedCommandRequest> {
+    if let Some(request) = crate::interpreter::authenticated_command_request(g, ch) {
+        return Some(request);
+    }
+
+    #[cfg(test)]
+    {
+        let authority = g
+            .principal_authority(ch)
+            .filter(|authority| authority.is_authenticated_player())?;
+        let descriptor = authority.descriptor?;
+        let principal = g.get_char(authority.principal)?;
+        return Some(crate::state::AuthenticatedCommandRequest {
+            requester_body: ch,
+            requester_principal: authority.principal,
+            descriptor,
+            idnum: principal.idnum,
+        });
+    }
+
+    #[cfg(not(test))]
+    None
 }
 
 /// delete_doubledollar(): collapse "$$" to "$" (interpreter.c). Boards run this
@@ -1032,6 +1137,27 @@ fn board_timestamp() -> String {
 #[cfg(test)]
 mod persistence_tests {
     use super::*;
+
+    fn connected_player(
+        g: &mut GameState,
+        conn: ConnId,
+        name: &str,
+        level: Level,
+        trust: i32,
+    ) -> CharId {
+        let mut character =
+            crate::character::Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        character.player.level = level;
+        character.trust = trust;
+        character.desc = Some(conn);
+        let character = g.create_char(character);
+        let mut descriptor =
+            crate::connection::Descriptor::new(conn, "board-authority.test".to_string());
+        descriptor.state = crate::connection::ConState::Playing;
+        descriptor.character = Some(character);
+        g.descriptors.insert(conn, descriptor);
+        character
+    }
 
     fn temp_file(name: &str) -> String {
         let stamp = std::time::SystemTime::now()
@@ -1094,5 +1220,149 @@ mod persistence_tests {
         save_board_file(&path, &loaded, format).unwrap();
         assert!(std::fs::read(&path).unwrap().starts_with(BOARD_FILE_MAGIC));
         let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
+    #[test]
+    fn board_read_write_and_remove_levels_use_persisted_trust() {
+        const IMPLEMENTOR_BOARD: usize = 3;
+        let root = std::path::PathBuf::from(temp_file("authority"))
+            .parent()
+            .unwrap()
+            .join("lib");
+        boot_boards(root.to_str().unwrap());
+
+        let mut g = GameState::new(crate::config::Config::default());
+        let display = connected_player(&mut g, ConnId(821), "Display", LVL_IMPL, 1);
+        let trusted = connected_player(&mut g, ConnId(822), "Trusted", 1, i32::from(LVL_IMPL));
+
+        assert!(board_show(&mut g, IMPLEMENTOR_BOARD, display, "board"));
+        assert!(
+            g.descriptors[&ConnId(821)]
+                .outbuf
+                .contains("fail to understand the holy words")
+        );
+        g.descriptors.get_mut(&ConnId(821)).unwrap().outbuf.clear();
+
+        assert!(board_show(&mut g, IMPLEMENTOR_BOARD, trusted, "board"));
+        assert!(
+            g.descriptors[&ConnId(822)]
+                .outbuf
+                .contains("The board is empty")
+        );
+        g.descriptors.get_mut(&ConnId(822)).unwrap().outbuf.clear();
+
+        board_write(&mut g, IMPLEMENTOR_BOARD, display, "forged authority");
+        assert!(
+            g.descriptors[&ConnId(821)]
+                .outbuf
+                .contains("not holy enough to write")
+        );
+        assert!(crate::lock_ok::lock(&boards()).boards[IMPLEMENTOR_BOARD].is_empty());
+
+        board_write(&mut g, IMPLEMENTOR_BOARD, trusted, "trusted authority");
+        assert!(
+            g.descriptors[&ConnId(822)]
+                .outbuf
+                .contains("Write your message")
+        );
+        assert_eq!(
+            crate::lock_ok::lock(&boards()).boards[IMPLEMENTOR_BOARD][0].level,
+            i32::from(LVL_IMPL)
+        );
+
+        {
+            let mut runtime = crate::lock_ok::lock(&boards());
+            runtime.pending.clear();
+            runtime.boards[IMPLEMENTOR_BOARD] = vec![BoardMsg {
+                heading: b"           (Other)      :: protected".to_vec(),
+                message: b"body".to_vec(),
+                level: 1,
+            }];
+        }
+        g.descriptors.get_mut(&ConnId(821)).unwrap().outbuf.clear();
+        g.descriptors.get_mut(&ConnId(822)).unwrap().outbuf.clear();
+
+        assert!(board_remove(&mut g, IMPLEMENTOR_BOARD, display, "1"));
+        assert!(
+            g.descriptors[&ConnId(821)]
+                .outbuf
+                .contains("not holy enough to remove other people's messages")
+        );
+        assert_eq!(
+            crate::lock_ok::lock(&boards()).boards[IMPLEMENTOR_BOARD].len(),
+            1
+        );
+
+        assert!(board_remove(&mut g, IMPLEMENTOR_BOARD, trusted, "1"));
+        assert!(
+            g.descriptors[&ConnId(822)]
+                .outbuf
+                .contains("Message removed")
+        );
+        assert!(crate::lock_ok::lock(&boards()).boards[IMPLEMENTOR_BOARD].is_empty());
+
+        boot_boards(root.join("empty-reset").to_str().unwrap());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn private_board_save_revalidates_the_opening_session_and_write_level() {
+        const IMPLEMENTOR_BOARD: usize = 3;
+        #[derive(Clone, Copy, Debug)]
+        enum Revocation {
+            Trust,
+            Quarantine,
+            DescriptorBody,
+        }
+
+        for (index, revocation) in [
+            Revocation::Trust,
+            Revocation::Quarantine,
+            Revocation::DescriptorBody,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let root = std::path::PathBuf::from(temp_file(&format!("write-revalidate-{index}")))
+                .parent()
+                .unwrap()
+                .join("lib");
+            boot_boards(root.to_str().unwrap());
+            let mut g = GameState::new(crate::config::Config::default());
+            let conn = ConnId(850 + index as u64);
+            let writer = connected_player(&mut g, conn, "Writer", LVL_IMPL, i32::from(LVL_IMPL));
+            board_write(&mut g, IMPLEMENTOR_BOARD, writer, "private draft");
+            assert!(has_pending_write_for_test(conn), "case={revocation:?}");
+
+            match revocation {
+                Revocation::Trust => g.get_char_mut(writer).unwrap().trust = 1,
+                Revocation::Quarantine => {
+                    let idnum = g.get_char(writer).unwrap().idnum;
+                    g.authority_quarantine.insert(idnum);
+                }
+                Revocation::DescriptorBody => {
+                    let mut replacement = crate::character::Character::new_player(
+                        "Replacement".into(),
+                        Class::Warrior,
+                        Race::Human,
+                    );
+                    replacement.desc = Some(conn);
+                    let replacement = g.create_char(replacement);
+                    g.descriptors.get_mut(&conn).unwrap().character = Some(replacement);
+                }
+            }
+
+            assert_eq!(
+                board_finish_write(&mut g, conn, "secret body", true),
+                BoardFinishOutcome::AuthorizationDenied,
+                "case={revocation:?}"
+            );
+            assert!(
+                crate::lock_ok::lock(&boards()).boards[IMPLEMENTOR_BOARD].is_empty(),
+                "case={revocation:?}"
+            );
+            assert!(!has_pending_write_for_test(conn), "case={revocation:?}");
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 }

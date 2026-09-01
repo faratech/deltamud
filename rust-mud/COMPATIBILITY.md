@@ -5,9 +5,9 @@ DeltaMUD tree (`/web/deltamud/src`, `/web/deltamud/lib`) and the Rust port in
 `/web/deltamud/rust-mud`.
 
 The old early-port guidance in this file is no longer accurate: the Rust port
-now has the full command table, most major subsystems, crypt-compatible
-password verification, an 83-column `player_main` mapping, and byte-compatible
-runtime persistence on the deployed C ABI.
+now has the full command table, most major subsystems, Argon2id password storage
+with historical-format verification, an 83-column `player_main` mapping, and
+byte-compatible runtime persistence on the deployed C ABI.
 
 The latest tracker-backed parity pass resolved the previously open high-risk
 runtime/editor items for complex alias queue timing, creation nanny/do_start,
@@ -27,7 +27,9 @@ text buffers.
 - SQL player persistence uses the C 83-column `player_main` shape plus
   `player_affects` and `player_skills`.
 - Password verification accepts historical DeltaMUD formats, including legacy
-  DES crypt, SHA-crypt, and the `pwd_new` bare SHA-256 path.
+  DES crypt, SHA-crypt, and the `pwd_new` bare SHA-256 path. New and changed
+  passwords use salted Argon2id PHC strings, and a successful legacy login
+  attempts to persist an Argon2id upgrade.
 - The static command table matches C order, and active command handlers are
   wired.
 
@@ -60,6 +62,13 @@ The Rust `database.rs`/`database_compat.rs` path now targets the original
 deity, conditions, preferences, combat stats, quest fields, clan fields, arena
 fields, map coordinates, god-command bitvectors, affects, and skills.
 
+Authority-changing operations use a narrow compare-and-swap over the complete
+persisted authority tuple (level, trust, and all four GCMD bitvectors). The live
+character is updated only after a committed result or exact durable readback;
+an ambiguous outcome quarantines the identity so it cannot exercise staff
+authority until reconciliation. Generic player saves cannot publish a pending
+authority or password change.
+
 Player aliases now use the C sidecar format under
 `plralias/<bucket>/<lowername>.alias`: alias, replacement, and type triples are
 loaded on login and rewritten on alias changes, saves, disconnects, shutdown,
@@ -90,10 +99,58 @@ Known builder/world gaps:
   audit. Inline OLC text buffers share the generic runtime `modify.rs` parser
   for the C-style string-editor slash command set.
 
+## Modern operational behavior (not C file-format parity)
+
+These controls intentionally modernize deployment and security without changing
+the C world grammar or command-oracle policy:
+
+- MySQL has no compiled-in credential and is never selected by falling back to
+  an unsafe URL. Debug/test builds may default to the ephemeral mock backend;
+  release builds default to real MySQL, which requires an explicit non-empty
+  `DATABASE_URL`. Operators should always set `MUD_MOCK_DB` explicitly.
+- The real schema is an ordered, checksummed migration set. Normal server boot
+  verifies it and its authorization-sensitive storage shape (including player
+  name collation and level type) and fails closed; only the offline
+  `deltamud --migrate` mode may apply it. Loading independently rejects a
+  malformed player level instead of allowing a signed value to wrap into an
+  immortal `u8` level.
+- Creating idnum 1 no longer creates an administrator. The first character is a
+  level-1 mortal. A new installation may promote one existing durable player
+  through the one-time offline `--bootstrap-implementor <name>` mode, which
+  refuses to run after an Implementor exists.
+- OLC world-file replacement is crash-conscious: sibling temp file, checked
+  write/flush/fsync, atomic rename, and directory fsync. Disk-first editors
+  publish live state only after disk success; REDIT/OEDIT keep the C two-stage
+  memory-then-`olc save` model. Save-list completion is published only after a
+  durable write. Manual save, shutdown, auto-reboot, and copyover all abort
+  their success/exit/exec path when an outstanding entry cannot be made
+  durable.
+- Every authority-bearing editor retains the exact authenticated session tuple
+  and revalidates persisted trust, quarantine, GCMD grants, and the current
+  zone ACL at its publication boundary. Revocation while an editor is open
+  therefore discards or retains scratch work without publishing it.
+- New-zone creation writes a versioned durable marker before publishing any of
+  its six components or indexes. Boot hides every indexed component for a
+  marked zone and restores the shutdown/copyover blocker; an exact idempotent
+  `zedit new` retry completes the publication and removes the marker.
+- Mail consumption is a whole-store copy-on-write replacement. A partial
+  rewrite cannot mark only part of a message deleted or make the original
+  unreadable.
+- Staff command authority belongs to direct input from the exact authenticated
+  player principal. `force`, `order`, and DG commands may still drive ordinary
+  gameplay, but cannot spend a staff principal's trust or GCMD capabilities.
+- Fresh connections receive server-initiated `WILL GMCP`; negotiated descriptors
+  retain bounded `Core.Hello` and `Core.Supports.Set/Add/Remove` capability state
+  and receive `Char.Vitals`/`Room.Info`. Plain Telnet and MSSP remain compatible,
+  and clients that do not negotiate GMCP receive no GMCP payload.
+- UTF-8 negotiation/input policy, NAWS, TTYPE/MTTS, MCCP, `Room.Add/Remove`, and
+  `Char.Items` are deliberately deferred rather than partially advertised.
+
 ## Divergence Register (deliberate deviations from the C oracle)
 
 Policy: where the C oracle itself is buggy, the Rust port implements the
-correct behavior and records it here. Everything else matches the C.
+correct behavior and records it here. Gameplay fidelity otherwise follows the C
+oracle, apart from the explicit operational/security controls above.
 
 | Area | Divergence | C behavior (oracle) | Rust behavior | Tracker |
 |---|---|---|---|---|
@@ -108,6 +165,7 @@ correct behavior and records it here. Everything else matches the C.
 | `build off` | Reachable | `real_room(atoi("off")) < 0` runs first, so C ALWAYS rejects `build off` as a bad room (act.other.c:328-335) | `build off` performs the off action | #320 |
 | redit special-exit `-1` | Menu stays in context | After clearing a special-exit destination, C re-displays the regular exit menu (a copy-paste slip at redit.c:1210) | Re-displays the special-exit menu | #268 |
 | Multiplay gate | Matches shipped C | `check_multiplaying` begins with `return 1` ("development mode"), so multi-boxing is never blocked (comm.c:2749) | Same default; the full C counting logic is live behind `MUD_ENFORCE_MULTIPLAY=1` | #219 |
+| Name-based privilege backdoors | Removed | Public `levelme` promotes the exact name `Mulder`; `snoop` bypasses hierarchy for that name; zone builder lists use prefix matching | `levelme` is not dispatchable, `snoop` applies one principal rule to every name, and builder ACLs use exact case-insensitive tokens whose identities cannot be newly reused while referenced | Security modernization |
 
 ### Finish-the-game completions (in progress, 2026-08)
 
@@ -138,7 +196,7 @@ Each activation is a registered, intentional divergence from the shipped C binar
 | The missing middle (L31-99) | Nothing between mob level 30 and two L100 town NPCs | Zone 30 Sundered Marches (L30-50), 31 Sunken Cloister (L45-70), 32 Ashen Spire (L60-99): 74 rooms, 31 mobs (4 MOB_QUEST-flagged per zone), chained 3044->3101->3200 |
 | SPELL_TELEPORT / SPELL_GROUP_RECALL | Handlers exist (spells.c:173 / magic.c:559) but never spello()'d; teleport had an inverted NULL check | Both registered with mortal level rows (MAG 46 / CLE 49); teleport excludes synthetic surface-map cells; the C NULL-check bug is fixed by construction in the port |
 | Web who-list (www_who) | make_who2html complete but gated behind a broken `if (!(www_who) > 0)` guard, a hardcoded /home/mulder path, a system("mv") shell-out, and an unregistered whoupd command | Native whohtml.rs: same page, configurable MUD_WWW_WHO_DIR, atomic tmp+rename, driven by www_who (MUD_WWW_WHO=1) from the heartbeat autosave block; whoupd live with C's rewww kept as alias |
-| Auto-reboot clock | setreboot armed a schedule (reboot_hr/min, warn_hr/min) that nothing consumed | The heartbeat consumes it: warning broadcast at the warn time, then save-all + OLC flush + graceful shutdown at the reboot time (MUD_AUTOREBOOT=1) |
+| Auto-reboot clock | setreboot armed a schedule (reboot_hr/min, warn_hr/min) that nothing consumed | The heartbeat consumes it: warning broadcast at the warn time, then save-all + OLC flush + graceful exit 75 at reboot time (`MUD_AUTOREBOOT=1`), which the supplied systemd unit restarts. Intentional `shutdown die/pause` and SIGTERM exit 0 and stay stopped. |
 | pt_markable | Shipped NO: theft allowed, THIEF branding dead | Implemented behind MUD_PT_MARKABLE=1 (default matches the oracle) |
 | zone.lst | The stock CircleMUD fantasy catalog (54 zones, zero shipped) | Rewritten to the real 25-zone catalog |
 | Mage Guild (room 156), zone-6 room 601, 16.wld #1631 | Placeholder text | Finished |
@@ -159,13 +217,32 @@ for exact output text when porting anything new.
 2. Back up SQL and `lib/` runtime data before any Rust production run.
 3. Treat world source files as mostly shareable, and compare Rust OLC output
    against the C build when changing save grammars or editor behavior.
-4. Treat runtime persistence files as Rust-only after Rust writes them, unless a
-   migration tool is added.
-5. Use `MUD_MOCK_DB=true` for local development unless testing SQL behavior.
-6. Use `/web/deltamud/bin/circle` side by side when proving exact output,
+4. Preserve the auto-detected format of existing runtime files.
+   `MUD_CFORMAT_FILES=true` selects C format only for new or intrinsically
+   ambiguous empty stores; toggling it does not convert existing files.
+5. Set `MUD_MOCK_DB=true` explicitly for local ephemeral development. For real
+   MySQL, set `MUD_MOCK_DB=false` plus an explicit `DATABASE_URL`, run
+   `deltamud --migrate` offline, and never assume normal boot will modify schema.
+6. Create the initial Implementor only with the one-time offline
+   `--bootstrap-implementor <name>` workflow; creating the first character is
+   intentionally not an authorization mechanism.
+7. Use `/web/deltamud/bin/circle` side by side when proving exact output,
    combat, editor, or persistence parity.
 
 ## Quick SQL Schema Check
+
+The binary is the authoritative verifier: with the real backend selected, a
+normal start checks the migration names/checksums and refuses a mismatched
+schema. For an operator-visible inventory:
+
+```sql
+SELECT version, name, checksum
+FROM schema_migrations
+ORDER BY version;
+```
+
+The current binary expects versions 1 through 4. The original shape check is
+still useful when importing an older database:
 
 ```sql
 SELECT COUNT(*) AS column_count
@@ -174,8 +251,9 @@ WHERE table_schema = 'deltamud'
   AND table_name = 'player_main';
 ```
 
-An 83-column result is the expected C-compatible shape. A much smaller result
-indicates an obsolete early Rust schema and should be migrated before use.
+An 83-column result is the expected C-compatible shape. A missing migration
+ledger or a much smaller result indicates an obsolete schema; back it up and run
+the explicit offline migration rather than allowing normal game startup.
 
 ## Deltania Breathes — spec-assignment collisions (2026-09-01)
 

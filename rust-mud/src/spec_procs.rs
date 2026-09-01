@@ -998,7 +998,7 @@ const OPEN_PATH: &[u8] = b"W3a3003b33000c111d0d111Oe333333Oe22c222112212111a1S."
 const CLOSE_PATH: &[u8] = b"W3a3003b33000c111d0d111CE333333CE22c222112212111a1S.";
 
 /// SPECIAL(mayor). Periodic-pulse only.
-pub fn mayor(g: &mut GameState, actor: CharId, me: CharId, cmd: &str, _arg: &str) -> bool {
+pub fn mayor(g: &mut GameState, _actor: CharId, me: CharId, cmd: &str, _arg: &str) -> bool {
     // C castle.c convention: the spec's `ch` is the MOB THAT OWNS the spec,
     // never the caller who happened to trigger dispatch. Without this rebinding
     // the mayor drove its patrol ON whoever walked through the room (and every

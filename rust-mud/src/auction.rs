@@ -139,8 +139,17 @@ fn get_gold(g: &GameState, id: CharId) -> i32 {
     g.get_char(id).map(|c| c.points.gold).unwrap_or(0)
 }
 
-fn get_level(g: &GameState, id: CharId) -> u8 {
-    g.get_char(id).map(|c| c.player.level).unwrap_or(0)
+fn staff_account_or_invalid_player(g: &GameState, id: CharId) -> bool {
+    match g.principal_authority(id) {
+        Some(authority) if authority.principal_is_player => {
+            g.get_char(authority.principal).is_none_or(|principal| {
+                g.authority_quarantine.contains(&principal.idnum)
+                    || authority.authority >= i32::from(LVL_IMMORT)
+            })
+        }
+        Some(_) => false,
+        None => g.get_char(id).is_some_and(|character| !character.is_npc),
+    }
 }
 
 fn get_name(g: &GameState, id: CharId) -> String {
@@ -442,7 +451,8 @@ pub fn auction_update(g: &mut GameState) {
                 "[WATCHDOG] {} auctions {} to {} for {} coin{}.",
                 sname, short, bname, bid, s
             );
-            if get_level(g, bidder) >= LVL_IMMORT || get_level(g, sid) >= LVL_IMMORT {
+            if staff_account_or_invalid_player(g, bidder) || staff_account_or_invalid_player(g, sid)
+            {
                 mudlog(g, &watch, CMP, LVL_IMPL);
             }
             if let Some(c) = g.get_char_mut(sid) {

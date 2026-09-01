@@ -37,6 +37,7 @@ const POS_STANDING: i32 = 9;
 
 // CircleMUD db.h: SOCMESS_FILE "misc/socials".
 const SOCMESS_REL: &str = "misc/socials";
+const AEDIT_GLOBAL_SAVE_KEY: &str = "<all actions>";
 
 // ---------------------------------------------------------------------------
 // social_messg (structs.h) — the editable mirror. A None Option is the C NULL.
@@ -75,31 +76,24 @@ fn soc_list() -> &'static Mutex<Vec<SocialAction>> {
     SOC_LIST.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-fn ensure_loaded(lib_path: &str) {
+fn ensure_loaded(lib_path: &str) -> std::io::Result<()> {
     let flag = SOC_LOADED.get_or_init(|| Mutex::new(false));
-    let mut loaded = match flag.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
+    let mut loaded = crate::lock_ok::lock(flag);
     if *loaded {
-        return;
+        return Ok(());
     }
-    let list = load_socials_file(lib_path);
-    if let Ok(mut guard) = soc_list().lock() {
-        *guard = list;
-    }
+    let list = load_socials_file(lib_path)?;
+    *crate::lock_ok::lock(soc_list()) = list;
     *loaded = true;
+    Ok(())
 }
 
 /// Load misc/socials (inverse of save). Header line "~cmd sort hide cpos vpos
 /// lvl", then exactly 13 message slots (a line starting with '#' is NULL),
 /// terminated by a "$" sentinel. Mirrors cmd_social::load_socials exactly.
-fn load_socials_file(lib_path: &str) -> Vec<SocialAction> {
+fn load_socials_file(lib_path: &str) -> std::io::Result<Vec<SocialAction>> {
     let path = format!("{}/{}", lib_path.trim_end_matches('/'), SOCMESS_REL);
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
+    let raw = std::fs::read_to_string(&path)?;
     let mut lines = raw.lines();
     let mut list: Vec<SocialAction> = Vec::new();
 
@@ -109,7 +103,12 @@ fn load_socials_file(lib_path: &str) -> Vec<SocialAction> {
             match lines.next() {
                 Some(l) if l.trim().is_empty() => continue,
                 Some(l) => break l,
-                None => return list,
+                None => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "socials file has no terminator",
+                    ));
+                }
             }
         };
         let header = header.trim_start();
@@ -117,43 +116,97 @@ fn load_socials_file(lib_path: &str) -> Vec<SocialAction> {
             break;
         }
         if !header.starts_with('~') {
-            continue;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid social header {header:?}"),
+            ));
         }
         let mut it = header.split_whitespace();
         let command = it.next().unwrap_or("~").trim_start_matches('~').to_string();
-        let sort_as = it.next().unwrap_or("").to_string();
-        let loader_i32 = |raw: Option<&str>, field: &str| match raw {
-            Some(raw) => match crate::text::parse_i32_strict(raw) {
-                Ok(value) => value,
-                Err(crate::text::ParseIntError::Overflow) => {
-                    let clamped = if raw.trim_start().starts_with('-') {
-                        i32::MIN
-                    } else {
-                        i32::MAX
-                    };
-                    log::warn!(
-                        "SYSERR: social {command} {field} overflow in {path}; clamped to {clamped}"
-                    );
-                    clamped
-                }
-                Err(_) => 0,
-            },
-            None => 0,
+        let sort_as = it
+            .next()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("social {command:?} is missing sort key"),
+                )
+            })?
+            .to_string();
+        if command.is_empty() || sort_as.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "social command and sort key must be non-empty",
+            ));
+        }
+        let loader_i32 = |raw: Option<&str>, field: &str| -> std::io::Result<i32> {
+            let raw = raw.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("social {command} is missing {field}"),
+                )
+            })?;
+            crate::text::parse_i32_strict(raw).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("social {command} has invalid {field} {raw:?}: {error:?}"),
+                )
+            })
         };
-        let hide = loader_i32(it.next(), "hide");
-        let min_char_pos = loader_i32(it.next(), "minimum character position");
-        let min_vict_pos = loader_i32(it.next(), "minimum victim position");
-        let min_lvl = loader_i32(it.next(), "minimum level");
+        let hide = loader_i32(it.next(), "hide")?;
+        let min_char_pos = loader_i32(it.next(), "minimum character position")?;
+        let min_vict_pos = loader_i32(it.next(), "minimum victim position")?;
+        let min_lvl = loader_i32(it.next(), "minimum level")?;
+        if it.next().is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("social {command} header has unexpected extra fields"),
+            ));
+        }
 
-        let read = |lines: &mut std::str::Lines| -> Option<String> {
-            let l = lines.next().unwrap_or("#");
-            if l.starts_with('#') {
-                None
+        let read = |lines: &mut std::str::Lines| -> std::io::Result<Option<String>> {
+            let line = lines.next().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("social {command} has an incomplete message block"),
+                )
+            })?;
+            if line.starts_with('#') {
+                Ok(None)
             } else {
-                Some(l.to_string())
+                Ok(Some(line.to_string()))
             }
         };
 
+        let messages = [
+            read(&mut lines)?,
+            read(&mut lines)?,
+            read(&mut lines)?,
+            read(&mut lines)?,
+            read(&mut lines)?,
+            read(&mut lines)?,
+            read(&mut lines)?,
+            read(&mut lines)?,
+            read(&mut lines)?,
+            read(&mut lines)?,
+            read(&mut lines)?,
+            read(&mut lines)?,
+            read(&mut lines)?,
+        ];
+        let [
+            char_no_arg,
+            others_no_arg,
+            char_found,
+            others_found,
+            vict_found,
+            not_found,
+            char_auto,
+            others_auto,
+            char_body_found,
+            others_body_found,
+            vict_body_found,
+            char_obj_found,
+            others_obj_found,
+        ] = messages;
         list.push(SocialAction {
             command,
             sort_as,
@@ -161,22 +214,22 @@ fn load_socials_file(lib_path: &str) -> Vec<SocialAction> {
             min_victim_position: min_vict_pos,
             min_char_position: min_char_pos,
             min_level_char: min_lvl,
-            char_no_arg: read(&mut lines),
-            others_no_arg: read(&mut lines),
-            char_found: read(&mut lines),
-            others_found: read(&mut lines),
-            vict_found: read(&mut lines),
-            not_found: read(&mut lines),
-            char_auto: read(&mut lines),
-            others_auto: read(&mut lines),
-            char_body_found: read(&mut lines),
-            others_body_found: read(&mut lines),
-            vict_body_found: read(&mut lines),
-            char_obj_found: read(&mut lines),
-            others_obj_found: read(&mut lines),
+            char_no_arg,
+            others_no_arg,
+            char_found,
+            others_found,
+            vict_found,
+            not_found,
+            char_auto,
+            others_auto,
+            char_body_found,
+            others_body_found,
+            vict_body_found,
+            char_obj_found,
+            others_obj_found,
         });
     }
-    list
+    Ok(list)
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +239,7 @@ fn load_socials_file(lib_path: &str) -> Vec<SocialAction> {
 #[derive(Clone, Debug)]
 struct AeditState {
     ch: CharId,
+    authorization: olc::OlcAuthorization,
     /// The scratch action (C OLC_ACTION).
     action: SocialAction,
     /// Real index into SOC_LIST of the action being edited, or None for a new
@@ -250,7 +304,12 @@ fn take_state(conn: ConnId) -> Option<AeditState> {
 /// abort: drop this conn's editor state without saving (player disconnected
 /// mid-edit). `olc::abort_editor` calls `olc::clear_active`.
 pub fn abort(conn: ConnId) {
-    take_state(conn);
+    if let Some(state) = take_state(conn) {
+        olc::discard_unresolved_named_save(
+            EditorKind::Aedit,
+            &state.action.command.to_ascii_lowercase(),
+        );
+    }
 }
 
 fn set_state(conn: ConnId, st: AeditState) {
@@ -330,9 +389,21 @@ pub fn do_aedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         Some(c) => c,
         None => return,
     };
+    let Some(authorization) = olc::capture_olc_authorization(g, ch) else {
+        send(g, ch, "You do not have access to the action editor.\r\n");
+        return;
+    };
 
     let lib_path = g.config.lib_path.clone();
-    ensure_loaded(&lib_path);
+    if let Err(error) = ensure_loaded(&lib_path) {
+        log::warn!("SYSERR: OLC: cannot load actions table: {}", error);
+        send(
+            g,
+            ch,
+            "The actions file could not be read safely; no editor was opened.\r\n",
+        );
+        return;
+    }
 
     let (buf1, _rest) = crate::interpreter::one_argument(arg);
     if buf1.is_empty() {
@@ -342,13 +413,29 @@ pub fn do_aedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
     // "save" — flush all actions to disk (do_olc save path for AEDIT).
     if is_abbrev(&buf1, "save") {
-        send(g, ch, "Saving all actions.\r\n");
+        if let Err(error) = olc::revalidate_olc_authorization(g, authorization, true, None) {
+            log::warn!("SYSERR: OLC: refused action publication: {error}");
+            send(
+                g,
+                ch,
+                "Your OLC authorization changed; actions were not saved.\r\n",
+            );
+            return;
+        }
         let name = g
             .get_char(ch)
             .map(|c| c.player.name.clone())
             .unwrap_or_default();
-        log::info!("OLC: {} saves all actions.", name);
-        aedit_save_to_disk(&lib_path);
+        match save_all_actions(g) {
+            Ok(()) => {
+                send(g, ch, "Saving all actions.\r\n");
+                log::info!("OLC: {} saves all actions.", name);
+            }
+            Err(err) => {
+                log::warn!("SYSERR: OLC: cannot save actions: {}", err);
+                send(g, ch, "Could not save the actions file.\r\n");
+            }
+        }
         return;
     }
 
@@ -357,6 +444,7 @@ pub fn do_aedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         conn,
         AeditState {
             ch,
+            authorization,
             action: SocialAction::default(),
             rnum: None,
             storage: buf1.clone(),
@@ -546,17 +634,35 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         // ---- Confirmation states ---------------------------------------
         AeditMode::ConfirmSave => {
             match trimmed.chars().next() {
-                Some('y') | Some('Y') => {
-                    aedit_save_internally(g, conn);
-                    let cmd = with_state(conn, |st| st.action.command.clone()).unwrap_or_default();
-                    let name = g
-                        .get_char(ch)
-                        .map(|c| c.player.name.clone())
-                        .unwrap_or_default();
-                    log::info!("OLC: {} edits action {}", name, cmd);
-                    send(g, ch, "Action saved to memory.\r\n");
-                    cleanup(conn);
-                }
+                Some('y') | Some('Y') => match aedit_save_internally(g, conn) {
+                    Ok(()) => {
+                        let cmd =
+                            with_state(conn, |st| st.action.command.clone()).unwrap_or_default();
+                        let name = g
+                            .get_char(ch)
+                            .map(|c| c.player.name.clone())
+                            .unwrap_or_default();
+                        log::info!("OLC: {} edits action {}", name, cmd);
+                        send(g, ch, "Action saved to disk and memory.\r\n");
+                        cleanup(conn);
+                    }
+                    Err(err) => {
+                        log::warn!("SYSERR: OLC: cannot save action: {}", err);
+                        if crate::olc::replacement_was_published(&err) {
+                            send(
+                                g,
+                                ch,
+                                "The actions file was published and live actions were reconciled, but crash durability could not be confirmed.\r\nDo you wish to retry saving this action? ",
+                            );
+                        } else {
+                            send(
+                                g,
+                                ch,
+                                "Could not save the action to disk; the live actions were not changed.\r\nDo you wish to retry saving this action? ",
+                            );
+                        }
+                    }
+                },
                 Some('n') | Some('N') => cleanup(conn),
                 _ => g.send_to_char(
                     ch,
@@ -914,52 +1020,122 @@ fn set_msg(conn: ConnId, arg: &str, apply: impl FnOnce(&mut SocialAction, Option
 // Internal save (aedit_save_internally) + disk save (aedit_save_to_disk).
 // ---------------------------------------------------------------------------
 
-fn aedit_save_internally(g: &mut GameState, conn: ConnId) {
-    let (action, rnum) = match with_state(conn, |st| (st.action.clone(), st.rnum)) {
-        Some(v) => v,
-        None => return,
-    };
-    {
-        let mut guard = match soc_list().lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
+fn aedit_save_internally(g: &mut GameState, conn: ConnId) -> std::io::Result<()> {
+    let (action, rnum, authorization) =
+        match with_state(conn, |st| (st.action.clone(), st.rnum, st.authorization)) {
+            Some(v) => v,
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "action editor state is missing",
+                ));
+            }
         };
-        match rnum {
-            Some(r) if r < guard.len() => {
-                guard[r] = action;
-            }
-            _ => {
-                // New action: appended (C appends at top_of_socialt+1).
-                guard.push(action);
-            }
+    olc::revalidate_olc_authorization(g, authorization, true, None)?;
+    let unresolved_key = action.command.to_ascii_lowercase();
+    let mut actions = crate::lock_ok::lock(&soc_list()).clone();
+    match rnum {
+        Some(r) if r < actions.len() => {
+            actions[r] = action;
+        }
+        _ => {
+            // New action: appended (C appends at top_of_socialt+1).
+            actions.push(action);
         }
     }
     let lib_path = g.config.lib_path.clone();
-    aedit_save_to_disk(&lib_path);
-    let socials_path = format!("{}/{}", lib_path.trim_end_matches('/'), SOCMESS_REL);
-    if let Err(e) = crate::cmd_social::reload_socials(Some(&socials_path)) {
-        log::warn!(
-            "SYSERR: can't reload socials file '{}': {}",
-            socials_path,
-            e
-        );
+    let result = publish_actions(&lib_path, &actions);
+    match &result {
+        Ok(()) => {
+            *crate::lock_ok::lock(&soc_list()) = actions;
+            crate::olc::olc_remove_from_save_list(0, crate::olc::OLC_SAVE_ACTION);
+            crate::olc::clear_unresolved_named_save(EditorKind::Aedit, &unresolved_key);
+            crate::olc::clear_unresolved_named_save(EditorKind::Aedit, AEDIT_GLOBAL_SAVE_KEY);
+            crate::olc::clear_published_unresolved_kind(EditorKind::Aedit);
+        }
+        Err(error) if crate::olc::replacement_was_published(error) => {
+            *crate::lock_ok::lock(&soc_list()) = actions;
+            crate::olc::olc_add_to_save_list(0, crate::olc::OLC_SAVE_ACTION);
+            crate::olc::mark_unresolved_named_save_failure(
+                EditorKind::Aedit,
+                &unresolved_key,
+                error,
+            );
+        }
+        Err(error) => crate::olc::mark_unresolved_named_save_failure(
+            EditorKind::Aedit,
+            &unresolved_key,
+            error,
+        ),
     }
+    result
 }
 
 /// Write the entire social table back to misc/socials (C aedit_save_to_disk).
 /// olc.rs 'olc aedit save' entry (#275).
-pub fn save_all_actions(g: &mut GameState) {
-    let lib = g.config.lib_path.clone();
-    aedit_save_to_disk(&lib);
+pub fn save_all_actions(g: &mut GameState) -> std::io::Result<()> {
+    let result = (|| {
+        let lib = g.config.lib_path.clone();
+        ensure_loaded(&lib)?;
+        let actions = crate::lock_ok::lock(&soc_list()).clone();
+        publish_actions(&lib, &actions)
+    })();
+    match &result {
+        Ok(()) => {
+            crate::olc::olc_remove_from_save_list(0, crate::olc::OLC_SAVE_ACTION);
+            crate::olc::clear_unresolved_named_save(EditorKind::Aedit, AEDIT_GLOBAL_SAVE_KEY);
+            crate::olc::clear_published_unresolved_kind(EditorKind::Aedit);
+        }
+        Err(error) => crate::olc::mark_unresolved_named_save_failure(
+            EditorKind::Aedit,
+            AEDIT_GLOBAL_SAVE_KEY,
+            error,
+        ),
+    }
+    result
 }
 
-fn aedit_save_to_disk(lib_path: &str) {
-    let path = format!("{}/{}", lib_path.trim_end_matches('/'), SOCMESS_REL);
+fn publish_actions(lib_path: &str, actions: &[SocialAction]) -> std::io::Result<()> {
+    let result = aedit_save_to_disk(lib_path, actions);
+    if match &result {
+        Ok(()) => true,
+        Err(error) => crate::olc::replacement_was_published(error),
+    } {
+        crate::cmd_social::install_social_messages(
+            actions.iter().map(SocialAction::to_live).collect(),
+        );
+    }
+    result
+}
 
-    let guard = match soc_list().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
+impl SocialAction {
+    fn to_live(&self) -> crate::cmd_social::SocialMessg {
+        crate::cmd_social::SocialMessg {
+            command: self.command.clone(),
+            sort_as: self.sort_as.clone(),
+            hide: self.hide,
+            min_victim_position: self.min_victim_position,
+            min_char_position: self.min_char_position,
+            min_level_char: self.min_level_char,
+            char_no_arg: self.char_no_arg.clone(),
+            others_no_arg: self.others_no_arg.clone(),
+            char_found: self.char_found.clone(),
+            others_found: self.others_found.clone(),
+            vict_found: self.vict_found.clone(),
+            char_body_found: self.char_body_found.clone(),
+            others_body_found: self.others_body_found.clone(),
+            vict_body_found: self.vict_body_found.clone(),
+            not_found: self.not_found.clone(),
+            char_auto: self.char_auto.clone(),
+            others_auto: self.others_auto.clone(),
+            char_obj_found: self.char_obj_found.clone(),
+            others_obj_found: self.others_obj_found.clone(),
+        }
+    }
+}
+
+fn aedit_save_to_disk(lib_path: &str, actions: &[SocialAction]) -> std::io::Result<()> {
+    let path = format!("{}/{}", lib_path.trim_end_matches('/'), SOCMESS_REL);
 
     let mut out = String::new();
     let h = |o: &Option<String>| -> String {
@@ -968,7 +1144,7 @@ fn aedit_save_to_disk(lib_path: &str) {
             None => "#".to_string(),
         }
     };
-    for a in guard.iter() {
+    for a in actions {
         // "~%s %s %d %d %d %d\n" — note the field order: hide, min_char_pos,
         // min_vict_pos, min_level (exactly C aedit_save_to_disk).
         out.push_str(&format!(
@@ -1009,9 +1185,10 @@ fn aedit_save_to_disk(lib_path: &str) {
     }
     out.push_str("$\n");
 
-    if std::fs::write(&path, &out).is_err() {
-        log::warn!("SYSERR: Can't open socials file '{}'", path);
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(parent)?;
     }
+    crate::olc::atomic_replace(std::path::Path::new(&path), out.as_bytes())
 }
 
 /// delete_doubledollar: collapse "$$" to "$".
@@ -1024,7 +1201,12 @@ fn delete_doubledollar(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 fn cleanup(conn: ConnId) {
-    take_state(conn);
+    if let Some(state) = take_state(conn) {
+        olc::discard_unresolved_named_save(
+            EditorKind::Aedit,
+            &state.action.command.to_ascii_lowercase(),
+        );
+    }
     olc::clear_active(conn);
 }
 

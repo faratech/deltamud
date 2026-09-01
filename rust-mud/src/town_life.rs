@@ -404,6 +404,9 @@ fn maybe_bark(g: &mut GameState, ch: CharId, barks: &'static [&'static str]) {
 }
 
 #[cfg(test)]
+// The guard serializes the process-global MUD clock while async fixture loading
+// runs; production town-life code never holds this test lock.
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::character::Character;

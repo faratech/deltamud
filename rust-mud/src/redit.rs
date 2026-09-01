@@ -86,6 +86,8 @@ struct RoomEdit {
 struct ReditState {
     vnum: RoomVnum,
     znum: usize, // loaded-zone index
+    zone_number: i32,
+    authorization: olc::OlcAuthorization,
     room: RoomEdit,
     mode: ReditMode,
     val: i32,        // current direction being edited / "modified" flag
@@ -120,6 +122,10 @@ pub fn do_redit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let conn = match g.get_char(ch).and_then(|c| c.desc) {
         Some(c) => c,
         None => return,
+    };
+    let Some(authorization) = olc::capture_olc_authorization(g, ch) else {
+        g.send_to_char(ch, "You do not have permission to use OLC.\r\n");
+        return;
     };
     let Some(vnum) = olc::parse_i32_input(g, conn, arg.trim(), NOWHERE) else {
         return;
@@ -167,6 +173,8 @@ pub fn do_redit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         ReditState {
             vnum,
             znum,
+            zone_number: g.zones[znum].number,
+            authorization,
             room,
             mode: ReditMode::MainMenu,
             val: 0,
@@ -559,7 +567,8 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
 
         ReditMode::SExitNumber => {
             // C redit.c:1200-1222: -1 clears the destination; otherwise the
-            // room must exist and (below LVL_IMMORT) be in an owned zone.
+            // room must exist and the authenticated principal must own its
+            // zone unless exact Implementor trust grants the global override.
             let Some(number) = olc::parse_i32_input(g, conn, arg.trim(), -2) else {
                 return;
             };
@@ -580,23 +589,18 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
                 send(g, conn, "That room does not exist, try again : ");
                 return;
             }
-            let ch = conn_char(g, conn);
-            let level = ch
-                .and_then(|c| g.get_char(c))
-                .map(|c| c.player.level)
-                .unwrap_or(LVL_IMPL);
-            if level < LVL_IMMORT {
-                let owned = olc::real_zone(g, number)
-                    .map(|zr| ch.map(|c| olc::can_edit_zone(g, c, zr)).unwrap_or(false))
-                    .unwrap_or(false);
-                if !owned {
-                    send(
-                        g,
-                        conn,
-                        "You don't have permissions to that zone, try again (-1 for none) : ",
-                    );
-                    return;
-                }
+            let owned = olc::real_zone(g, number)
+                .and_then(|zone_rnum| {
+                    conn_char(g, conn).map(|ch| olc::can_edit_zone(g, ch, zone_rnum))
+                })
+                .unwrap_or(false);
+            if !owned {
+                send(
+                    g,
+                    conn,
+                    "You don't have permissions to that zone, try again (-1 for none) : ",
+                );
+                return;
             }
             with_state(conn, |s| {
                 if let Some(se) = s.room.special_exit.as_mut() {
@@ -856,11 +860,20 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
 
     match mode {
         ReditMode::ConfirmSave => match arg.chars().next().map(|c| c.to_ascii_lowercase()) {
-            Some('y') => {
-                save_internally(g, conn);
-                send(g, conn, "Room saved to memory.\r\n");
-                finish(g, conn);
-            }
+            Some('y') => match save_internally(g, conn) {
+                Ok(()) => {
+                    send(g, conn, "Room saved to memory.\r\n");
+                    finish(g, conn);
+                }
+                Err(error) => {
+                    log::warn!("SYSERR: OLC: refused room publication: {error}");
+                    send(
+                        g,
+                        conn,
+                        "Your OLC authorization changed; the room was not saved.\r\nDo you wish to save this room internally? : ",
+                    );
+                }
+            },
             Some('n') => {
                 finish(g, conn);
             }
@@ -956,31 +969,27 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 send(g, conn, "That room does not exist, try again : ");
                 return;
             }
-            // C redit.c:1075-1086 REDIT_EXIT_NUMBER: a sub-immortal builder
-            // may only link to rooms in zones they can edit (#269).
-            {
-                let level = conn_char(g, conn)
-                    .and_then(|c| g.get_char(c))
-                    .map(|c| c.player.level)
-                    .unwrap_or(LVL_IMPL);
-                if number != -1 && level < LVL_IMMORT {
-                    // the exit destination's zone NUMBER must be under the
-                    // builder's ownership (can_edit_zone takes the zone rnum).
-                    let target_zone_rnum = g
-                        .real_room(number)
-                        .and_then(|r| g.room_opt(r))
-                        .and_then(|room| crate::olc::real_zone(g, room.number));
-                    let owned = target_zone_rnum
-                        .map(|zr| crate::olc::can_edit_zone(g, conn_char(g, conn).unwrap(), zr))
-                        .unwrap_or(false);
-                    if !owned {
-                        send(
-                            g,
-                            conn,
-                            "You don't have permissions to that zone, try again (-1 for none) : ",
-                        );
-                        return;
-                    }
+            // Destination-zone ownership is the boundary for every non-
+            // Implementor editor. `can_edit_zone` resolves the authenticated
+            // principal and grants its sole global override to exact persisted
+            // Implementor trust, independent of the active body's level.
+            if number != -1 {
+                let target_zone_rnum = g
+                    .real_room(number)
+                    .and_then(|r| g.room_opt(r))
+                    .and_then(|room| crate::olc::real_zone(g, room.number));
+                let owned = target_zone_rnum
+                    .and_then(|zone_rnum| {
+                        conn_char(g, conn).map(|ch| crate::olc::can_edit_zone(g, ch, zone_rnum))
+                    })
+                    .unwrap_or(false);
+                if !owned {
+                    send(
+                        g,
+                        conn,
+                        "You don't have permissions to that zone, try again (-1 for none) : ",
+                    );
+                    return;
                 }
             }
             with_state(conn, |s| {
@@ -1364,11 +1373,31 @@ fn parse_extradesc_menu(g: &mut GameState, conn: ConnId, arg: &str) {
 // Save to memory (redit_save_internally) — write the edit copy into the live
 // world. New rooms are appended (rnum reindexing is implicit via add_room).
 // ===========================================================================
-fn save_internally(g: &mut GameState, conn: ConnId) {
-    let (vnum, znum, edit) = match with_state(conn, |s| (s.vnum, s.znum, s.room.clone())) {
+fn save_internally(g: &mut GameState, conn: ConnId) -> std::io::Result<()> {
+    let (vnum, zone_number, authorization, edit) = match with_state(conn, |s| {
+        (s.vnum, s.zone_number, s.authorization, s.room.clone())
+    }) {
         Some(v) => v,
-        None => return,
+        None => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "room editor state is missing",
+            ));
+        }
     };
+    let znum = olc::real_zone(g, vnum).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "room editor zone mapping changed",
+        )
+    })?;
+    if g.zones.get(znum).map(|zone| zone.number) != Some(zone_number) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "room editor zone mapping changed",
+        ));
+    }
+    olc::revalidate_olc_authorization(g, authorization, false, Some(znum))?;
     if let Some(rnum) = g.real_room(vnum) {
         // Existing room: overwrite editable fields, keep occupants/contents.
         let room = g.room_mut(rnum);
@@ -1393,8 +1422,8 @@ fn save_internally(g: &mut GameState, conn: ConnId) {
         room.extra_descriptions = edit.extra_descriptions;
         g.add_room(room);
     }
-    let zone_number = g.zones.get(znum).map(|z| z.number).unwrap_or(vnum / 100);
     olc::olc_add_to_save_list(zone_number, olc::OLC_SAVE_ROOM);
+    Ok(())
 }
 
 /// abort: drop this conn's editor state without saving (used when a player
@@ -1427,13 +1456,23 @@ fn finish(g: &mut GameState, conn: ConnId) {
 // redit_save_to_disk — rewrite a zone's .wld file (inverse of
 // file_loader::load_room_file). Writes every room in the zone's vnum band.
 // ===========================================================================
-pub fn redit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
+pub fn redit_save_to_disk(g: &mut GameState, zone_rnum: usize) -> std::io::Result<()> {
     let (zone_number, start, top) = match g.zones.get(zone_rnum) {
         Some(z) => match z.vnum_start() {
             Some(start) => (z.number, start, z.top),
-            None => return,
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "zone number is outside the supported range",
+                ));
+            }
         },
-        None => return,
+        None => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "zone index is not loaded",
+            ));
+        }
     };
     // C redit.c:379-381 MAP_ACTIVE guard: the synthetic surface-map zone's
     // .wld is never written by OLC - 'olc redit save <map zone>' would
@@ -1444,9 +1483,13 @@ pub fn redit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
                 "SYSERR: refused OLC write of the surface-map zone {}.",
                 zone_number
             );
-            return;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "refused to write the synthetic surface-map zone",
+            ));
         }
     }
+    olc::olc_add_to_save_list(zone_number, olc::OLC_SAVE_ROOM);
     let mut out = String::new();
     for vnum in start..=top {
         let rnum = match g.real_room(vnum) {
@@ -1559,23 +1602,12 @@ pub fn redit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
         .join("world")
         .join("wld")
         .join(format!("{}.wld", zone_number));
-    write_world_file(&path, &out);
-
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    olc::atomic_replace(&path, out.as_bytes())?;
     olc::olc_remove_from_save_list(zone_number, olc::OLC_SAVE_ROOM);
-}
-
-/// Atomic-ish file write: write to <path>.new, then rename over <path>
-/// (mirrors the C remove()/rename() dance).
-fn write_world_file(path: &std::path::Path, contents: &str) {
-    let tmp = path.with_extension("new");
-    if std::fs::write(&tmp, contents).is_err() {
-        log::warn!("OLC: cannot write {:?}", tmp);
-        return;
-    }
-    let _ = std::fs::remove_file(path);
-    if std::fs::rename(&tmp, path).is_err() {
-        log::warn!("OLC: cannot rename {:?} -> {:?}", tmp, path);
-    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1700,5 +1732,64 @@ mod tests {
                 .special_exit
                 .is_none()
         );
+    }
+
+    #[test]
+    fn exit_destination_override_uses_exact_principal_trust() {
+        let (mut g, ch, conn) = setup(106, ConnId(75));
+        g.zones.push(zone(2));
+        g.zones[1].builders = "Other".to_string();
+        g.add_room(Room::new(
+            205,
+            1,
+            "Unowned target".to_string(),
+            String::new(),
+        ));
+        {
+            let character = g.get_char_mut(ch).unwrap();
+            character.player.level = LVL_IMPL;
+            character.trust = i32::from(LVL_GRGOD);
+        }
+
+        redit_parse(&mut g, conn, "5"); // north exit menu
+        redit_parse(&mut g, conn, "1"); // destination prompt
+        redit_parse(&mut g, conn, "205");
+        assert_eq!(
+            crate::lock_ok::lock(&states())[&conn].room.exits[NORTH]
+                .as_ref()
+                .unwrap()
+                .to_room,
+            NOWHERE,
+            "display level must not bypass destination-zone ownership"
+        );
+
+        with_state(conn, |state| state.mode = ReditMode::MainMenu);
+        redit_parse(&mut g, conn, "b"); // main-menu special exit
+        redit_parse(&mut g, conn, "1"); // destination prompt
+        redit_parse(&mut g, conn, "205");
+        assert_eq!(
+            crate::lock_ok::lock(&states())[&conn]
+                .room
+                .special_exit
+                .as_ref()
+                .unwrap()
+                .to_room,
+            NOWHERE
+        );
+
+        g.get_char_mut(ch).unwrap().trust = i32::from(LVL_IMPL);
+        redit_parse(&mut g, conn, "205");
+        assert_eq!(
+            crate::lock_ok::lock(&states())[&conn]
+                .room
+                .special_exit
+                .as_ref()
+                .unwrap()
+                .to_room,
+            205,
+            "exact persisted Implementor trust must retain the global override"
+        );
+
+        finish(&mut g, conn);
     }
 }

@@ -170,6 +170,7 @@ struct EditMob {
 struct MeditState {
     vnum: MobVnum,
     zone_number: i32,
+    authorization: olc::OlcAuthorization,
     mob: EditMob,
     mode: Mode,
     changed: bool,     // OLC_VAL — has anything been edited?
@@ -185,7 +186,9 @@ fn states() -> &'static Mutex<HashMap<ConnId, MeditState>> {
 /// mid-edit). The MeditState (including its in-progress description buffer) is
 /// removed so nothing lingers until reboot. `olc::abort_editor` clears active.
 pub fn abort(conn: ConnId) {
-    crate::lock_ok::lock(&states()).remove(&conn);
+    if let Some(state) = crate::lock_ok::lock(&states()).remove(&conn) {
+        olc::discard_unresolved_save(EditorKind::Medit, state.vnum);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -208,10 +211,15 @@ pub fn do_medit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         Some(c) => c,
         None => return,
     };
+    let Some(authorization) = olc::capture_olc_authorization(g, ch) else {
+        send(g, conn, "You do not have access to the mobile editor.\r\n");
+        return;
+    };
 
-    // Immortal/builder gate (medit is wired at LVL_IMMORT in the command table).
-    let level = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
-    if level < LVL_IMMORT {
+    // Persisted trust, not character level, is command authority. Keep this
+    // direct-handler gate in addition to the central dispatcher.
+    let authority = olc::validated_olc_trust(g, ch).unwrap_or(-1);
+    if authority < i32::from(LVL_IMMORT) {
         send(g, conn, "You do not have access to the mobile editor.\r\n");
         return;
     }
@@ -249,15 +257,30 @@ pub fn do_medit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
     };
 
-    // Builder permission: must be allowed to edit this zone (or be GRGOD+).
-    if level < LVL_GRGOD && !can_edit_zone(g, ch, zone_number) {
+    // Only an explicitly listed builder or exact Implementor trust may edit.
+    if !can_edit_zone(g, ch, zone_number) {
         send(g, conn, "You do not have permission to edit this zone.\r\n");
         return;
     }
 
     // Seed the scratch mob: from the live proto if it exists, else a fresh mob.
     let mob = match g.mob_protos.get(&vnum) {
-        Some(proto) => seed_from_proto(g, proto, vnum),
+        Some(proto) => match seed_from_proto(g, proto, vnum) {
+            Ok(mob) => mob,
+            Err(error) => {
+                log::warn!(
+                    "MEDIT refused to open existing mobile {} because its source could not be reconstructed: {}",
+                    vnum,
+                    error
+                );
+                send(
+                    g,
+                    conn,
+                    "Unable to read the existing mobile source; the editor was not opened.\r\n",
+                );
+                return;
+            }
+        },
         None => {
             send(g, conn, "New mobile.\r\n");
             new_mob()
@@ -267,6 +290,7 @@ pub fn do_medit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let st = MeditState {
         vnum,
         zone_number,
+        authorization,
         mob,
         mode: Mode::MainMenu,
         changed: false,
@@ -334,7 +358,7 @@ fn new_mob() -> EditMob {
 /// plus the extended fields the proto does not keep, recovered by re-reading
 /// the on-disk `.mob` block for this vnum. This guarantees medit does not
 /// silently zero a mob's flags/abilities/alignment on the first save.
-fn seed_from_proto(g: &GameState, proto: &MobileProto, vnum: MobVnum) -> EditMob {
+fn seed_from_proto(g: &GameState, proto: &MobileProto, vnum: MobVnum) -> std::io::Result<EditMob> {
     let mut m = EditMob {
         alias: proto.name.clone(),
         short_desc: proto.short_desc.clone(),
@@ -368,34 +392,48 @@ fn seed_from_proto(g: &GameState, proto: &MobileProto, vnum: MobVnum) -> EditMob
         con: MOB_DEFAULT_STAT,
         cha: MOB_DEFAULT_STAT,
     };
-    // Pull the extended fields out of the on-disk block if available.
-    if let Some(zone) = zone_for_vnum(g, vnum) {
-        let path = mob_file_path(g, zone);
-        if let Some(ext) = read_disk_mob(&path, vnum) {
-            m.mob_flags = ext.mob_flags | MOB_ISNPC;
-            m.aff_flags = ext.aff_flags;
-            m.alignment = ext.alignment;
-            m.power = ext.power;
-            m.mpower = ext.mpower;
-            m.defense = ext.defense;
-            m.mdefense = ext.mdefense;
-            m.technique = ext.technique;
-            m.hit = ext.hit;
-            m.mana = ext.mana;
-            m.movep = ext.movep;
-            m.num_dam_dice = ext.num_dam_dice;
-            m.size_dam_dice = ext.size_dam_dice;
-            m.attack_type = ext.attack_type;
-            m.str_ = ext.str_;
-            m.str_add = ext.str_add;
-            m.intel = ext.intel;
-            m.wis = ext.wis;
-            m.dex = ext.dex;
-            m.con = ext.con;
-            m.cha = ext.cha;
-        }
-    }
-    m
+    // Existing prototypes have fields that live only in the world file. A
+    // missing, unreadable, or malformed source must stop the editor/save;
+    // substituting defaults here would destroy those fields on publication.
+    let zone = zone_for_vnum(g, vnum).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("mobile {vnum} is not owned by a loaded zone"),
+        )
+    })?;
+    let path = mob_file_path(g, zone);
+    read_disk_blocks(&path)?;
+    let ext = read_disk_mob(&path, vnum).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "mobile {vnum} is missing or malformed in {}; refusing to substitute defaults",
+                path.display()
+            ),
+        )
+    })?;
+    m.mob_flags = ext.mob_flags | MOB_ISNPC;
+    m.aff_flags = ext.aff_flags;
+    m.alignment = ext.alignment;
+    m.power = ext.power;
+    m.mpower = ext.mpower;
+    m.defense = ext.defense;
+    m.mdefense = ext.mdefense;
+    m.technique = ext.technique;
+    m.hit = ext.hit;
+    m.mana = ext.mana;
+    m.movep = ext.movep;
+    m.num_dam_dice = ext.num_dam_dice;
+    m.size_dam_dice = ext.size_dam_dice;
+    m.attack_type = ext.attack_type;
+    m.str_ = ext.str_;
+    m.str_add = ext.str_add;
+    m.intel = ext.intel;
+    m.wis = ext.wis;
+    m.dex = ext.dex;
+    m.con = ext.con;
+    m.cha = ext.cha;
+    Ok(m)
 }
 
 fn trim_trailing_nl(s: &str) -> String {
@@ -657,6 +695,7 @@ impl ClonedState for Option<&MeditState> {
         self.map(|s| MeditState {
             vnum: s.vnum,
             zone_number: s.zone_number,
+            authorization: s.authorization,
             mob: s.mob.clone(),
             mode: s.mode,
             changed: s.changed,
@@ -1047,15 +1086,59 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
 }
 
 fn parse_confirm_save(g: &mut GameState, conn: ConnId, line: &str) {
+    parse_confirm_save_with(g, conn, line, crate::olc::atomic_replace)
+}
+
+fn parse_confirm_save_with<F>(g: &mut GameState, conn: ConnId, line: &str, replace: F)
+where
+    F: FnOnce(&std::path::Path, &[u8]) -> std::io::Result<()>,
+{
     // Force MOB_ISNPC regardless of which way the user answers (C medit_parse).
     with_mob(conn, |m| m.mob_flags |= MOB_ISNPC);
     match line.trim().chars().next().unwrap_or('\0') {
-        'y' | 'Y' => {
-            send(g, conn, "Saving mobile to memory.\r\n");
-            save_internally(g, conn);
-            save_to_disk(g, conn);
-            finish(g, conn);
-        }
+        'y' | 'Y' => match save_to_disk_with(g, conn, replace) {
+            Ok(()) => {
+                save_internally(g, conn);
+                if let Some(state) = crate::lock_ok::lock(&states()).get(&conn) {
+                    crate::olc::clear_unresolved_publication(EditorKind::Medit, state.vnum);
+                    crate::olc::olc_remove_from_save_list(
+                        state.zone_number,
+                        crate::olc::OLC_SAVE_MOB,
+                    );
+                }
+                send(g, conn, "Mobile saved to disk and memory.\r\n");
+                finish(g, conn);
+            }
+            Err(err) => {
+                log::warn!("SYSERR: OLC: could not save mobile: {}", err);
+                if let Some(state) = crate::lock_ok::lock(&states()).get(&conn) {
+                    crate::olc::mark_unresolved_save_failure(EditorKind::Medit, state.vnum, &err);
+                }
+                if crate::olc::replacement_was_published(&err) {
+                    // rename(2) already made the candidate visible.  Keep the
+                    // editor/dirty marker for a retry, but reconcile runtime so
+                    // a forced restart cannot reveal different content.
+                    if let Some(state) = crate::lock_ok::lock(&states()).get(&conn) {
+                        crate::olc::olc_add_to_save_list(
+                            state.zone_number,
+                            crate::olc::OLC_SAVE_MOB,
+                        );
+                    }
+                    save_internally(g, conn);
+                    send(
+                        g,
+                        conn,
+                        "The mobile file was published and live memory was reconciled, but crash durability could not be confirmed.\r\nDo you wish to retry saving the mobile? : ",
+                    );
+                } else {
+                    send(
+                        g,
+                        conn,
+                        "Could not save the mobile to disk; the live mobile was not changed.\r\nDo you wish to retry saving the mobile? : ",
+                    );
+                }
+            }
+        },
         'n' | 'N' => {
             finish(g, conn);
         }
@@ -1073,7 +1156,9 @@ fn editor_char(g: &GameState, conn: ConnId) -> Option<CharId> {
 }
 
 fn finish(g: &mut GameState, conn: ConnId) {
-    crate::lock_ok::lock(&states()).remove(&conn);
+    if let Some(state) = crate::lock_ok::lock(&states()).remove(&conn) {
+        olc::discard_unresolved_save(EditorKind::Medit, state.vnum);
+    }
     olc::clear_active(conn);
     // C olc.c:610-613 cleanup_olc: clear PLR_WRITING and act '$n stops using
     // OLC.' The invented 'Mobile editor exited.' line appears nowhere in C
@@ -1236,12 +1321,33 @@ fn save_internally(g: &mut GameState, conn: ConnId) {
 /// extended `X`-format, byte-faithfully (CircleMUD medit_save_to_disk). We
 /// re-emit every mob in the zone: the one just edited from the scratch state,
 /// all others from their on-disk blocks (so their espec fields survive).
-fn save_to_disk(g: &mut GameState, conn: ConnId) {
+fn save_to_disk_with<F>(g: &mut GameState, conn: ConnId, replace: F) -> std::io::Result<()>
+where
+    F: FnOnce(&std::path::Path, &[u8]) -> std::io::Result<()>,
+{
     let st = match crate::lock_ok::lock(&states()).get(&conn).cloned_state() {
         Some(s) => s,
-        None => return,
+        None => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "mobile editor state is missing",
+            ));
+        }
     };
     let zone_number = st.zone_number;
+    let zone_rnum = olc::real_zone(g, st.vnum).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "mobile editor zone mapping changed",
+        )
+    })?;
+    if g.zones.get(zone_rnum).map(|zone| zone.number) != Some(zone_number) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "mobile editor zone mapping changed",
+        ));
+    }
+    olc::revalidate_olc_authorization(g, st.authorization, false, Some(zone_rnum))?;
     let path = mob_file_path(g, zone_number);
 
     // Collect, in vnum order, every mob block for this zone. The edited mob's
@@ -1251,16 +1357,14 @@ fn save_to_disk(g: &mut GameState, conn: ConnId) {
         None => zone_vnum_bounds(zone_number),
     };
     let Some((zone_lo, zone_top)) = zone_bounds else {
-        send(
-            g,
-            conn,
-            "Warning: mob's zone number is outside the supported range.\r\n",
-        );
-        return;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "mobile zone number is outside the supported range",
+        ));
     };
 
     // Existing on-disk blocks (so unedited mobs keep their exact text/espec).
-    let disk_blocks = read_disk_blocks(&path);
+    let disk_blocks = read_disk_blocks(&path)?;
 
     // The full set of vnums to write: every vnum present on disk in range, plus
     // the edited vnum (which may be new).
@@ -1293,27 +1397,31 @@ fn save_to_disk(g: &mut GameState, conn: ConnId) {
     out.push_str("$\n");
 
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)?;
     }
-    if std::fs::write(&path, out.as_bytes()).is_err() {
-        send(
-            g,
-            conn,
-            "Warning: could not write the mob file to disk.\r\n",
-        );
-    }
+    replace(&path, out.as_bytes())
 }
 
 /// medit_save_to_disk(zone): central OLC save dispatcher entry. Rewrites every
 /// mobile prototype in the zone using the same extended block renderer as the
 /// editor save path.
-pub fn medit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
+pub fn medit_save_to_disk(g: &mut GameState, zone_rnum: usize) -> std::io::Result<()> {
     let (zone_number, zone_lo, zone_top) = match g.zones.get(zone_rnum) {
         Some(z) => match z.vnum_start() {
             Some(start) => (z.number, start, z.top),
-            None => return,
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "zone number is outside the supported range",
+                ));
+            }
         },
-        None => return,
+        None => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "zone index is not loaded",
+            ));
+        }
     };
     // C medit.c:465: the internal save marks the save list; the disk write
     // (this function, in the port's eager model) clears it (#274).
@@ -1330,7 +1438,7 @@ pub fn medit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
     let mut out = String::new();
     for v in vnums {
         if let Some(proto) = g.mob_protos.get(&v) {
-            let mob = seed_from_proto(g, proto, v);
+            let mob = seed_from_proto(g, proto, v)?;
             out.push_str(&format!("#{}\n", v));
             out.push_str(&render_mob_block(&mob));
             for tv in crate::dg_db_scripts::proto_trigger_vnums(0, v) {
@@ -1341,10 +1449,12 @@ pub fn medit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
     out.push_str("$\n");
 
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)?;
     }
-    let _ = std::fs::write(&path, out.as_bytes());
+    crate::olc::atomic_replace(&path, out.as_bytes())?;
     crate::olc::olc_remove_from_save_list(zone_number, crate::olc::OLC_SAVE_MOB);
+    crate::olc::clear_published_unresolved_numeric_range(EditorKind::Medit, zone_lo, zone_top);
+    Ok(())
 }
 
 /// Render one mob's body block (everything after the `#vnum` line, up to but
@@ -1467,17 +1577,16 @@ struct DiskMobExt {
 
 /// Read raw body blocks (text after each `#vnum` up to the next `#`/`$`),
 /// keyed by vnum, preserving the exact on-disk bytes for round-trip.
-fn read_disk_blocks(path: &std::path::Path) -> HashMap<MobVnum, String> {
+fn read_disk_blocks(path: &std::path::Path) -> std::io::Result<HashMap<MobVnum, String>> {
     let mut map = HashMap::new();
-    let contents = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return map,
-    };
+    let contents = std::fs::read_to_string(path)?;
     let lines: Vec<&str> = contents.lines().collect();
     let mut i = 0;
+    let mut terminated = false;
     while i < lines.len() {
         let t = lines[i].trim_end();
         if t == "$" || t == "$~" {
+            terminated = true;
             break;
         }
         if let Some(rest) = t.strip_prefix('#') {
@@ -1494,26 +1603,45 @@ fn read_disk_blocks(path: &std::path::Path) -> HashMap<MobVnum, String> {
                         block.push('\n');
                         i += 1;
                     }
-                    map.insert(vnum, block);
+                    if map.insert(vnum, block).is_some() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!(
+                                "duplicate mobile vnum {vnum} in {}; refusing destructive rewrite",
+                                path.display()
+                            ),
+                        ));
+                    }
                     continue;
                 }
-                Err(crate::text::ParseIntError::Overflow) => {
-                    log::warn!(
-                        "SYSERR: mobile vnum overflow in {}; block ignored",
-                        path.display()
-                    );
+                Err(error) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "invalid mobile header {rest:?} in {} ({error:?}); refusing destructive rewrite",
+                            path.display()
+                        ),
+                    ));
                 }
-                Err(_) => {}
             }
         }
         i += 1;
     }
-    map
+    if !terminated {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "mobile file {} has no terminator; refusing destructive rewrite",
+                path.display()
+            ),
+        ));
+    }
+    Ok(map)
 }
 
 /// Parse the extended numeric fields out of a single mob's on-disk block.
 fn read_disk_mob(path: &std::path::Path, vnum: MobVnum) -> Option<DiskMobExt> {
-    let blocks = read_disk_blocks(path);
+    let blocks = read_disk_blocks(path).ok()?;
     let block = blocks.get(&vnum)?;
     let lines: Vec<&str> = block.lines().collect();
     let mut idx = 0;
@@ -1987,9 +2115,12 @@ mod tests {
         });
         let mut ch = Character::new_player("Root".into(), Class::Cleric, Race::Human);
         ch.player.level = LVL_IMPL;
+        ch.trust = i32::from(LVL_IMPL);
+        ch.godcmds2 |= crate::gcmd::GCMD2_OLC;
         let ch = g.create_char(ch);
         g.get_char_mut(ch).unwrap().desc = Some(conn);
         let mut d = Descriptor::new(conn, "example.test".to_string());
+        d.state = crate::connection::ConState::Playing;
         d.character = Some(ch);
         g.descriptors.insert(conn, d);
         (g, ch)
@@ -2072,13 +2203,135 @@ mod tests {
 
         std::fs::write(mob_dir.join("1.mob"), record("2147483648")).unwrap();
         do_medit(&mut g, ch, "198", 0);
-        with_mob(conn, |m| alignment.set(m.alignment));
-        assert_eq!(
-            alignment.get(),
-            0,
-            "overflowing classic bonus rejects the disk extension"
+        assert_eq!(crate::olc::active_editor(conn), None);
+        assert!(
+            g.descriptors[&conn]
+                .outbuf
+                .contains("editor was not opened")
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn existing_mobile_editor_fails_closed_when_its_disk_component_is_missing_or_unreadable() {
+        for (conn, make_unreadable) in [(ConnId(981), false), (ConnId(982), true)] {
+            let (mut g, ch) = editor_game(conn);
+            let root = std::env::temp_dir().join(format!(
+                "deltamud-medit-source-failure-{}-{}",
+                std::process::id(),
+                conn.0
+            ));
+            let mob_dir = root.join("world/mob");
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&mob_dir).unwrap();
+            g.config.lib_path = root.to_string_lossy().into_owned();
+
+            do_medit(&mut g, ch, "new 198", 0);
+            save_internally(&mut g, conn);
+            finish(&mut g, conn);
+            if make_unreadable {
+                std::fs::create_dir(mob_dir.join("1.mob")).unwrap();
+            }
+
+            do_medit(&mut g, ch, "198", 0);
+
+            assert_eq!(crate::olc::active_editor(conn), None);
+            assert!(
+                g.descriptors[&conn]
+                    .outbuf
+                    .contains("editor was not opened")
+            );
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn central_mobile_save_keeps_dirty_state_when_existing_source_is_malformed() {
+        let conn = ConnId(983);
+        let (mut g, ch) = editor_game(conn);
+        let root = std::env::temp_dir().join(format!(
+            "deltamud-medit-central-malformed-{}-{}",
+            std::process::id(),
+            conn.0
+        ));
+        let mob_dir = root.join("world/mob");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&mob_dir).unwrap();
+        g.config.lib_path = root.to_string_lossy().into_owned();
+
+        do_medit(&mut g, ch, "new 198", 0);
+        save_internally(&mut g, conn);
         finish(&mut g, conn);
+        let malformed = disk_mob("X1 2 3 malformed 5 6 7d8+9 10d11", "0");
+        std::fs::write(mob_dir.join("1.mob"), &malformed).unwrap();
+
+        let error = medit_save_to_disk(&mut g, 0).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::read_to_string(mob_dir.join("1.mob")).unwrap(),
+            malformed
+        );
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        crate::olc::olc_saveinfo(&mut g, ch);
+        assert!(g.descriptors[&conn].outbuf.contains("Mobiles for zone 1"));
+        crate::olc::olc_remove_from_save_list(1, crate::olc::OLC_SAVE_MOB);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn post_rename_mobile_failure_reconciles_live_and_keeps_zone_dirty() {
+        let _save_guard = crate::olc::test_save_list_guard();
+        let conn = ConnId(984);
+        let (mut g, ch) = editor_game(conn);
+        let root = std::env::temp_dir().join(format!(
+            "deltamud-medit-post-publish-{}-{}",
+            std::process::id(),
+            conn.0
+        ));
+        let mob_dir = root.join("world/mob");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&mob_dir).unwrap();
+        std::fs::write(mob_dir.join("1.mob"), "$\n").unwrap();
+        g.config.lib_path = root.to_string_lossy().into_owned();
+
+        do_medit(&mut g, ch, "new 198", 0);
+        with_mob(conn, |mob| mob.alignment = 777);
+        parse_confirm_save_with(&mut g, conn, "y", |path, bytes| {
+            crate::olc::atomic_replace_with_hooks(
+                path,
+                bytes,
+                |_| Ok(()),
+                |_| Err(std::io::Error::other("injected directory sync failure")),
+            )
+        });
+
+        assert_eq!(g.mob_protos.get(&198).unwrap().alignment, 777);
+        assert_eq!(
+            read_disk_mob(&mob_dir.join("1.mob"), 198)
+                .unwrap()
+                .alignment,
+            777
+        );
+        assert!(crate::olc::test_pending_save(1, crate::olc::OLC_SAVE_MOB));
+        assert!(crate::olc::test_unresolved_publication(
+            EditorKind::Medit,
+            198
+        ));
+        assert_eq!(crate::olc::active_editor(conn), Some(EditorKind::Medit));
+        assert!(
+            g.descriptors[&conn]
+                .outbuf
+                .contains("live memory was reconciled")
+        );
+
+        parse_confirm_save_with(&mut g, conn, "y", crate::olc::atomic_replace);
+        assert!(!crate::olc::test_unresolved_publication(
+            EditorKind::Medit,
+            198
+        ));
+        assert!(!crate::olc::test_pending_save(1, crate::olc::OLC_SAVE_MOB));
+        assert!(!crate::olc::in_olc(conn));
         let _ = std::fs::remove_dir_all(root);
     }
 

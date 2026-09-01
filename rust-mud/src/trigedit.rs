@@ -24,7 +24,6 @@ use crate::olc::{self, EditorKind};
 use crate::state::GameState;
 use crate::types::*;
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
@@ -100,8 +99,10 @@ enum Mode {
 /// and OLC_VAL(d) (the dirty flag).
 struct TrigEditState {
     mode: Mode,
-    vnum: i32,   // OLC_NUM
-    znum: usize, // OLC_ZNUM (index into g.zones)
+    vnum: i32,        // OLC_NUM
+    znum: usize,      // OLC_ZNUM (index into g.zones)
+    zone_number: i32, // retained stable identity for that zone index
+    authorization: olc::OlcAuthorization,
     // scratch trigger (OLC_TRIG): the prototype we're editing.
     name: String,
     attach_type: i32,
@@ -122,7 +123,9 @@ fn states() -> &'static Mutex<HashMap<ConnId, TrigEditState>> {
 /// abort: drop this conn's editor state without saving (player disconnected
 /// mid-edit). `olc::abort_editor` calls `olc::clear_active`.
 pub fn abort(conn: ConnId) {
-    crate::lock_ok::lock(&states()).remove(&conn);
+    if let Some(state) = crate::lock_ok::lock(&states()).remove(&conn) {
+        olc::discard_unresolved_save(EditorKind::Trigedit, state.vnum);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -211,8 +214,8 @@ fn sprintbits(data: i64) -> String {
 
 pub fn do_trigedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     // No screwing around as a mobile.
-    let (is_npc, level, conn) = match g.get_char(ch) {
-        Some(c) => (c.is_npc, c.player.level, c.desc),
+    let (is_npc, conn) = match g.get_char(ch) {
+        Some(c) => (c.is_npc, c.desc),
         None => return,
     };
     if is_npc {
@@ -221,6 +224,10 @@ pub fn do_trigedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let conn = match conn {
         Some(c) => c,
         None => return,
+    };
+    let Some(authorization) = olc::capture_olc_authorization(g, ch) else {
+        send(g, conn, "You do not have permission to edit that zone.\r\n");
+        return;
     };
 
     // two_arguments(argument, buf1, buf2)
@@ -274,12 +281,10 @@ pub fn do_trigedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             return;
         }
     };
-
-    // Everyone but IMPLs can only edit zones they have been assigned. The
-    // builder-permission table is not modelled in this port (cmd_wizard.rs
-    // notes the same); IMPLs and immortals edit freely. Mortals never reach
-    // here (the command is LVL_IMMORT-gated in the command table).
-    let _ = level;
+    if !olc::can_edit_zone(g, ch, znum) {
+        send(g, conn, "You do not have permission to edit that zone.\r\n");
+        return;
+    }
 
     // Check that this trigger isn't already being edited on another connection.
     let busy_name: Option<String> = {
@@ -309,9 +314,12 @@ pub fn do_trigedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
 
     // Set up the scratch trigger (existing prototype or a fresh one).
+    let zone_number = g.zones[znum].number;
     let state = match dg_db_scripts::real_trigger(number) {
-        rnum if rnum >= 0 => setup_existing(rnum as usize, number, znum),
-        _ => setup_new(number, znum),
+        rnum if rnum >= 0 => {
+            setup_existing(rnum as usize, number, znum, zone_number, authorization)
+        }
+        _ => setup_new(number, znum, zone_number, authorization),
     };
 
     crate::lock_ok::lock(&states()).insert(conn, state);
@@ -320,7 +328,13 @@ pub fn do_trigedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 }
 
 /// trigedit_setup_existing: snapshot an existing prototype into edit state.
-fn setup_existing(rnum: usize, vnum: i32, znum: usize) -> TrigEditState {
+fn setup_existing(
+    rnum: usize,
+    vnum: i32,
+    znum: usize,
+    zone_number: i32,
+    authorization: olc::OlcAuthorization,
+) -> TrigEditState {
     let proto = dg_db_scripts::trig_proto(rnum).unwrap_or(TrigProto {
         vnum,
         attach_type: MOB_TRIGGER,
@@ -342,6 +356,8 @@ fn setup_existing(rnum: usize, vnum: i32, znum: usize) -> TrigEditState {
         mode: Mode::MainMenu,
         vnum,
         znum,
+        zone_number,
+        authorization,
         name: proto.name,
         attach_type: proto.attach_type,
         trigger_type: proto.trigger_type,
@@ -354,11 +370,18 @@ fn setup_existing(rnum: usize, vnum: i32, znum: usize) -> TrigEditState {
 }
 
 /// trigedit_setup_new: a blank scratch trigger with C's defaults.
-fn setup_new(vnum: i32, znum: usize) -> TrigEditState {
+fn setup_new(
+    vnum: i32,
+    znum: usize,
+    zone_number: i32,
+    authorization: olc::OlcAuthorization,
+) -> TrigEditState {
     TrigEditState {
         mode: Mode::MainMenu,
         vnum,
         znum,
+        zone_number,
+        authorization,
         name: "new trigger".to_string(),
         attach_type: MOB_TRIGGER,
         trigger_type: 1 << 6, // MTRIG_GREET (C default)
@@ -498,21 +521,38 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 .next()
                 .map(|c| c.to_ascii_lowercase())
             {
-                Some('y') => {
-                    save(g, conn);
-                    let cname = conn_char(g, conn)
-                        .and_then(|c| g.get_char(c))
-                        .map(|c| c.player.name.clone())
-                        .unwrap_or_default();
-                    let vnum = states()
-                        .lock()
-                        .unwrap()
-                        .get(&conn)
-                        .map(|s| s.vnum)
-                        .unwrap_or(0);
-                    mudlog(g, &format!("OLC: {} edits trigger {}", cname, vnum));
-                    cleanup(g, conn);
-                }
+                Some('y') => match save(g, conn) {
+                    Ok(()) => {
+                        let cname = conn_char(g, conn)
+                            .and_then(|c| g.get_char(c))
+                            .map(|c| c.player.name.clone())
+                            .unwrap_or_default();
+                        let vnum = states()
+                            .lock()
+                            .unwrap()
+                            .get(&conn)
+                            .map(|s| s.vnum)
+                            .unwrap_or(0);
+                        mudlog(g, &format!("OLC: {} edits trigger {}", cname, vnum));
+                        cleanup(g, conn);
+                    }
+                    Err(err) => {
+                        mudlog(g, &format!("SYSERR: OLC: could not save trigger: {}", err));
+                        if olc::replacement_was_published(&err) {
+                            send(
+                                g,
+                                conn,
+                                "The trigger file was published and live triggers were reconciled, but crash durability could not be confirmed.\r\nDo you wish to retry saving the trigger? : ",
+                            );
+                        } else {
+                            send(
+                                g,
+                                conn,
+                                "Could not save the trigger to disk; the live trigger was not changed.\r\nDo you wish to retry saving the trigger? : ",
+                            );
+                        }
+                    }
+                },
                 Some('n') => {
                     cleanup(g, conn);
                 }
@@ -717,21 +757,46 @@ fn commands_input(g: &mut GameState, conn: ConnId, line: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// trigedit_save (dg_olc.c): rewrite the whole zone's .trg file byte-faithfully
-// and refresh the live trig_index by reloading prototypes from disk.
+// trigedit_save (dg_olc.c): rewrite the whole zone's .trg file byte-faithfully,
+// then publish the edited prototype into the live trigger index.
 // ---------------------------------------------------------------------------
 
-fn save(g: &mut GameState, conn: ConnId) {
+fn save(g: &mut GameState, conn: ConnId) -> std::io::Result<()> {
+    save_with(g, conn, olc::atomic_replace)
+}
+
+fn save_with<F>(g: &mut GameState, conn: ConnId, replace: F) -> std::io::Result<()>
+where
+    F: FnOnce(&std::path::Path, &[u8]) -> std::io::Result<()>,
+{
     // Snapshot the scratch trigger out of edit state.
-    let (vnum, znum, name, attach_type, trigger_type, narg, arglist, storage) = {
+    let (
+        vnum,
+        znum,
+        zone_number,
+        authorization,
+        name,
+        attach_type,
+        trigger_type,
+        narg,
+        arglist,
+        storage,
+    ) = {
         let map = crate::lock_ok::lock(&states());
         let st = match map.get(&conn) {
             Some(s) => s,
-            None => return,
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "trigger editor state is missing",
+                ));
+            }
         };
         (
             st.vnum,
             st.znum,
+            st.zone_number,
+            st.authorization,
             st.name.clone(),
             st.attach_type,
             st.trigger_type,
@@ -740,6 +805,20 @@ fn save(g: &mut GameState, conn: ConnId) {
             st.storage.clone(),
         )
     };
+
+    // Recheck the exact authenticated principal, zone mapping, and zone ACL at
+    // the publication boundary. A descriptor handoff or builder-list change
+    // while the scratch editor is open must never become a confused-deputy
+    // disk write.
+    if real_zone(g, vnum) != Some(znum)
+        || g.zones.get(znum).map(|zone| zone.number) != Some(zone_number)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "trigger editor zone mapping changed",
+        ));
+    }
+    olc::revalidate_olc_authorization(g, authorization, false, Some(znum))?;
 
     // Recompile the command list from the storage text (strtok on "\n\r" drops
     // empty lines — match that exactly).
@@ -758,20 +837,23 @@ fn save(g: &mut GameState, conn: ConnId) {
         arglist: arglist.clone(),
         cmdlist,
     };
-    // C dg_olc.c:424-470: install the edited prototype IN PLACE - dg_olc
-    // patches the table (and live trigger_list entries) without touching any
-    // other prototype. boot_triggers() cleared index/vnum_map/proto_scripts,
-    // detaching EVERY trigger in the world on each save and stripping T
-    // lines from the next redit save (#260).
-    dg_db_scripts::upsert_proto_trigger(edited.clone());
-
     // Resolve the zone range to rewrite.
-    let (zone_number, zone_start, zone_top) = match g.zones.get(znum) {
+    let (zone_start, zone_top) = match g.zones.get(znum) {
         Some(z) => match z.vnum_start() {
-            Some(zone_start) => (z.number, zone_start, z.top),
-            None => return,
+            Some(zone_start) => (zone_start, z.top),
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "trigger zone number is outside the supported range",
+                ));
+            }
         },
-        None => return,
+        None => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "trigger zone index is not loaded",
+            ));
+        }
     };
     let lib_path = g.config.lib_path.clone();
     let trg_dir = Path::new(&lib_path).join("world").join("trg");
@@ -801,8 +883,6 @@ fn save(g: &mut GameState, conn: ConnId) {
         zone_protos.sort_by_key(|p| p.vnum);
     }
 
-    // Write to "<zone>.new" then rename to "<zone>.trg" (atomic-ish, like C).
-    let new_path = trg_dir.join(format!("{}.new", zone_number));
     let final_path = trg_dir.join(format!("{}.trg", zone_number));
 
     let mut text = String::new();
@@ -831,26 +911,24 @@ fn save(g: &mut GameState, conn: ConnId) {
     }
     text.push_str("$~\n");
 
-    let write_ok = (|| -> std::io::Result<()> {
-        let mut f = std::fs::File::create(&new_path)?;
-        f.write_all(text.as_bytes())?;
-        f.flush()?;
-        Ok(())
-    })();
-
-    match write_ok {
+    std::fs::create_dir_all(&trg_dir)?;
+    match replace(&final_path, text.as_bytes()) {
         Ok(()) => {
-            let _ = std::fs::rename(&new_path, &final_path);
+            // Publish the edited prototype only after its durable
+            // representation is in place.
+            dg_db_scripts::upsert_proto_trigger(edited);
+            olc::clear_unresolved_publication(EditorKind::Trigedit, vnum);
+            Ok(())
         }
-        Err(_) => {
-            mudlog(
-                g,
-                &format!(
-                    "SYSERR: OLC: Can't open trig file \"{}\"",
-                    new_path.display()
-                ),
-            );
-            return;
+        Err(error) => {
+            if olc::replacement_was_published(&error) {
+                // rename already exposed the candidate. Reconcile runtime
+                // while returning the typed error so the editor remains open
+                // for a durability-confirming retry.
+                dg_db_scripts::upsert_proto_trigger(edited);
+            }
+            olc::mark_unresolved_save_failure(EditorKind::Trigedit, vnum, &error);
+            Err(error)
         }
     }
 }
@@ -860,7 +938,9 @@ fn save(g: &mut GameState, conn: ConnId) {
 // ---------------------------------------------------------------------------
 
 fn cleanup(g: &mut GameState, conn: ConnId) {
-    crate::lock_ok::lock(&states()).remove(&conn);
+    if let Some(state) = crate::lock_ok::lock(&states()).remove(&conn) {
+        olc::discard_unresolved_save(EditorKind::Trigedit, state.vnum);
+    }
     olc::clear_active(conn);
     // C cleanup_olc returns to the playing prompt; the framework restores the
     // descriptor state. Echo a blank line so the player sees the prompt return.
@@ -870,20 +950,7 @@ fn cleanup(g: &mut GameState, conn: ConnId) {
 /// mudlog to immortals at builder level (CMP channel in C). We reuse the same
 /// immortal-broadcast shape the rest of the port uses.
 fn mudlog(g: &mut GameState, line: &str) {
-    let formatted = format!("[ {} ]\r\n", line);
-    let imms: Vec<CharId> = g
-        .players_by_name
-        .values()
-        .copied()
-        .filter(|&id| {
-            g.get_char(id)
-                .map(|c| c.player.level >= LVL_IMMORT)
-                .unwrap_or(false)
-        })
-        .collect();
-    for id in imms {
-        g.send_to_char(id, &formatted);
-    }
+    crate::syslog::mudlog(g, line, crate::syslog::CMP, LVL_IMMORT);
 }
 
 #[cfg(test)]
@@ -916,9 +983,12 @@ mod tests {
 
         let mut ch = Character::new_player("Root".into(), Class::Cleric, Race::Human);
         ch.player.level = LVL_IMPL;
+        ch.trust = i32::from(LVL_IMPL);
+        ch.godcmds2 |= crate::gcmd::GCMD2_OLC;
         let ch = g.create_char(ch);
         g.get_char_mut(ch).unwrap().desc = Some(conn);
         let mut descriptor = Descriptor::new(conn, "example.test".into());
+        descriptor.state = crate::connection::ConState::Playing;
         descriptor.character = Some(ch);
         g.descriptors.insert(conn, descriptor);
         (g, ch, vnum)
@@ -988,5 +1058,233 @@ mod tests {
         trigedit_parse(&mut g, conn, "q");
         trigedit_parse(&mut g, conn, "n");
         assert!(!crate::olc::in_olc(conn));
+    }
+
+    #[test]
+    fn trigedit_entry_uses_authenticated_zone_acl_not_display_level() {
+        let conn = ConnId(4_040_003);
+        crate::olc::abort_editor(conn);
+        let (mut g, ch, vnum) = editor_game(conn);
+        {
+            let intruder = g.get_char_mut(ch).unwrap();
+            intruder.player.name = "Intruder".into();
+            intruder.player.level = LVL_IMPL;
+            intruder.trust = 1;
+        }
+
+        do_trigedit(&mut g, ch, &vnum.to_string(), 0);
+
+        assert!(!crate::olc::in_olc(conn));
+        assert!(
+            g.descriptors[&conn]
+                .outbuf
+                .contains("You do not have permission to edit that zone")
+        );
+    }
+
+    #[test]
+    fn trigedit_save_rechecks_principal_zone_ownership_before_publication() {
+        let conn = ConnId(4_040_004);
+        crate::olc::abort_editor(conn);
+        let (mut g, ch, vnum) = editor_game(conn);
+        g.get_char_mut(ch).unwrap().trust = i32::from(LVL_IMMORT);
+        do_trigedit(&mut g, ch, &vnum.to_string(), 0);
+        assert!(crate::olc::in_olc(conn));
+
+        g.zones[0].builders = "SomebodyElse".into();
+        let error = save_with(&mut g, conn, |_path, _bytes| {
+            panic!("revoked zone ownership must be rejected before disk publication")
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(crate::olc::in_olc(conn));
+        cleanup(&mut g, conn);
+    }
+
+    #[test]
+    fn trigedit_publication_rechecks_every_retained_authority_component() {
+        #[derive(Clone, Copy, Debug)]
+        enum Revocation {
+            Grant,
+            Trust,
+            Quarantine,
+            ZoneOwnership,
+            ZoneIdentity,
+            DescriptorBody,
+        }
+
+        for (index, revocation) in [
+            Revocation::Grant,
+            Revocation::Trust,
+            Revocation::Quarantine,
+            Revocation::ZoneOwnership,
+            Revocation::ZoneIdentity,
+            Revocation::DescriptorBody,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let conn = ConnId(4_040_020 + index as u64);
+            crate::olc::abort_editor(conn);
+            let (mut g, ch, zone_start) = editor_game(conn);
+            if matches!(revocation, Revocation::ZoneOwnership) {
+                // Exact Implementors legitimately override zone.builders;
+                // exercise ACL revocation with an ordinary listed builder.
+                g.get_char_mut(ch).unwrap().trust = i32::from(LVL_IMMORT);
+            }
+            let vnum = zone_start + 20 + index as i32;
+            do_trigedit(&mut g, ch, &vnum.to_string(), 0);
+            assert!(crate::olc::in_olc(conn), "case={revocation:?}");
+
+            match revocation {
+                Revocation::Grant => g.get_char_mut(ch).unwrap().godcmds2 = 0,
+                Revocation::Trust => g.get_char_mut(ch).unwrap().trust = 1,
+                Revocation::Quarantine => {
+                    let idnum = g.get_char(ch).unwrap().idnum;
+                    g.authority_quarantine.insert(idnum);
+                }
+                Revocation::ZoneOwnership => g.zones[0].builders = "SomebodyElse".into(),
+                Revocation::ZoneIdentity => g.zones[0].number -= 1,
+                Revocation::DescriptorBody => {
+                    let mut replacement =
+                        Character::new_player("Replacement".into(), Class::Cleric, Race::Human);
+                    replacement.desc = Some(conn);
+                    let replacement = g.create_char(replacement);
+                    g.descriptors.get_mut(&conn).unwrap().character = Some(replacement);
+                }
+            }
+
+            let replacer_called = std::cell::Cell::new(false);
+            let result = save_with(&mut g, conn, |_path, _bytes| {
+                replacer_called.set(true);
+                Ok(())
+            });
+            assert!(result.is_err(), "case={revocation:?}");
+            let error = result.unwrap_err();
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "case={revocation:?}"
+            );
+            assert!(!replacer_called.get(), "case={revocation:?}");
+            cleanup(&mut g, conn);
+        }
+    }
+
+    #[test]
+    fn unpublished_save_failure_blocks_flush_until_retry_or_explicit_discard() {
+        let _save_guard = crate::olc::test_save_list_guard();
+        let conn = ConnId(4_040_098);
+        crate::olc::abort_editor(conn);
+        let (mut g, ch, zone_start) = editor_game(conn);
+        let vnum = zone_start + 2;
+        let lib = std::env::temp_dir().join(format!(
+            "deltamud-trigedit-unpublished-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&lib);
+        g.config.lib_path = lib.to_string_lossy().into_owned();
+
+        do_trigedit(&mut g, ch, &vnum.to_string(), 0);
+        let error = save_with(&mut g, conn, |_path, _bytes| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected pre-publication failure",
+            ))
+        })
+        .unwrap_err();
+        assert!(!crate::olc::replacement_was_published(&error));
+        assert!(crate::olc::test_unresolved_publication(
+            EditorKind::Trigedit,
+            vnum
+        ));
+        assert!(crate::olc::flush_save_list_to_disk(&mut g).is_err());
+
+        // Declining after an unpublished failure explicitly discards only
+        // this scratch trigger, so no unresolved durable state remains.
+        set_mode(conn, Mode::ConfirmSaveString);
+        trigedit_parse(&mut g, conn, "n");
+        assert!(!crate::olc::test_unresolved_publication(
+            EditorKind::Trigedit,
+            vnum
+        ));
+        assert!(crate::olc::flush_save_list_to_disk(&mut g).is_ok());
+
+        // A later failed attempt remains a blocker until a successful retry.
+        do_trigedit(&mut g, ch, &vnum.to_string(), 0);
+        save_with(&mut g, conn, |_path, _bytes| {
+            Err(std::io::Error::other("injected replacement failure"))
+        })
+        .unwrap_err();
+        assert!(crate::olc::flush_save_list_to_disk(&mut g).is_err());
+        save_with(&mut g, conn, crate::olc::atomic_replace).unwrap();
+        assert!(!crate::olc::test_unresolved_publication(
+            EditorKind::Trigedit,
+            vnum
+        ));
+        cleanup(&mut g, conn);
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
+    #[test]
+    fn post_rename_sync_failure_reconciles_live_trigger_and_retains_editor() {
+        let _save_guard = crate::olc::test_save_list_guard();
+        let conn = ConnId(4_040_099);
+        crate::olc::abort_editor(conn);
+        let (mut g, ch, zone_start) = editor_game(conn);
+        let vnum = zone_start + 1;
+        let lib = std::env::temp_dir().join(format!(
+            "deltamud-trigedit-published-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&lib);
+        g.config.lib_path = lib.to_string_lossy().into_owned();
+
+        do_trigedit(&mut g, ch, &vnum.to_string(), 0);
+        assert_eq!(crate::dg_db_scripts::real_trigger(vnum), -1);
+
+        let error = save_with(&mut g, conn, |path, bytes| {
+            crate::olc::atomic_replace_with_hooks(
+                path,
+                bytes,
+                |_| Ok(()),
+                |_| Err(std::io::Error::other("injected directory sync failure")),
+            )
+        })
+        .unwrap_err();
+
+        assert!(crate::olc::replacement_was_published(&error));
+        assert!(crate::dg_db_scripts::real_trigger(vnum) >= 0);
+        assert!(crate::olc::in_olc(conn));
+        assert!(crate::olc::test_unresolved_publication(
+            EditorKind::Trigedit,
+            vnum
+        ));
+        assert!(crate::olc::flush_save_list_to_disk(&mut g).is_err());
+        assert!(
+            lib.join(format!("world/trg/{}.trg", g.zones[0].number))
+                .exists()
+        );
+
+        // Discarding cannot clear a marker after rename: the scratch editor
+        // closes, but durability still needs a same-entry retry.
+        set_mode(conn, Mode::ConfirmSaveString);
+        trigedit_parse(&mut g, conn, "n");
+        assert!(!crate::olc::in_olc(conn));
+        assert!(crate::olc::test_unresolved_publication(
+            EditorKind::Trigedit,
+            vnum
+        ));
+        assert!(crate::olc::flush_save_list_to_disk(&mut g).is_err());
+
+        do_trigedit(&mut g, ch, &vnum.to_string(), 0);
+        save_with(&mut g, conn, crate::olc::atomic_replace).unwrap();
+        assert!(!crate::olc::test_unresolved_publication(
+            EditorKind::Trigedit,
+            vnum
+        ));
+        cleanup(&mut g, conn);
+        let _ = std::fs::remove_dir_all(lib);
     }
 }

@@ -1,4 +1,9 @@
-use std::env;
+use std::{
+    env,
+    net::{IpAddr, Ipv4Addr},
+};
+
+use anyhow::{Result, anyhow, bail};
 
 use crate::types::RoomVnum;
 
@@ -56,6 +61,8 @@ pub struct Config {
     /// held until the underlying libc call returns. Clamped to 1..=256.
     pub reverse_dns_max_inflight: usize,
     pub lib_path: String,
+    /// Address on which the player listener accepts connections.
+    pub bind_ip: IpAddr,
     pub port: u16,
     pub use_compat_mode: bool,
     pub use_mock_db: bool,
@@ -80,10 +87,13 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn from_env() -> Self {
-        Config {
-            database_url: env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "mysql://root:password@localhost/deltamud".to_string()),
+    pub fn from_env() -> Result<Self> {
+        let (use_mock_db, database_url) =
+            database_settings(|key| env::var(key).ok(), cfg!(debug_assertions))?;
+        let bind_ip = parse_bind_ip(env::var("MUD_BIND").ok())?;
+
+        Ok(Config {
+            database_url,
             db_timeout_secs: env::var("MUD_DB_TIMEOUT_SECS")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
@@ -113,6 +123,7 @@ impl Config {
                 .map(|v| v == "1")
                 .unwrap_or(false),
             lib_path: env::var("MUD_LIB_PATH").unwrap_or_else(|_| "./lib".to_string()),
+            bind_ip,
             port: env::var("MUD_PORT")
                 .unwrap_or_else(|_| "4000".to_string())
                 .parse()
@@ -120,14 +131,51 @@ impl Config {
             use_compat_mode: env::var("MUD_COMPAT_MODE")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
-            use_mock_db: env::var("MUD_MOCK_DB")
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(false),
+            use_mock_db,
             rng_seed: env::var("MUD_RNG_SEED").ok().and_then(|s| s.parse().ok()),
             no_specials: env::var("MUD_NO_SPECIALS")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
-        }
+        })
+    }
+}
+
+/// Resolve database mode before startup. Debug/test builds default to the mock
+/// backend for a zero-setup development loop; release builds default to the
+/// real backend. Any real-backend selection requires an explicit non-empty
+/// DATABASE_URL, so production can never fall back to a compiled-in credential.
+fn database_settings<F>(mut env_value: F, default_mock: bool) -> Result<(bool, String)>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let use_mock_db = match env_value("MUD_MOCK_DB") {
+        Some(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => bail!("MUD_MOCK_DB must be one of true/false, 1/0, yes/no, or on/off"),
+        },
+        None => default_mock,
+    };
+
+    let database_url = env_value("DATABASE_URL")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_default();
+    if !use_mock_db && database_url.is_empty() {
+        return Err(anyhow!(
+            "DATABASE_URL is required when the real database backend is enabled"
+        ));
+    }
+
+    Ok((use_mock_db, database_url))
+}
+
+fn parse_bind_ip(value: Option<String>) -> Result<IpAddr> {
+    match value {
+        Some(value) => value
+            .trim()
+            .parse()
+            .map_err(|_| anyhow!("MUD_BIND must be a valid IPv4 or IPv6 address")),
+        None => Ok(Ipv4Addr::UNSPECIFIED.into()),
     }
 }
 
@@ -150,6 +198,7 @@ impl Default for Config {
                 .map(|v| v == "1")
                 .unwrap_or(false),
             lib_path: "./lib".to_string(),
+            bind_ip: Ipv4Addr::UNSPECIFIED.into(),
             port: 4000,
             use_compat_mode: false,
             use_mock_db: true,
@@ -165,3 +214,90 @@ pub const AUTOSAVE_TIME: u32 = 5;
 /// C config.c:235 max_bad_pws: consecutive bad passwords before a login is
 /// disconnected (#194).
 pub const MAX_BAD_PWS: u32 = 2;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings(vars: &[(&str, &str)], default_mock: bool) -> Result<(bool, String)> {
+        database_settings(
+            |key| {
+                vars.iter()
+                    .find(|(candidate, _)| *candidate == key)
+                    .map(|(_, value)| (*value).to_string())
+            },
+            default_mock,
+        )
+    }
+
+    #[test]
+    fn mock_mode_is_zero_setup_and_can_be_the_development_default() {
+        assert_eq!(settings(&[], true).unwrap(), (true, String::new()));
+        assert_eq!(
+            settings(&[("MUD_MOCK_DB", "true")], false).unwrap(),
+            (true, String::new())
+        );
+    }
+
+    #[test]
+    fn real_database_mode_requires_an_explicit_nonempty_url() {
+        let missing = settings(&[("MUD_MOCK_DB", "false")], true).unwrap_err();
+        assert!(missing.to_string().contains("DATABASE_URL is required"));
+
+        let blank = settings(&[("MUD_MOCK_DB", "0"), ("DATABASE_URL", "  \t")], true).unwrap_err();
+        assert!(blank.to_string().contains("DATABASE_URL is required"));
+
+        let release_default = settings(&[], false).unwrap_err();
+        assert!(
+            release_default
+                .to_string()
+                .contains("DATABASE_URL is required")
+        );
+    }
+
+    #[test]
+    fn real_database_mode_accepts_an_explicit_url() {
+        let url = "mysql://mud@database/deltamud";
+        assert_eq!(
+            settings(&[("MUD_MOCK_DB", "off"), ("DATABASE_URL", url)], true).unwrap(),
+            (false, url.to_string())
+        );
+    }
+
+    #[test]
+    fn invalid_mock_mode_is_rejected_instead_of_silently_selecting_real_db() {
+        let error = settings(
+            &[
+                ("MUD_MOCK_DB", "sometimes"),
+                ("DATABASE_URL", "mysql://mud@database/deltamud"),
+            ],
+            false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("MUD_MOCK_DB must be one of"));
+    }
+
+    #[test]
+    fn bind_ip_defaults_compatibly_and_accepts_ipv4_or_ipv6() {
+        assert_eq!(
+            parse_bind_ip(None).unwrap(),
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        );
+        assert_eq!(
+            parse_bind_ip(Some("127.0.0.1".to_string())).unwrap(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        );
+        assert_eq!(
+            parse_bind_ip(Some("::1".to_string())).unwrap(),
+            "::1".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn invalid_bind_ip_fails_configuration() {
+        for invalid in ["", "localhost", "999.1.2.3"] {
+            let error = parse_bind_ip(Some(invalid.to_string())).unwrap_err();
+            assert!(error.to_string().contains("MUD_BIND must be a valid"));
+        }
+    }
+}

@@ -3,7 +3,7 @@
 
 import unittest
 
-from soak_combat import parse_score_hp, parse_score_level
+from soak_combat import parse_score_hp, parse_score_level, provision_mortal_for_combat
 
 
 class ScoreParserTests(unittest.TestCase):
@@ -26,6 +26,37 @@ class ScoreParserTests(unittest.TestCase):
 
     def test_exp_to_level_is_not_character_level(self):
         self.assertIsNone(parse_score_level("Exp to Level : 100,000\r\n"))
+
+    def test_canary_stages_an_ordinary_mortal_via_the_shipped_exit(self):
+        class FakeSession:
+            def __init__(self):
+                self.commands = []
+
+            def provision_and_enter(self):
+                return "Level: 1\r\nHit points: 22/100\r\n"
+
+            def command(self, command):
+                self.commands.append(command)
+                return "The Town Square of Newhaven\r\n22hp 100mp 83mv > "
+
+        session = FakeSession()
+        score = provision_mortal_for_combat(session)
+
+        self.assertIn("Level: 1", score)
+        self.assertEqual(session.commands, ["south"])
+
+    def test_canary_rejects_a_newbie_route_that_does_not_reach_the_square(self):
+        class FakeSession:
+            name = "Soakalpha"
+
+            def provision_and_enter(self):
+                return "Level: 1\r\nHit points: 22/100\r\n"
+
+            def command(self, _command):
+                return "In the forest\r\n22hp 100mp 83mv > "
+
+        with self.assertRaisesRegex(RuntimeError, "did not reach"):
+            provision_mortal_for_combat(FakeSession())
 
 
 if __name__ == "__main__":

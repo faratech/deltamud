@@ -283,6 +283,7 @@ mod tests {
             idnum: level as i64,
             name: name.to_string(),
             level,
+            trust: i32::from(level),
             class: Class::Warrior,
             last_logon: 0,
             host: String::new(),

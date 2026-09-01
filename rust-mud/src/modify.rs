@@ -85,7 +85,13 @@ enum EditTarget {
     /// yet) and is applied to the player at enter-game (#198).
     LoginDescription,
     /// `tedit` — CON_TEXTED: write the saved buffer to a text file (OLC_STORAGE).
-    TextFile(std::path::PathBuf),
+    /// Authorization is retained across the long-lived string editor and
+    /// revalidated immediately before replacement.
+    TextFile {
+        path: std::path::PathBuf,
+        authorization: crate::state::AuthenticatedCommandRequest,
+        minimum_authority: i32,
+    },
 }
 
 struct EditState {
@@ -107,6 +113,12 @@ pub fn abort_conn(g: &mut GameState, conn_id: ConnId) {
         }
         Some(EditTarget::Board) => {
             crate::boards::board_finish_write(g, conn_id, "", false);
+        }
+        Some(EditTarget::TextFile { path, .. }) => {
+            crate::olc::discard_unresolved_named_save(
+                crate::olc::EditorKind::Tedit,
+                &path.to_string_lossy(),
+            );
         }
         _ => {}
     }
@@ -250,12 +262,18 @@ pub fn start_textfile_editing(
     path: std::path::PathBuf,
     initial: &str,
     max_len: usize,
+    authorization: crate::state::AuthenticatedCommandRequest,
+    minimum_authority: i32,
 ) {
     push_editor_with(
         g,
         conn,
         max_len,
-        EditTarget::TextFile(path),
+        EditTarget::TextFile {
+            path,
+            authorization,
+            minimum_authority,
+        },
         initial.to_string(),
     );
 }
@@ -303,6 +321,16 @@ pub fn editing(g: &GameState, conn: ConnId) -> bool {
     )
 }
 
+/// TEDIT markers are keyed by their durable target path, so only one active
+/// scratch editor may own a path at a time. This also prevents last-writer-wins
+/// loss between two administrators editing the same static file.
+pub(crate) fn textfile_edit_busy(path: &std::path::Path, exclude: ConnId) -> bool {
+    crate::lock_ok::lock(&edits()).iter().any(|(conn, state)| {
+        *conn != exclude
+            && matches!(&state.target, EditTarget::TextFile { path: active, .. } if active == path)
+    })
+}
+
 /// editor_input — feed one input line into the active StringEdit editor. This is
 /// the port of CircleMUD string_add(). Returns `true` while the editor remains
 /// active (caller stays in edit mode) and `false` once the editor has saved or
@@ -317,10 +345,7 @@ pub fn editor_input(g: &mut GameState, conn: ConnId, line: &str) -> bool {
 
     match result {
         BufferEditorResult::Continue => true,
-        BufferEditorResult::Save => {
-            finish_editor(g, conn, 1);
-            false
-        }
+        BufferEditorResult::Save => !finish_editor(g, conn, 1),
         BufferEditorResult::Abort => {
             finish_editor(g, conn, 2);
             false
@@ -440,18 +465,22 @@ fn buffer_nonempty(g: &GameState, conn: ConnId) -> bool {
     read_buffer(g, conn).map(|b| !b.is_empty()).unwrap_or(false)
 }
 
-/// Dispatch the finished buffer (terminator 1 = save, 2 = abort) to its target,
-/// clear PLR_WRITING/PLR_MAILING, and drop the edit-state side table entry.
-/// The StringEdit context is removed by the caller after this returns.
-fn finish_editor(g: &mut GameState, conn: ConnId, terminator: i32) {
+/// Dispatch the finished buffer (terminator 1 = save, 2 = abort) to its target.
+/// Returns true only when the caller may pop the StringEdit context. TEDIT
+/// publication failures return false so the buffer, target, and writer flag
+/// remain available for a retry or explicit `/a` discard.
+fn finish_editor(g: &mut GameState, conn: ConnId, terminator: i32) -> bool {
     let buffer = read_buffer(g, conn).unwrap_or_default();
     let saved = terminator == 1;
     // An all-empty saved buffer becomes "no string" (C NULLs it out).
     let body = buffer.trim_end_matches(['\r', '\n']);
 
-    let state = take_edit(conn);
-    let target = state.map(|s| s.target).unwrap_or(EditTarget::Plain);
+    let target = crate::lock_ok::lock(&edits())
+        .get(&conn)
+        .map(|state| state.target.clone())
+        .unwrap_or(EditTarget::Plain);
     let cid = conn_char(g, conn);
+    let mut finished = true;
 
     match target {
         EditTarget::Note(oid) => {
@@ -484,18 +513,31 @@ fn finish_editor(g: &mut GameState, conn: ConnId, terminator: i32) {
             if saved {
                 if crate::mail::finish_mail(g, conn, body) {
                     send_to_q(g, conn, "Message sent!\r\n");
+                } else {
+                    send_to_q(
+                        g,
+                        conn,
+                        "The mail system could not store your message; it was not sent.\r\n",
+                    );
                 }
             } else {
                 crate::mail::abort_mail(conn);
                 send_to_q(g, conn, "Mail aborted.\r\n");
             }
         }
-        EditTarget::Board => {
-            crate::boards::board_finish_write(g, conn, body, saved);
-            if saved {
+        EditTarget::Board => match crate::boards::board_finish_write(g, conn, body, saved) {
+            crate::boards::BoardFinishOutcome::Finished if saved => {
                 send_to_q(g, conn, "Post not aborted, use REMOVE <post #>.\r\n");
             }
-        }
+            crate::boards::BoardFinishOutcome::AuthorizationDenied => {
+                send_to_q(
+                    g,
+                    conn,
+                    "Your board access changed; the pending post was not published.\r\n",
+                );
+            }
+            _ => {}
+        },
         EditTarget::CharField { cid: tcid, field } => {
             apply_char_field(g, tcid, field, saved, body);
             if !saved {
@@ -512,14 +554,35 @@ fn finish_editor(g: &mut GameState, conn: ConnId, terminator: i32) {
                 send_to_q(g, conn, "Field updated.\r\n");
             }
         }
-        EditTarget::TextFile(path) => {
+        EditTarget::TextFile {
+            path,
+            authorization,
+            minimum_authority,
+        } => {
             // CON_TEXTED save path (modify.c): fopen(OLC_STORAGE,"w") + fputs of
             // stripcr(*d->str). Mirror the SYSERR/OLC mudlog lines and the
             // "$n stops editing some scrolls." room act.
             if saved {
+                if !g.authenticated_command_request_is_current(
+                    authorization,
+                    minimum_authority,
+                    3,
+                    crate::gcmd::GCMD3_IMPOLC,
+                ) {
+                    send_to_q(
+                        g,
+                        conn,
+                        "Your text-editor authorization changed; the file was not saved. Use /s to retry after access is restored or /a to discard.\r\n",
+                    );
+                    return false;
+                }
                 let stripped: String = buffer.chars().filter(|&c| c != '\r').collect();
-                match std::fs::write(&path, stripped.as_bytes()) {
+                match crate::olc::atomic_replace(&path, stripped.as_bytes()) {
                     Ok(_) => {
+                        crate::olc::clear_unresolved_named_save(
+                            crate::olc::EditorKind::Tedit,
+                            &path.to_string_lossy(),
+                        );
                         let name = cid
                             .and_then(|c| g.get_char(c))
                             .map(|c| c.player.name.clone())
@@ -532,19 +595,38 @@ fn finish_editor(g: &mut GameState, conn: ConnId, terminator: i32) {
                         );
                         send_to_q(g, conn, "Saved.\r\n");
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        crate::olc::mark_unresolved_named_save_failure(
+                            crate::olc::EditorKind::Tedit,
+                            &path.to_string_lossy(),
+                            &error,
+                        );
                         mudlog(
                             g,
-                            &format!("SYSERR: Can't write file '{}'.", path.display()),
+                            &format!(
+                                "SYSERR: Can't durably replace file '{}': {}.",
+                                path.display(),
+                                error
+                            ),
                             crate::syslog::CMP,
                             LVL_IMPL,
                         );
+                        send_to_q(
+                            g,
+                            conn,
+                            "Could not save the file; your editor remains open. Use /s to retry or /a to discard.\r\n",
+                        );
+                        finished = false;
                     }
                 }
             } else {
+                crate::olc::discard_unresolved_named_save(
+                    crate::olc::EditorKind::Tedit,
+                    &path.to_string_lossy(),
+                );
                 send_to_q(g, conn, "Edit aborted.\r\n");
             }
-            if let Some(cid) = cid {
+            if finished && let Some(cid) = cid {
                 act(
                     g,
                     "$n stops editing some scrolls.",
@@ -579,14 +661,18 @@ fn finish_editor(g: &mut GameState, conn: ConnId, terminator: i32) {
         }
     }
 
-    // Clear PLR_WRITING | PLR_MAILING on the writer.
-    if let Some(cid) = cid {
-        if let Some(c) = g.get_char_mut(cid) {
-            if !c.is_npc {
-                c.act_flags &= !(PLR_WRITING | PLR_MAILING);
+    if finished {
+        take_edit(conn);
+        // Clear PLR_WRITING | PLR_MAILING on the writer.
+        if let Some(cid) = cid {
+            if let Some(c) = g.get_char_mut(cid) {
+                if !c.is_npc {
+                    c.act_flags &= !(PLR_WRITING | PLR_MAILING);
+                }
             }
         }
     }
+    finished
 }
 
 /// Install a saved buffer into an immortal-edited character field.
@@ -1745,6 +1831,7 @@ mod tests {
 
         let mut ch = Character::new_player("Writer".to_string(), Class::Warrior, Race::Human);
         ch.desc = Some(conn);
+        ch.godcmds3 |= crate::gcmd::GCMD3_IMPOLC;
         let ch_id = g.create_char(ch);
 
         let mut d = Descriptor::new(conn, "test".to_string());
@@ -1755,6 +1842,19 @@ mod tests {
         let obj = Object::new(1, "note paper".to_string(), "a note".to_string());
         let obj_id = g.create_obj(obj);
         (g, conn, ch_id, obj_id)
+    }
+
+    fn tedit_authorization(
+        g: &GameState,
+        conn: ConnId,
+        ch: CharId,
+    ) -> crate::state::AuthenticatedCommandRequest {
+        crate::state::AuthenticatedCommandRequest {
+            requester_body: ch,
+            requester_principal: ch,
+            descriptor: conn,
+            idnum: g.get_char(ch).unwrap().idnum,
+        }
     }
 
     #[test]
@@ -1800,6 +1900,159 @@ mod tests {
                 .outbuf
                 .contains("Note aborted.")
         );
+    }
+
+    #[test]
+    fn tedit_failure_keeps_retryable_state_and_blocks_flush_until_resolved() {
+        let _save_guard = crate::olc::test_save_list_guard();
+        let (mut g, conn, ch, _obj) = editor_game();
+        let root = std::env::temp_dir().join(format!(
+            "deltamud-tedit-retry-{}-{}",
+            std::process::id(),
+            conn.0
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("news");
+        std::fs::write(&path, "old\n").unwrap();
+        let key = path.to_string_lossy().into_owned();
+
+        let authorization = tedit_authorization(&g, conn, ch);
+        start_textfile_editing(
+            &mut g,
+            conn,
+            path.clone(),
+            "new\r\n",
+            1024,
+            authorization,
+            0,
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(editor_input(&mut g, conn, "/s"));
+        assert!(editing(&g, conn));
+        assert_ne!(g.get_char(ch).unwrap().act_flags & PLR_WRITING, 0);
+        assert!(crate::olc::test_unresolved_named_save(
+            crate::olc::EditorKind::Tedit,
+            &key
+        ));
+        assert!(crate::olc::flush_save_list_to_disk(&mut g).is_err());
+        assert!(g.descriptors[&conn].outbuf.contains("editor remains open"));
+
+        std::fs::remove_dir(&path).unwrap();
+        assert!(!editor_input(&mut g, conn, "/s"));
+        g.descriptors.get_mut(&conn).unwrap().editors.pop();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
+        assert!(!crate::olc::test_unresolved_named_save(
+            crate::olc::EditorKind::Tedit,
+            &key
+        ));
+        assert!(crate::olc::flush_save_list_to_disk(&mut g).is_ok());
+        assert_eq!(g.get_char(ch).unwrap().act_flags & PLR_WRITING, 0);
+
+        // A separate unpublished failure may also be resolved by explicitly
+        // discarding that one editor buffer.
+        start_textfile_editing(
+            &mut g,
+            conn,
+            path.clone(),
+            "discard\r\n",
+            1024,
+            authorization,
+            0,
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(editor_input(&mut g, conn, "/s"));
+        assert!(crate::olc::test_unresolved_named_save(
+            crate::olc::EditorKind::Tedit,
+            &key
+        ));
+        assert!(!editor_input(&mut g, conn, "/a"));
+        g.descriptors.get_mut(&conn).unwrap().editors.pop();
+        assert!(!crate::olc::test_unresolved_named_save(
+            crate::olc::EditorKind::Tedit,
+            &key
+        ));
+        assert!(crate::olc::flush_save_list_to_disk(&mut g).is_ok());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tedit_revalidates_session_trust_grant_and_quarantine_before_replacement() {
+        #[derive(Clone, Copy, Debug)]
+        enum Revocation {
+            Grant,
+            Trust,
+            Quarantine,
+            DescriptorBody,
+        }
+
+        for (index, revocation) in [
+            Revocation::Grant,
+            Revocation::Trust,
+            Revocation::Quarantine,
+            Revocation::DescriptorBody,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (mut g, conn, ch, _obj) = editor_game();
+            g.get_char_mut(ch).unwrap().trust = i32::from(LVL_IMPL);
+            let root = std::env::temp_dir().join(format!(
+                "deltamud-tedit-authorization-{}-{}-{index}",
+                std::process::id(),
+                conn.0
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            let path = root.join("news");
+            std::fs::write(&path, "old\n").unwrap();
+            let authorization = tedit_authorization(&g, conn, ch);
+            start_textfile_editing(
+                &mut g,
+                conn,
+                path.clone(),
+                "new\r\n",
+                1024,
+                authorization,
+                i32::from(LVL_GRGOD),
+            );
+
+            match revocation {
+                Revocation::Grant => g.get_char_mut(ch).unwrap().godcmds3 = 0,
+                Revocation::Trust => g.get_char_mut(ch).unwrap().trust = 1,
+                Revocation::Quarantine => {
+                    let idnum = g.get_char(ch).unwrap().idnum;
+                    g.authority_quarantine.insert(idnum);
+                }
+                Revocation::DescriptorBody => {
+                    let mut replacement =
+                        Character::new_player("Replacement".into(), Class::Warrior, Race::Human);
+                    replacement.desc = Some(conn);
+                    let replacement = g.create_char(replacement);
+                    g.descriptors.get_mut(&conn).unwrap().character = Some(replacement);
+                }
+            }
+
+            assert!(editor_input(&mut g, conn, "/s"), "case={revocation:?}");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "old\n",
+                "case={revocation:?}"
+            );
+            assert!(
+                g.descriptors[&conn]
+                    .outbuf
+                    .contains("authorization changed"),
+                "case={revocation:?}"
+            );
+            abort_conn(&mut g, conn);
+            g.descriptors.get_mut(&conn).unwrap().editors.pop();
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     #[test]

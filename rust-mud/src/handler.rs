@@ -678,8 +678,14 @@ impl GameState {
             Some(t) => t,
             None => return false,
         };
-        // Higher-invis-level immortals are hidden from lower-level viewers.
-        if t.invis_level > v.player.level as i32 {
+        // Immortal invisibility is an authority boundary, not a gameplay-level
+        // comparison. Switched sessions inherit the authenticated principal's
+        // persisted trust; malformed principals fail closed at authority 0.
+        let viewer_authority = self
+            .principal_authority(viewer)
+            .map(|principal| principal.authority)
+            .unwrap_or(0);
+        if t.invis_level > viewer_authority {
             return false;
         }
         if v.prf_flags & PRF_HOLYLIGHT != 0 {
@@ -1037,7 +1043,7 @@ mod tests {
     use super::*;
     use crate::character::Character;
     use crate::config::Config;
-    use crate::connection::Descriptor;
+    use crate::connection::{ConState, Descriptor};
     use crate::object::{Object, ObjectAffect, ObjectType};
     use crate::types::{Class, Race};
 
@@ -1176,6 +1182,22 @@ mod tests {
 
         g.get_char_mut(target).unwrap().invis_level = 2;
         assert!(!g.can_see(viewer, target));
+    }
+
+    #[test]
+    fn can_see_uses_persisted_trust_not_spoofable_display_level_for_invis() {
+        let (mut g, viewer, target) = visible_pair();
+        {
+            let v = g.get_char_mut(viewer).unwrap();
+            v.player.level = LVL_IMPL;
+            v.trust = 1;
+            v.prf_flags |= PRF_HOLYLIGHT;
+        }
+        g.get_char_mut(target).unwrap().invis_level = 2;
+        assert!(!g.can_see(viewer, target));
+
+        g.get_char_mut(viewer).unwrap().trust = 2;
+        assert!(g.can_see(viewer, target));
     }
 
     /// BUG 2: repeated equip/unequip must NOT balloon max_hit / defense, and the
@@ -1544,11 +1566,16 @@ mod tests {
             snooper_conn,
             Descriptor::new(snooper_conn, "snooper.test".into()),
         );
+        g.descriptors.get_mut(&victim_conn).unwrap().state = ConState::Playing;
+        g.descriptors.get_mut(&snooper_conn).unwrap().state = ConState::Playing;
         let mut victim = Character::new_player("Victim".into(), Class::Warrior, Race::Human);
         victim.desc = Some(victim_conn);
+        victim.trust = 1;
         let victim = g.create_char(victim);
         let mut snooper = Character::new_player("Snooper".into(), Class::Warrior, Race::Human);
         snooper.desc = Some(snooper_conn);
+        snooper.trust = i32::from(LVL_IMPL);
+        snooper.godcmds1 |= crate::gcmd::GCMD_SNOOP;
         let snooper = g.create_char(snooper);
         g.descriptors.get_mut(&victim_conn).unwrap().character = Some(victim);
         g.descriptors.get_mut(&snooper_conn).unwrap().character = Some(snooper);

@@ -5,6 +5,7 @@ use crate::types::*;
 use crate::world::{MAX_ZONE_NUMBER, MobileProto, ObjectProto, ResetCmd, Zone, zone_vnum_bounds};
 use anyhow::{Context, Result, anyhow};
 use log::{info, warn};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -33,18 +34,20 @@ impl FileLoader {
 
     pub async fn load_world(world: &mut GameState, base_path: &str) -> Result<()> {
         let world_path = Path::new(base_path).join("world");
+        let pending_new_zones = crate::olc::pending_new_zone_publications(base_path)
+            .context("read durable new-zone publication gates")?;
 
         // Load zones
-        FileLoader::load_zones(world, &world_path.join("zon"))?;
+        FileLoader::load_zones(world, &world_path.join("zon"), &pending_new_zones)?;
 
         // Load rooms
-        FileLoader::load_rooms(world, &world_path.join("wld"))?;
+        FileLoader::load_rooms(world, &world_path.join("wld"), &pending_new_zones)?;
 
         // Load mobiles
-        FileLoader::load_mobiles(world, &world_path.join("mob"))?;
+        FileLoader::load_mobiles(world, &world_path.join("mob"), &pending_new_zones)?;
 
         // Load objects
-        FileLoader::load_objects(world, &world_path.join("obj"))?;
+        FileLoader::load_objects(world, &world_path.join("obj"), &pending_new_zones)?;
 
         info!(
             "World loaded: {} zones, {} rooms, {} mobs, {} objects",
@@ -57,7 +60,11 @@ impl FileLoader {
         Ok(())
     }
 
-    fn load_zones(world: &mut GameState, path: &Path) -> Result<()> {
+    fn load_zones(
+        world: &mut GameState,
+        path: &Path,
+        pending_new_zones: &HashSet<i32>,
+    ) -> Result<()> {
         let index_path = path.join("index");
         let file = File::open(&index_path)?;
         let reader = BufReader::new(file);
@@ -66,6 +73,10 @@ impl FileLoader {
             let line = line?;
             if line == "$" {
                 break;
+            }
+            if crate::olc::new_zone_index_entry_is_pending(pending_new_zones, &line) {
+                warn!("Skipping incomplete new-zone file {line:?} during boot");
+                continue;
             }
 
             let zone_file = path.join(&line);
@@ -258,7 +269,11 @@ impl FileLoader {
         Ok(parsed)
     }
 
-    fn load_rooms(world: &mut GameState, path: &Path) -> Result<()> {
+    fn load_rooms(
+        world: &mut GameState,
+        path: &Path,
+        pending_new_zones: &HashSet<i32>,
+    ) -> Result<()> {
         let index_path = path.join("index");
         let file = File::open(&index_path)?;
         let reader = BufReader::new(file);
@@ -267,6 +282,10 @@ impl FileLoader {
             let line = line?;
             if line == "$" {
                 break;
+            }
+            if crate::olc::new_zone_index_entry_is_pending(pending_new_zones, &line) {
+                warn!("Skipping incomplete new-zone file {line:?} during boot");
+                continue;
             }
 
             let room_file = path.join(&line);
@@ -492,7 +511,11 @@ impl FileLoader {
         Ok(())
     }
 
-    fn load_mobiles(world: &mut GameState, path: &Path) -> Result<()> {
+    fn load_mobiles(
+        world: &mut GameState,
+        path: &Path,
+        pending_new_zones: &HashSet<i32>,
+    ) -> Result<()> {
         let index_path = path.join("index");
         let file = File::open(&index_path)?;
         let reader = BufReader::new(file);
@@ -501,6 +524,10 @@ impl FileLoader {
             let line = line?;
             if line == "$" {
                 break;
+            }
+            if crate::olc::new_zone_index_entry_is_pending(pending_new_zones, &line) {
+                warn!("Skipping incomplete new-zone file {line:?} during boot");
+                continue;
             }
 
             let mob_file = path.join(&line);
@@ -921,7 +948,11 @@ impl FileLoader {
         None
     }
 
-    fn load_objects(world: &mut GameState, path: &Path) -> Result<()> {
+    fn load_objects(
+        world: &mut GameState,
+        path: &Path,
+        pending_new_zones: &HashSet<i32>,
+    ) -> Result<()> {
         let index_path = path.join("index");
         let file = File::open(&index_path)?;
         let reader = BufReader::new(file);
@@ -930,6 +961,10 @@ impl FileLoader {
             let line = line?;
             if line == "$" {
                 break;
+            }
+            if crate::olc::new_zone_index_entry_is_pending(pending_new_zones, &line) {
+                warn!("Skipping incomplete new-zone file {line:?} during boot");
+                continue;
             }
 
             let obj_file = path.join(&line);

@@ -477,7 +477,10 @@ pub fn advance_level(g: &mut GameState, ch: CharId) {
             }
             c.prf_flags |= crate::flags::PRF_HOLYLIGHT;
         }
-        c.trust = level;
+        // Mortal trust normally tracks level so newly unlocked commands work,
+        // but normal/DG XP must never demote a staff principal whose display
+        // level is deliberately lower than persisted command authority.
+        c.trust = c.trust.max(level);
     }
 
     let buf = format!(
@@ -776,7 +779,7 @@ pub fn check_idling(g: &mut GameState, ch: CharId) {
             ch,
             "Build mode, my friend, was not made for you to idle in.\r\n",
         );
-        crate::cmd_other::do_build(g, ch, "off", 0);
+        crate::cmd_other::exit_build_mode(g, ch);
         return;
     }
 
@@ -1757,12 +1760,14 @@ mod tests {
     }
 
     fn connected_player(g: &mut GameState, conn: ConnId, name: &str, level: Level) -> CharId {
-        g.descriptors
-            .insert(conn, Descriptor::new(conn, "test".to_string()));
         let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
         ch.desc = Some(conn);
         ch.player.level = level;
+        ch.trust = i32::from(level);
         let id = g.create_char(ch);
+        let mut descriptor = Descriptor::new(conn, "test".to_string());
+        descriptor.character = Some(id);
+        g.descriptors.insert(conn, descriptor);
         g.players_by_name.insert(name.to_lowercase(), id);
         id
     }
@@ -1824,6 +1829,22 @@ mod tests {
         let c = g.get_char(ch).unwrap();
         assert_eq!(c.training, 3);
         assert_eq!(c.newbie, 0);
+    }
+
+    #[test]
+    fn ordinary_level_gain_never_demotes_higher_persisted_trust() {
+        let mut g = GameState::new(Config::default());
+        let mut player =
+            Character::new_player("Trustedleveler".to_string(), Class::Warrior, Race::Human);
+        player.player.level = 2;
+        player.trust = i32::from(LVL_IMPL);
+        let player = g.create_char(player);
+
+        advance_level(&mut g, player);
+
+        let player = g.get_char(player).unwrap();
+        assert_eq!(player.player.level, 2);
+        assert_eq!(player.trust, i32::from(LVL_IMPL));
     }
 
     #[test]

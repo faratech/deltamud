@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Prompt-aware concurrent combat soak for an isolated DeltaMUD server.
 
-The first account is an administrator used to gather the mortal players in a
-known room. Account creation is deliberately sequential so a fresh database
-assigns idnum 1 deterministically. Every mortal must reach Playing, report
-positive HP, and produce evidence of real combat; any socket/thread/server-log
-error makes the run fail.
+Every fresh account remains an ordinary mortal. Players follow the shipped
+newbie-world route south from the school into Newhaven's shared combat square;
+the driver never relies on an implicit idnum-1 administrator or a mock-only
+privilege bypass. Every player must reach Playing, report positive HP, and
+produce evidence of real combat; any socket/thread/server-log error makes the
+run fail.
 """
 
 import argparse
@@ -19,7 +20,6 @@ import urllib.request
 
 
 PASSWORD = "soakpass"
-ADMIN_NAME = "Soakadmin"
 PLAYER_NAMES = [
     "Soakalpha",
     "Soakbravo",
@@ -31,6 +31,7 @@ PLAYER_NAMES = [
     "Soakhotel",
 ]
 TARGETS = ["craft", "guard", "questmaster", "carter"]
+COMBAT_ROOM = "The Town Square of Newhaven"
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 DISPLAY_INT = r"-?(?:\d{1,3}(?:,\d{3})+|\d+)"
 DISPLAY_UINT = r"(?:\d{1,3}(?:,\d{3})+|\d+)"
@@ -231,10 +232,10 @@ class Fighter(threading.Thread):
             self.error = exc
 
 
-def health_ok(port):
+def readiness_ok(port):
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5) as response:
-            return response.status == 200 and response.read().startswith(b"ok")
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/ready", timeout=5) as response:
+            return response.status == 200 and response.read().startswith(b"ready")
     except Exception:
         return False
 
@@ -248,12 +249,24 @@ def scan_new_log(path, start):
     return [line for line in fresh.splitlines() if any(marker in line for marker in PANIC_MARKERS)]
 
 
+def provision_mortal_for_combat(session):
+    """Enter through the normal newbie flow and walk to the shared square."""
+    score = session.provision_and_enter()
+    arrival = ANSI_RE.sub("", session.command("south"))
+    if COMBAT_ROOM not in arrival:
+        raise SoakFailure(
+            f"{session.name}: configured newbie route did not reach {COMBAT_ROOM!r}; "
+            f"tail={arrival[-800:]!r}"
+        )
+    return score
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=4000)
     parser.add_argument("--players", type=int, default=3, choices=range(1, 9))
     parser.add_argument("--seconds", type=int, default=90)
-    parser.add_argument("--health", type=int, default=0)
+    parser.add_argument("--readiness", "--health", dest="readiness", type=int, default=0)
     parser.add_argument("--log", default="")
     parser.add_argument("--artifacts", default="")
     parser.add_argument("--force-driver-error", action="store_true", help=argparse.SUPPRESS)
@@ -262,26 +275,20 @@ def main():
     log_start = os.path.getsize(args.log) if args.log and os.path.exists(args.log) else 0
     sessions = []
     try:
-        if args.health and not health_ok(args.health):
-            raise SoakFailure("/health was not ready before the soak")
+        if args.readiness and not readiness_ok(args.readiness):
+            raise SoakFailure("/ready was not ready before the soak")
         if args.force_driver_error:
             raise SoakFailure("injected driver failure")
-
-        admin = Session(ADMIN_NAME, args.port)
-        sessions.append(admin)
-        admin_score = admin.provision_and_enter()
-        level = parse_score_level(admin_score)
-        if level is None or level < 100:
-            raise SoakFailure("administrator account is not Implementor; use a fresh soak DB")
-        admin.command("goto 210")
 
         players = []
         for name in PLAYER_NAMES[: args.players]:
             player = Session(name, args.port)
             sessions.append(player)
-            player.provision_and_enter()
+            provision_mortal_for_combat(player)
+            # All new characters begin in room 200. The shipped room exit leads
+            # south to room 210, where the ordinary reset population provides
+            # the named combat targets below.
             players.append(player)
-            admin.command(f"trans {name}")
 
         deadline = time.monotonic() + args.seconds
         fighters = [
@@ -299,8 +306,8 @@ def main():
             if not fighter.combat_verified:
                 raise SoakFailure(f"{fighter.name}: combat was not verified")
 
-        if args.health and not health_ok(args.health):
-            raise SoakFailure("/health failed after the soak")
+        if args.readiness and not readiness_ok(args.readiness):
+            raise SoakFailure("/ready failed after the soak")
         panics = scan_new_log(args.log, log_start)
         if panics:
             raise SoakFailure("new panic markers: " + " | ".join(panics[-5:]))

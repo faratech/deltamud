@@ -15,7 +15,8 @@
 //   (b) Echo the line to every playing immortal whose on-line syslog level
 //       (the PRF_LOG{1,2,3} bit triple, 0..=4: Off/Brief/Normal/Perfect/
 //       Complete) is at or above `type`, and whose character level is at or
-//       above `level`. Perfect (tp == 3) sees everything except "Auto zone
+//       above `level`. The Rust port uses the authenticated principal's
+//       persisted trust, never a body's display level. Perfect (tp == 3) sees everything except "Auto zone
 //       reset:" spam. The echoed line is `[ str ]\r\n`, with the trailing
 //       CR/LF stripped from `str` first, wrapped in CCGRN/CCNRM (bright green
 //       at colour level >= C_NRM).
@@ -132,7 +133,21 @@ pub fn mudlog(g: &mut GameState, str: &str, log_type: u8, min_level: Level) {
                 Some(c) => c,
                 None => return false,
             };
-            if c.player.level < min_level || c.player.level < LVL_IMMORT {
+            let Some(authority) = g
+                .principal_authority(id)
+                .filter(|authority| authority.is_authenticated_player())
+            else {
+                return false;
+            };
+            let Some(principal) = g.get_char(authority.principal) else {
+                return false;
+            };
+            if g.authority_quarantine.contains(&principal.idnum) {
+                return false;
+            }
+            if authority.authority < i32::from(min_level)
+                || authority.authority < i32::from(LVL_IMMORT)
+            {
                 return false;
             }
             // tp = the player's syslog level from the PRF_LOG bit triple.
@@ -156,5 +171,81 @@ pub fn mudlog(g: &mut GameState, str: &str, log_type: u8, min_level: Level) {
         } else {
             g.send_to_char(id, &body);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::{ConState, Descriptor};
+    use crate::types::{Class, ConnId, LVL_GOD, LVL_IMPL, Race};
+
+    fn connected_player(
+        state: &mut GameState,
+        conn: ConnId,
+        name: &str,
+        level: u8,
+        trust: i32,
+    ) -> CharId {
+        state
+            .descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        let mut character = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        character.desc = Some(conn);
+        character.idnum = conn.0 as i64;
+        character.player.level = level;
+        character.trust = trust;
+        character.prf_flags |= PRF_LOG1 | PRF_LOG2 | PRF_LOG3;
+        let id = state.create_char(character);
+        let descriptor = state.descriptors.get_mut(&conn).unwrap();
+        descriptor.state = ConState::Playing;
+        descriptor.character = Some(id);
+        state.players_by_name.insert(name.to_lowercase(), id);
+        id
+    }
+
+    #[test]
+    fn mudlog_recipient_gate_uses_persisted_principal_trust() {
+        let mut config = Config::default();
+        config.lib_path = std::env::temp_dir()
+            .join(format!("deltamud-syslog-trust-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        std::fs::create_dir_all(&config.lib_path).unwrap();
+        let mut state = GameState::new(config);
+        let trusted = connected_player(&mut state, ConnId(1), "Trusted", 1, i32::from(LVL_IMPL));
+        let spoofed = connected_player(&mut state, ConnId(2), "Spoofed", LVL_IMPL, 1);
+
+        mudlog(&mut state, "trust boundary", NRM, LVL_GOD);
+
+        assert!(
+            state.descriptors[&ConnId(1)]
+                .outbuf
+                .contains("trust boundary")
+        );
+        assert!(
+            !state.descriptors[&ConnId(2)]
+                .outbuf
+                .contains("trust boundary")
+        );
+        assert_eq!(state.principal_authority(trusted).unwrap().authority, 105);
+        assert_eq!(state.principal_authority(spoofed).unwrap().authority, 1);
+
+        state
+            .descriptors
+            .get_mut(&ConnId(1))
+            .unwrap()
+            .outbuf
+            .clear();
+        state.authority_quarantine.insert(1);
+        mudlog(&mut state, "quarantined disclosure", NRM, LVL_GOD);
+        assert!(
+            !state.descriptors[&ConnId(1)]
+                .outbuf
+                .contains("quarantined disclosure")
+        );
+        let _ = std::fs::remove_dir_all(&state.config.lib_path);
     }
 }

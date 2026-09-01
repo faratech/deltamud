@@ -1517,7 +1517,7 @@ mod deliver_tests {
 
     #[test]
     fn deliver_assignment_seals_pouch_and_names_recipient() {
-        let (mut g, player, qm, recip) = deliver_game();
+        let (mut g, player, qm, _recip) = deliver_game();
         assert!(assign_deliver(&mut g, player, qm));
 
         let c = g.get_char(player).unwrap();

@@ -1,37 +1,66 @@
 #!/usr/bin/env bash
 # Parity battery: proves rust-mud against the C oracle side by side.
 #
-# Isolation: everything runs inside a private network namespace (`unshare -n`)
+# Isolation: everything runs inside a bubblewrap-created unprivileged user plus
+# private network, PID, IPC, and minimal mount namespace
 # with its own loopback and a throwaway MariaDB on 127.0.0.1:3306 (the C binary
 # hardcodes that endpoint), so neither server can touch production data. The
-# world/lib is a fresh copy in /tmp/parity-lib every run. All cleanup is done
-# by PID - never pkill by name (a host mariadbd lives here!).
+# world/lib is a fresh copy under an exclusive disk-backed /var/tmp directory
+# every run. The
+# PID namespace, recursively read-only host filesystem, capability-free oracle
+# processes, and PID-only cleanup keep both oracles away from production state.
 #
 # Usage:
-#   scripts/parity-check.sh            # boot both servers, run the battery, diff
-#   PROBE=1 scripts/parity-check.sh    # boot + drive, keep raw transcripts
+#   cargo build --release --locked
+#   RUST_BIN="$PWD/target/release/deltamud" scripts/parity-check.sh
+#   PROBE=1 RUST_BIN="$PWD/target/release/deltamud" scripts/parity-check.sh
 #
 # Inputs:
 #   scripts/parity/scenario.txt        # prompt->answer login map + command list
 #   scripts/parity/driver.py           # expect-style driver
 #
-# Outputs in a fresh /tmp/deltamud-parity.XXXXXX directory printed at exit:
+# Outputs in a fresh /var/tmp/deltamud-parity.XXXXXX directory printed at exit:
 #   raw_c.txt / raw_r.txt              # raw transcripts
-#   norm_c.txt / norm_r.txt            # normalized (ANSI stripped, digits->N)
+#   norm_c.txt / norm_r.txt            # transport-only normalization
 #   diff.txt                           # unified diff (empty == converged)
 set -Eeuo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 MUD_DIR=$(cd "$HERE/.." && pwd)
 REPO_DIR=$(cd "$MUD_DIR/.." && pwd)
+HOST_UID=$(id -u)
+if ! awk -v expected="$HOST_UID" '
+  /^Uid:/ {
+    uid_seen = 1
+    if ($2 != expected || $3 != expected || $4 != expected || $5 != expected) bad = 1
+  }
+  /^Cap(Inh|Prm|Eff|Amb):/ {
+    caps_seen++
+    if ($2 !~ /^0+$/) bad = 1
+  }
+  END { exit !(uid_seen && caps_seen == 4 && !bad && expected != 0) }
+' "/proc/$$/status"; then
+  echo "[parity] refusing host-root, set-ID, or capability-bearing execution of checkout-controlled tools" >&2
+  echo "[parity] run as an unprivileged development/CI user; the script maps only that user into the namespace" >&2
+  exit 77
+fi
+[ -f /usr/bin/bwrap ] && [ ! -L /usr/bin/bwrap ] && [ -x /usr/bin/bwrap ] \
+  && [ "$(stat -Lc %u -- /usr/bin/bwrap)" -eq 0 ] \
+  && [ "$((8#$(stat -Lc %a -- /usr/bin/bwrap) & 8#022))" -eq 0 ] || {
+  echo "[parity] a root-owned, non-writable /usr/bin/bwrap is required" >&2
+  exit 77
+}
 if [ -z "${RUST_BIN+x}" ]; then
-  echo "[parity] building current Rust source..."
-  cargo build --release --manifest-path "$MUD_DIR/Cargo.toml"
+  echo "[parity] building current Rust source as the invoking unprivileged user..."
+  cargo build --release --locked --manifest-path "$MUD_DIR/Cargo.toml"
   RUST_BIN=$MUD_DIR/target/release/deltamud
 fi
 C_BIN=${C_BIN:-$REPO_DIR/bin/circle}
 SEED=${MUD_RNG_SEED:-12345}
 PARITY_TIMEOUT_SECONDS=${PARITY_TIMEOUT_SECONDS:-240}
+PARITY_FORCE_DRIVER_ERROR=${PARITY_FORCE_DRIVER_ERROR:-0}
+PARITY_FORCE_RUST_ZOMBIE=${PARITY_FORCE_RUST_ZOMBIE:-0}
+PARITY_FORCE_CHILD_LEAK=${PARITY_FORCE_CHILD_LEAK:-0}
 
 if [ ! -x "$RUST_BIN" ] || [ ! -x "$C_BIN" ]; then
   echo "[parity] required executable missing (Rust: $RUST_BIN; C: $C_BIN)" >&2
@@ -41,35 +70,161 @@ if ! [[ "$PARITY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
   echo "[parity] PARITY_TIMEOUT_SECONDS must be a positive integer" >&2
   exit 64
 fi
+if [[ "$PARITY_FORCE_DRIVER_ERROR" != 0 && "$PARITY_FORCE_DRIVER_ERROR" != 1 ]] \
+  || [[ "$PARITY_FORCE_RUST_ZOMBIE" != 0 && "$PARITY_FORCE_RUST_ZOMBIE" != 1 ]] \
+  || [[ "$PARITY_FORCE_CHILD_LEAK" != 0 && "$PARITY_FORCE_CHILD_LEAK" != 1 ]]; then
+  echo "[parity] negative-control flags must be 0 or 1" >&2
+  exit 64
+fi
 RUST_BIN=$(readlink -f -- "$RUST_BIN")
 C_BIN=$(readlink -f -- "$C_BIN")
 
-WORK=${PARITY_WORK:-$(mktemp -d /tmp/deltamud-parity.XXXXXX)}
-mkdir -p "$WORK" "$HERE/parity"
+umask 077
+WORK=$(mktemp -d /var/tmp/deltamud-parity.XXXXXX)
+[ -d "$WORK" ] && [ ! -L "$WORK" ] \
+  && [ "$(stat -Lc %u:%g:%a -- "$WORK")" = "$(id -u):$(id -g):700" ] || {
+    echo "[parity] could not create a private invoking-user-owned work directory" >&2
+    exit 77
+  }
+install -d -m 0755 "$WORK/bin" "$WORK/input/rust-mud/scripts/parity" "$WORK/input/bin"
+install -d -m 0700 "$WORK/tmp"
+rust_before=$(sha256sum -- "$RUST_BIN" | awk '{print $1}')
+c_before=$(sha256sum -- "$C_BIN" | awk '{print $1}')
+install -m 0755 "$RUST_BIN" "$WORK/bin/deltamud"
+install -m 0755 "$C_BIN" "$WORK/bin/circle"
+[ "$rust_before" = "$(sha256sum -- "$RUST_BIN" | awk '{print $1}')" ] \
+  && [ "$rust_before" = "$(sha256sum -- "$WORK/bin/deltamud" | awk '{print $1}')" ] \
+  && [ "$c_before" = "$(sha256sum -- "$C_BIN" | awk '{print $1}')" ] \
+  && [ "$c_before" = "$(sha256sum -- "$WORK/bin/circle" | awk '{print $1}')" ] || {
+    echo "[parity] an oracle executable changed while entering the private stage" >&2
+    exit 65
+  }
+RUST_BIN=$WORK/bin/deltamud
+C_BIN=$WORK/bin/circle
+export PARITY_RUST_SHA256=$rust_before
+export PARITY_C_SHA256=$c_before
+cp -R -- "$REPO_DIR/lib" "$WORK/input/lib"
+install -m 0644 "$REPO_DIR/deltamud_schema.sql" "$WORK/input/deltamud_schema.sql"
+install -m 0644 "$MUD_DIR/scripts/parity/driver.py" \
+  "$MUD_DIR/scripts/parity/scenario.txt" "$WORK/input/rust-mud/scripts/parity/"
+for helper in autowiz scheck licheck; do
+  [ ! -f "$REPO_DIR/bin/$helper" ] \
+    || install -m 0755 "$REPO_DIR/bin/$helper" "$WORK/input/bin/$helper"
+done
+if find "$WORK/input" \! -type d \! -type f -print -quit | grep -q .; then
+  echo "[parity] staged inputs contain a link or special file" >&2
+  exit 65
+fi
+chmod -R a-w "$WORK/input"
 export PARITY_WORK="$WORK"
 export PARITY_RUST_BIN="$RUST_BIN"
 export PARITY_C_BIN="$C_BIN"
-export PARITY_MUD_DIR="$MUD_DIR"
-export PARITY_REPO_DIR="$REPO_DIR"
+export PARITY_MUD_DIR="$WORK/input/rust-mud"
+export PARITY_REPO_DIR="$WORK/input"
+export PARITY_HOST_NETNS
+PARITY_HOST_NETNS=$(readlink /proc/self/ns/net)
 
 # The inner script uses a QUOTED heredoc marker ('INNER') so nothing is
 # expanded by this outer shell: every $var is evaluated by the inner shell.
+set -o noclobber
 cat > "$WORK/netns.sh" <<'INNER'
 set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 WORK=${PARITY_WORK:?missing parity work directory}
+export TMPDIR=$WORK/tmp
 SEED=${MUD_RNG_SEED:-12345}
 RUST_BIN=${PARITY_RUST_BIN:?missing Rust binary}
 C_BIN=${PARITY_C_BIN:?missing C binary}
 MUD_DIR=${PARITY_MUD_DIR:?missing Rust MUD directory}
 REPO_DIR=${PARITY_REPO_DIR:?missing repository directory}
+HOST_NETNS=${PARITY_HOST_NETNS:?missing host network namespace identity}
+RUST_SHA256=${PARITY_RUST_SHA256:?missing Rust oracle digest}
+C_SHA256=${PARITY_C_SHA256:?missing C oracle digest}
 LIB_C=$WORK/lib-c
 LIB_R=$WORK/lib-r
 DBDIR=$WORK/mariadb
-SOCK=$WORK/mariadb.sock
+MYSQL_RUN=$WORK/mysql-run
+SOCK=$MYSQL_RUN/mariadb.sock
 MYSQL_PID=
 C_PID=
 R_PID=
+command -v setpriv >/dev/null 2>&1 || { echo "missing setpriv privilege-drop tool"; exit 77; }
+ORACLE_PREFIX=(
+  setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all
+  --pdeathsig SIGKILL
+)
+ORACLE_ENV=(
+  env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  HOME="$WORK" TMPDIR="$TMPDIR" LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC
+)
+[ "$(id -u)" -eq 1 ] || { echo "unexpected parity namespace identity"; exit 77; }
+awk '
+  /^Uid:/ { seen_uid = 1; if ($2 != 1 || $3 != 1 || $4 != 1 || $5 != 1) bad = 1 }
+  /^Cap(Inh|Prm|Eff|Bnd|Amb):/ { seen_caps++; if ($2 !~ /^0+$/) bad = 1 }
+  END { exit !(seen_uid && seen_caps == 5 && !bad) }
+' /proc/$$/status || { echo "parity namespace retained an identity or capability"; exit 77; }
+
+# Bubblewrap supplies private /dev, /proc, and /run plus a disk-backed private /tmp,
+# then exposes only system executables/config read-only plus this run's work
+# tree. The staged control/input/binary subtrees are additional read-only
+# mounts. Check the effective topology and prove the parser rejects an
+# unexpected writable host-shaped mount before starting any oracle.
+cp -- /proc/self/mountinfo "$WORK/mount-options.after"
+verify_only_private_mounts_are_writable () {
+  local inventory=$1
+  local mount_id parent_id device mount_root mount_target mount_options remainder
+  local records=0
+  while IFS=' ' read -r mount_id parent_id device mount_root mount_target \
+    mount_options remainder; do
+    records=$((records + 1))
+    case ",$mount_options," in
+      *,rw,*)
+        case "$mount_target" in
+          /|/work|/tmp|/run|/dev|/dev/*|/proc|/proc/*) ;;
+          *) echo "unexpected writable mount: $mount_target" >&2; return 1 ;;
+        esac
+        ;;
+    esac
+  done <"$inventory"
+  [ "$records" -gt 0 ]
+}
+# Negative control: prove that the parser rejects an unexpected writable mount,
+# rather than merely accepting a malformed or empty inventory.
+printf '%s\n' \
+  '1 0 0:1 / / rw - tmpfs tmpfs rw' \
+  '2 1 0:2 / /host rw,nosuid - tmpfs tmpfs rw,nosuid' \
+  >"$WORK/mount-options.negative"
+if verify_only_private_mounts_are_writable "$WORK/mount-options.negative" 2>/dev/null; then
+  echo "mount isolation verifier accepted its writable-mount negative control" >&2
+  exit 77
+fi
+if ! verify_only_private_mounts_are_writable "$WORK/mount-options.after"; then
+  echo "a non-private mount remains writable in the parity sandbox" >&2
+  exit 77
+fi
+for protected_target in /work/input /work/bin /work/netns.sh; do
+  awk -v target="$protected_target" '
+    $5 == target && ("," $6 ",") ~ /,ro,/ { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' /proc/self/mountinfo || {
+    echo "protected parity mount is not read-only: $protected_target" >&2
+    exit 77
+  }
+done
+if find /run /tmp /dev -type s -print -quit | grep -q .; then
+  echo "the parity sandbox inherited a host Unix-domain socket" >&2
+  exit 77
+fi
+verify_oracle_hash () {
+  local binary=$1
+  local expected=$2
+  local label=$3
+  [ "$(sha256sum -- "$binary" | awk '{print $1}')" = "$expected" ] || {
+    echo "$label oracle changed inside the parity namespace" >&2
+    return 1
+  }
+}
+mkdir -p "$MYSQL_RUN"
 pid_has_exited () {
   local pid=$1
   local state
@@ -125,7 +280,11 @@ stop_pid () {
     return "$wait_rc"
   fi
   case "$signal_sent:$wait_rc" in
-    15:0|15:143|9:137) return 0 ;;
+    15:0|15:143) return 0 ;;
+    9:137)
+      echo "[parity] $label required forced SIGKILL after its shutdown deadline" >&2
+      return 71
+      ;;
     *)
       echo "[parity] $label PID $pid returned unexpected status $wait_rc after stop signal $signal_sent" >&2
       if [ "$wait_rc" -eq 0 ]; then
@@ -143,6 +302,33 @@ cleanup () {
   stop_pid "$C_PID" "C oracle" || cleanup_rc=71
   stop_pid "$R_PID" "Rust server" || cleanup_rc=71
   stop_pid "$MYSQL_PID" "MariaDB" || cleanup_rc=71
+  for proc_dir in /proc/[0-9]*; do
+    [ "${proc_dir##*/}" = "$$" ] && continue
+    if [ "${proc_dir##*/}" = 1 ]; then
+      init_argv0=
+      IFS= read -r -d '' init_argv0 <"$proc_dir/cmdline" 2>/dev/null || true
+      if [ "$init_argv0" = /usr/bin/bwrap ] \
+        && [ "$(readlink -e "$proc_dir/exe" 2>/dev/null || true)" = /usr/bin/bwrap ] \
+        && awk '
+          /^Name:/ { name_seen = 1; if ($2 != "bwrap") bad = 1 }
+          /^State:/ { state_seen = 1; if ($2 ~ /^Z/) bad = 1 }
+          /^PPid:/ { ppid_seen = 1; if ($2 != 0) bad = 1 }
+          /^Uid:/ {
+            uid_seen = 1
+            if ($2 != 1 || $3 != 1 || $4 != 1 || $5 != 1) bad = 1
+          }
+          /^Cap(Inh|Prm|Eff|Bnd|Amb):/ { caps_seen++; if ($2 !~ /^0+$/) bad = 1 }
+          END {
+            exit !(name_seen && state_seen && ppid_seen && uid_seen \
+              && caps_seen == 5 && !bad)
+          }
+        ' "$proc_dir/status"; then
+        continue
+      fi
+    fi
+    echo "[parity] untracked PID ${proc_dir##*/} remains in the private PID namespace" >&2
+    cleanup_rc=71
+  done
   if [ "$rc" -eq 0 ] && [ "$cleanup_rc" -ne 0 ]; then
     rc=$cleanup_rc
   fi
@@ -152,10 +338,12 @@ trap cleanup EXIT INT TERM
 
 # SAFETY: refuse to run outside the private netns - kills below must never
 # reach host processes (a production mariadbd lives on this box).
-if [ "$(readlink /proc/self/ns/net)" = "$(readlink /proc/1/ns/net)" ]; then
+if [ "$(readlink /proc/self/ns/net)" = "$HOST_NETNS" ]; then
   echo "FATAL: not inside the private netns - aborting"; exit 42
 fi
-ip link set lo up
+ip -o link show lo | grep -Eq '<[^>]*UP' || {
+  echo "FATAL: bubblewrap private loopback is not up"; exit 42
+}
 choose_port () {
   python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
 }
@@ -164,35 +352,50 @@ PORT_R=$(choose_port)
 while [ "$PORT_R" -eq "$PORT_C" ]; do PORT_R=$(choose_port); done
 
 # --- throwaway MariaDB (C oracle hardcodes 127.0.0.1:3306/deltamud) ---
-mariadb-install-db --datadir="$DBDIR" --auth-root-authentication-method=normal --skip-test-db >/dev/null 2>&1
-/usr/sbin/mariadbd --user=root --datadir="$DBDIR" --socket="$SOCK" \
-  --port=3306 --bind-address=127.0.0.1 --sql-mode=NO_ENGINE_SUBSTITUTION --skip-ssl --general-log=1 --general-log-file="$WORK/mysql-general.log" --skip-grant-tables --skip-networking=0 \
-  --pid-file=$WORK/mysqld.pid >$WORK/mysqld.log 2>&1 &
+mariadb-install-db --no-defaults --datadir="$DBDIR" \
+  --auth-root-authentication-method=normal --skip-test-db >/dev/null 2>&1
+"${ORACLE_PREFIX[@]}" "${ORACLE_ENV[@]}" \
+  /usr/sbin/mariadbd --no-defaults --datadir="$DBDIR" --socket="$SOCK" \
+  --tmpdir="$TMPDIR" \
+  --port=3306 --bind-address=127.0.0.1 --sql-mode=NO_ENGINE_SUBSTITUTION --skip-ssl \
+  --general-log=1 --general-log-file="$MYSQL_RUN/mysql-general.log" --skip-grant-tables \
+  --skip-networking=0 --pid-file="$MYSQL_RUN/mysqld.pid" >$WORK/mysqld.log 2>&1 &
 MYSQL_PID=$!
 for i in $(seq 1 100); do
-  mariadb --no-defaults --skip-ssl -u root --socket="$SOCK" -e 'SELECT 1' >/dev/null 2>&1 && break
+  "${ORACLE_PREFIX[@]}" "${ORACLE_ENV[@]}" mariadb --no-defaults --skip-ssl -u root --socket="$SOCK" \
+    -e 'SELECT 1' >/dev/null 2>&1 && break
   sleep 0.2
 done
 reset_db () {
-  mariadb --no-defaults --skip-ssl -u root --socket="$SOCK" \
+  "${ORACLE_PREFIX[@]}" "${ORACLE_ENV[@]}" mariadb --no-defaults --skip-ssl -u root --socket="$SOCK" \
     -e 'DROP DATABASE IF EXISTS deltamud; CREATE DATABASE deltamud'
-  mariadb --no-defaults --skip-ssl -u root --socket="$SOCK" deltamud \
+  "${ORACLE_PREFIX[@]}" "${ORACLE_ENV[@]}" mariadb --no-defaults --binary-mode --skip-ssl -u root \
+    --socket="$SOCK" deltamud \
     < "$REPO_DIR/deltamud_schema.sql"
-  mariadb --no-defaults --skip-ssl -u root --socket="$SOCK" deltamud <<'SQL'
-UPDATE player_main
--- The checked-in schema retains the legacy VARCHAR(50) password column, so a
--- modern SHA-crypt hash would be truncated before either server reads it.
--- This full 13-byte DES hash is crypt("pass", "Mu") and both implementations
--- deliberately support it for migration compatibility.
-SET name='Mulder', pwd='MuARz2/PsqHFE', host='', hometown=1,
-    act=0, clan=-1, clan_rank=-1
-WHERE idnum=1;
+  "${ORACLE_PREFIX[@]}" "${ORACLE_ENV[@]}" mariadb --no-defaults --skip-ssl -u root \
+    --socket="$SOCK" deltamud <<'SQL'
+-- Parity owns its fixture explicitly: the shipped schema is deliberately
+-- empty and production bootstrap never creates a known administrative login.
+-- This full DES hash is crypt("pass", "Mu"); both implementations retain it
+-- only for legacy-login migration compatibility.
+INSERT INTO player_main (
+  idnum, name, pwd, level, sex, class, race, deity, hometown, birth, played,
+  last_logon, host, hit, max_hit, mana, max_mana, move, max_move, gold, exp,
+  str, intel, wis, dex, con, cha, alignment, load_room, act, clan, clan_rank,
+  trust, godcmds1, godcmds2, godcmds3, godcmds4
+) VALUES (
+  1, 'Mulder', 'MuARz2/PsqHFE', 60, 1, 0, 0, 0, 1, UNIX_TIMESTAMP(), 0,
+  UNIX_TIMESTAMP(), '', 500, 500, 100, 100, 100, 100, 50000, 0,
+  18, 18, 18, 18, 18, 18, 0, 0, 0, -1, -1,
+  0, 0, 0, 0, 0
+);
 SQL
 }
 
 # --- fresh world copies (never share mutable files between implementations) ---
 cp -a "$REPO_DIR/lib" "$LIB_C"
 cp -a "$REPO_DIR/lib" "$LIB_R"
+chmod -R u+rwX "$LIB_C" "$LIB_R"
 # The date_record carries the LAST shutdown's calendar; drop it so both
 # servers seed their clock from their respective clean boot and agree.
 rm -f "$LIB_C/etc/date_record" "$LIB_R/etc/date_record"
@@ -205,7 +408,11 @@ for b in autowiz scheck licheck; do [ -f "$REPO_DIR/bin/$b" ] && cp "$REPO_DIR/b
 ln -s "$LIB_C" "$C_ROOT/lib"
 : > "$LIB_C/USRCNT"
 cd "$C_ROOT"
-MYSQL_USER=parity MYSQL_PASSWORD=parity "$C_BIN" -q "$PORT_C" >"$WORK/c.log" 2>&1 &
+verify_oracle_hash "$C_BIN" "$C_SHA256" C
+verify_oracle_hash "$RUST_BIN" "$RUST_SHA256" Rust
+"${ORACLE_PREFIX[@]}" "${ORACLE_ENV[@]}" \
+  MYSQL_USER=parity MYSQL_PASSWORD=parity \
+  "$C_BIN" -q "$PORT_C" >"$WORK/c.log" 2>&1 &
 C_PID=$!
 
 # wait for C, drive it, and stop it before resetting shared external state
@@ -215,15 +422,29 @@ for i in $(seq 1 150); do
 done
 (exec 3<>/dev/tcp/127.0.0.1/$PORT_C) 2>/dev/null || { echo "C oracle did not come up"; tail -20 $WORK/c.log; exit 1; }
 
-python3 "$MUD_DIR/scripts/parity/driver.py" "$PORT_C" "$WORK/raw_c.txt" \
+"${ORACLE_PREFIX[@]}" "${ORACLE_ENV[@]}" python3 "$MUD_DIR/scripts/parity/driver.py" \
+  "$PORT_C" "$WORK/raw_c.txt" \
   "$MUD_DIR/scripts/parity/scenario.txt" 2>"$WORK/raw_c.txt.err"
 stop_pid "$C_PID" "C oracle"
 C_PID=
+verify_oracle_hash "$C_BIN" "$C_SHA256" C
+verify_oracle_hash "$RUST_BIN" "$RUST_SHA256" Rust
 
 # --- Rust server, with a newly reset DB and independent lib tree ---
 reset_db
-cd /tmp
-DATABASE_URL=mysql://root@127.0.0.1:3306/deltamud MUD_PORT="$PORT_R" MUD_LIB_PATH="$LIB_R" MUD_RNG_SEED="$SEED" \
+cd "$WORK"
+verify_oracle_hash "$RUST_BIN" "$RUST_SHA256" Rust
+"${ORACLE_PREFIX[@]}" "${ORACLE_ENV[@]}" \
+  DATABASE_URL=mysql://root@127.0.0.1:3306/deltamud MUD_MOCK_DB=0 \
+  "$RUST_BIN" --migrate >"$WORK/r-migrate.log" 2>&1 || {
+    echo "Rust schema migration failed"
+    tail -20 "$WORK/r-migrate.log"
+    exit 1
+  }
+verify_oracle_hash "$RUST_BIN" "$RUST_SHA256" Rust
+"${ORACLE_PREFIX[@]}" "${ORACLE_ENV[@]}" \
+  DATABASE_URL=mysql://root@127.0.0.1:3306/deltamud MUD_MOCK_DB=0 \
+  MUD_BIND=127.0.0.1 MUD_PORT="$PORT_R" MUD_LIB_PATH="$LIB_R" MUD_RNG_SEED="$SEED" \
   "$RUST_BIN" >"$WORK/r.log" 2>&1 &
 R_PID=$!
 
@@ -234,9 +455,11 @@ done
 (exec 3<>/dev/tcp/127.0.0.1/$PORT_R) 2>/dev/null || { echo "Rust server did not come up"; tail -20 $WORK/r.log; exit 1; }
 
 if [ "${PARITY_FORCE_DRIVER_ERROR:-0}" = "1" ]; then
-  python3 "$MUD_DIR/scripts/parity/driver.py" --force-driver-error
+  "${ORACLE_PREFIX[@]}" "${ORACLE_ENV[@]}" python3 "$MUD_DIR/scripts/parity/driver.py" \
+    --force-driver-error
 fi
-python3 "$MUD_DIR/scripts/parity/driver.py" "$PORT_R" "$WORK/raw_r.txt" \
+"${ORACLE_PREFIX[@]}" "${ORACLE_ENV[@]}" python3 "$MUD_DIR/scripts/parity/driver.py" \
+  "$PORT_R" "$WORK/raw_r.txt" \
   "$MUD_DIR/scripts/parity/scenario.txt" 2>"$WORK/raw_r.txt.err"
 
 if [ "${PARITY_FORCE_RUST_ZOMBIE:-0}" = "1" ]; then
@@ -250,22 +473,55 @@ stop_pid "$R_PID" "Rust server"
 R_PID=
 stop_pid "$MYSQL_PID" "MariaDB"
 MYSQL_PID=
-trap - EXIT INT TERM
+verify_oracle_hash "$C_BIN" "$C_SHA256" C
+verify_oracle_hash "$RUST_BIN" "$RUST_SHA256" Rust
+if [ "${PARITY_FORCE_CHILD_LEAK:-0}" = "1" ]; then
+  sleep 300 &
+  echo "[parity-negative] injected untracked PID $!" >&2
+fi
 exit 0
 INNER
+chmod 0700 "$WORK/netns.sh"
 
 normalize () {
-  # Strip complete telnet negotiation triplets, ANSI, and CR before making
-  # RNG/volatile numbers comparable. Negotiation ordering is protocol-layer
-  # noise; its application text must still compare byte-for-byte afterward.
-  LC_ALL=C perl -pe 's/\xff[\xfb-\xfe].//g; s/\e\[[0-9;]*[A-Za-z]//g; s/\r//g; s/\d+/N/g' "$1" \
+  # Strip only complete Telnet negotiation triplets, ANSI, and CR. Every game
+  # number (levels, vnums, stats, prices, dates) remains parity evidence.
+  LC_ALL=C perl -pe 's/\xff[\xfb-\xfe].//g; s/\e\[[0-9;]*[A-Za-z]//g; s/\r//g' "$1" \
     | grep -av '^\s*$'
 }
 
 echo "[parity] booting isolated namespace (mariadb + C oracle + rust)..."
 set +e
-timeout --signal=TERM --kill-after=15s "$PARITY_TIMEOUT_SECONDS" \
-  unshare --fork --kill-child=TERM -n bash "$WORK/netns.sh"
+env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  HOME="$WORK" TMPDIR="$WORK/tmp" LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+  timeout --signal=TERM --kill-after=15s "$PARITY_TIMEOUT_SECONDS" \
+  /usr/bin/bwrap --unshare-all --new-session --die-with-parent --uid 1 --gid 1 \
+  --cap-drop ALL --proc /proc --dev /dev --tmpfs /run \
+  --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/sbin /sbin \
+  --symlink usr/lib /lib --symlink usr/lib64 /lib64 --dir /etc \
+  --ro-bind /etc/alternatives /etc/alternatives \
+  --ro-bind /etc/ld.so.cache /etc/ld.so.cache \
+  --ro-bind /etc/passwd /etc/passwd --ro-bind /etc/group /etc/group \
+  --ro-bind /etc/nsswitch.conf /etc/nsswitch.conf \
+  --ro-bind /etc/hosts /etc/hosts --ro-bind /etc/resolv.conf /etc/resolv.conf \
+  --dir /var --dir /var/tmp --bind "$WORK" /work \
+  --bind "$WORK/tmp" /tmp \
+  --ro-bind "$WORK/bin" /work/bin --ro-bind "$WORK/input" /work/input \
+  --ro-bind "$WORK/netns.sh" /work/netns.sh --chdir /work \
+  --clearenv --setenv PATH /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  --setenv HOME /work --setenv TMPDIR /work/tmp --setenv LANG C.UTF-8 \
+  --setenv LC_ALL C.UTF-8 --setenv TZ UTC \
+  --setenv PARITY_WORK /work --setenv PARITY_RUST_BIN /work/bin/deltamud \
+  --setenv PARITY_C_BIN /work/bin/circle \
+  --setenv PARITY_MUD_DIR /work/input/rust-mud \
+  --setenv PARITY_REPO_DIR /work/input \
+  --setenv PARITY_HOST_NETNS "$PARITY_HOST_NETNS" \
+  --setenv PARITY_RUST_SHA256 "$PARITY_RUST_SHA256" \
+  --setenv PARITY_C_SHA256 "$PARITY_C_SHA256" --setenv MUD_RNG_SEED "$SEED" \
+  --setenv PARITY_FORCE_DRIVER_ERROR "$PARITY_FORCE_DRIVER_ERROR" \
+  --setenv PARITY_FORCE_RUST_ZOMBIE "$PARITY_FORCE_RUST_ZOMBIE" \
+  --setenv PARITY_FORCE_CHILD_LEAK "$PARITY_FORCE_CHILD_LEAK" \
+  /bin/bash /work/netns.sh
 RC=$?
 set -e
 

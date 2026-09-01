@@ -35,9 +35,12 @@ use crate::dg_handler::{self, OBJ_TRIGGER, ScriptKey, WLD_TRIGGER};
 use crate::flags::*;
 use crate::gcmd::*;
 use crate::interpreter::{command_interpreter, half_chop, is_abbrev, one_argument, search_block};
-use crate::limits::{exp_to_level, gain_exp_regardless};
+use crate::limits::exp_to_level;
 use crate::object::{ObjLoc, ObjectType};
-use crate::state::{GameState, OfflineOpAuthority, PLAYER_INSPECTION_DENIED};
+use crate::state::{
+    GameState, OfflineOpAuthority, PLAYER_INSPECTION_DENIED, ProcessDisposition, ShutdownMode,
+    ShutdownRequest,
+};
 use crate::syslog::{BRF, CMP, NRM, PFT};
 use crate::types::*;
 use crate::world::zone_vnum_bounds;
@@ -351,18 +354,21 @@ fn real_zone(g: &GameState, number: i32) -> i32 {
     -1
 }
 
-/// can_edit_zone(ch, zone_rnum) — olc.c. LVL_IMPL passes unconditionally; a
-/// negative/out-of-range zone fails; otherwise the actor's name must appear in
-/// the zone's builder list (is_name over Zone.builders).
+/// can_edit_zone(ch, zone_rnum) — olc.c. Persisted Implementor trust passes
+/// unconditionally; a negative/out-of-range zone fails; otherwise the
+/// authenticated principal's name must appear in the zone's builder list.
 fn can_edit_zone(g: &GameState, ch: CharId, number: i32) -> bool {
-    if level_of(g, ch) >= LVL_IMPL {
+    let Some(principal) = authenticated_player_authority(g, ch) else {
+        return false;
+    };
+    if principal.authority >= i32::from(LVL_IMPL) {
         return true;
     }
     if number < 0 || number as usize >= g.zones.len() {
         return false;
     }
     let builders = &g.zones[number as usize].builders;
-    crate::handler::isname(&name_of(g, ch), builders)
+    crate::handler::isname(&name_of(g, principal.principal), builders)
 }
 
 /// script_stat(ch, sc) — dg_scripts.c. Lists an entity's global script context
@@ -592,11 +598,11 @@ fn try_defer_offline(
 }
 
 /// Apply the one player-inspection authority rule and its one denial string.
-/// Callers resolve the authoritative target level for their path (live entity
-/// or persistent index); the async bridge repeats this with the freshly loaded
-/// entity before replay.
-fn authorize_player_inspection(g: &mut GameState, requester: CharId, target_level: u8) -> bool {
-    if g.can_inspect_player_level(requester, target_level) {
+/// Callers resolve persisted target trust from the live principal or player
+/// index; the async bridge repeats this with the freshly loaded entity before
+/// replay.
+fn authorize_player_inspection(g: &mut GameState, requester: CharId, target_trust: i32) -> bool {
+    if g.can_inspect_player_authority(requester, target_trust) {
         true
     } else {
         g.send_to_char(requester, PLAYER_INSPECTION_DENIED);
@@ -721,14 +727,19 @@ fn find_target_room(g: &mut GameState, ch: CharId, rawroomstr: &str) -> Option<R
         return None;
     }
 
-    // < GRGOD restriction checks.
-    let lvl = level_of(g, ch);
+    // < GRGOD restriction checks use the authenticated player's persisted
+    // trust. A high-level switched body or stale display level cannot bypass
+    // GODROOM, private-room, or house ownership restrictions.
+    let Some(authority) = authenticated_player_authority(g, ch) else {
+        g.send_to_char(ch, "You are not godly enough to use that room!\r\n");
+        return None;
+    };
     let flags = g.room(location).room_flags.bits();
-    if lvl < LVL_GRGOD && (flags & ROOM_IMPROOM_BIT) != 0 {
+    if authority.authority < i32::from(LVL_GRGOD) && (flags & ROOM_IMPROOM_BIT) != 0 {
         g.send_to_char(ch, "You are not godly enough to use that room!\r\n");
         return None;
     }
-    if lvl < LVL_GRGOD {
+    if authority.authority < i32::from(LVL_GRGOD) {
         if (flags & ROOM_GODROOM_BIT) != 0 {
             g.send_to_char(ch, "You are not godly enough to use that room!\r\n");
             return None;
@@ -743,7 +754,7 @@ fn find_target_room(g: &mut GameState, ch: CharId, rawroomstr: &str) -> Option<R
         if (flags & ROOM_HOUSE_BIT) != 0 {
             // House_can_enter(ch, vnum): owner/guest (or LVL_GRGOD+) may enter.
             let house_vnum = g.room(location).number;
-            if !crate::house::house_can_enter(g, ch, house_vnum) {
+            if !crate::house::house_can_enter(g, authority.principal, house_vnum) {
                 g.send_to_char(ch, "That's private property -- no trespassing!\r\n");
                 return None;
             }
@@ -800,14 +811,14 @@ pub fn do_echo(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
             // C act.wizard.c:149: an intangible sender who is not building
             // hides the emote from mortal recipients who are not themselves
             // intangible.
-            let (vict_prf2, vict_level) = g
-                .get_char(vict)
-                .map(|c| (c.prf2_flags, c.player.level))
-                .unwrap_or((0, 0));
+            let vict_prf2 = g.get_char(vict).map(|c| c.prf2_flags).unwrap_or(0);
+            let vict_authority = target_principal_authority(g, vict)
+                .map(|principal| principal.authority)
+                .unwrap_or(-1);
             if (ch_prf2 & PRF2_INTANGIBLE) != 0
                 && (ch_prf2 & PRF2_MBUILDING) == 0
                 && (vict_prf2 & PRF2_INTANGIBLE) == 0
-                && vict_level < LVL_IMMORT
+                && vict_authority < i32::from(LVL_IMMORT)
             {
                 continue;
             }
@@ -876,7 +887,7 @@ pub fn do_at(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     };
     g.char_from_room(ch);
     g.char_to_room(ch, location);
-    command_interpreter(g, ch, &command);
+    crate::interpreter::command_interpreter_authenticated(g, ch, &command);
 
     // If the char is still there, send them back.
     if g.get_char(ch).and_then(|c| c.in_room) == Some(location) {
@@ -945,7 +956,15 @@ pub fn do_trans(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             g.send_to_char(ch, "That doesn't make much sense, does it?\r\n");
             return;
         }
-        if level_of(g, ch) < level_of(g, victim) && !is_npc(g, victim) {
+        let (Some(authority), Some(victim_authority)) = (
+            target_principal_authority(g, ch),
+            target_principal_authority(g, victim),
+        ) else {
+            g.send_to_char(ch, "Go transfer someone your own size.\r\n");
+            return;
+        };
+        let ordinary_npc = is_npc(g, victim) && !victim_authority.descriptor_controls_target;
+        if authority.authority < victim_authority.authority && !ordinary_npc {
             g.send_to_char(ch, "Go transfer someone your own size.\r\n");
             return;
         }
@@ -964,17 +983,28 @@ pub fn do_trans(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
     } else {
         // Trans All
-        if level_of(g, ch) < LVL_GRGOD {
+        let Some(ch_authority) = authenticated_player_authority(g, ch) else {
+            g.send_to_char(ch, "I think not.\r\n");
+            return;
+        };
+        if ch_authority.authority < i32::from(LVL_GRGOD) {
             g.send_to_char(ch, "I think not.\r\n");
             return;
         }
-        let ch_level = level_of(g, ch);
-        let players: Vec<CharId> = g.players_by_name.values().copied().collect();
-        for victim in players {
+        let targets: Vec<CharId> = g
+            .descriptors
+            .values()
+            .filter(|descriptor| descriptor.state == ConState::Playing)
+            .filter_map(|descriptor| descriptor.character)
+            .collect();
+        for victim in targets {
             if victim == ch {
                 continue;
             }
-            if level_of(g, victim) >= ch_level {
+            let Some(victim_authority) = target_principal_authority(g, victim) else {
+                continue;
+            };
+            if victim_authority.authority >= ch_authority.authority {
                 continue;
             }
             transfer_one(g, ch, victim);
@@ -1039,7 +1069,9 @@ pub fn do_teleport(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "Use 'goto' to teleport yourself.\r\n");
         return;
     }
-    if level_of(g, victim) >= level_of(g, ch) {
+    let authority = target_principal_authority(g, ch).map(|target| target.authority);
+    let victim_authority = target_principal_authority(g, victim).map(|target| target.authority);
+    if authority.is_none() || victim_authority.is_none() || victim_authority >= authority {
         g.send_to_char(ch, "Maybe you shouldn't do that.\r\n");
         return;
     }
@@ -1160,10 +1192,13 @@ fn do_stat_room(g: &mut GameState, ch: CharId) {
         Some(r) => r,
         None => return,
     };
-    // GET_LEVEL < IMMORT && !can_edit_zone(real_zone(vnum)) -> permission denied.
-    let lvl = level_of(g, ch);
+    let Some(authority) = authenticated_player_authority(g, ch) else {
+        g.send_to_char(ch, "You don't have permissions to that zone.\r\n");
+        return;
+    };
     let room_vnum = g.room(rnum).number;
-    if lvl < LVL_IMMORT && !can_edit_zone(g, ch, real_zone(g, room_vnum)) {
+    if authority.authority < i32::from(LVL_IMMORT) && !can_edit_zone(g, ch, real_zone(g, room_vnum))
+    {
         g.send_to_char(ch, "You don't have permissions to that zone.\r\n");
         return;
     }
@@ -1342,9 +1377,13 @@ fn do_stat_room(g: &mut GameState, ch: CharId) {
 }
 
 fn do_stat_object(g: &mut GameState, ch: CharId, j: ObjId) {
-    let lvl = level_of(g, ch);
+    let Some(authority) = authenticated_player_authority(g, ch) else {
+        g.send_to_char(ch, "You don't have permissions to that zone.\r\n");
+        return;
+    };
     let obj_vnum = g.get_obj(j).map(|o| o.item_number).unwrap_or(NOTHING);
-    if lvl < LVL_IMMORT && !can_edit_zone(g, ch, real_zone(g, obj_vnum)) {
+    if authority.authority < i32::from(LVL_IMMORT) && !can_edit_zone(g, ch, real_zone(g, obj_vnum))
+    {
         g.send_to_char(ch, "You don't have permissions to that zone.\r\n");
         return;
     }
@@ -1613,12 +1652,23 @@ fn do_stat_object(g: &mut GameState, ch: CharId, j: ObjId) {
 }
 
 fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
-    let lvl = level_of(g, ch);
-    if lvl < LVL_IMMORT {
-        if !is_npc(g, k) {
+    let Some(authority) = authenticated_player_authority(g, ch) else {
+        g.send_to_char(ch, "You find yourself unable to.\r\n");
+        return;
+    };
+    if !is_npc(g, k) {
+        let Some(target) = exact_player_authority(g, k) else {
+            g.send_to_char(ch, PLAYER_INSPECTION_DENIED);
+            return;
+        };
+        if !authorize_player_inspection(g, ch, target.authority) {
+            return;
+        }
+        if authority.authority < i32::from(LVL_IMMORT) {
             g.send_to_char(ch, "You find yourself unable to.\r\n");
             return;
         }
+    } else if authority.authority < i32::from(LVL_IMMORT) {
         // Mortal builders may stat a mob whose zone they own (can_edit_zone of
         // real_zone(GET_MOB_VNUM)).
         let mob_vnum = g.get_char(k).map(|c| c.nr).unwrap_or(NOBODY);
@@ -2123,26 +2173,32 @@ pub fn do_stat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             g.send_to_char(ch, "Stats on which player?\r\n");
         } else {
             let online = get_player_vis(g, ch, &rest);
-            let target_level = online
-                .map(|target| level_of(g, target))
-                .or_else(|| g.player_index(&rest).map(|entry| entry.level));
-            if let Some(level) = target_level
-                && !authorize_player_inspection(g, ch, level)
-            {
-                return;
-            }
             if let Some(v) = online {
+                let Some(target) = exact_player_authority(g, v) else {
+                    g.send_to_char(ch, PLAYER_INSPECTION_DENIED);
+                    return;
+                };
+                if !authorize_player_inspection(g, ch, target.authority) {
+                    return;
+                }
                 do_stat_character(g, ch, v);
-            } else if try_defer_offline(
-                g,
-                ch,
-                &rest,
-                &format!("stat player {}", rest),
-                OfflineOpAuthority::InspectPlayer,
-            ) {
-                // The replay repeats this level check after the DB load.
             } else {
-                g.send_to_char(ch, "No such player around.\r\n");
+                if let Some(target) = g.player_index(&rest)
+                    && !authorize_player_inspection(g, ch, target.trust)
+                {
+                    return;
+                }
+                if try_defer_offline(
+                    g,
+                    ch,
+                    &rest,
+                    &format!("stat player {}", rest),
+                    OfflineOpAuthority::InspectPlayer,
+                ) {
+                    // The replay repeats this trust check after the DB load.
+                } else {
+                    g.send_to_char(ch, "No such player around.\r\n");
+                }
             }
         }
     } else if is_abbrev(&kind, "file") {
@@ -2157,20 +2213,20 @@ pub fn do_stat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             g.send_to_char(ch, "Stats on which player?\r\n");
         } else {
             // C act.wizard.c:1140-1143: retrieve_player_entry(), then refuse a
-            // target whose level exceeds the requester's — "Sorry, you can't
-            // do that." — before any record is rendered. The target's level
+            // target whose authority exceeds the requester's — "Sorry, you
+            // can't do that." — before any record is rendered. Target trust
             // comes from the live character when online, else the persistent
             // player index (C's player_table, which retrieve_player_entry
             // walks).
             let online = get_player_vis(g, ch, &rest);
-            let target_level = match online {
-                Some(v) => Some(level_of(g, v)),
-                None => g.player_index(&rest).map(|p| p.level),
+            let target_trust = match online {
+                Some(v) => exact_player_authority(g, v).map(|target| target.authority),
+                None => g.player_index(&rest).map(|p| p.trust),
             };
-            match target_level {
+            match target_trust {
                 None => g.send_to_char(ch, "There is no such player.\r\n"),
-                Some(level) => {
-                    if !authorize_player_inspection(g, ch, level) {
+                Some(trust) => {
+                    if !authorize_player_inspection(g, ch, trust) {
                         return;
                     }
                     match online {
@@ -2263,22 +2319,62 @@ fn write_control_file(g: &GameState, name: &str) {
     }
 }
 
+fn requested_shutdown_mode(option: &str) -> Option<ShutdownMode> {
+    if option.is_empty() {
+        Some(ShutdownMode::Shutdown)
+    } else if option.eq_ignore_ascii_case("reboot") {
+        Some(ShutdownMode::Reboot)
+    } else if option.eq_ignore_ascii_case("now") {
+        Some(ShutdownMode::Now)
+    } else if option.eq_ignore_ascii_case("die") {
+        Some(ShutdownMode::Die)
+    } else if option.eq_ignore_ascii_case("pause") {
+        Some(ShutdownMode::Pause)
+    } else {
+        None
+    }
+}
+
+fn requested_shutdown_disposition(option: &str) -> Option<ProcessDisposition> {
+    requested_shutdown_mode(option).map(ShutdownMode::disposition)
+}
+
 pub fn do_shutdown(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
     if subcmd != SCMD_SHUTDOWN {
         g.send_to_char(ch, "If you want to shut something down, say so!\r\n");
         return;
     }
     let (option, _rest) = one_argument(arg);
+    let Some(mode) = requested_shutdown_mode(&option) else {
+        g.send_to_char(ch, "Unknown shutdown option.\r\n");
+        return;
+    };
+    let Some(authorization) = crate::interpreter::authenticated_command_request(g, ch) else {
+        g.send_to_char(ch, "Shutdown requires direct authenticated input.\r\n");
+        return;
+    };
+    if g.shutdown_requested.is_some() {
+        g.send_to_char(ch, "A shutdown request is already pending.\r\n");
+        return;
+    }
+    g.shutdown_requested = Some(ShutdownRequest::Command {
+        authorization,
+        mode,
+    });
+    g.send_to_char(
+        ch,
+        "Shutdown request queued for authority revalidation.\r\n",
+    );
+}
+
+/// Publish the visible/control-file effects only after the async game shell
+/// has revalidated the queued session and shutdown grant.
+pub(crate) fn publish_authorized_shutdown(g: &mut GameState, ch: CharId, mode: ShutdownMode) {
     let cname = name_of(g, ch);
-    // Every shutdown variant sets C's circle_shutdown=1 (the run loop then halts
-    // the server). The .fastboot/.killscript/pause touch-files that the autorun
-    // wrapper reads to decide reboot-vs-stop remain a boot-loop detail; the core
-    // behaviour — the server actually stops — is wired via shutdown_requested.
-    g.shutdown_requested = true;
-    if option.is_empty() {
+    if mode == ShutdownMode::Shutdown {
         log_line(g, &format!("(GC) Shutdown by {}.", cname));
         send_to_all(g, "&m[&YINFO&m]&n Shutting down.\r\n");
-    } else if option.eq_ignore_ascii_case("reboot") {
+    } else if mode == ShutdownMode::Reboot {
         log_line(g, &format!("(GC) Reboot by {}.", cname));
         send_to_all(
             g,
@@ -2287,26 +2383,23 @@ pub fn do_shutdown(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
         // C act.wizard.c:1212: touch(FASTBOOT_FILE) - the autorun wrapper
         // distinguishes reboot/stop/pause by these control files (#211).
         write_control_file(g, ".fastboot");
-    } else if option.eq_ignore_ascii_case("now") {
+    } else if mode == ShutdownMode::Now {
         log_line(g, &format!("(GC) Shutdown NOW by {}.", cname));
         send_to_all(
             g,
             "&m[&YINFO&m]&n Rebooting.. come back in a minute or two.\r\n",
         );
         write_control_file(g, ".fastboot");
-    } else if option.eq_ignore_ascii_case("die") {
+    } else if mode == ShutdownMode::Die {
         log_line(g, &format!("(GC) Shutdown by {}.", cname));
         send_to_all(g, "&m[&YINFO&m]&n Shutting down for maintenance.\r\n");
         // C act.wizard.c:1230: touch(KILLSCRIPT_FILE).
         write_control_file(g, ".killscript");
-    } else if option.eq_ignore_ascii_case("pause") {
+    } else if mode == ShutdownMode::Pause {
         log_line(g, &format!("(GC) Shutdown by {}.", cname));
         send_to_all(g, "&m[&YINFO&m]&n Shutting down for maintenance.\r\n");
         // C act.wizard.c:1238: touch(PAUSE_FILE).
         write_control_file(g, "pause");
-    } else {
-        g.shutdown_requested = false; // unknown option: do not halt
-        g.send_to_char(ch, "Unknown shutdown option.\r\n");
     }
 }
 
@@ -2342,6 +2435,46 @@ fn stop_snooping(g: &mut GameState, ch: CharId) {
     }
 }
 
+/// Resolve the authenticated principal behind either half of a switched
+/// session. The active NPC has the connection's forward `character` link,
+/// while the detached PC is reachable only through the reverse `original`
+/// link, so checking `Character::desc` alone is insufficient.
+///
+/// Persisted `trust` is the command authority. Invalid trust or asymmetric /
+/// duplicate descriptor aliases fail closed instead of falling back to the
+/// low-level body. Descriptorless NPCs retain their ordinary C `GET_LEVEL`
+/// hierarchy semantics.
+fn target_principal_authority(
+    g: &GameState,
+    target: CharId,
+) -> Option<crate::state::PrincipalAuthority> {
+    g.principal_authority(target)
+}
+
+/// Administrative callers must resolve to a live authenticated player
+/// principal. Descriptorless PCs, descriptor-controlled NPCs without an
+/// original, malformed aliases, and invalid persisted trust all fail closed.
+fn authenticated_player_authority(
+    g: &GameState,
+    target: CharId,
+) -> Option<crate::state::PrincipalAuthority> {
+    let authority = target_principal_authority(g, target)
+        .filter(|principal| principal.is_authenticated_player())?;
+    let principal = g.get_char(authority.principal)?;
+    (!g.authority_quarantine.contains(&principal.idnum)).then_some(authority)
+}
+
+/// A named PC target must represent its own account, not somebody else's
+/// switched-to body. A detached original remains its own principal and is a
+/// legitimate target.
+fn exact_player_authority(
+    g: &GameState,
+    target: CharId,
+) -> Option<crate::state::PrincipalAuthority> {
+    target_principal_authority(g, target)
+        .filter(|principal| principal.principal_is_player && principal.principal == target)
+}
+
 pub fn do_snoop(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     if g.get_char(ch).and_then(|c| c.desc).is_none() {
         return;
@@ -2375,9 +2508,9 @@ pub fn do_snoop(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "Don't be stupid.\r\n");
         return;
     }
-    // Level gate uses the original (switched) body's level; switched bodies are
-    // handled at the descriptor level in C. Here level_of(victim) suffices.
-    if level_of(g, victim) >= level_of(g, ch) && name_of(g, ch) != "Mulder" {
+    if crate::interpreter::authenticated_input_authority(g, ch).is_none()
+        || !g.can_start_snoop(ch, victim)
+    {
         g.send_to_char(ch, "You can't.\r\n");
         return;
     }
@@ -2402,6 +2535,10 @@ pub fn do_switch(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let conn = match g.get_char(ch).and_then(|c| c.desc) {
         Some(c) => c,
         None => return,
+    };
+    let Some(caller_principal) = target_principal_authority(g, ch) else {
+        g.send_to_char(ch, "You can't do that right now.\r\n");
+        return;
     };
     let already = g
         .descriptors
@@ -2428,11 +2565,15 @@ pub fn do_switch(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "Hee hee... we are jolly funny today, eh?\r\n");
         return;
     }
-    if g.get_char(victim).and_then(|c| c.desc).is_some() {
+    let Some(victim_principal) = target_principal_authority(g, victim) else {
+        g.send_to_char(ch, "You can't do that, the body state is invalid.\r\n");
+        return;
+    };
+    if victim_principal.descriptor_controls_target || victim_principal.switched_session {
         g.send_to_char(ch, "You can't do that, the body is already in use!\r\n");
         return;
     }
-    if level_of(g, ch) < LVL_IMPL && !is_npc(g, victim) {
+    if caller_principal.authority < i32::from(LVL_IMPL) && !is_npc(g, victim) {
         g.send_to_char(ch, "You aren't holy enough to use a person's body.\r\n");
         return;
     }
@@ -2509,12 +2650,16 @@ pub fn do_load(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
     // impboard (immortal board) protection + per-zone builder permission.
-    let ch_level = level_of(g, ch);
-    if number == IMPBOARD && ch_level < LVL_GRGOD {
+    let Some(ch_authority) = authenticated_player_authority(g, ch) else {
+        g.send_to_char(ch, "You are not holy enough for that!\r\n");
+        return;
+    };
+    let ch_trust = ch_authority.authority;
+    if number == IMPBOARD && ch_trust < i32::from(LVL_GRGOD) {
         g.send_to_char(ch, "You are not holy enough for that!\r\n");
         return;
     }
-    if !can_edit_zone(g, ch, real_zone(g, number)) && ch_level < LVL_GRGOD {
+    if !can_edit_zone(g, ch, real_zone(g, number)) && ch_trust < i32::from(LVL_GRGOD) {
         g.send_to_char(ch, "You do not have permission to load from this zone.\r\n");
         return;
     }
@@ -2584,7 +2729,7 @@ pub fn do_load(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 return;
             }
         };
-        if level_of(g, ch) < LVL_IMMORT {
+        if ch_trust < i32::from(LVL_IMMORT) {
             if let Some(o) = g.get_obj_mut(obj) {
                 o.extra_flags =
                     crate::object::ExtraFlags::from_bits_retain(o.extra_flags.bits() | ITEM_NORENT);
@@ -2690,7 +2835,10 @@ pub fn do_vstat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     // C act.wizard.c:1481-1484: the builder gate fires before real_mobile() /
     // real_object(), so an out-of-zone vnum is refused without the mobile ever
     // being instantiated into room 0.
-    if level_of(g, ch) < LVL_IMMORT && !can_edit_zone(g, ch, real_zone(g, number)) {
+    let authority = authenticated_player_authority(g, ch)
+        .map(|principal| principal.authority)
+        .unwrap_or(-1);
+    if authority < i32::from(LVL_IMMORT) && !can_edit_zone(g, ch, real_zone(g, number)) {
         g.send_to_char(ch, "You don't have permissions to that zone.\r\n");
         return;
     }
@@ -2731,19 +2879,35 @@ pub fn do_purge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         Some(r) => r,
         None => return,
     };
-    let ch_level = level_of(g, ch);
+    let ch_authority = target_principal_authority(g, ch);
+    let ch_trust = ch_authority
+        .map(|principal| principal.authority)
+        .unwrap_or(-1);
 
     if !name.is_empty() {
         if let Some(vict) = g.get_char_room_vis(ch, &name) {
-            let vict_level = level_of(g, vict);
+            let victim_authority = target_principal_authority(g, vict);
             let vict_npc = is_npc(g, vict);
-            if !vict_npc && ch_level <= vict_level && ch_level >= LVL_GRGOD {
-                g.send_to_char(ch, "Fuuuuuuuuu!\r\n");
+            if victim_authority.is_none()
+                || victim_authority.is_some_and(|target| target.switched_session)
+            {
+                g.send_to_char(ch, "No, no, no!\r\n");
                 return;
             }
             if !vict_npc {
-                if ch_level < LVL_IMMORT {
+                let Some(authority) = ch_authority.filter(|principal| {
+                    principal.is_authenticated_player()
+                        && principal.authority >= i32::from(LVL_IMMORT)
+                }) else {
                     g.send_to_char(ch, "No, no, no!\r\n");
+                    return;
+                };
+                if authority.authority
+                    <= victim_authority
+                        .map(|principal| principal.authority)
+                        .unwrap_or(i32::MAX)
+                {
+                    g.send_to_char(ch, "Fuuuuuuuuu!\r\n");
                     return;
                 }
                 let cname = name_of(g, ch);
@@ -2768,7 +2932,7 @@ pub fn do_purge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 // NPC: must own the zone (or be GRGOD+), unless it has no proto.
                 let mob_vnum = g.get_char(vict).map(|c| c.nr).unwrap_or(NOBODY);
                 if !can_edit_zone(g, ch, real_zone(g, mob_vnum))
-                    && ch_level < LVL_GRGOD
+                    && ch_trust < i32::from(LVL_GRGOD)
                     && mob_vnum != NOBODY
                 {
                     g.send_to_char(
@@ -2794,7 +2958,7 @@ pub fn do_purge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             if let Some(obj) = g.get_obj_in_list_vis(ch, &name, &room_objs) {
                 let obj_vnum = g.get_obj(obj).map(|o| o.item_number).unwrap_or(NOTHING);
                 if !can_edit_zone(g, ch, real_zone(g, obj_vnum))
-                    && ch_level < LVL_GRGOD
+                    && ch_trust < i32::from(LVL_GRGOD)
                     && obj_vnum != NOTHING
                 {
                     g.send_to_char(
@@ -2837,9 +3001,15 @@ pub fn do_purge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             if !is_npc(g, vict) {
                 continue;
             }
+            let Some(target) = target_principal_authority(g, vict) else {
+                continue;
+            };
+            if target.switched_session || target.descriptor_controls_target {
+                continue;
+            }
             let mob_vnum = g.get_char(vict).map(|c| c.nr).unwrap_or(NOBODY);
             if can_edit_zone(g, ch, real_zone(g, mob_vnum))
-                || ch_level >= LVL_GRGOD
+                || ch_trust >= i32::from(LVL_GRGOD)
                 || mob_vnum == NOBODY
             {
                 g.extract_char(vict);
@@ -2849,7 +3019,7 @@ pub fn do_purge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         for obj in objs {
             let obj_vnum = g.get_obj(obj).map(|o| o.item_number).unwrap_or(NOTHING);
             if can_edit_zone(g, ch, real_zone(g, obj_vnum))
-                || ch_level >= LVL_GRGOD
+                || ch_trust >= i32::from(LVL_GRGOD)
                 || obj_vnum == NOTHING
             {
                 g.extract_obj(obj);
@@ -2864,9 +3034,14 @@ pub fn do_purge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 const LOGTYPES: &[&str] = &["off", "brief", "normal", "perfect", "complete", "\n"];
 
 pub fn do_syslog(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
+    let Some(authority) = authenticated_player_authority(g, ch) else {
+        g.send_to_char(ch, "Huh?!?\r\n");
+        return;
+    };
+    let principal = authority.principal;
     let (name, _rest) = one_argument(arg);
     if name.is_empty() {
-        let prf = g.get_char(ch).map(|c| c.prf_flags).unwrap_or(0);
+        let prf = g.get_char(principal).map(|c| c.prf_flags).unwrap_or(0);
         let tp = (if prf & PRF_LOG1 != 0 { 1 } else { 0 })
             + (if prf & PRF_LOG2 != 0 { 2 } else { 0 })
             + (if prf & PRF_LOG3 != 0 { 4 } else { 0 });
@@ -2886,7 +3061,7 @@ pub fn do_syslog(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             return;
         }
     };
-    if let Some(c) = g.get_char_mut(ch) {
+    if let Some(c) = g.get_char_mut(principal) {
         c.prf_flags &= !(PRF_LOG1 | PRF_LOG2 | PRF_LOG3);
         c.prf_flags |= if tp & 1 != 0 { PRF_LOG1 } else { 0 };
         c.prf_flags |= if tp & 2 != 0 { PRF_LOG2 } else { 0 };
@@ -2896,6 +3071,7 @@ pub fn do_syslog(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         ch,
         &format!("Your syslog is now {}.\r\n", LOGTYPES[tp as usize]),
     );
+    g.request_player_save(principal);
 }
 
 // ===========================================================================
@@ -2914,12 +3090,36 @@ pub fn do_advance(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             return;
         }
     };
-    if level_of(g, ch) <= level_of(g, victim) {
+    if is_npc(g, victim) {
+        g.send_to_char(ch, "NO!  Not on NPC's.\r\n");
+        return;
+    }
+    let Some(authorization) = crate::interpreter::authenticated_command_request(g, ch) else {
+        g.send_to_char(ch, "Maybe that's not such a good idea.\r\n");
+        return;
+    };
+    let Some(requester) = target_principal_authority(g, ch).filter(|principal| {
+        principal.is_authenticated_player()
+            && principal.principal == authorization.requester_principal
+    }) else {
+        g.send_to_char(ch, "Maybe that's not such a good idea.\r\n");
+        return;
+    };
+    let requester_has_advance = g
+        .get_char(requester.principal)
+        .is_some_and(|principal| principal.godcmds1 & GCMD_ADVANCE != 0);
+    if !requester_has_advance {
         g.send_to_char(ch, "Maybe that's not such a good idea.\r\n");
         return;
     }
-    if is_npc(g, victim) {
-        g.send_to_char(ch, "NO!  Not on NPC's.\r\n");
+    let Some(target) = target_principal_authority(g, victim)
+        .filter(|principal| principal.principal_is_player && principal.principal == victim)
+    else {
+        g.send_to_char(ch, "Maybe that's not such a good idea.\r\n");
+        return;
+    };
+    if requester.authority <= target.authority {
+        g.send_to_char(ch, "Maybe that's not such a good idea.\r\n");
         return;
     }
     let Some(newlevel) = command_atoi(g, ch, &levelstr) else {
@@ -2936,22 +3136,74 @@ pub fn do_advance(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         );
         return;
     }
-    if newlevel > level_of(g, ch) as i32 {
+    if newlevel > requester.authority {
         g.send_to_char(ch, "Yeah, right.\r\n");
         return;
     }
-    let oldlevel = level_of(g, victim);
-    if newlevel == oldlevel as i32 {
+    let Some(character) = g.get_char(victim) else {
+        return;
+    };
+    let expected = crate::PlayerAuthorityState {
+        level: character.player.level,
+        trust: character.trust,
+        exp: character.points.exp,
+        godcmds1: character.godcmds1,
+        godcmds2: character.godcmds2,
+        godcmds3: character.godcmds3,
+        godcmds4: character.godcmds4,
+    };
+    let (godcmds1, godcmds2, godcmds3, godcmds4) =
+        crate::gcmd::canonical_advance_grants(newlevel as u8, LVL_IMMORT, LVL_IMPL);
+    let replacement = crate::PlayerAuthorityState {
+        level: newlevel as u8,
+        trust: newlevel,
+        exp: exp_to_level(newlevel - 1),
+        godcmds1,
+        godcmds2,
+        godcmds3,
+        godcmds4,
+    };
+    if expected.level == replacement.level
+        && expected.trust == replacement.trust
+        && expected.godcmds1 == replacement.godcmds1
+        && expected.godcmds2 == replacement.godcmds2
+        && expected.godcmds3 == replacement.godcmds3
+        && expected.godcmds4 == replacement.godcmds4
+    {
         g.send_to_char(ch, "They are already at that level.\r\n");
         return;
     }
-    if newlevel < oldlevel as i32 {
-        if let Some(v) = g.get_char_mut(victim) {
-            v.points.exp = 0;
-            v.player.level = newlevel as u8;
-        }
+    let request = crate::state::AuthorityUpdateRequest {
+        authorization,
+        victim,
+        idnum: character.idnum,
+        name: character.get_name().to_string(),
+        expected,
+        replacement,
+    };
+    g.queue_authority_update(request);
+    g.send_to_char(
+        ch,
+        "Authority change queued; it will be announced after durable confirmation.\r\n",
+    );
+}
+
+/// Apply and announce a rank transition only after the async shell has
+/// confirmed the exact durable authority tuple.
+pub(crate) fn complete_advance(g: &mut GameState, request: &crate::state::AuthorityUpdateRequest) {
+    if !g.authenticated_command_request_is_current(
+        request.authorization,
+        i32::from(LVL_IMMORT),
+        1,
+        GCMD_ADVANCE,
+    ) {
+        return;
+    }
+    let oldlevel = request.expected.level;
+    let newlevel = request.replacement.level;
+    if newlevel < oldlevel {
         g.send_to_char(
-            victim,
+            request.victim,
             "You are momentarily enveloped by darkness!\r\nYou feel somewhat diminished.\r\n",
         );
     } else {
@@ -2959,56 +3211,45 @@ pub fn do_advance(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             g,
             "$n makes some strange gestures.\r\n\r\nA strange feeling comes upon you, like a giant hand, light comes\r\ndown from above, grabbing your body, that begins to pulse with\r\ncolored lights from inside.\r\n\r\nYour head seems to be filled with demons from another plane\r\nas your body dissolves to the elements of time and space itself.\r\nSuddenly a silent explosion of light snaps you back to reality.\r\n\r\nYou feel slightly different.",
             false,
-            ch,
+            request.authorization.requester_body,
             None,
-            ActArg::Char(victim),
+            ActArg::Char(request.victim),
             To::Vict,
         );
     }
-    g.send_to_char(ch, OK);
-    let cname = name_of(g, ch);
-    let vname = name_of(g, victim);
+
+    if let Some(victim) = g.get_char_mut(request.victim) {
+        victim.player.level = newlevel;
+        victim.trust = request.replacement.trust;
+        victim.points.exp = request.replacement.exp;
+        victim.godcmds1 = request.replacement.godcmds1;
+        victim.godcmds2 = request.replacement.godcmds2;
+        victim.godcmds3 = request.replacement.godcmds3;
+        victim.godcmds4 = request.replacement.godcmds4;
+        victim.invis_level = victim.invis_level.min(request.replacement.trust.max(0));
+        if request.replacement.trust < i32::from(LVL_IMMORT) {
+            victim.prf_flags &= !(PRF_NOHASSLE | PRF_HOLYLIGHT | PRF_ROOMFLAGS);
+        }
+    }
+
+    g.send_to_char(request.authorization.requester_body, OK);
+    let requester_name = name_of(g, request.authorization.requester_principal);
+    let victim_name = name_of(g, request.victim);
     log_line(
         g,
         &format!(
             "(GC) {} has advanced {} to level {} (from {})",
-            cname, vname, newlevel, oldlevel
+            requester_name, victim_name, newlevel, oldlevel
         ),
     );
     g.send_to_char(
-        ch,
+        request.authorization.requester_body,
         &format!(
             "(GC) {} has advanced {} to level {}.",
-            cname, vname, newlevel
+            requester_name, victim_name, newlevel
         ),
     );
-    if let Some(v) = g.get_char_mut(victim) {
-        v.player.level = newlevel as u8;
-        v.points.exp = 0;
-        // Grant god-command bits on crossing IMMORT / IMPL, mirroring C
-        // do_advance (act.wizard.c:1738-1745): SET_BIT(godcmds1, GCMD_GEN) for
-        // any new immortal; full grant (all bitvectors) for a new Implementor.
-        // Without this, advancing a mortal to immortal would leave them unable
-        // to use even GCMD_GEN commands (goto, wiznet, ...).
-        crate::gcmd::grant_advance(
-            &mut v.godcmds1,
-            &mut v.godcmds2,
-            &mut v.godcmds3,
-            &mut v.godcmds4,
-            newlevel as u8,
-            LVL_IMMORT,
-            LVL_IMPL,
-        );
-    }
-    gain_exp_regardless(g, victim, exp_to_level(newlevel - 1));
-    // check_autowiz: C reaches autowiz here via gain_exp_regardless()->check_autowiz(),
-    // which regenerates the wizlist/immlist when the (re-leveled) victim is now
-    // >= LVL_HERO. The level gate lives inside check_autowiz, matching C: advancing
-    // a player to immortal re-lists them; demoting below HERO leaves the stale entry
-    // until the next regeneration, exactly as C does.
-    crate::autowiz::check_autowiz(g, victim);
-    // C save_char(victim, NOWHERE) here persists the new level + godcmds; the
-    // Rust port saves on logout/copyover.
+    crate::autowiz::check_autowiz(g, request.victim);
 }
 
 // ===========================================================================
@@ -3027,7 +3268,18 @@ pub fn do_restore(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             return;
         }
     };
-    let ch_level = level_of(g, ch);
+    let Some(ch_authority) = authenticated_player_authority(g, ch) else {
+        g.send_to_char(ch, "You are not godly enough for that!\r\n");
+        return;
+    };
+    let Some(vict_authority) = target_principal_authority(g, vict) else {
+        g.send_to_char(ch, "You are not godly enough for that!\r\n");
+        return;
+    };
+    if !is_npc(g, vict) && exact_player_authority(g, vict).is_none() {
+        g.send_to_char(ch, "You are not godly enough for that!\r\n");
+        return;
+    }
     let vict_level = level_of(g, vict);
     if let Some(v) = g.get_char_mut(vict) {
         v.points.hit = v.points.max_hit;
@@ -3041,7 +3293,9 @@ pub fn do_restore(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             v.conditions[THIRST] = -100;
         }
     }
-    if ch_level >= LVL_GRGOD && vict_level >= LVL_IMMORT {
+    if ch_authority.authority >= i32::from(LVL_GRGOD)
+        && vict_authority.authority >= i32::from(LVL_IMMORT)
+    {
         if let Some(v) = g.get_char_mut(vict) {
             for i in 1..=(MAX_SKILLS as u16) {
                 v.set_skill(i, 100);
@@ -3054,8 +3308,6 @@ pub fn do_restore(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             v.real_abils.con = MAX_STAT;
             v.real_abils.cha = MAX_STAT;
             v.aff_abils = v.real_abils;
-            // SET_BIT(GCMD_FLAGS(vict), GCMD_GEN): grant the general god command.
-            v.godcmds1 |= crate::gcmd::GCMD_GEN;
         }
     }
     update_pos(g, vict);
@@ -3107,19 +3359,22 @@ pub fn do_invis(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "You can't do that!\r\n");
         return;
     }
+    let Some(authority) = authenticated_player_authority(g, ch) else {
+        g.send_to_char(ch, "You can't do that!\r\n");
+        return;
+    };
     let (name, _rest) = one_argument(arg);
     if name.is_empty() {
         if invis_lev(g, ch) > 0 {
             perform_immort_vis(g, ch);
         } else {
-            let lvl = level_of(g, ch) as i32;
-            perform_immort_invis(g, ch, lvl);
+            perform_immort_invis(g, ch, authority.authority);
         }
     } else {
         let Some(level) = command_atoi(g, ch, &name) else {
             return;
         };
-        if level > level_of(g, ch) as i32 {
+        if level > authority.authority {
             g.send_to_char(ch, "You can't go invisible above your own level.\r\n");
         } else if level < 1 {
             perform_immort_vis(g, ch);
@@ -3174,7 +3429,9 @@ fn perform_immort_invis(g: &mut GameState, ch: CharId, level: i32) {
         if tch == ch {
             continue;
         }
-        let tlvl = level_of(g, tch) as i32;
+        let tlvl = target_principal_authority(g, tch)
+            .map(|principal| principal.authority)
+            .unwrap_or(-1);
         if tlvl >= cur_invis && tlvl < level {
             act(
                 g,
@@ -3248,7 +3505,10 @@ fn delete_doubledollar(s: &str) -> String {
 pub fn do_gplague(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     let players: Vec<CharId> = g.players_by_name.values().copied().collect();
     for pt in players {
-        if pt != ch && level_of(g, pt) < 100 {
+        if pt != ch
+            && exact_player_authority(g, pt)
+                .is_some_and(|target| target.authority < i32::from(LVL_HERO))
+        {
             g.send_to_char(pt, "&RYou have contracted the plague!&n\r\n");
             if let Some(c) = g.get_char_mut(pt) {
                 c.affect_flags |= AFF_PLAGUED;
@@ -3262,7 +3522,10 @@ pub fn do_gplague(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
 pub fn do_gcureplague(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     let players: Vec<CharId> = g.players_by_name.values().copied().collect();
     for pt in players {
-        if pt != ch && level_of(g, pt) < 100 {
+        if pt != ch
+            && exact_player_authority(g, pt)
+                .is_some_and(|target| target.authority < i32::from(LVL_HERO))
+        {
             g.send_to_char(pt, "You have been cured of the plague!\r\n");
             if let Some(c) = g.get_char_mut(pt) {
                 c.affect_flags &= !AFF_PLAGUED;
@@ -3318,9 +3581,14 @@ pub fn do_dc(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             return;
         }
     };
-    let target = g.descriptors.get(&conn).and_then(|d| d.character);
+    let target = g
+        .descriptors
+        .get(&conn)
+        .and_then(|d| d.character.or(d.original));
     if let Some(tch) = target {
-        if level_of(g, tch) >= level_of(g, ch) {
+        let authority = target_principal_authority(g, ch).map(|target| target.authority);
+        let target_authority = target_principal_authority(g, tch).map(|target| target.authority);
+        if authority.is_none() || target_authority.is_none() || target_authority >= authority {
             if !g.can_see(ch, tch) {
                 g.send_to_char(ch, "No such connection.\r\n");
             } else {
@@ -3357,13 +3625,17 @@ pub fn circle_restrict() -> i32 {
 }
 
 pub fn do_wizlock(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
+    let Some(authority) = authenticated_player_authority(g, ch) else {
+        g.send_to_char(ch, "Invalid wizlock value.\r\n");
+        return;
+    };
     let (name, _rest) = one_argument(arg);
     let when: &str;
     if !name.is_empty() {
         let Some(value) = command_atoi(g, ch, &name) else {
             return;
         };
-        if value < 0 || value > level_of(g, ch) as i32 {
+        if value < 0 || value > authority.authority {
             g.send_to_char(ch, "Invalid wizlock value.\r\n");
             return;
         }
@@ -3424,6 +3696,10 @@ pub fn do_date(g: &mut GameState, ch: CharId, _arg: &str, subcmd: i32) {
 // do_last
 // ===========================================================================
 pub fn do_last(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
+    let Some(requester) = authenticated_player_authority(g, ch) else {
+        g.send_to_char(ch, "You are not sufficiently godly for that!\r\n");
+        return;
+    };
     let (name, _rest) = one_argument(arg);
     if name.is_empty() {
         g.send_to_char(ch, "For whom do you wish to search?\r\n");
@@ -3440,8 +3716,12 @@ pub fn do_last(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let target = g.find_player_by_name(&name);
     match target {
         Some(p) => {
+            let Some(target_authority) = exact_player_authority(g, p) else {
+                g.send_to_char(ch, "You are not sufficiently godly for that!\r\n");
+                return;
+            };
             let plvl = level_of(g, p);
-            if plvl > level_of(g, ch) && level_of(g, ch) < LVL_IMPL {
+            if target_authority.authority > requester.authority {
                 g.send_to_char(ch, "You are not sufficiently godly for that!\r\n");
                 return;
             }
@@ -3450,9 +3730,8 @@ pub fn do_last(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 .map(|c| (c.idnum, c.player.class, c.player.name.clone()))
                 .unwrap_or((-1, Class::Warrior, String::new()));
             let cls = class_abbrev(class);
-            let host = g
-                .get_char(p)
-                .and_then(|c| c.desc)
+            let host = target_authority
+                .descriptor
                 .and_then(|conn| g.descriptors.get(&conn).map(|d| d.host.clone()))
                 .unwrap_or_default();
             g.send_to_char(
@@ -3468,7 +3747,7 @@ pub fn do_last(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             let row = g.player_index(&name).cloned();
             match row {
                 Some(p) => {
-                    if p.level > level_of(g, ch) && level_of(g, ch) < LVL_IMPL {
+                    if !g.can_inspect_player_authority(requester.principal, p.trust) {
                         g.send_to_char(ch, "You are not sufficiently godly for that!\r\n");
                         return;
                     }
@@ -3533,14 +3812,17 @@ fn class_abbrev(class: Class) -> &'static str {
 pub fn do_force(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let (who, to_force) = half_chop(arg);
     let cmd_msg = format!("$n has forced you to '{}'.", to_force);
-    let ch_level = level_of(g, ch);
 
     if who.is_empty() || to_force.is_empty() {
         g.send_to_char(ch, "Whom do you wish to force do what?\r\n");
         return;
     }
+    let Some(ch_authority) = authenticated_player_authority(g, ch) else {
+        g.send_to_char(ch, "No, no, no!\r\n");
+        return;
+    };
 
-    if ch_level < LVL_GRGOD
+    if ch_authority.authority < i32::from(LVL_GRGOD)
         || (!who.eq_ignore_ascii_case("all") && !who.eq_ignore_ascii_case("room"))
     {
         let vict = match get_char_vis(g, ch, &who) {
@@ -3550,13 +3832,17 @@ pub fn do_force(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 return;
             }
         };
-        if ch_level <= level_of(g, vict) {
+        let Some(victim_authority) = target_principal_authority(g, vict) else {
+            g.send_to_char(ch, "No, no, no!\r\n");
+            return;
+        };
+        if ch_authority.authority <= victim_authority.authority {
             g.send_to_char(ch, "No, no, no!\r\n");
             return;
         }
         g.send_to_char(ch, OK);
         act(g, &cmd_msg, true, ch, None, ActArg::Char(vict), To::Vict);
-        let cname = name_of(g, ch);
+        let cname = name_of(g, ch_authority.principal);
         let vname = name_of(g, vict);
         let lvl = LVL_GOD.max(invis_lev(g, ch) as u8);
         mudlog(
@@ -3568,7 +3854,7 @@ pub fn do_force(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         command_interpreter(g, vict, &to_force);
     } else if who.eq_ignore_ascii_case("room") {
         g.send_to_char(ch, OK);
-        let cname = name_of(g, ch);
+        let cname = name_of(g, ch_authority.principal);
         let rnum = match g.get_char(ch).and_then(|c| c.in_room) {
             Some(r) => r,
             None => return,
@@ -3583,7 +3869,10 @@ pub fn do_force(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         );
         let people = g.rooms[rnum].people.clone();
         for vict in people {
-            if level_of(g, vict) >= ch_level {
+            let Some(victim_authority) = target_principal_authority(g, vict) else {
+                continue;
+            };
+            if victim_authority.authority >= ch_authority.authority {
                 continue;
             }
             act(g, &cmd_msg, true, ch, None, ActArg::Char(vict), To::Vict);
@@ -3592,7 +3881,7 @@ pub fn do_force(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     } else {
         // force all
         g.send_to_char(ch, OK);
-        let cname = name_of(g, ch);
+        let cname = name_of(g, ch_authority.principal);
         let lvl = LVL_GOD.max(invis_lev(g, ch) as u8);
         mudlog(
             g,
@@ -3600,9 +3889,17 @@ pub fn do_force(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             NRM,
             lvl,
         );
-        let players: Vec<CharId> = g.players_by_name.values().copied().collect();
-        for vict in players {
-            if level_of(g, vict) >= ch_level {
+        let targets: Vec<CharId> = g
+            .descriptors
+            .values()
+            .filter(|descriptor| descriptor.state == ConState::Playing)
+            .filter_map(|descriptor| descriptor.character)
+            .collect();
+        for vict in targets {
+            let Some(victim_authority) = target_principal_authority(g, vict) else {
+                continue;
+            };
+            if victim_authority.authority >= ch_authority.authority {
                 continue;
             }
             act(g, &cmd_msg, true, ch, None, ActArg::Char(vict), To::Vict);
@@ -3614,7 +3911,53 @@ pub fn do_force(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 // ===========================================================================
 // do_wiznet
 // ===========================================================================
+/// Resolve each playing descriptor to its authenticated player principal and
+/// active delivery body. Preferences and authority belong to the principal;
+/// writing state and output belong to the body currently controlled by that
+/// descriptor.
+fn wiznet_participants(g: &GameState) -> Vec<(CharId, CharId, crate::state::PrincipalAuthority)> {
+    let mut participants = Vec::new();
+    let mut seen_descriptors = Vec::new();
+    for &principal in g.players_by_name.values() {
+        let Some(authority) = exact_player_authority(g, principal)
+            .filter(|authority| authority.is_authenticated_player())
+        else {
+            continue;
+        };
+        let Some(conn) = authority.descriptor else {
+            continue;
+        };
+        if seen_descriptors.contains(&conn) {
+            continue;
+        }
+        let Some(descriptor) = g
+            .descriptors
+            .get(&conn)
+            .filter(|descriptor| descriptor.state == ConState::Playing)
+        else {
+            continue;
+        };
+        let Some(principal_character) = g.get_char(principal) else {
+            continue;
+        };
+        if g.authority_quarantine.contains(&principal_character.idnum) {
+            continue;
+        }
+        let Some(body) = descriptor.character else {
+            continue;
+        };
+        seen_descriptors.push(conn);
+        participants.push((principal, body, authority));
+    }
+    participants
+}
+
 pub fn do_wiznet(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
+    let Some(sender) = authenticated_player_authority(g, ch) else {
+        g.send_to_char(ch, "Huh?!?\r\n");
+        return;
+    };
+    let sender_principal = sender.principal;
     let mut argument = delete_doubledollar(arg.trim_start());
     let mut emote = false;
     let mut level = LVL_IMMORT as i32;
@@ -3641,7 +3984,7 @@ pub fn do_wiznet(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                     return;
                 };
                 level = parsed_level.max(LVL_IMMORT as i32);
-                if level > level_of(g, ch) as i32 {
+                if level > sender.authority {
                     g.send_to_char(ch, "You can't wizline above your own level.\r\n");
                     return;
                 }
@@ -3652,28 +3995,28 @@ pub fn do_wiznet(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
         '@' => {
             // List gods online / offline.
-            let players: Vec<CharId> = g.players_by_name.values().copied().collect();
-            let ch_is_impl = level_of(g, ch) == LVL_IMPL;
+            let players = wiznet_participants(g);
+            let ch_is_impl = sender.authority >= i32::from(LVL_IMPL);
             let mut out = String::new();
             let mut any = false;
-            for d in &players {
-                let online_god = level_of(g, *d) >= LVL_IMMORT
-                    && g.get_char(*d)
+            for &(principal, body, authority) in &players {
+                let online_god = authority.authority >= i32::from(LVL_IMMORT)
+                    && g.get_char(principal)
                         .map(|c| c.prf_flags & PRF_NOWIZ == 0)
                         .unwrap_or(false)
-                    && (g.can_see(ch, *d) || ch_is_impl);
+                    && (g.can_see(ch, body) || ch_is_impl);
                 if online_god {
                     if !any {
                         out.push_str("Gods online:\r\n");
                         any = true;
                     }
-                    let nm = name_of(g, *d);
+                    let nm = name_of(g, principal);
                     let writing = g
-                        .get_char(*d)
+                        .get_char(body)
                         .map(|c| c.act_flags & PLR_WRITING != 0)
                         .unwrap_or(false);
                     let mailing = g
-                        .get_char(*d)
+                        .get_char(body)
                         .map(|c| c.act_flags & PLR_MAILING != 0)
                         .unwrap_or(false);
                     if writing {
@@ -3686,18 +4029,18 @@ pub fn do_wiznet(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 }
             }
             let mut any2 = false;
-            for d in &players {
-                let offline_god = level_of(g, *d) >= LVL_IMMORT
-                    && g.get_char(*d)
+            for &(principal, body, authority) in &players {
+                let offline_god = authority.authority >= i32::from(LVL_IMMORT)
+                    && g.get_char(principal)
                         .map(|c| c.prf_flags & PRF_NOWIZ != 0)
                         .unwrap_or(false)
-                    && g.can_see(ch, *d);
+                    && (g.can_see(ch, body) || ch_is_impl);
                 if offline_god {
                     if !any2 {
                         out.push_str("Gods offline:\r\n");
                         any2 = true;
                     }
-                    out.push_str(&format!("  {}\r\n", name_of(g, *d)));
+                    out.push_str(&format!("  {}\r\n", name_of(g, principal)));
                 }
             }
             g.send_to_char(ch, &out);
@@ -3709,7 +4052,7 @@ pub fn do_wiznet(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         _ => {}
     }
 
-    if g.get_char(ch)
+    if g.get_char(sender_principal)
         .map(|c| c.prf_flags & PRF_NOWIZ != 0)
         .unwrap_or(false)
     {
@@ -3722,7 +4065,7 @@ pub fn do_wiznet(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
 
-    let cname = name_of(g, ch);
+    let cname = name_of(g, sender_principal);
     let (buf1, buf2);
     if level > LVL_IMMORT as i32 {
         buf1 = format!(
@@ -3752,29 +4095,28 @@ pub fn do_wiznet(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         );
     }
 
-    let ch_conn = g.get_char(ch).and_then(|c| c.desc);
     let ch_norepeat = g
-        .get_char(ch)
+        .get_char(sender_principal)
         .map(|c| c.prf_flags & PRF_NOREPEAT != 0)
         .unwrap_or(false);
-    let players: Vec<CharId> = g.players_by_name.values().copied().collect();
-    for d in players {
-        let recv = level_of(g, d) >= level as u8
-            && g.get_char(d)
+    let players = wiznet_participants(g);
+    for (principal, body, authority) in players {
+        let recv = authority.authority >= level
+            && g.get_char(principal)
                 .map(|c| c.prf_flags & PRF_NOWIZ == 0)
                 .unwrap_or(false)
-            && g.get_char(d)
+            && g.get_char(body)
                 .map(|c| c.act_flags & (PLR_WRITING | PLR_MAILING) == 0)
                 .unwrap_or(false);
-        let is_self_norepeat = g.get_char(d).and_then(|c| c.desc) == ch_conn && ch_norepeat;
+        let is_self_norepeat = authority.descriptor == sender.descriptor && ch_norepeat;
         if recv && !is_self_norepeat {
-            g.send_to_char(d, "&c");
-            if g.can_see(d, ch) {
-                g.send_to_char(d, &buf1);
+            g.send_to_char(body, "&c");
+            if g.can_see(body, ch) {
+                g.send_to_char(body, &buf1);
             } else {
-                g.send_to_char(d, &buf2);
+                g.send_to_char(body, &buf2);
             }
-            g.send_to_char(d, "&n");
+            g.send_to_char(body, "&n");
         }
     }
     if ch_norepeat {
@@ -3786,6 +4128,10 @@ pub fn do_wiznet(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 // do_zreset
 // ===========================================================================
 pub fn do_zreset(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
+    let Some(authority) = authenticated_player_authority(g, ch) else {
+        g.send_to_char(ch, "You are not holy enough to do that!\r\n");
+        return;
+    };
     let (name, _rest) = one_argument(arg);
     if name.is_empty() {
         g.send_to_char(ch, "You must specify a zone.\r\n");
@@ -3793,7 +4139,7 @@ pub fn do_zreset(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
     let cname = name_of(g, ch);
     if name.starts_with('*') {
-        if level_of(g, ch) < LVL_GRGOD {
+        if authority.authority < i32::from(LVL_GRGOD) {
             g.send_to_char(ch, "You are not holy enough to do that!\r\n");
             return;
         }
@@ -3821,7 +4167,7 @@ pub fn do_zreset(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     match zone_idx {
         Some(i) if i < g.zones.len() => {
             // Builders may only reset a zone they own (or be GRGOD+).
-            if !can_edit_zone(g, ch, i as i32) && level_of(g, ch) < LVL_GRGOD {
+            if !can_edit_zone(g, ch, i as i32) && authority.authority < i32::from(LVL_GRGOD) {
                 g.send_to_char(ch, "You do not have permission to reset this zone.\r\n");
                 return;
             }
@@ -3861,12 +4207,19 @@ pub fn do_wizutil(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
         g.send_to_char(ch, "You can't do that to a mob!\r\n");
         return;
     }
-    if level_of(g, vict) > level_of(g, ch) {
+    let (Some(ch_authority), Some(vict_authority)) = (
+        authenticated_player_authority(g, ch),
+        exact_player_authority(g, vict),
+    ) else {
+        g.send_to_char(ch, "Hmmm...you'd better not.\r\n");
+        return;
+    };
+    if vict_authority.authority > ch_authority.authority {
         g.send_to_char(ch, "Hmmm...you'd better not.\r\n");
         return;
     }
 
-    let cname = name_of(g, ch);
+    let cname = name_of(g, ch_authority.principal);
     let vname = name_of(g, vict);
     let logmin = |g: &GameState| LVL_GOD.max(invis_lev(g, ch) as u8);
 
@@ -3940,7 +4293,7 @@ pub fn do_wizutil(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
             );
         }
         SCMD_FREEZE => {
-            if ch == vict {
+            if ch_authority.principal == vict_authority.principal {
                 g.send_to_char(ch, "Oh, yeah, THAT'S real smart...\r\n");
                 return;
             }
@@ -3951,10 +4304,9 @@ pub fn do_wizutil(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
                 g.send_to_char(ch, "Your victim is already pretty cold.\r\n");
                 return;
             }
-            let ch_level = level_of(g, ch);
             if let Some(v) = g.get_char_mut(vict) {
                 v.act_flags |= PLR_FROZEN;
-                v.freeze_level = ch_level;
+                v.freeze_level = ch_authority.authority as u8;
             }
             g.send_to_char(vict, "A bitter wind suddenly rises and drains every erg of heat from your body!\r\nYou feel frozen!\r\n");
             g.send_to_char(ch, "Frozen.\r\n");
@@ -3986,7 +4338,7 @@ pub fn do_wizutil(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
                 return;
             }
             let freeze_lev = g.get_char(vict).map(|c| c.freeze_level).unwrap_or(0);
-            if freeze_lev > level_of(g, ch) {
+            if i32::from(freeze_lev) > ch_authority.authority {
                 let hmhr = match g
                     .get_char(vict)
                     .map(|c| c.player.sex)
@@ -4094,11 +4446,9 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     ];
 
     let argument = arg.trim_start();
-    let ch_level = level_of(g, ch);
-    let ch_trust = g
-        .get_char(ch)
-        .map(|c| c.trust.max(c.player.level as i32))
-        .unwrap_or(0);
+    let ch_trust = target_principal_authority(g, ch)
+        .map(|principal| principal.authority)
+        .unwrap_or(-1);
 
     if argument.is_empty() {
         let mut buf = String::from("Show options:\r\n");
@@ -4107,7 +4457,7 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             if i == 0 {
                 continue;
             }
-            if *lvl <= ch_level {
+            if i32::from(*lvl) <= ch_trust {
                 j += 1;
                 buf.push_str(&format!(
                     "{:<15}{}",
@@ -4132,7 +4482,7 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
 
     let needed = if l < fields.len() { fields[l].1 } else { 0 };
-    if (ch_trust as u8) < needed {
+    if ch_trust < i32::from(needed) {
         g.send_to_char(ch, "You are not godly enough for that!\r\n");
         return;
     }
@@ -4182,13 +4532,20 @@ pub fn do_show(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 return;
             }
             let online = g.find_player_by_name(&value);
-            let target_level = online
-                .map(|target| level_of(g, target))
-                .or_else(|| g.player_index(&value).map(|entry| entry.level));
-            if let Some(level) = target_level {
-                if !authorize_player_inspection(g, ch, level) {
-                    return;
-                }
+            let target_trust = match online {
+                Some(target) => match exact_player_authority(g, target) {
+                    Some(authority) => Some(authority.authority),
+                    None => {
+                        g.send_to_char(ch, PLAYER_INSPECTION_DENIED);
+                        return;
+                    }
+                },
+                None => g.player_index(&value).map(|entry| entry.trust),
+            };
+            if let Some(trust) = target_trust
+                && !authorize_player_inspection(g, ch, trust)
+            {
+                return;
             }
             if online.is_none()
                 && try_defer_offline(
@@ -4487,7 +4844,7 @@ static SET_FIELDS: &[SetField] = &[
     sf(22, "power", LVL_GRGOD, BOTH, T_NUMBER),
     sf(51, "hometown", LVL_GRGOD, PC, T_MISC),
     sf(30, "hunger", LVL_GRGOD, BOTH, T_NUMBER),
-    sf(44, "idnum", LVL_IMPL, PC, T_NUMBER),
+    sf(44, "idnum", LVL_IMPL, NPC, T_NUMBER),
     sf(13, "int", LVL_GRGOD, BOTH, T_NUMBER),
     sf(129, "intangible", LVL_GRGOD, PC, T_BINARY),
     sf(24, "invis", LVL_IMPL, PC, T_NUMBER),
@@ -4557,6 +4914,13 @@ fn parse_race(c: char) -> i32 {
     crate::races::parse_race(c)
 }
 
+/// Player level, trust, and command grants form one durable authority record
+/// and must be committed atomically by `advance`; `set` may still change an
+/// NPC's runtime level because NPC authority is not persistent account state.
+fn set_field_changes_player_authority(field: &SetField) -> bool {
+    matches!(field.switchnum, 34 | 52 | 103..=108) || field.cmd.starts_with("cmd")
+}
+
 /// perform_set: apply one set field. Returns true on a change that should be
 /// saved. `ch` is None for recursive setall-style calls (no permission echo).
 fn perform_set(
@@ -4573,6 +4937,16 @@ fn perform_set(
     let mut value = 0i32;
     let mut output = String::new();
 
+    if !is_npc(g, vict) && set_field_changes_player_authority(field) {
+        if let Some(cch) = ch {
+            g.send_to_char(
+                cch,
+                "Player authority changes must use 'advance <player> <level>' so they are durably committed.\r\n",
+            );
+        }
+        return false;
+    }
+
     if ch.is_none() {
         if val_arg == "on" || val_arg == "yes" {
             on = true;
@@ -4581,21 +4955,33 @@ fn perform_set(
         }
     } else {
         let cch = ch.unwrap();
-        // Level checks.
-        if level_of(g, cch) != LVL_IMPL
-            && !is_npc(g, vict)
-            && level_of(g, cch) <= level_of(g, vict)
-            && vict != cch
+        let Some(caller) = authenticated_player_authority(g, cch) else {
+            g.send_to_char(cch, "You are not godly enough for that!\r\n");
+            return false;
+        };
+        let vnpc = is_npc(g, vict);
+        let victim_authority = if vnpc {
+            None
+        } else {
+            let Some(target) = exact_player_authority(g, vict) else {
+                g.send_to_char(cch, "Maybe that's not such a great idea...\r\n");
+                return false;
+            };
+            Some(target)
+        };
+        if caller.authority < i32::from(LVL_IMPL)
+            && victim_authority.is_some_and(|target| {
+                caller.principal != target.principal && caller.authority <= target.authority
+            })
         {
             g.send_to_char(cch, "Maybe that's not such a great idea...\r\n");
             return false;
         }
-        if level_of(g, cch) < field.level {
+        if caller.authority < i32::from(field.level) {
             g.send_to_char(cch, "You are not godly enough for that!\r\n");
             return false;
         }
         // PC/NPC correctness.
-        let vnpc = is_npc(g, vict);
         if vnpc && (field.pcnpc & NPC) == 0 {
             g.send_to_char(cch, "You can't do that to a beast!\r\n");
             return false;
@@ -4604,7 +4990,7 @@ fn perform_set(
             g.send_to_char(cch, "That can only be done to a beast!\r\n");
             return false;
         }
-        let cname = name_of(g, cch);
+        let cname = name_of(g, caller.principal);
         let vname = name_of(g, vict);
         let m = LVL_GOD.max(invis_lev(g, cch) as u8);
         match field.typ {
@@ -4712,8 +5098,9 @@ fn perform_set(
         }
     };
 
-    let vict_level = level_of(g, vict);
-    let vict_immortal = !is_npc(g, vict) && vict_level >= LVL_IMMORT;
+    let vict_immortal = !is_npc(g, vict)
+        && exact_player_authority(g, vict)
+            .is_some_and(|target| target.authority >= i32::from(LVL_IMMORT));
 
     match switchmode {
         0 => set_or_remove_prf(g, PRF_BRIEF),
@@ -4893,23 +5280,39 @@ fn perform_set(
             g.affect_total(vict);
         }
         24 => {
-            if let Some(cch) = ch {
-                if level_of(g, cch) < LVL_IMPL && cch != vict {
-                    g.send_to_char(cch, "You aren't godly enough for that!\r\n");
-                    return false;
-                }
+            let Some(cch) = ch else {
+                return false;
+            };
+            let (Some(caller), Some(target)) = (
+                authenticated_player_authority(g, cch),
+                exact_player_authority(g, vict),
+            ) else {
+                g.send_to_char(cch, "You aren't godly enough for that!\r\n");
+                return false;
+            };
+            if caller.authority < i32::from(LVL_IMPL) && caller.principal != target.principal {
+                g.send_to_char(cch, "You aren't godly enough for that!\r\n");
+                return false;
             }
-            let nv = range_i32(0, vict_level as i32, value);
+            let nv = range_i32(0, target.authority, value);
             if let Some(v) = g.get_char_mut(vict) {
                 v.invis_level = nv;
             }
         }
         25 => {
-            if let Some(cch) = ch {
-                if level_of(g, cch) < LVL_IMPL && cch != vict {
-                    g.send_to_char(cch, "You aren't godly enough for that!\r\n");
-                    return false;
-                }
+            let Some(cch) = ch else {
+                return false;
+            };
+            let (Some(caller), Some(target)) = (
+                authenticated_player_authority(g, cch),
+                exact_player_authority(g, vict),
+            ) else {
+                g.send_to_char(cch, "You aren't godly enough for that!\r\n");
+                return false;
+            };
+            if caller.authority < i32::from(LVL_IMPL) && caller.principal != target.principal {
+                g.send_to_char(cch, "You aren't godly enough for that!\r\n");
+                return false;
             }
             set_or_remove_prf(g, PRF_NOHASSLE);
         }
@@ -4949,8 +5352,11 @@ fn perform_set(
         32 => set_or_remove_act(g, PLR_KILLER),
         33 => set_or_remove_act(g, PLR_THIEF),
         34 => {
-            let ch_level = ch.map(|c| level_of(g, c)).unwrap_or(LVL_IMPL);
-            if value > ch_level as i32 || value > LVL_IMPL as i32 {
+            let ch_trust = ch
+                .and_then(|caller| authenticated_player_authority(g, caller))
+                .map(|caller| caller.authority)
+                .unwrap_or(i32::from(LVL_IMPL));
+            if value > ch_trust || value > i32::from(LVL_IMPL) {
                 if let Some(cch) = ch {
                     g.send_to_char(cch, "You can't do that.\r\n");
                 }
@@ -5029,9 +5435,14 @@ fn perform_set(
         }
         43 => set_or_remove_prf(g, PRF_COLOR_1 | PRF_COLOR_2),
         44 => {
-            // idnum: only impl (idnum 1) on NPCs.
-            let ch_idnum = ch.and_then(|c| g.get_char(c)).map(|c| c.idnum).unwrap_or(0);
-            if ch_idnum != 1 || !is_npc(g, vict) {
+            // idnum: an Implementor role may change NPC runtime identities.
+            // Durable player id 1 is historical data, not an authorization
+            // credential; trusting it let a mortal impostor bypass this gate.
+            let caller_is_implementor = ch.is_some_and(|caller| {
+                target_principal_authority(g, caller)
+                    .is_some_and(|principal| principal.authority >= i32::from(LVL_IMPL))
+            });
+            if !caller_is_implementor || !is_npc(g, vict) {
                 return false;
             }
             if let Some(v) = g.get_char_mut(vict) {
@@ -5039,16 +5450,42 @@ fn perform_set(
             }
         }
         45 => {
-            if vict_level >= LVL_GRGOD {
+            let Some(target) = exact_player_authority(g, vict) else {
+                if let Some(cch) = ch {
+                    g.send_to_char(cch, "You cannot change that.\r\n");
+                }
+                return false;
+            };
+            if target.authority >= i32::from(LVL_GRGOD) {
                 if let Some(cch) = ch {
                     g.send_to_char(cch, "You cannot change that.\r\n");
                 }
                 return false;
             }
-            if let Some(v) = g.get_char_mut(vict) {
-                v.pending_password_hash = Some(crate::password::hash_password(val_arg));
+            if !(3..=crate::password::MAX_PASSWORD_INPUT_BYTES).contains(&val_arg.len()) {
+                if let Some(cch) = ch {
+                    g.send_to_char(cch, "Password must be between 3 and 64 bytes.\r\n");
+                }
+                return false;
             }
-            output = format!("Password changed to '{}'.", val_arg);
+            let Some(authorization) =
+                ch.and_then(|caller| crate::interpreter::authenticated_command_request(g, caller))
+            else {
+                return false;
+            };
+            let Some((idnum, name)) = g
+                .get_char(vict)
+                .filter(|victim| !victim.is_npc && victim.idnum > 0)
+                .map(|victim| (victim.idnum, victim.get_name().to_string()))
+            else {
+                g.send_to_char(
+                    authorization.requester_body,
+                    "That player has no durable identity.\r\n",
+                );
+                return false;
+            };
+            g.queue_password_update(authorization, vict, idnum, &name, val_arg.to_owned());
+            output = format!("Password change for {} queued.", name);
         }
         46 => set_or_remove_act(g, PLR_NODELETE),
         47 => {
@@ -5095,15 +5532,13 @@ fn perform_set(
             }
         }
         52 => {
-            let ch_level = ch.map(|c| level_of(g, c)).unwrap_or(LVL_IMPL);
-            if value > ch_level as i32 || value > LVL_IMPL as i32 {
-                if let Some(cch) = ch {
-                    g.send_to_char(cch, "You can't do that.\r\n");
-                }
-                // C `break`s (no return) — fall through to save anyway.
-            } else if let Some(v) = g.get_char_mut(vict) {
-                v.trust = value;
+            if let Some(cch) = ch {
+                g.send_to_char(
+                    cch,
+                    "Player authority changes must use 'advance <player> <level>' so they are durably committed.\r\n",
+                );
             }
+            return false;
         }
         53 => {
             let nv = range_i32(0, 100, value);
@@ -5306,7 +5741,10 @@ fn grant_cmd_tier(g: &mut GameState, vict: CharId, tier: u8, val_arg: &str) {
 
 /// Stat ceiling for int/wis/dex/con/cha: NPC or >= GRGOD gets MAX_STAT.
 fn stat_hi(g: &GameState, vict: CharId) -> i32 {
-    if is_npc(g, vict) || level_of(g, vict) >= LVL_GRGOD {
+    if is_npc(g, vict)
+        || exact_player_authority(g, vict)
+            .is_some_and(|target| target.authority >= i32::from(LVL_GRGOD))
+    {
         MAX_STAT as i32
     } else {
         MAX_PLAYER_STAT as i32
@@ -5318,11 +5756,21 @@ pub fn do_set(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let mut is_player = false;
     let mut is_mob = false;
 
-    let ch_level = level_of(g, ch);
+    let Some(ch_authority) = authenticated_player_authority(g, ch) else {
+        g.send_to_char(ch, "Huh?!?\r\n");
+        return;
+    };
+    let principal_has_god_commands = g.get_char(ch_authority.principal).is_some_and(|principal| {
+        principal.godcmds1 != 0
+            || principal.godcmds2 != 0
+            || principal.godcmds3 != 0
+            || principal.godcmds4 != 0
+    });
     // C act.wizard.c:3895: `if (!IS_GOD(ch) && GET_LEVEL(ch) < LVL_IMMORT)`.
     // IS_GOD is the granted-command test, so a sub-immortal holding bits is
-    // admitted where a plain level check would reject them.
-    if !is_god(g, ch) && ch_level < LVL_IMMORT {
+    // admitted where a plain trust check would reject them. Both properties
+    // come from the authenticated principal, never the active body's level.
+    if !principal_has_god_commands && ch_authority.authority < i32::from(LVL_IMMORT) {
         g.send_to_char(ch, "Huh?!?\r\n");
         return;
     }
@@ -5366,7 +5814,9 @@ pub fn do_set(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         let (n, r) = half_chop(&rest);
         name = n;
         rest = r;
-    } else if name.eq_ignore_ascii_case("Legal_PKS") && ch_level >= LVL_GRGOD {
+    } else if name.eq_ignore_ascii_case("Legal_PKS")
+        && ch_authority.authority >= i32::from(LVL_GRGOD)
+    {
         // C act.wizard.c:3914-3921: this really flips the pk_allowed global that
         // do_hit/do_kill/murder, fight.c's killer flagging and the PvP spell
         // guards all read.
@@ -5395,12 +5845,8 @@ pub fn do_set(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     if name.is_empty() || field.is_empty() {
         let mut buf = String::from("Usage: set <victim> <field> <value>\r\nFields:\r\n");
         let mut k = 0;
-        let ch_trust = g
-            .get_char(ch)
-            .map(|c| c.trust.max(c.player.level as i32))
-            .unwrap_or(0);
         for f in SET_FIELDS {
-            if f.level as i32 > ch_trust {
+            if i32::from(f.level) > ch_authority.authority {
                 continue;
             }
             k += 1;
@@ -5475,8 +5921,14 @@ pub fn do_set(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
 
-    perform_set(g, Some(ch), vict, mode, &val_arg);
-    // save_char(NOWHERE) on a real change: no player-file layer yet.
+    let changed = perform_set(g, Some(ch), vict, mode, &val_arg);
+    if changed
+        && !is_npc(g, vict)
+        && SET_FIELDS[mode].switchnum != 45
+        && !set_field_changes_player_authority(&SET_FIELDS[mode])
+    {
+        g.request_player_save(vict);
+    }
 }
 
 // ===========================================================================
@@ -5517,7 +5969,10 @@ pub fn do_rlist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     };
     // C act.wizard.c:4091-4100: a mortal builder may only enumerate the zone(s)
     // they own, checked on both arguments before any range validation.
-    if level_of(g, ch) < LVL_IMMORT {
+    let authority = authenticated_player_authority(g, ch)
+        .map(|principal| principal.authority)
+        .unwrap_or(-1);
+    if authority < i32::from(LVL_IMMORT) {
         if !can_edit_zone(g, ch, real_zone(g, first)) {
             g.send_to_char(
                 ch,
@@ -5583,7 +6038,10 @@ pub fn do_mlist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     };
     // C act.wizard.c:4146-4155: same two-gate builder check as rlist.
-    if level_of(g, ch) < LVL_IMMORT {
+    let authority = authenticated_player_authority(g, ch)
+        .map(|principal| principal.authority)
+        .unwrap_or(-1);
+    if authority < i32::from(LVL_IMMORT) {
         if !can_edit_zone(g, ch, real_zone(g, first)) {
             g.send_to_char(
                 ch,
@@ -5646,7 +6104,10 @@ pub fn do_olist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     };
     // C act.wizard.c:4199-4208: same two-gate builder check as rlist.
-    if level_of(g, ch) < LVL_IMMORT {
+    let authority = authenticated_player_authority(g, ch)
+        .map(|principal| principal.authority)
+        .unwrap_or(-1);
+    if authority < i32::from(LVL_IMMORT) {
         if !can_edit_zone(g, ch, real_zone(g, first)) {
             g.send_to_char(
                 ch,
@@ -6095,7 +6556,10 @@ pub fn do_vwear(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         ("mvregen", LVL_GOD),
     ];
     let argument = arg.trim_start();
-    let ch_level = level_of(g, ch);
+    let Some(authority) = authenticated_player_authority(g, ch) else {
+        g.send_to_char(ch, "You are not godly enough for that!\r\n");
+        return;
+    };
     if argument.is_empty() {
         let mut buf = String::from("&cItem Listing Options&n:\r\n");
         let mut j = 0;
@@ -6103,7 +6567,7 @@ pub fn do_vwear(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             if i == 0 {
                 continue;
             }
-            if *lvl <= ch_level {
+            if i32::from(*lvl) <= authority.authority {
                 j += 1;
                 buf.push_str(&format!(
                     "{:<15}{}",
@@ -6128,7 +6592,7 @@ pub fn do_vwear(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "Come again?\r\n");
         return;
     }
-    if ch_level < fields[l].1 {
+    if authority.authority < i32::from(fields[l].1) {
         g.send_to_char(ch, "You are not godly enough for that!\r\n");
         return;
     }
@@ -6214,10 +6678,23 @@ pub fn do_tedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             return;
         }
     };
-    if level_of(g, ch) < LVL_GRGOD {
+    let Some(authorization) = crate::olc::capture_olc_authorization(g, ch) else {
+        g.send_to_char(ch, "You do not have text editor permissions.\r\n");
+        return;
+    };
+    if !g.authenticated_command_request_is_current(
+        authorization,
+        i32::from(LVL_GRGOD),
+        3,
+        crate::gcmd::GCMD3_IMPOLC,
+    ) {
         g.send_to_char(ch, "You do not have text editor permissions.\r\n");
         return;
     }
+    let authority = g
+        .principal_authority(ch)
+        .map(|principal| principal.authority)
+        .unwrap_or(-1);
     let (field, _rest) = half_chop(arg);
     // (command, min level, relative path under lib, editor max size). Paths and
     // sizes match db.h *_FILE constants / fields[].size in act.wizard.c.
@@ -6234,13 +6711,12 @@ pub fn do_tedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         ("circlemud", LVL_IMPL, "text/circlemud", 2400),
         ("startup", LVL_IMPL, "text/startup", 8192),
     ];
-    let ch_level = level_of(g, ch);
     if field.is_empty() {
         let mut buf = String::from("Files available to be edited:\r\n");
         let mut i = 1;
         let mut any = false;
         for (cmd, lvl, _, _) in &files {
-            if ch_level >= *lvl {
+            if authority >= i32::from(*lvl) {
                 buf.push_str(&format!("{:<11.11}", cmd));
                 if i % 7 == 0 {
                     buf.push_str("\r\n");
@@ -6262,12 +6738,39 @@ pub fn do_tedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         .iter()
         .position(|(c, _, _, _)| c.starts_with(&field.to_lowercase()));
     match l {
-        Some(i) if ch_level >= files[i].1 => {
-            let (_, _, rel, size) = files[i];
+        Some(i) if authority >= i32::from(files[i].1) => {
+            let (_, minimum_authority, rel, size) = files[i];
+            if !g.authenticated_command_request_is_current(
+                authorization,
+                i32::from(minimum_authority),
+                3,
+                crate::gcmd::GCMD3_IMPOLC,
+            ) {
+                g.send_to_char(ch, "You are not godly enough for that!\r\n");
+                return;
+            }
             let path = std::path::Path::new(&g.config.lib_path).join(rel);
+            if crate::modify::textfile_edit_busy(&path, conn) {
+                g.send_to_char(ch, "That text file is currently being edited.\r\n");
+                return;
+            }
             // C echoes the current file contents into the editor and seeds it as
             // the abort-restore buffer (backstr); read what is on disk now.
-            let current = std::fs::read_to_string(&path).unwrap_or_default();
+            let current = match std::fs::read_to_string(&path) {
+                Ok(current) => current,
+                Err(error) => {
+                    log::warn!(
+                        "SYSERR: TEDIT refused to open '{}': {}",
+                        path.display(),
+                        error
+                    );
+                    g.send_to_char(
+                        ch,
+                        "That text file could not be read safely; no editor was opened.\r\n",
+                    );
+                    return;
+                }
+            };
             g.send_to_char(ch, "\x1B[H\x1B[J");
             g.send_to_char(ch, "Edit file below: (/s saves /h for help)\r\n");
             if !current.is_empty() {
@@ -6282,7 +6785,15 @@ pub fn do_tedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 ActArg::None,
                 To::Room,
             );
-            crate::modify::start_textfile_editing(g, conn, path, &current, size);
+            crate::modify::start_textfile_editing(
+                g,
+                conn,
+                path,
+                &current,
+                size,
+                authorization,
+                i32::from(minimum_authority),
+            );
         }
         Some(_) => g.send_to_char(ch, "You are not godly enough for that!\r\n"),
         None => g.send_to_char(ch, "Invalid text editor option.\r\n"),
@@ -6310,7 +6821,19 @@ pub fn do_rename(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             return;
         }
     };
-    if level_of(g, ch) <= level_of(g, victim) {
+    let Some(authorization) = crate::interpreter::authenticated_command_request(g, ch) else {
+        g.send_to_char(ch, "You don't have permission to change that name.");
+        return;
+    };
+    let (Some(requester), Some(target)) = (
+        authenticated_player_authority(g, ch)
+            .filter(|principal| principal.principal == authorization.requester_principal),
+        exact_player_authority(g, victim),
+    ) else {
+        g.send_to_char(ch, "You don't have permission to change that name.");
+        return;
+    };
+    if requester.authority <= target.authority {
         g.send_to_char(ch, "You don't have permission to change that name.");
         return;
     }
@@ -6358,13 +6881,17 @@ pub fn do_rename(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     // identities and publish nothing here.  The async Game drain rechecks
     // authority/collisions and reports success only after all durable pieces
     // have committed (#411/#413).
-    g.queue_player_rename(ch, victim, victim_idnum, &oldname, &tmp);
+    g.queue_player_rename(authorization, victim, victim_idnum, &oldname, &tmp);
 }
 
 // ===========================================================================
 // do_peace
 // ===========================================================================
 pub fn do_peace(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
+    let Some(ch_authority) = authenticated_player_authority(g, ch) else {
+        g.send_to_char(ch, "Huh?!?\r\n");
+        return;
+    };
     act(
         g,
         "$n decides that everyone should just be friends.",
@@ -6379,14 +6906,16 @@ pub fn do_peace(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         None => return,
     };
     g.send_to_room(rnum, "Everything is quite peaceful now.\r\n", None);
-    let ch_level = level_of(g, ch);
     let people = g.rooms[rnum].people.clone();
     for vict in people {
         let fighting = g
             .get_char(vict)
             .map(|c| c.fighting.is_some())
             .unwrap_or(false);
-        if fighting && level_of(g, vict) <= ch_level {
+        let target_authority = target_principal_authority(g, vict)
+            .map(|target| target.authority)
+            .unwrap_or(i32::MAX);
+        if fighting && target_authority <= ch_authority.authority {
             if let Some(v) = g.get_char_mut(vict) {
                 v.fighting = None;
                 if v.position == Position::Fighting {
@@ -6456,7 +6985,7 @@ pub fn do_delsnow(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
 }
 
 // ===========================================================================
-// do_tmobdie / do_wrestrict / do_respec / do_questmobs / do_reward / do_levelme
+// do_tmobdie / do_wrestrict / do_respec / do_questmobs / do_reward
 // ===========================================================================
 static MOBDIE_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static WEAPONRESTRICTIONS: std::sync::atomic::AtomicBool =
@@ -6503,11 +7032,15 @@ pub fn do_wrestrict(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
 }
 
 pub fn do_respec(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    if level_of(g, ch) < LVL_IMMORT {
+    let Some(authority) = authenticated_player_authority(g, ch) else {
+        g.send_to_char(ch, "Huh?!?\r\n");
+        return;
+    };
+    if authority.authority < i32::from(LVL_IMMORT) {
         g.send_to_char(ch, "Huh?!?\r\n");
         return;
     }
-    let cname = name_of(g, ch);
+    let cname = name_of(g, authority.principal);
     mudlog(g, &format!("(GC) {} has respec'd.", cname), PFT, LVL_GOD);
     g.send_to_char(ch, "Mob hardcoded SPECS reassigned\r\n");
     // C re-walks mob_index[] re-binding each func pointer. The Rust spec-proc
@@ -6696,7 +7229,10 @@ pub fn do_reward(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         let mut rewardbuf = String::from("You reward");
         let mut rewardcount = 0;
         for victim in players {
-            if level_of(g, victim) >= LVL_IMMORT || is_npc(g, victim) {
+            if is_npc(g, victim)
+                || exact_player_authority(g, victim)
+                    .is_none_or(|target| target.authority >= i32::from(LVL_IMMORT))
+            {
                 continue;
             }
             if let Some(obj) = g.load_object(obj_vnum) {
@@ -6749,18 +7285,6 @@ pub fn do_reward(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
 }
 
-pub fn do_levelme(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
-    if name_of(g, ch) == "Mulder" {
-        if let Some(c) = g.get_char_mut(ch) {
-            c.player.level = LVL_IMPL;
-            c.trust = LVL_IMPL as i32;
-        }
-        g.send_to_char(ch, "Welcome back!\r\n");
-    } else {
-        g.send_to_char(ch, "Huh?!?\r\n");
-    }
-}
-
 // ===========================================================================
 // do_copyover (Erwin S. Andreasen's seamless reboot)
 // ===========================================================================
@@ -6779,8 +7303,103 @@ pub fn do_copyover(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "A copyover is already being prepared.\n\r");
         return;
     }
-    g.copyover_requested = Some(ch);
+    let Some(request) = crate::interpreter::authenticated_command_request(g, ch) else {
+        g.send_to_char(ch, "Copyover requires direct authenticated input.\n\r");
+        return;
+    };
+    g.copyover_requested = Some(request);
     g.send_to_char(ch, "Preparing a durable copyover snapshot...\n\r");
+}
+
+fn validate_copyover_executable(
+    candidate: std::path::PathBuf,
+    require_absolute: bool,
+    require_root_trust: bool,
+) -> anyhow::Result<std::path::PathBuf> {
+    use anyhow::{Context, bail};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    if require_absolute && !candidate.is_absolute() {
+        bail!("MUD_EXEC_PATH must be absolute");
+    }
+    let executable = candidate
+        .canonicalize()
+        .with_context(|| format!("resolve copyover executable {}", candidate.display()))?;
+    let metadata = executable
+        .metadata()
+        .with_context(|| format!("inspect copyover executable {}", executable.display()))?;
+    if !metadata.is_file() {
+        bail!("copyover executable is not a regular file");
+    }
+    if metadata.permissions().mode() & 0o111 == 0 {
+        bail!("copyover executable has no execute bit");
+    }
+    let executable_c = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(
+        executable.as_os_str(),
+    ))
+    .context("copyover executable path contains a NUL byte")?;
+    if unsafe { libc::access(executable_c.as_ptr(), libc::X_OK) } != 0 {
+        bail!(
+            "copyover executable is not executable by the service identity: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    if require_root_trust {
+        if metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0 {
+            bail!("production copyover executable must be root-owned and not group/world writable");
+        }
+
+        // Canonicalizing closes symlink ambiguity only if an unprivileged
+        // process cannot replace a symlink or ancestor afterward. Check both
+        // the configured path and resolved path chains; the trusted root owner
+        // may still activate releases, while the service identity cannot race
+        // validation-to-exec by replacing a component.
+        let mut ancestors = std::collections::BTreeSet::new();
+        for path in [candidate.as_path(), executable.as_path()] {
+            for ancestor in path.ancestors().skip(1) {
+                ancestors.insert(ancestor.to_path_buf());
+            }
+        }
+        for ancestor in ancestors {
+            let ancestor_metadata = ancestor
+                .metadata()
+                .with_context(|| format!("inspect copyover path {}", ancestor.display()))?;
+            if !ancestor_metadata.is_dir()
+                || ancestor_metadata.uid() != 0
+                || ancestor_metadata.permissions().mode() & 0o022 != 0
+            {
+                bail!(
+                    "production copyover path component {} is not a trusted root-owned directory",
+                    ancestor.display()
+                );
+            }
+        }
+    }
+    Ok(executable)
+}
+
+fn resolve_copyover_executable_from(
+    configured_path: Option<std::ffi::OsString>,
+    use_mock_db: bool,
+) -> anyhow::Result<std::path::PathBuf> {
+    use anyhow::{Context, bail};
+
+    match configured_path {
+        Some(path) => validate_copyover_executable(std::path::PathBuf::from(path), true, true),
+        None if use_mock_db => validate_copyover_executable(
+            std::env::current_exe().context("resolve current executable")?,
+            false,
+            false,
+        ),
+        None => bail!("MUD_EXEC_PATH is required when using the real database"),
+    }
+}
+
+/// Production copyover must execute an explicitly configured, trusted release
+/// path. Only mock-DB development/test runs may fall back to the current test
+/// or development binary.
+fn resolve_copyover_executable(use_mock_db: bool) -> anyhow::Result<std::path::PathBuf> {
+    resolve_copyover_executable_from(std::env::var_os("MUD_EXEC_PATH"), use_mock_db)
 }
 
 /// Execute the filesystem/socket half only after the async Game shell has
@@ -6790,7 +7409,14 @@ pub fn perform_copyover(g: &mut GameState, ch: CharId) {
 
     // C act.wizard.c:1927-1990: flush the OLC save list to disk before the
     // exec, so redit/oedit work survives the reboot (#262).
-    crate::olc::flush_save_list_to_disk(g);
+    if let Err(error) = crate::olc::flush_save_list_to_disk(g) {
+        log::warn!("Copyover aborted because pending OLC could not be saved: {error}");
+        g.send_to_char(
+            ch,
+            "Copyover OLC save failed; reboot aborted. Unsaved OLC entries remain pending.\n\r",
+        );
+        return;
+    }
 
     let listener_fd = crate::state::listener_fd();
     if listener_fd < 3 {
@@ -6800,11 +7426,15 @@ pub fn perform_copyover(g: &mut GameState, ch: CharId) {
         return;
     }
 
-    // Resolve the binary to exec FIRST: it must be the actual running image
-    // (C uses EXE_FILE). If we can't find it, abort before touching anything.
-    let exe = match std::env::current_exe() {
+    // Resolve the binary to exec FIRST. Production sets MUD_EXEC_PATH to the
+    // release-aware `current` path; resolving it here deliberately selects the
+    // newly activated release instead of re-executing the old process image.
+    // Only explicit mock/development runs retain current_exe() as a fallback;
+    // a real-DB service fails closed when MUD_EXEC_PATH is absent.
+    let exe = match resolve_copyover_executable(g.config.use_mock_db) {
         Ok(p) => p,
-        Err(_) => {
+        Err(error) => {
+            log::warn!("copyover executable validation failed: {error:#}");
             g.send_to_char(ch, "Copyover file not writeable, aborted.\n\r");
             return;
         }
@@ -6820,32 +7450,59 @@ pub fn perform_copyover(g: &mut GameState, ch: CharId) {
     let mut entries = Vec::new();
     let mut nonplaying = Vec::new();
     for &conn in &conns {
-        let (has_char, state, fd, host) = match g.descriptors.get(&conn) {
-            Some(d) => (d.character.is_some(), d.state, d.raw_fd, d.host.clone()),
+        let (recovery_character, state, fd, host) = match g.descriptors.get(&conn) {
+            Some(d) => (
+                d.original.or(d.character),
+                d.state,
+                d.raw_fd,
+                d.host.clone(),
+            ),
             None => continue,
         };
-        if !has_char || state != ConState::Playing {
+        if recovery_character.is_none() || state != ConState::Playing {
             nonplaying.push((conn, fd));
             continue;
         }
-        let cid = match g.descriptors.get(&conn).and_then(|d| d.character) {
-            Some(c) => c,
-            None => continue,
-        };
+        let cid = recovery_character.expect("checked copyover recovery character");
         let (player_name, player_id, character_snapshot) = match g.get_char(cid) {
-            Some(character) if !character.is_npc => (
-                character.get_name().to_string(),
-                character.idnum,
-                crate::copyover::CharacterSnapshot::from_character(character),
-            ),
+            Some(character) if !character.is_npc => {
+                let mut process_exit = character.clone();
+                if let Some(room) = character.in_room.and_then(|room| g.rooms.get(room)) {
+                    if let Some((x, y)) = room.map_x.zip(room.map_y) {
+                        process_exit.tloadroom = -1;
+                        process_exit.mapx = i64::from(x);
+                        process_exit.mapy = i64::from(y);
+                    } else {
+                        process_exit.tloadroom = i64::from(room.number);
+                        process_exit.mapx = -1;
+                        process_exit.mapy = -1;
+                    }
+                }
+                crate::arena::apply_process_exit_state_to_snapshot(cid, &mut process_exit);
+                (
+                    character.get_name().to_string(),
+                    character.idnum,
+                    crate::copyover::CharacterSnapshot::from_character(&process_exit),
+                )
+            }
             _ => {
                 g.send_to_char(ch, "Copyover found an invalid playing body; aborted.\n\r");
                 return;
             }
         };
+        let was_crash_dirty = g
+            .get_char(cid)
+            .is_some_and(|character| character.act_flags & crate::objsave::PLR_CRASH != 0);
         if !crate::objsave::crash_save(g, cid, &g.config.lib_path.clone()) {
             g.send_to_char(ch, "Copyover could not save player objects; aborted.\n\r");
             return;
+        }
+        if was_crash_dirty {
+            // Copyover preflight must be retryable. The crash file is durable,
+            // but only a successful exec may discard the live dirty marker.
+            if let Some(character) = g.get_char_mut(cid) {
+                character.act_flags |= crate::objsave::PLR_CRASH;
+            }
         }
         if let Err(error) = crate::alias::write_aliases(&g.config.lib_path, &player_name, player_id)
         {
@@ -6878,52 +7535,10 @@ pub fn perform_copyover(g: &mut GameState, ch: CharId) {
         return;
     }
 
-    let cname = name_of(g, ch);
-    send_to_all(
-        g,
-        &format!(
-            "\n\rThe server is being rebooted by {}. Please standby..\n\r",
-            cname
-        ),
-    );
-    for (conn, fd) in nonplaying {
-        let bye = b"\n\rSorry, we are rebooting. Come back in a minute.\n\r";
-        if fd >= 0 {
-            let _ = write_fd_all(fd, bye);
-        }
-        if let Some(descriptor) = g.descriptors.get_mut(&conn) {
-            descriptor.state = ConState::Close;
-        }
-    }
-    for &conn in &conns {
-        let (fd, playing) = match g.descriptors.get(&conn) {
-            Some(descriptor) => (
-                descriptor.raw_fd,
-                descriptor.state == ConState::Playing && descriptor.character.is_some(),
-            ),
-            None => continue,
-        };
-        if !playing {
-            continue;
-        }
-        let mut tail = g
-            .descriptors
-            .get_mut(&conn)
-            .map(|descriptor| descriptor.take_output())
-            .unwrap_or_default();
-        tail.push_str("\n\rRestoring from copyover...\n\r");
-        let rendered = crate::connection::render_color(&tail);
-        if let Err(error) = write_fd_all(fd, rendered.as_bytes()) {
-            log::warn!("copyover socket flush failed for fd {fd}: {error}");
-            let _ = std::fs::remove_file(&copyover_path);
-            g.send_to_char(ch, "Copyover socket flush failed; reboot aborted.\n\r");
-            return;
-        }
-    }
-
     // Clear FD_CLOEXEC on the listener and every inherited playing fd so the
     // kernel keeps them open across execv (the whole point — without this the
-    // exec closes them and the sockets die).
+    // exec closes them and the sockets die). Do this before publishing reboot
+    // text to sockets; the guard rolls every flag back on any later refusal.
     let inheritance_fds: Vec<RawFd> = std::iter::once(listener_fd)
         .chain(inherit_fds.iter().copied())
         .collect();
@@ -6941,7 +7556,50 @@ pub fn perform_copyover(g: &mut GameState, ch: CharId) {
             }
         };
 
-    // exec the same binary: argv = [exe, "--copyover", "<port>", "<listener_fd>"].
+    let cname = name_of(g, ch);
+    let reboot_notice = format!(
+        "\n\rThe server is being rebooted by {}. Please standby..\n\r",
+        cname
+    );
+    for (_conn, fd) in nonplaying {
+        let bye = b"\n\rSorry, we are rebooting. Come back in a minute.\n\r";
+        if fd >= 0 {
+            let _ = write_fd_all(fd, bye);
+        }
+    }
+    for &conn in &conns {
+        let (fd, playing, buffered) = match g.descriptors.get(&conn) {
+            Some(descriptor) => (
+                descriptor.raw_fd,
+                descriptor.state == ConState::Playing
+                    && descriptor.original.or(descriptor.character).is_some(),
+                descriptor.outbuf.clone(),
+            ),
+            None => continue,
+        };
+        if !playing {
+            continue;
+        }
+        // Clone rather than consume the descriptor buffer. Successful exec
+        // discards the old process; a failed write/exec leaves the live session
+        // byte-for-byte retryable (at worst the client sees duplicate text).
+        let mut tail = buffered;
+        tail.push_str(&reboot_notice);
+        tail.push_str("\n\rRestoring from copyover...\n\r");
+        let rendered = crate::connection::render_color(&tail);
+        if let Err(error) = write_fd_all(fd, rendered.as_bytes()) {
+            log::warn!("copyover socket flush failed for fd {fd}: {error}");
+            let _ = std::fs::remove_file(&copyover_path);
+            if let Err(rollback_error) = inheritance_guard.rollback() {
+                log::error!("copyover fd rollback failed after socket error: {rollback_error:#}");
+            }
+            g.send_to_char(ch, "Copyover socket flush failed; reboot aborted.\n\r");
+            return;
+        }
+    }
+
+    // Exec the validated release: argv = [exe, "--copyover", "<port>",
+    // "<listener_fd>"].
     // CommandExt::exec() is execvp with no fork: on success it never returns.
     let err = std::os::unix::process::CommandExt::exec(
         std::process::Command::new(&exe)
@@ -6990,46 +7648,567 @@ mod tests {
     use crate::object::{ExtraFlags, Object, WearFlags};
     use crate::room::Room;
     use crate::world::{MobileProto, ObjectProto, Zone};
-    use chrono::TimeZone;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::os::unix::fs::PermissionsExt;
 
-    fn lock_olc_save_list() -> MutexGuard<'static, ()> {
-        static OLC_SAVE_LIST_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        OLC_SAVE_LIST_TEST_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap()
+    #[test]
+    fn shutdown_options_have_explicit_restart_or_stop_dispositions() {
+        for option in ["", "reboot", "REBOOT", "now"] {
+            assert_eq!(
+                requested_shutdown_disposition(option),
+                Some(ProcessDisposition::Restart),
+                "{option:?} must request a supervisor restart"
+            );
+        }
+        for option in ["die", "DIE", "pause"] {
+            assert_eq!(
+                requested_shutdown_disposition(option),
+                Some(ProcessDisposition::Stop),
+                "{option:?} must stop cleanly"
+            );
+        }
+        assert_eq!(requested_shutdown_disposition("later"), None);
+    }
+
+    #[test]
+    fn copyover_executable_must_be_absolute_regular_and_executable() {
+        assert!(
+            validate_copyover_executable(std::path::PathBuf::from("relative/mud"), true, false)
+                .is_err()
+        );
+
+        let dir = std::env::temp_dir().join(format!(
+            "deltamud-copyover-exe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let file = dir.join("deltamud");
+        std::fs::write(&file, b"test executable").unwrap();
+
+        let mut permissions = std::fs::metadata(&file).unwrap().permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&file, permissions.clone()).unwrap();
+        assert!(validate_copyover_executable(file.clone(), true, false).is_err());
+
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&file, permissions).unwrap();
+        assert_eq!(
+            validate_copyover_executable(file.clone(), true, false).unwrap(),
+            file.canonicalize().unwrap()
+        );
+        assert!(
+            validate_copyover_executable(file.clone(), true, true).is_err(),
+            "a binary below world-writable /tmp must never be a production exec target"
+        );
+
+        std::fs::remove_file(file).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn copyover_requires_configured_release_for_real_database() {
+        let error = resolve_copyover_executable_from(None, false).unwrap_err();
+        assert!(error.to_string().contains("MUD_EXEC_PATH is required"));
+
+        let current = resolve_copyover_executable_from(None, true).unwrap();
+        assert_eq!(
+            current,
+            std::env::current_exe().unwrap().canonicalize().unwrap()
+        );
+    }
+
+    use chrono::TimeZone;
+    fn lock_olc_save_list() -> crate::olc::TestSaveListGuard {
+        crate::olc::test_save_list_guard()
+    }
+
+    #[test]
+    fn low_level_copyover_aborts_before_listener_work_when_olc_flush_fails() {
+        let _guard = lock_olc_save_list();
+        const MISSING_ZONE: i32 = 29_994;
+        crate::olc::olc_add_to_save_list(MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
+        let mut g = GameState::new(Config::default());
+        let requester = connected_player(&mut g, ConnId(199), "Builder", LVL_IMPL);
+
+        perform_copyover(&mut g, requester);
+
+        let output = &g.descriptors[&ConnId(199)].outbuf;
+        assert!(output.contains("Copyover OLC save failed"));
+        assert!(!output.contains("Copyover unavailable"));
+        assert!(crate::olc::flush_save_list_to_disk(&mut g).is_err());
+
+        crate::olc::olc_remove_from_save_list(MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
     }
 
     fn connected_player(g: &mut GameState, conn: ConnId, name: &str, level: Level) -> CharId {
         g.descriptors
             .insert(conn, Descriptor::new(conn, "test".to_string()));
+        g.descriptors.get_mut(&conn).unwrap().state = ConState::Playing;
         let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
         ch.desc = Some(conn);
+        ch.idnum = conn.0 as i64;
         ch.player.level = level;
+        ch.trust = i32::from(level);
+        let grants = crate::gcmd::canonical_advance_grants(level, LVL_IMMORT, LVL_IMPL);
+        ch.godcmds1 = grants.0;
+        ch.godcmds2 = grants.1;
+        ch.godcmds3 = grants.2;
+        ch.godcmds4 = grants.3;
         let id = g.create_char(ch);
+        g.descriptors.get_mut(&conn).unwrap().character = Some(id);
         g.players_by_name.insert(name.to_lowercase(), id);
         id
     }
 
     #[test]
-    fn do_advance_sets_xp_floor_and_confirms_to_immortal() {
+    fn tedit_uses_persisted_trust_and_refuses_unreadable_source() {
+        let root = std::env::temp_dir().join(format!("deltamud-tedit-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("text")).unwrap();
+        let mut config = Config::default();
+        config.lib_path = root.to_string_lossy().into_owned();
+        let mut g = GameState::new(config);
+
+        let demoted_conn = ConnId(7_301);
+        let demoted = connected_player(&mut g, demoted_conn, "Demoted", LVL_IMPL);
+        {
+            let character = g.get_char_mut(demoted).unwrap();
+            character.trust = 1;
+            character.godcmds3 |= crate::gcmd::GCMD3_IMPOLC;
+        }
+        do_tedit(&mut g, demoted, "news", 0);
+        assert!(
+            g.descriptors[&demoted_conn]
+                .outbuf
+                .contains("do not have text editor permissions")
+        );
+        assert!(!crate::modify::editing(&g, demoted_conn));
+
+        let trusted_conn = ConnId(7_302);
+        let trusted = connected_player(&mut g, trusted_conn, "Trusted", 1);
+        {
+            let character = g.get_char_mut(trusted).unwrap();
+            character.trust = i32::from(LVL_GRGOD);
+            character.godcmds3 |= crate::gcmd::GCMD3_IMPOLC;
+        }
+        do_tedit(&mut g, trusted, "news", 0);
+        assert!(
+            g.descriptors[&trusted_conn]
+                .outbuf
+                .contains("could not be read safely")
+        );
+        assert!(!crate::modify::editing(&g, trusted_conn));
+
+        std::fs::write(root.join("text/news"), "Current news.\n").unwrap();
+        g.descriptors.get_mut(&trusted_conn).unwrap().outbuf.clear();
+        do_tedit(&mut g, trusted, "news", 0);
+        assert!(crate::modify::editing(&g, trusted_conn));
+        assert!(
+            g.descriptors[&trusted_conn]
+                .outbuf
+                .contains("Current news.")
+        );
+
+        let other_conn = ConnId(7_303);
+        let other = connected_player(&mut g, other_conn, "Other", LVL_GRGOD);
+        g.get_char_mut(other).unwrap().godcmds3 |= crate::gcmd::GCMD3_IMPOLC;
+        do_tedit(&mut g, other, "news", 0);
+        assert!(
+            g.descriptors[&other_conn]
+                .outbuf
+                .contains("currently being edited")
+        );
+        assert!(!crate::modify::editing(&g, other_conn));
+
+        crate::modify::abort_conn(&mut g, trusted_conn);
+        g.descriptors.get_mut(&trusted_conn).unwrap().editors.pop();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn do_advance_queues_exact_transition_without_publishing_or_mutating() {
         let mut g = GameState::new(Config::default());
         let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
         let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
         let vict = connected_player(&mut g, ConnId(2), "Mort", 2);
+        g.get_char_mut(imm).unwrap().godcmds1 |= GCMD_ADVANCE;
         g.char_to_room(imm, room);
         g.char_to_room(vict, room);
 
-        do_advance(&mut g, imm, "Mort 10", 0);
+        crate::interpreter::run_authenticated_command(&mut g, imm, "advance Mort 10");
 
         let victim = g.get_char(vict).unwrap();
-        assert_eq!(victim.player.level, 10);
-        assert_eq!(victim.points.exp, exp_to_level(9));
+        assert_eq!(victim.player.level, 2);
+        assert_ne!(victim.points.exp, exp_to_level(9));
+        assert_eq!(g.authority_update_requests.len(), 1);
+        let request = &g.authority_update_requests[0];
+        assert_eq!(request.expected.level, 2);
+        assert_eq!(request.replacement.level, 10);
+        assert_eq!(request.replacement.trust, 10);
+        assert_eq!(request.replacement.exp, exp_to_level(9));
+        assert_eq!(
+            (
+                request.replacement.godcmds1,
+                request.replacement.godcmds2,
+                request.replacement.godcmds3,
+                request.replacement.godcmds4,
+            ),
+            (0, 0, 0, 0)
+        );
 
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
-        assert!(out.contains("&YOkay.&n\r\n"));
-        assert!(out.contains("(GC) Imm has advanced Mort to level 10."));
+        assert!(out.contains("queued"));
+        assert!(!out.contains("&YOkay.&n\r\n"));
+        assert!(!out.contains("has advanced"));
+    }
+
+    #[test]
+    fn mulder_name_does_not_bypass_snoop_authority() {
+        let mut g = GameState::new(Config::default());
+        let requester = connected_player(&mut g, ConnId(1), "Mulder", LVL_GOD);
+        let target = connected_player(&mut g, ConnId(2), "Target", LVL_IMPL);
+
+        do_snoop(&mut g, requester, "Target", 0);
+
+        assert_eq!(g.get_char(requester).unwrap().snooping, None);
+        assert_eq!(g.get_char(target).unwrap().snoop_by, None);
+        assert_eq!(g.descriptors[&ConnId(1)].outbuf, "You can't.\r\n");
+    }
+
+    #[test]
+    fn switched_low_level_body_does_not_hide_target_principal_from_snoop_gate() {
+        let mut g = GameState::new(Config::default());
+        let requester = connected_player(&mut g, ConnId(11), "Requester", LVL_GOD);
+        let principal = connected_player(&mut g, ConnId(12), "Principal", LVL_GRGOD);
+        let mut vessel = Character::new_npc(9_901);
+        vessel.player.name = "Vessel".to_string();
+        vessel.player.level = 1;
+        let vessel = g.create_char(vessel);
+
+        do_switch(&mut g, principal, "Vessel", 0);
+        assert_eq!(g.descriptors[&ConnId(12)].original, Some(principal));
+        assert_eq!(g.descriptors[&ConnId(12)].character, Some(vessel));
+
+        do_snoop(&mut g, requester, "Vessel", 0);
+
+        assert_eq!(g.get_char(requester).unwrap().snooping, None);
+        assert_eq!(g.get_char(vessel).unwrap().snoop_by, None);
+        assert!(
+            g.descriptors[&ConnId(11)]
+                .outbuf
+                .ends_with("You can't.\r\n")
+        );
+    }
+
+    #[test]
+    fn snoop_revalidates_grant_before_each_disclosure() {
+        let mut g = GameState::new(Config::default());
+        let requester = connected_player(&mut g, ConnId(21), "Requester", LVL_IMPL);
+        let target = connected_player(&mut g, ConnId(22), "Target", 1);
+        g.get_char_mut(requester).unwrap().godcmds1 |= GCMD_SNOOP;
+
+        crate::interpreter::run_authenticated_command(&mut g, requester, "snoop Target");
+        assert_eq!(g.get_char(requester).unwrap().snooping, Some(target));
+        assert_eq!(g.get_char(target).unwrap().snoop_by, Some(requester));
+
+        g.get_char_mut(requester).unwrap().godcmds1 &= !GCMD_SNOOP;
+        g.send_to_char(target, "private output\r\n");
+
+        assert_eq!(g.get_char(requester).unwrap().snooping, None);
+        assert_eq!(g.get_char(target).unwrap().snoop_by, None);
+        assert!(
+            !g.descriptors[&ConnId(21)].outbuf.contains("private output"),
+            "revoked snoopers must not receive one final relayed message"
+        );
+    }
+
+    #[test]
+    fn switch_pc_body_exception_uses_exact_principal_trust_not_level() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 1, "Room".into(), String::new()));
+        let requester = connected_player(&mut g, ConnId(91), "Requester", LVL_IMPL);
+        g.get_char_mut(requester).unwrap().trust = 1;
+        let mut victim = Character::new_player(
+            "Victim".to_string(),
+            crate::types::Class::Warrior,
+            crate::types::Race::Human,
+        );
+        victim.player.level = 1;
+        victim.trust = 1;
+        let victim = g.create_char(victim);
+        g.char_to_room(requester, room);
+        g.char_to_room(victim, room);
+
+        do_switch(&mut g, requester, "Victim", 0);
+        assert_eq!(g.descriptors[&ConnId(91)].character, Some(requester));
+        assert_eq!(g.descriptors[&ConnId(91)].original, None);
+
+        {
+            let requester = g.get_char_mut(requester).unwrap();
+            requester.player.level = 1;
+            requester.trust = i32::from(LVL_IMPL);
+        }
+        do_switch(&mut g, requester, "Victim", 0);
+        assert_eq!(g.descriptors[&ConnId(91)].character, Some(victim));
+        assert_eq!(g.descriptors[&ConnId(91)].original, Some(requester));
+    }
+
+    #[test]
+    fn dc_cannot_disconnect_a_higher_trust_principal_switched_into_a_low_npc() {
+        let mut g = GameState::new(Config::default());
+        let requester = connected_player(&mut g, ConnId(21), "Requester", LVL_GOD);
+        let principal = connected_player(&mut g, ConnId(22), "Principal", LVL_GRGOD);
+        let mut vessel = Character::new_npc(9_902);
+        vessel.player.name = "Vessel".to_string();
+        vessel.player.level = 1;
+        let vessel = g.create_char(vessel);
+
+        do_switch(&mut g, principal, "Vessel", 0);
+        let original_state = g.descriptors[&ConnId(22)].state;
+
+        do_dc(&mut g, requester, "22", 0);
+
+        assert_eq!(g.descriptors[&ConnId(22)].state, original_state);
+        assert_eq!(g.descriptors[&ConnId(22)].character, Some(vessel));
+        assert_eq!(g.descriptors[&ConnId(22)].original, Some(principal));
+        assert!(
+            g.descriptors[&ConnId(21)]
+                .outbuf
+                .ends_with("Umm.. maybe that's not such a good idea...\r\n")
+        );
+    }
+
+    #[test]
+    fn switched_principal_authority_blocks_force_transfer_and_teleport() {
+        let mut g = GameState::new(Config::default());
+        let source = g.add_room(Room::new(100, 1, "Source".into(), String::new()));
+        let destination = g.add_room(Room::new(200, 2, "Destination".into(), String::new()));
+        let requester = connected_player(&mut g, ConnId(31), "Requester", LVL_GOD);
+        let principal = connected_player(&mut g, ConnId(32), "Principal", LVL_GRGOD);
+        let mut vessel = Character::new_npc(9_903);
+        vessel.player.name = "Vessel".to_string();
+        vessel.player.level = 1;
+        let vessel = g.create_char(vessel);
+        g.char_to_room(requester, destination);
+        g.char_to_room(principal, source);
+        g.char_to_room(vessel, source);
+        do_switch(&mut g, principal, "Vessel", 0);
+
+        do_force(&mut g, requester, "Vessel stand", 0);
+        do_trans(&mut g, requester, "Vessel", 0);
+        do_teleport(&mut g, requester, "Vessel 200", 0);
+
+        assert_eq!(g.get_char(vessel).unwrap().in_room, Some(source));
+        let output = &g.descriptors[&ConnId(31)].outbuf;
+        assert!(output.contains("No, no, no!\r\n"));
+        assert!(output.contains("Go transfer someone your own size.\r\n"));
+        assert!(output.ends_with("Maybe you shouldn't do that.\r\n"));
+    }
+
+    #[test]
+    fn room_force_skips_a_higher_principal_switched_body() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 1, "Room".into(), String::new()));
+        let requester = connected_player(&mut g, ConnId(35), "Requester", LVL_GRGOD);
+        let principal = connected_player(&mut g, ConnId(36), "Principal", LVL_IMPL);
+        let mut vessel = Character::new_npc(9_905);
+        vessel.player.name = "Vessel".to_string();
+        vessel.position = Position::Resting;
+        let vessel = g.create_char(vessel);
+        let mut ordinary = Character::new_npc(NOBODY);
+        ordinary.player.name = "Ordinary".to_string();
+        ordinary.position = Position::Resting;
+        let ordinary = g.create_char(ordinary);
+        for character in [requester, principal, vessel, ordinary] {
+            g.char_to_room(character, room);
+        }
+        do_switch(&mut g, principal, "Vessel", 0);
+
+        do_force(&mut g, requester, "room stand", 0);
+
+        assert_eq!(g.get_char(vessel).unwrap().position, Position::Resting);
+        assert_eq!(g.get_char(ordinary).unwrap().position, Position::Standing);
+    }
+
+    #[test]
+    fn purge_preserves_both_roles_of_a_switched_session_and_ordinary_npcs() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 1, "Room".into(), String::new()));
+        let requester = connected_player(&mut g, ConnId(41), "Requester", LVL_IMPL);
+        let principal = connected_player(&mut g, ConnId(42), "Principal", LVL_GRGOD);
+        let mut vessel = Character::new_npc(9_904);
+        vessel.player.name = "Vessel".to_string();
+        let vessel = g.create_char(vessel);
+        let mut ordinary = Character::new_npc(NOBODY);
+        ordinary.player.name = "Ordinary".to_string();
+        let ordinary = g.create_char(ordinary);
+        g.char_to_room(requester, room);
+        g.char_to_room(principal, room);
+        g.char_to_room(vessel, room);
+        g.char_to_room(ordinary, room);
+        do_switch(&mut g, principal, "Vessel", 0);
+
+        do_purge(&mut g, requester, "Vessel", 0);
+        do_purge(&mut g, requester, "Principal", 0);
+
+        assert!(g.get_char(vessel).is_some());
+        assert!(g.get_char(principal).is_some());
+        assert_eq!(g.descriptors[&ConnId(42)].character, Some(vessel));
+        assert_eq!(g.descriptors[&ConnId(42)].original, Some(principal));
+
+        do_purge(&mut g, requester, "", 0);
+
+        assert!(g.get_char(vessel).is_some());
+        assert!(g.get_char(principal).is_some());
+        assert!(g.get_char(ordinary).is_none());
+        assert_eq!(g.descriptors[&ConnId(42)].character, Some(vessel));
+        assert_eq!(g.descriptors[&ConnId(42)].original, Some(principal));
+    }
+
+    #[test]
+    fn ordinary_descriptorless_npc_keeps_wizard_target_behavior() {
+        let mut g = GameState::new(Config::default());
+        let source = g.add_room(Room::new(100, 1, "Source".into(), String::new()));
+        let destination = g.add_room(Room::new(200, 2, "Destination".into(), String::new()));
+        let requester = connected_player(&mut g, ConnId(51), "Requester", LVL_GOD);
+        let mut ordinary = Character::new_npc(NOBODY);
+        ordinary.player.name = "Ordinary".to_string();
+        ordinary.position = Position::Resting;
+        let ordinary = g.create_char(ordinary);
+        g.char_to_room(requester, destination);
+        g.char_to_room(ordinary, source);
+
+        do_force(&mut g, requester, "Ordinary stand", 0);
+        assert_eq!(g.get_char(ordinary).unwrap().position, Position::Standing);
+
+        do_trans(&mut g, requester, "Ordinary", 0);
+        assert_eq!(g.get_char(ordinary).unwrap().in_room, Some(destination));
+
+        g.char_from_room(ordinary);
+        g.char_to_room(ordinary, source);
+        do_teleport(&mut g, requester, "Ordinary 200", 0);
+        assert_eq!(g.get_char(ordinary).unwrap().in_room, Some(destination));
+
+        do_purge(&mut g, requester, "Ordinary", 0);
+        assert!(g.get_char(ordinary).is_none());
+    }
+
+    #[test]
+    fn purge_keeps_ordinary_connected_player_close_and_extract_behavior() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 1, "Room".into(), String::new()));
+        let requester = connected_player(&mut g, ConnId(61), "Requester", LVL_IMPL);
+        let victim = connected_player(&mut g, ConnId(62), "Victim", 10);
+        g.char_to_room(requester, room);
+        g.char_to_room(victim, room);
+
+        do_purge(&mut g, requester, "Victim", 0);
+
+        assert!(g.get_char(victim).is_none());
+        assert_eq!(g.descriptors[&ConnId(62)].state, ConState::Close);
+        assert_eq!(g.descriptors[&ConnId(62)].character, None);
+        assert_eq!(g.descriptors[&ConnId(62)].original, None);
+    }
+
+    #[test]
+    fn purge_player_hierarchy_uses_authenticated_trust_for_every_caller_level() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 1, "Room".into(), String::new()));
+        let requester = connected_player(&mut g, ConnId(63), "Requester", LVL_IMPL);
+        let victim = connected_player(&mut g, ConnId(64), "Victim", 1);
+        g.get_char_mut(requester).unwrap().trust = i32::from(LVL_IMMORT);
+        g.get_char_mut(victim).unwrap().trust = i32::from(LVL_GOD);
+        g.char_to_room(requester, room);
+        g.char_to_room(victim, room);
+
+        do_purge(&mut g, requester, "Victim", 0);
+
+        assert!(
+            g.char_exists(victim),
+            "display level must not let lower trust purge a higher-trust player"
+        );
+        assert!(
+            g.descriptors[&ConnId(63)]
+                .outbuf
+                .ends_with("Fuuuuuuuuu!\r\n")
+        );
+
+        g.get_char_mut(requester).unwrap().player.level = 1;
+        g.get_char_mut(requester).unwrap().trust = i32::from(LVL_IMPL);
+        g.get_char_mut(victim).unwrap().trust = 1;
+        do_purge(&mut g, requester, "Victim", 0);
+        assert!(
+            !g.char_exists(victim),
+            "authenticated Implementor trust must work independently of display level"
+        );
+    }
+
+    #[test]
+    fn malformed_descriptor_alias_fails_closed_at_the_shared_authority_gate() {
+        let mut g = GameState::new(Config::default());
+        let requester = connected_player(&mut g, ConnId(71), "Requester", LVL_IMPL);
+        let victim = connected_player(&mut g, ConnId(72), "Victim", 1);
+        g.get_char_mut(victim).unwrap().desc = Some(ConnId(999));
+        let original_state = g.descriptors[&ConnId(72)].state;
+
+        do_dc(&mut g, requester, "72", 0);
+
+        assert_eq!(g.descriptors[&ConnId(72)].state, original_state);
+        assert!(
+            g.descriptors[&ConnId(71)]
+                .outbuf
+                .ends_with("Umm.. maybe that's not such a good idea...\r\n")
+        );
+    }
+
+    #[test]
+    fn descriptor_controlled_npc_without_an_original_principal_fails_closed() {
+        let mut g = GameState::new(Config::default());
+        let requester = connected_player(&mut g, ConnId(75), "Requester", LVL_IMPL);
+        let conn = ConnId(76);
+        g.descriptors
+            .insert(conn, Descriptor::new(conn, "test".to_string()));
+        g.descriptors.get_mut(&conn).unwrap().state = ConState::Playing;
+        let mut npc = Character::new_npc(9_906);
+        npc.player.name = "Broken".to_string();
+        npc.desc = Some(conn);
+        let npc = g.create_char(npc);
+        g.descriptors.get_mut(&conn).unwrap().character = Some(npc);
+
+        do_dc(&mut g, requester, "76", 0);
+
+        assert_eq!(g.descriptors[&conn].state, ConState::Playing);
+        assert_eq!(g.descriptors[&conn].character, Some(npc));
+        assert_eq!(g.descriptors[&conn].original, None);
+    }
+
+    #[test]
+    fn bulk_force_and_transfer_operate_on_the_active_switched_body() {
+        let mut g = GameState::new(Config::default());
+        let source = g.add_room(Room::new(100, 1, "Source".into(), String::new()));
+        let destination = g.add_room(Room::new(200, 2, "Destination".into(), String::new()));
+        let requester = connected_player(&mut g, ConnId(81), "Requester", LVL_IMPL);
+        let principal = connected_player(&mut g, ConnId(82), "Principal", LVL_GRGOD);
+        let mut vessel = Character::new_npc(9_907);
+        vessel.player.name = "Vessel".to_string();
+        vessel.position = Position::Resting;
+        let vessel = g.create_char(vessel);
+        g.char_to_room(requester, destination);
+        g.char_to_room(principal, source);
+        g.char_to_room(vessel, source);
+        do_switch(&mut g, principal, "Vessel", 0);
+
+        do_force(&mut g, requester, "all stand", 0);
+        assert_eq!(g.get_char(vessel).unwrap().position, Position::Standing);
+
+        do_trans(&mut g, requester, "all", 0);
+        assert_eq!(g.get_char(vessel).unwrap().in_room, Some(destination));
+        assert_eq!(g.get_char(principal).unwrap().in_room, Some(source));
+        assert_eq!(g.descriptors[&ConnId(82)].character, Some(vessel));
+        assert_eq!(g.descriptors[&ConnId(82)].original, Some(principal));
     }
 
     #[test]
@@ -7401,22 +8580,43 @@ mod tests {
     }
 
     #[test]
-    fn set_passwd_sets_pending_hash_and_echoes() {
+    fn set_passwd_queues_a_typed_hash_without_claiming_durable_success() {
         let mut g = GameState::new(Config::default());
         let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
         let target = connected_player(&mut g, ConnId(2), "Mort", 20);
+        g.get_char_mut(imm).unwrap().idnum = 101;
+        g.get_char_mut(target).unwrap().idnum = 202;
 
-        do_set(&mut g, imm, "Mort passwd newpass", 0);
+        crate::interpreter::run_authenticated_command(&mut g, imm, "set Mort passwd newpass");
 
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
-        assert!(out.contains("Password changed to 'newpass'.\r\n"));
-        let hash = g
-            .get_char(target)
-            .unwrap()
-            .pending_password_hash
-            .as_ref()
-            .expect("pending password hash");
-        assert!(crate::password::check_password(hash, "newpass"));
+        assert!(out.contains("Password change for Mort queued.\r\n"));
+        assert!(!out.contains("newpass"));
+        assert!(g.get_char(target).unwrap().pending_password_hash.is_none());
+        assert_eq!(g.password_update_requests.len(), 1);
+        let request = &g.password_update_requests[0];
+        assert_eq!(request.authorization.requester_body, imm);
+        assert_eq!(request.victim, target);
+        assert_eq!(request.idnum, 202);
+        assert_eq!(request.name, "Mort");
+        assert_eq!(request.plaintext_password, "newpass");
+
+        crate::interpreter::run_authenticated_command(&mut g, imm, "set Mort passwd xy");
+        assert_eq!(g.password_update_requests.len(), 1);
+        assert!(
+            g.descriptors[&ConnId(1)]
+                .outbuf
+                .contains("Password must be between 3 and 64 bytes.")
+        );
+        crate::interpreter::run_authenticated_command(
+            &mut g,
+            imm,
+            &format!(
+                "set Mort passwd {}",
+                "x".repeat(crate::password::MAX_PASSWORD_INPUT_BYTES + 1)
+            ),
+        );
+        assert_eq!(g.password_update_requests.len(), 1);
     }
 
     #[test]
@@ -7425,11 +8625,63 @@ mod tests {
         let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
         let target = connected_player(&mut g, ConnId(2), "Greater", LVL_GRGOD);
 
-        do_set(&mut g, imm, "Greater passwd newpass", 0);
+        crate::interpreter::run_authenticated_command(&mut g, imm, "set Greater passwd newpass");
 
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
         assert!(out.contains("You cannot change that.\r\n"));
         assert!(g.get_char(target).unwrap().pending_password_hash.is_none());
+        assert!(g.password_update_requests.is_empty());
+    }
+
+    #[test]
+    fn set_idnum_authorizes_the_implementor_role_not_player_id_one() {
+        let mut g = GameState::new(Config::default());
+        let implementor = connected_player(&mut g, ConnId(1), "Admin", LVL_IMPL);
+        g.get_char_mut(implementor).unwrap().idnum = 42;
+        let mut mobile = Character::new_npc(9001);
+        mobile.player.name = "test mobile".to_string();
+        mobile.idnum = 9001;
+        let target = g.create_char(mobile);
+
+        do_set(&mut g, implementor, "mobile idnum 777", 0);
+
+        assert_eq!(g.get_char(target).unwrap().idnum, 777);
+    }
+
+    #[test]
+    fn set_idnum_rejects_an_id_one_non_implementor_impostor() {
+        let mut g = GameState::new(Config::default());
+        let impostor = connected_player(&mut g, ConnId(1), "Impostor", 1);
+        {
+            let impostor = g.get_char_mut(impostor).unwrap();
+            impostor.idnum = 1;
+            // Pass do_set's historical IS_GOD admission so this specifically
+            // exercises role/field authorization rather than command lookup.
+            impostor.godcmds1 = crate::gcmd::GCMD_GEN;
+        }
+        let mut mobile = Character::new_npc(9002);
+        mobile.player.name = "test mobile".to_string();
+        mobile.idnum = 9002;
+        let target = g.create_char(mobile);
+
+        let idnum_mode = SET_FIELDS
+            .iter()
+            .position(|field| field.switchnum == 44)
+            .unwrap();
+        assert!(!perform_set(
+            &mut g,
+            Some(impostor),
+            target,
+            idnum_mode,
+            "888"
+        ));
+
+        assert_eq!(g.get_char(target).unwrap().idnum, 9002);
+        assert!(
+            g.descriptors[&ConnId(1)]
+                .outbuf
+                .contains("You are not godly enough for that!")
+        );
     }
 
     #[test]
@@ -7765,6 +9017,13 @@ WorldMap:\n",
         let mut g = GameState::new(Config::default());
         let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
         let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_GOD);
+        {
+            let imm = g.get_char_mut(imm).unwrap();
+            imm.godcmds1 = 0;
+            imm.godcmds2 = 0;
+            imm.godcmds3 = 0;
+            imm.godcmds4 = 0;
+        }
         g.char_to_room(imm, room);
 
         do_stat_character(&mut g, imm, imm);
@@ -7818,7 +9077,7 @@ WorldMap:\n",
         let new_rent = crate::objsave::crash_filename(&g.config.lib_path, "Newname").unwrap();
         let new_alias = crate::alias::alias_filename(&g.config.lib_path, "Newname").unwrap();
 
-        do_rename(&mut g, admin, "Oldname Newname", 0);
+        crate::interpreter::run_authenticated_command(&mut g, admin, "rename Oldname Newname");
 
         assert_eq!(g.get_char(victim).unwrap().get_name(), "Oldname");
         assert_eq!(g.find_player_by_name("Oldname"), Some(victim));
@@ -7828,7 +9087,7 @@ WorldMap:\n",
         assert!(g.player_save_requests.is_empty());
         assert_eq!(g.player_rename_requests.len(), 1);
         let queued = &g.player_rename_requests[0];
-        assert_eq!(queued.requester, admin);
+        assert_eq!(queued.authorization.requester_body, admin);
         assert_eq!(queued.victim, victim);
         assert_eq!(queued.idnum, idnum);
         assert_eq!(queued.old_name, "Oldname");
@@ -7843,8 +9102,8 @@ WorldMap:\n",
     #[test]
     fn rename_rejects_a_second_request_for_the_same_identity() {
         let (mut g, lib, admin, victim) = rename_test_state("duplicate");
-        do_rename(&mut g, admin, "Oldname Newname", 0);
-        do_rename(&mut g, admin, "Oldname Anothername", 0);
+        crate::interpreter::run_authenticated_command(&mut g, admin, "rename Oldname Newname");
+        crate::interpreter::run_authenticated_command(&mut g, admin, "rename Oldname Anothername");
 
         assert_eq!(g.player_rename_requests.len(), 1);
         assert_eq!(g.get_char(victim).unwrap().get_name(), "Oldname");
@@ -8112,5 +9371,523 @@ WorldMap:\n",
         assert_eq!(g.get_char(owner).unwrap().desc, None);
         assert_eq!(g.descriptors.get(&ConnId(1)).unwrap().character, Some(host));
         assert_eq!(g.descriptors.get(&ConnId(1)).unwrap().original, None);
+    }
+
+    #[test]
+    fn force_mass_scope_uses_persisted_trust_not_display_level() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".into(), "A room.".into()));
+        let requester = connected_player(&mut g, ConnId(91_001), "Requester", LVL_IMPL);
+        let target = connected_player(&mut g, ConnId(91_002), "Target", 1);
+        g.char_to_room(requester, room);
+        g.char_to_room(target, room);
+        g.get_char_mut(requester).unwrap().trust = i32::from(LVL_GOD);
+
+        do_force(&mut g, requester, "all stand", 0);
+        assert!(
+            !g.descriptors[&ConnId(91_002)]
+                .outbuf
+                .contains("has forced you")
+        );
+
+        {
+            let requester = g.get_char_mut(requester).unwrap();
+            requester.player.level = 1;
+            requester.trust = i32::from(LVL_GRGOD);
+        }
+        do_force(&mut g, requester, "all stand", 0);
+        assert!(
+            g.descriptors[&ConnId(91_002)]
+                .outbuf
+                .contains("has forced you")
+        );
+    }
+
+    #[test]
+    fn rename_queue_gate_uses_persisted_trust_not_display_level() {
+        let mut g = GameState::new(Config::default());
+        let requester = connected_player(&mut g, ConnId(91_011), "Requester", LVL_IMPL);
+        let target = connected_player(&mut g, ConnId(91_012), "Oldname", 1);
+        g.get_char_mut(target).unwrap().idnum = 91_012;
+        g.get_char_mut(requester).unwrap().trust = i32::from(LVL_GOD);
+        g.get_char_mut(target).unwrap().trust = i32::from(LVL_GRGOD);
+
+        crate::interpreter::run_authenticated_command(&mut g, requester, "rename Oldname Newname");
+        assert!(g.player_rename_requests.is_empty());
+
+        {
+            let requester = g.get_char_mut(requester).unwrap();
+            requester.player.level = 1;
+            requester.trust = i32::from(LVL_IMPL);
+        }
+        {
+            let target = g.get_char_mut(target).unwrap();
+            target.player.level = LVL_IMPL;
+            target.trust = i32::from(LVL_GOD);
+        }
+        crate::interpreter::run_authenticated_command(&mut g, requester, "rename Oldname Newname");
+        assert_eq!(g.player_rename_requests.len(), 1);
+        assert_eq!(
+            g.player_rename_requests[0].authorization.requester_body,
+            requester
+        );
+    }
+
+    #[test]
+    fn set_rejects_player_authority_fields_and_saves_normal_changes() {
+        let mut g = GameState::new(Config::default());
+        let requester = connected_player(&mut g, ConnId(91_021), "Requester", LVL_IMPL);
+        let target = connected_player(&mut g, ConnId(91_022), "Target", 20);
+        let before = {
+            let target = g.get_char(target).unwrap();
+            (
+                target.player.level,
+                target.trust,
+                target.godcmds1,
+                target.godcmds2,
+                target.godcmds3,
+                target.godcmds4,
+            )
+        };
+
+        for command in [
+            "Target level 50",
+            "Target trust 50",
+            "Target cmdadvance on",
+            "Target setall on",
+        ] {
+            g.descriptors
+                .get_mut(&ConnId(91_021))
+                .unwrap()
+                .outbuf
+                .clear();
+            do_set(&mut g, requester, command, 0);
+            assert!(
+                g.descriptors[&ConnId(91_021)]
+                    .outbuf
+                    .contains("advance <player> <level>"),
+                "command={command:?}"
+            );
+            let target = g.get_char(target).unwrap();
+            assert_eq!(
+                (
+                    target.player.level,
+                    target.trust,
+                    target.godcmds1,
+                    target.godcmds2,
+                    target.godcmds3,
+                    target.godcmds4,
+                ),
+                before
+            );
+            assert!(g.player_save_requests.is_empty());
+        }
+
+        do_set(&mut g, requester, "Target title Persisted", 0);
+        assert_eq!(
+            g.get_char(target).unwrap().player.title.as_deref(),
+            Some("Persisted")
+        );
+        assert_eq!(g.player_save_requests, vec![target]);
+    }
+
+    #[test]
+    fn set_password_target_cap_uses_trust_not_display_level() {
+        let mut g = GameState::new(Config::default());
+        let requester = connected_player(&mut g, ConnId(91_031), "Requester", LVL_IMPL);
+        let target = connected_player(&mut g, ConnId(91_032), "Target", 1);
+        g.get_char_mut(requester).unwrap().idnum = 91_031;
+        g.get_char_mut(target).unwrap().idnum = 91_032;
+        g.get_char_mut(target).unwrap().trust = i32::from(LVL_GRGOD);
+
+        crate::interpreter::run_authenticated_command(
+            &mut g,
+            requester,
+            "set Target passwd durable-pass",
+        );
+        assert!(g.password_update_requests.is_empty());
+
+        {
+            let target = g.get_char_mut(target).unwrap();
+            target.player.level = LVL_GRGOD;
+            target.trust = 1;
+        }
+        crate::interpreter::run_authenticated_command(
+            &mut g,
+            requester,
+            "set Target passwd durable-pass",
+        );
+        assert_eq!(g.password_update_requests.len(), 1);
+        assert!(g.player_save_requests.is_empty());
+    }
+
+    #[test]
+    fn set_invis_and_nohassle_caps_use_persisted_trust() {
+        let mut g = GameState::new(Config::default());
+        let requester = connected_player(&mut g, ConnId(91_041), "Requester", LVL_IMPL);
+        let target = connected_player(&mut g, ConnId(91_042), "Target", LVL_IMPL);
+        g.get_char_mut(requester).unwrap().trust = i32::from(LVL_GRGOD);
+        g.get_char_mut(target).unwrap().trust = 1;
+
+        do_set(&mut g, requester, "Target nohassle on", 0);
+        assert_eq!(g.get_char(target).unwrap().prf_flags & PRF_NOHASSLE, 0);
+
+        {
+            let requester = g.get_char_mut(requester).unwrap();
+            requester.player.level = 1;
+            requester.trust = i32::from(LVL_IMPL);
+        }
+        do_set(&mut g, requester, "Target invis 105", 0);
+        do_set(&mut g, requester, "Target nohassle on", 0);
+        assert_eq!(g.get_char(target).unwrap().invis_level, 1);
+        assert_ne!(g.get_char(target).unwrap().prf_flags & PRF_NOHASSLE, 0);
+        assert_eq!(g.player_save_requests, vec![target]);
+    }
+
+    #[test]
+    fn wiznet_recipients_and_listing_use_persisted_trust() {
+        let mut g = GameState::new(Config::default());
+        let sender = connected_player(&mut g, ConnId(91_051), "Sender", 1);
+        let spoofed = connected_player(&mut g, ConnId(91_052), "Spoofed", LVL_IMPL);
+        let trusted = connected_player(&mut g, ConnId(91_053), "Trusted", 1);
+        g.get_char_mut(sender).unwrap().trust = i32::from(LVL_IMPL);
+        g.get_char_mut(spoofed).unwrap().trust = 1;
+        g.get_char_mut(trusted).unwrap().trust = i32::from(LVL_IMMORT);
+
+        do_wiznet(&mut g, sender, "trust boundary", 0);
+        assert!(
+            !g.descriptors[&ConnId(91_052)]
+                .outbuf
+                .contains("trust boundary")
+        );
+        assert!(
+            g.descriptors[&ConnId(91_053)]
+                .outbuf
+                .contains("trust boundary")
+        );
+
+        g.descriptors
+            .get_mut(&ConnId(91_051))
+            .unwrap()
+            .outbuf
+            .clear();
+        do_wiznet(&mut g, sender, "@", 0);
+        let listing = &g.descriptors[&ConnId(91_051)].outbuf;
+        assert!(listing.contains("Trusted"), "listing={listing:?}");
+        assert!(!listing.contains("Spoofed"), "listing={listing:?}");
+
+        g.authority_quarantine.insert(91_053);
+        g.descriptors
+            .get_mut(&ConnId(91_051))
+            .unwrap()
+            .outbuf
+            .clear();
+        do_wiznet(&mut g, sender, "@", 0);
+        let listing = &g.descriptors[&ConnId(91_051)].outbuf;
+        assert!(!listing.contains("Trusted"), "listing={listing:?}");
+    }
+
+    #[test]
+    fn wizutil_hierarchy_and_freeze_provenance_use_persisted_trust() {
+        let mut g = GameState::new(Config::default());
+        let requester = connected_player(&mut g, ConnId(91_056), "Requester", 1);
+        let target = connected_player(&mut g, ConnId(91_057), "Target", LVL_HERO - 1);
+        g.get_char_mut(requester).unwrap().trust = i32::from(LVL_GRGOD);
+        g.get_char_mut(target).unwrap().trust = 1;
+
+        do_wizutil(&mut g, requester, "Target", SCMD_FREEZE);
+        assert_ne!(g.get_char(target).unwrap().act_flags & PLR_FROZEN, 0);
+        assert_eq!(g.get_char(target).unwrap().freeze_level, LVL_GRGOD);
+
+        g.get_char_mut(requester).unwrap().trust = i32::from(LVL_GOD);
+        do_wizutil(&mut g, requester, "Target", SCMD_THAW);
+        assert_ne!(g.get_char(target).unwrap().act_flags & PLR_FROZEN, 0);
+
+        g.get_char_mut(requester).unwrap().trust = i32::from(LVL_GRGOD);
+        do_wizutil(&mut g, requester, "Target", SCMD_THAW);
+        assert_eq!(g.get_char(target).unwrap().act_flags & PLR_FROZEN, 0);
+    }
+
+    #[test]
+    fn live_and_offline_inspection_and_last_use_persisted_trust() {
+        let mut g = GameState::new(Config::default());
+        let requester = connected_player(&mut g, ConnId(91_061), "Requester", LVL_IMPL);
+        let target = connected_player(&mut g, ConnId(91_062), "Target", 1);
+        g.get_char_mut(requester).unwrap().trust = i32::from(LVL_GOD);
+        g.get_char_mut(target).unwrap().trust = i32::from(LVL_GRGOD);
+        g.descriptors.get_mut(&ConnId(91_062)).unwrap().host = "secret.example".into();
+
+        do_stat(&mut g, requester, "player Target", 0);
+        do_last(&mut g, requester, "Target", 0);
+        let output = &g.descriptors[&ConnId(91_061)].outbuf;
+        assert!(output.contains(PLAYER_INSPECTION_DENIED.trim()));
+        assert!(!output.contains("secret.example"));
+
+        g.update_player_index(91_063, "Offline", 1, 1_700_000_000, "offline-secret");
+        g.player_table
+            .iter_mut()
+            .find(|entry| entry.idnum == 91_063)
+            .unwrap()
+            .trust = i32::from(LVL_GRGOD);
+        g.descriptors
+            .get_mut(&ConnId(91_061))
+            .unwrap()
+            .outbuf
+            .clear();
+        do_last(&mut g, requester, "Offline", 0);
+        assert!(
+            !g.descriptors[&ConnId(91_061)]
+                .outbuf
+                .contains("offline-secret")
+        );
+
+        {
+            let requester = g.get_char_mut(requester).unwrap();
+            requester.player.level = 1;
+            requester.trust = i32::from(LVL_IMPL);
+        }
+        g.descriptors
+            .get_mut(&ConnId(91_061))
+            .unwrap()
+            .outbuf
+            .clear();
+        do_last(&mut g, requester, "Offline", 0);
+        assert!(
+            g.descriptors[&ConnId(91_061)]
+                .outbuf
+                .contains("offline-secret")
+        );
+    }
+
+    #[test]
+    fn transfer_all_uses_persisted_trust_not_display_level() {
+        let mut g = GameState::new(Config::default());
+        let source = g.add_room(Room::new(100, 0, "Source".into(), "Source.".into()));
+        let destination = g.add_room(Room::new(
+            200,
+            0,
+            "Destination".into(),
+            "Destination.".into(),
+        ));
+        let requester = connected_player(&mut g, ConnId(92_001), "Requester", LVL_IMPL);
+        let target = connected_player(&mut g, ConnId(92_002), "Target", 1);
+        g.char_to_room(requester, destination);
+        g.char_to_room(target, source);
+        g.get_char_mut(requester).unwrap().trust = i32::from(LVL_GOD);
+
+        do_trans(&mut g, requester, "all", 0);
+        assert_eq!(g.get_char(target).unwrap().in_room, Some(source));
+
+        {
+            let requester = g.get_char_mut(requester).unwrap();
+            requester.player.level = 1;
+            requester.trust = i32::from(LVL_GRGOD);
+        }
+        do_trans(&mut g, requester, "all", 0);
+        assert_eq!(g.get_char(target).unwrap().in_room, Some(destination));
+    }
+
+    #[test]
+    fn stat_vstat_and_zone_lists_use_persisted_trust() {
+        let mut g = GameState::new(Config::default());
+        g.zones.push(test_zone(1, 199, "Other"));
+        let room = g.add_room(Room::new(100, 0, "Audited room".into(), "Room.".into()));
+        let requester = connected_player(&mut g, ConnId(92_011), "Requester", LVL_IMPL);
+        g.char_to_room(requester, room);
+        g.get_char_mut(requester).unwrap().trust = 1;
+
+        g.obj_protos
+            .insert(100, object_proto(100, ObjectType::Boat, "an audited boat"));
+        g.mob_protos
+            .insert(100, mobile_proto(100, "an audited mobile", 0));
+        let object = g.create_obj(Object::new(
+            100,
+            "audited boat".into(),
+            "an audited boat".into(),
+        ));
+        let mut mobile = Character::new_npc(100);
+        mobile.player.name = "audited mobile".into();
+        let mobile = g.create_char(mobile);
+
+        do_stat_room(&mut g, requester);
+        do_stat_object(&mut g, requester, object);
+        do_stat_character(&mut g, requester, mobile);
+        do_vstat(&mut g, requester, "mob 100", 0);
+        let denied = &g.descriptors[&ConnId(92_011)].outbuf;
+        assert_eq!(
+            denied
+                .matches("You don't have permissions to that zone.")
+                .count(),
+            4,
+            "output={denied:?}"
+        );
+
+        let list_routes: [fn(&mut GameState, CharId, &str, i32); 3] =
+            [do_rlist, do_mlist, do_olist];
+        for route in list_routes {
+            g.descriptors
+                .get_mut(&ConnId(92_011))
+                .unwrap()
+                .outbuf
+                .clear();
+            route(&mut g, requester, "100 101", 0);
+            assert!(
+                g.descriptors[&ConnId(92_011)]
+                    .outbuf
+                    .contains("You can't edit the zone supplied by the first argument."),
+            );
+        }
+
+        {
+            let requester = g.get_char_mut(requester).unwrap();
+            requester.player.level = 1;
+            requester.trust = i32::from(LVL_IMMORT);
+        }
+        for route in list_routes {
+            g.descriptors
+                .get_mut(&ConnId(92_011))
+                .unwrap()
+                .outbuf
+                .clear();
+            route(&mut g, requester, "100 101", 0);
+            let output = &g.descriptors[&ConnId(92_011)].outbuf;
+            assert!(!output.contains("can't edit the zone"), "output={output:?}");
+            assert!(output.contains("100"), "output={output:?}");
+        }
+    }
+
+    #[test]
+    fn invisibility_visibility_and_vwear_use_persisted_trust() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".into(), "Room.".into()));
+        let requester = connected_player(&mut g, ConnId(92_021), "Requester", LVL_IMPL);
+        let spoofed_viewer = connected_player(&mut g, ConnId(92_022), "Spoofed", LVL_IMPL);
+        let trusted_viewer = connected_player(&mut g, ConnId(92_023), "Trusted", 1);
+        for player in [requester, spoofed_viewer, trusted_viewer] {
+            g.char_to_room(player, room);
+        }
+        g.get_char_mut(requester).unwrap().trust = 1;
+        g.get_char_mut(spoofed_viewer).unwrap().trust = 1;
+        g.get_char_mut(trusted_viewer).unwrap().trust = i32::from(LVL_IMPL);
+        g.obj_protos.insert(
+            500,
+            object_proto(500, ObjectType::Boat, "an authority boat"),
+        );
+
+        do_invis(&mut g, requester, "105", 0);
+        do_vwear(&mut g, requester, "boat", 0);
+        do_respec(&mut g, requester, "", 0);
+        assert_eq!(g.get_char(requester).unwrap().invis_level, 0);
+        assert!(
+            g.descriptors[&ConnId(92_021)]
+                .outbuf
+                .contains("You are not godly enough for that!")
+        );
+
+        {
+            let requester = g.get_char_mut(requester).unwrap();
+            requester.player.level = 1;
+            requester.trust = i32::from(LVL_GOD);
+        }
+        for conn in [ConnId(92_021), ConnId(92_022), ConnId(92_023)] {
+            g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        }
+        do_invis(&mut g, requester, "", 0);
+        do_vwear(&mut g, requester, "boat", 0);
+        do_respec(&mut g, requester, "", 0);
+        assert_eq!(
+            g.get_char(requester).unwrap().invis_level,
+            i32::from(LVL_GOD)
+        );
+        assert!(
+            g.descriptors[&ConnId(92_021)]
+                .outbuf
+                .contains("an authority boat")
+        );
+        assert!(
+            g.descriptors[&ConnId(92_021)]
+                .outbuf
+                .contains("Mob hardcoded SPECS reassigned")
+        );
+        assert!(
+            g.descriptors[&ConnId(92_022)]
+                .outbuf
+                .contains("suddenly realize")
+        );
+        assert!(
+            !g.descriptors[&ConnId(92_023)]
+                .outbuf
+                .contains("suddenly realize")
+        );
+
+        perform_immort_vis(&mut g, requester);
+        g.get_char_mut(requester).unwrap().prf2_flags |= PRF2_INTANGIBLE;
+        for conn in [ConnId(92_022), ConnId(92_023)] {
+            g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        }
+        do_echo(&mut g, requester, "passes unseen.", SCMD_EMOTE);
+        assert!(
+            !g.descriptors[&ConnId(92_022)]
+                .outbuf
+                .contains("passes unseen")
+        );
+        assert!(
+            g.descriptors[&ConnId(92_023)]
+                .outbuf
+                .contains("passes unseen")
+        );
+    }
+
+    #[test]
+    fn bare_stat_and_administrative_target_scopes_use_persisted_trust() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 0, "Room".into(), "Room.".into()));
+        let requester = connected_player(&mut g, ConnId(92_031), "Requester", LVL_IMPL);
+        let lower = connected_player(&mut g, ConnId(92_032), "Lower", LVL_IMPL);
+        let higher = connected_player(&mut g, ConnId(92_033), "Higher", 1);
+        for player in [requester, lower, higher] {
+            g.char_to_room(player, room);
+        }
+        g.get_char_mut(requester).unwrap().trust = i32::from(LVL_GOD);
+        g.get_char_mut(lower).unwrap().trust = 1;
+        g.get_char_mut(higher).unwrap().trust = i32::from(LVL_GRGOD);
+
+        do_stat(&mut g, requester, "Higher", 0);
+        assert!(
+            g.descriptors[&ConnId(92_031)]
+                .outbuf
+                .contains(PLAYER_INSPECTION_DENIED.trim())
+        );
+
+        g.get_char_mut(lower).unwrap().fighting = Some(higher);
+        g.get_char_mut(higher).unwrap().fighting = Some(lower);
+        do_peace(&mut g, requester, "", 0);
+        assert!(g.get_char(lower).unwrap().fighting.is_none());
+        assert!(g.get_char(higher).unwrap().fighting.is_some());
+
+        do_gplague(&mut g, requester, "", 0);
+        assert_ne!(g.get_char(lower).unwrap().affect_flags & AFF_PLAGUED, 0);
+        assert_eq!(g.get_char(higher).unwrap().affect_flags & AFF_PLAGUED, 0);
+
+        g.obj_protos.insert(
+            600,
+            object_proto(600, ObjectType::Treasure, "an authority reward"),
+        );
+        do_reward(&mut g, requester, "all 600", 0);
+        assert_eq!(g.get_char(lower).unwrap().carrying.len(), 1);
+        assert!(g.get_char(higher).unwrap().carrying.is_empty());
+
+        {
+            let requester = g.get_char_mut(requester).unwrap();
+            requester.player.level = 1;
+            requester.trust = i32::from(LVL_GRGOD);
+        }
+        g.descriptors
+            .get_mut(&ConnId(92_031))
+            .unwrap()
+            .outbuf
+            .clear();
+        do_stat(&mut g, requester, "Higher", 0);
+        assert!(g.descriptors[&ConnId(92_031)].outbuf.contains("IDNum:"));
     }
 }

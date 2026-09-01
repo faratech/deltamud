@@ -1,0 +1,40 @@
+[Unit]
+Description=DeltaMUD offline schema migration for release %i
+Documentation=file:/opt/deltamud/releases/%i/docs/RUNBOOK.md
+After=mariadb.service
+ConditionFileIsExecutable=/opt/deltamud/releases/%i/bin/deltamud
+
+[Service]
+Type=oneshot
+User=deltamud
+Group=deltamud
+TimeoutStartSec=infinity
+WorkingDirectory=/var/lib/deltamud
+EnvironmentFile=/etc/deltamud/deltamud.env
+UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT LD_DEBUG LD_PROFILE LD_SHOW_AUXV LD_ORIGIN_PATH BASH_ENV ENV SHELLOPTS BASHOPTS CDPATH GLOBIGNORE PYTHONPATH PYTHONHOME PERL5LIB PERLLIB RUBYLIB GEM_HOME GEM_PATH GCONV_PATH GETCONF_DIR HOME XDG_CONFIG_HOME CURL_HOME HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy SYSTEMD_LOG_LEVEL SYSTEMD_LOG_TARGET SYSTEMD_PAGER SYSTEMD_LESS SYSTEMD_COLORS
+ExecCondition=+/usr/local/sbin/deltamud-release migration-guard %i
+ExecStart=/opt/deltamud/releases/%i/bin/deltamud --migrate
+UMask=0027
+
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+ReadOnlyPaths=/opt/deltamud
+ReadWritePaths=/var/lib/deltamud -/etc/deltamud/activation

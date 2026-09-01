@@ -1143,7 +1143,14 @@ pub fn do_page(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let buf = format!("\x07\x07*{}* {}\r\n", get_name(g, ch), message);
 
     if name.eq_ignore_ascii_case("all") {
-        if level(g, ch) > LVL_GOD as u8 {
+        // Paging one named target is the ordinary GCMD2_PAGE capability, but
+        // the global broadcast is a stronger administrative exception. Bind
+        // it to the exact live input session and persisted principal trust;
+        // display level and indirect/forced handler entry must not authorize
+        // a server-wide page.
+        if crate::interpreter::authenticated_input_authority(g, ch)
+            .is_some_and(|authority| authority.authority > i32::from(LVL_GOD))
+        {
             let players = connected_players(g);
             for d in players {
                 act(g, &buf, false, ch, None, ActArg::Char(d), To::Vict);
@@ -1451,42 +1458,53 @@ pub fn check_multiplaying(g: &GameState, hostname: &str) -> bool {
         .map(|v| v != "0" && !v.is_empty())
         .unwrap_or(false)
     {
-        // The C logic, past the dev-mode bypass:
-        let mut num_links = 0u32;
-        let mut name: Option<String> = None;
-        for d in g.descriptors.values() {
-            let lvl_ch = d.character.or(d.original);
-            if let Some(cid) = lvl_ch {
-                let c = g.get_char(cid);
-                if c.map(|c| c.player.level >= LVL_IMPL).unwrap_or(false) {
-                    continue;
-                }
-                if c.map(|c| c.act_flags & crate::flags::PLR_MULTIOK != 0)
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-            }
-            if !d.host.eq_ignore_ascii_case(hostname) {
-                continue;
-            }
-            let this = lvl_ch
-                .and_then(|cid| g.get_char(cid))
-                .map(|c| c.get_name().to_string());
-            let this = match this {
-                Some(t) => t,
-                None => continue,
-            };
-            match &name {
-                None => name = Some(this),
-                Some(n) if n.eq_ignore_ascii_case(&this) => continue,
-                _ => num_links += 1,
-            }
-        }
-        return num_links < 2;
+        return check_multiplaying_enforced(g, hostname);
     }
     // C: `return 1; // While in development mode we wanna give our builders freedom...`
     true
+}
+
+/// The optional post-development multiplay policy. Kept separate from the env
+/// switch so its trust and malformed-session behavior can be tested without
+/// mutating process-global environment state.
+fn check_multiplaying_enforced(g: &GameState, hostname: &str) -> bool {
+    let mut num_links = 0u32;
+    let mut name: Option<String> = None;
+    for descriptor in g.descriptors.values() {
+        if !descriptor.host.eq_ignore_ascii_case(hostname) {
+            continue;
+        }
+        let Some(controlled) = descriptor.character.or(descriptor.original) else {
+            // Login descriptors without an attached identity do not represent
+            // a second account yet.
+            continue;
+        };
+        let Some(principal) = g.principal_authority(controlled) else {
+            // A same-host broken alias must never acquire the Implementor or
+            // PLR_MULTIOK exemption, nor disappear from the count.
+            return false;
+        };
+        if principal.descriptor != Some(descriptor.id) || !principal.is_authenticated_player() {
+            return false;
+        }
+        let Some(character) = g.get_char(principal.principal) else {
+            return false;
+        };
+        if principal.authority >= i32::from(LVL_IMPL) {
+            continue;
+        }
+        if character.act_flags & crate::flags::PLR_MULTIOK != 0 {
+            continue;
+        }
+
+        let this = character.get_name().to_string();
+        match &name {
+            None => name = Some(this),
+            Some(existing) if existing.eq_ignore_ascii_case(&this) => continue,
+            _ => num_links += 1,
+        }
+    }
+    num_links < 2
 }
 
 #[cfg(test)]
@@ -1494,7 +1512,7 @@ mod tests {
     use super::*;
     use crate::character::Character;
     use crate::config::Config;
-    use crate::connection::Descriptor;
+    use crate::connection::{ConState, Descriptor};
     use crate::object::{ObjectType, WearFlags};
     use crate::room::Room;
     use crate::world::ObjectProto;
@@ -1505,13 +1523,20 @@ mod tests {
         let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
         ch.desc = Some(conn);
         ch.player.level = level;
+        ch.trust = i32::from(level);
         let id = g.create_char(ch);
+        g.descriptors.get_mut(&conn).unwrap().character = Some(id);
         g.players_by_name.insert(name.to_lowercase(), id);
         id
     }
 
     fn out(g: &GameState, conn: ConnId) -> String {
         g.descriptors.get(&conn).unwrap().outbuf.clone()
+    }
+
+    fn authenticate(g: &mut GameState, ch: CharId) {
+        let conn = g.get_char(ch).and_then(|character| character.desc).unwrap();
+        g.descriptors.get_mut(&conn).unwrap().state = ConState::Playing;
     }
 
     fn proto(vnum: ObjVnum, name: &str, obj_type: ObjectType) -> ObjectProto {
@@ -1616,6 +1641,95 @@ mod tests {
         );
     }
 
+    #[test]
+    fn multiplay_implementor_exemption_uses_principal_trust_not_display_level() {
+        let mut display_game = GameState::new(Config::default());
+        let display = player(&mut display_game, ConnId(31), "Display", LVL_IMPL);
+        display_game.get_char_mut(display).unwrap().trust = 1;
+        player(&mut display_game, ConnId(32), "Alpha", 10);
+        player(&mut display_game, ConnId(33), "Beta", 10);
+        assert!(
+            !check_multiplaying_enforced(&display_game, "test"),
+            "display level 105 with trust 1 must count toward the same-host gate"
+        );
+
+        let mut trust_game = GameState::new(Config::default());
+        let trusted = player(&mut trust_game, ConnId(34), "Trusted", 1);
+        trust_game.get_char_mut(trusted).unwrap().trust = i32::from(LVL_IMPL);
+        player(&mut trust_game, ConnId(35), "Alpha", 10);
+        player(&mut trust_game, ConnId(36), "Beta", 10);
+        assert!(
+            check_multiplaying_enforced(&trust_game, "test"),
+            "display level 1 with Implementor trust must receive the exemption"
+        );
+    }
+
+    #[test]
+    fn multiplay_exemption_rejects_malformed_switched_aliases() {
+        let mut g = GameState::new(Config::default());
+        let principal = player(&mut g, ConnId(37), "Principal", 1);
+        g.get_char_mut(principal).unwrap().trust = i32::from(LVL_IMPL);
+
+        let mut body = Character::new_npc(7_300);
+        body.desc = Some(ConnId(37));
+        let body = g.create_char(body);
+        g.get_char_mut(principal).unwrap().desc = None;
+        {
+            let descriptor = g.descriptors.get_mut(&ConnId(37)).unwrap();
+            descriptor.character = Some(body);
+            descriptor.original = Some(principal);
+        }
+
+        let mut alias_body = Character::new_npc(7_301);
+        alias_body.desc = Some(ConnId(38));
+        let alias_body = g.create_char(alias_body);
+        let mut duplicate = Descriptor::new(ConnId(38), "test".to_string());
+        duplicate.character = Some(alias_body);
+        duplicate.original = Some(principal);
+        g.descriptors.insert(ConnId(38), duplicate);
+
+        assert!(
+            !check_multiplaying_enforced(&g, "test"),
+            "a duplicate switched principal alias must fail closed"
+        );
+    }
+
+    #[test]
+    fn page_all_requires_direct_authenticated_principal_trust() {
+        let mut g = GameState::new(Config::default());
+        let sender = player(&mut g, ConnId(41), "Sender", LVL_GRGOD);
+        let recipient = player(&mut g, ConnId(42), "Recipient", 10);
+        authenticate(&mut g, sender);
+        authenticate(&mut g, recipient);
+        g.get_char_mut(sender).unwrap().godcmds2 |= crate::gcmd::GCMD2_PAGE;
+
+        // Display rank is not authority.
+        g.get_char_mut(sender).unwrap().trust = 1;
+        crate::interpreter::run_authenticated_command(&mut g, sender, "page all spoofed");
+        assert!(
+            !out(&g, ConnId(42)).contains("spoofed"),
+            "display-only rank must not broadcast"
+        );
+
+        // Persisted trust is sufficient only on exact descriptor input.
+        g.get_char_mut(sender).unwrap().player.level = 1;
+        g.get_char_mut(sender).unwrap().trust = i32::from(LVL_GRGOD);
+        g.descriptors.get_mut(&ConnId(41)).unwrap().outbuf.clear();
+        g.descriptors.get_mut(&ConnId(42)).unwrap().outbuf.clear();
+        crate::interpreter::command_interpreter(&mut g, sender, "page all indirect");
+        assert!(
+            !out(&g, ConnId(42)).contains("indirect"),
+            "indirect command replay must not broadcast"
+        );
+
+        crate::interpreter::run_authenticated_command(&mut g, sender, "page all direct");
+        assert!(
+            out(&g, ConnId(42)).contains("*Sender* direct"),
+            "direct authenticated GRGOD trust should broadcast: {}",
+            out(&g, ConnId(42))
+        );
+    }
+
     /// #331: a named pen (ITEM_PEN) is the pen, the held note is the paper, and
     /// the write goes ahead; the reverse ('write note pen' with a non-pen pen)
     /// is refused with "$p is no good for writing with.".
@@ -1690,7 +1804,8 @@ mod tests {
         );
         g.descriptors.get_mut(&ConnId(1)).unwrap().outbuf.clear();
 
-        crate::cmd_informative::do_status(&mut g, god, "victim", 0);
+        authenticate(&mut g, god);
+        crate::interpreter::run_authenticated_command(&mut g, god, "score victim");
         assert!(
             out(&g, ConnId(1)).contains("***** Score for Victim *****"),
             "score <player> should find an out-of-room PC: {}",

@@ -396,8 +396,16 @@ fn get_name(g: &GameState, id: CharId) -> String {
         .map(|c| c.player.name.clone())
         .unwrap_or_default()
 }
-fn get_level(g: &GameState, id: CharId) -> Level {
-    g.get_char(id).map(|c| c.player.level).unwrap_or(0)
+fn authenticated_clan_god(g: &GameState, id: CharId) -> bool {
+    crate::interpreter::authenticated_input_authority(g, id)
+        .is_some_and(|authority| authority.authority >= i32::from(LVL_CLAN_GOD))
+}
+fn player_account_is_immortal(g: &GameState, id: CharId) -> bool {
+    g.principal_authority(id).is_none_or(|authority| {
+        !authority.principal_is_player
+            || authority.principal != id
+            || authority.authority >= i32::from(LVL_IMMORT)
+    })
 }
 fn get_clan(g: &GameState, id: CharId) -> i32 {
     g.get_char(id).map(|c| c.clan).unwrap_or(-1)
@@ -558,7 +566,10 @@ fn send_clan_format(g: &mut GameState, ch: CharId) {
 \x20      clan roster\r\n\
 \x20      clan demote <victim>\r\n",
     );
-    if get_level(g, ch) >= LVL_CLAN_GOD {
+    if g.principal_authority(ch)
+        .filter(|authority| authority.is_authenticated_player())
+        .is_some_and(|authority| authority.authority >= i32::from(LVL_CLAN_GOD))
+    {
         g.send_to_char(
             ch,
             "\x20      clan create <leader> <name>\r\n\
@@ -577,7 +588,7 @@ fn clan_create(g: &mut GameState, ch: CharId, arg: &str) {
         send_clan_format(g, ch);
         return;
     }
-    if get_level(g, ch) < LVL_CLAN_GOD {
+    if !authenticated_clan_god(g, ch) {
         g.send_to_char(ch, "You can't do that!\r\n");
         return;
     }
@@ -599,7 +610,7 @@ fn clan_create(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, "Clan name too long! (32 characters max)\r\n");
         return;
     }
-    if get_level(g, leader) >= LVL_IMMORT {
+    if player_account_is_immortal(g, leader) {
         g.send_to_char(
             ch,
             "You cannot set an immortal as the leader of a clan.\r\n",
@@ -677,7 +688,7 @@ fn clan_destroy(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, "Unknown clan.\r\n");
         return;
     }
-    if get_level(g, ch) < LVL_CLAN_GOD {
+    if !authenticated_clan_god(g, ch) {
         g.send_to_char(ch, "Your not mighty enough to destroy clans!\r\n");
         return;
     }
@@ -1092,7 +1103,7 @@ fn clan_enlist(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, "They are already in your clan.\r\n");
         return;
     }
-    if get_level(g, victim) >= LVL_IMMORT {
+    if player_account_is_immortal(g, victim) {
         g.send_to_char(ch, "You can't enlist immortals.\r\n");
         return;
     }
@@ -1364,7 +1375,7 @@ fn clan_who_title(g: &mut GameState, ch: CharId, arg: &str) {
         send_clan_format(g, ch);
         return;
     }
-    if get_level(g, ch) < LVL_CLAN_GOD {
+    if !authenticated_clan_god(g, ch) {
         g.send_to_char(ch, "You cannot do that.\r\n");
         return;
     }
@@ -1607,7 +1618,6 @@ fn clan_roster(g: &mut GameState, ch: CharId) {
     if !any {
         g.send_to_char(ch, "No clan members!\r\n");
     }
-    let members = with_clan(num, |c| c.members).unwrap_or(0);
     g.send_to_char(ch, "------------------------------------\r\n");
 }
 
@@ -1616,7 +1626,7 @@ fn clan_roster(g: &mut GameState, ch: CharId) {
 // ---------------------------------------------------------------------------
 
 fn clan_new_owner(g: &mut GameState, ch: CharId, arg: &str) {
-    if arg.trim().is_empty() || get_level(g, ch) < LVL_CLAN_GOD {
+    if arg.trim().is_empty() || !authenticated_clan_god(g, ch) {
         send_clan_format(g, ch);
         return;
     }
@@ -1666,7 +1676,7 @@ fn clan_new_owner(g: &mut GameState, ch: CharId, arg: &str) {
 // ---------------------------------------------------------------------------
 
 fn set_clanroom(g: &mut GameState, ch: CharId, arg: &str) {
-    if arg.trim().is_empty() || get_level(g, ch) < LVL_CLAN_GOD {
+    if arg.trim().is_empty() || !authenticated_clan_god(g, ch) {
         send_clan_format(g, ch);
         return;
     }
@@ -1980,7 +1990,7 @@ pub fn do_csay(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 fn pers(g: &GameState, viewer: CharId, target: CharId) -> String {
     if g.can_see(viewer, target) {
         get_name(g, target)
-    } else if get_level(g, target) >= LVL_IMMORT {
+    } else if player_account_is_immortal(g, target) {
         "A Mystical Being".to_string()
     } else {
         "someone".to_string()
@@ -2022,6 +2032,7 @@ mod tests {
             idnum,
             name: name.to_string(),
             level,
+            trust: i32::from(level),
             class: Class::Warrior,
             last_logon: 0,
             host: String::new(),
@@ -2137,6 +2148,7 @@ mod tests {
             idnum: 42,
             name: "Offline".to_string(),
             level: 20,
+            trust: 20,
             class: Class::Thief,
             last_logon: 0,
             host: String::new(),

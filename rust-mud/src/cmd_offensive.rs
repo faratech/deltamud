@@ -370,8 +370,13 @@ pub fn do_hit(g: &mut GameState, ch: CharId, argument: &str, mut subcmd: i32) {
 }
 
 pub fn do_kill(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
-    // Mortals / NPCs route to do_hit (only true implementors get the instakill).
-    if get_level(g, ch) < LVL_IMPL || is_npc(g, ch) {
+    // Only an authenticated player principal with persisted Implementor trust
+    // receives the raw-kill path.  A high display level is cosmetic authority,
+    // and a switched body must inherit its original player's trust rather than
+    // the body's level. Ordinary descriptorless NPCs still route to do_hit.
+    let can_instakill = crate::interpreter::authenticated_input_authority(g, ch)
+        .is_some_and(|principal| principal.authority >= i32::from(LVL_IMPL));
+    if !can_instakill {
         do_hit(g, ch, argument, subcmd);
         return;
     }
@@ -682,7 +687,9 @@ pub fn do_order(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
             To::Room,
         );
 
-        let obeys = get_master(g, vict) == Some(ch) && is_affected(g, vict, AFF_CHARM);
+        let obeys = get_master(g, vict) == Some(ch)
+            && is_affected(g, vict, AFF_CHARM)
+            && crate::interpreter::indirect_command_target_is_forceable(g, vict);
         if !obeys {
             act(
                 g,
@@ -710,7 +717,10 @@ pub fn do_order(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         let mut found = false;
         for k in followers {
             let same_room = g.get_char(k).and_then(|c| c.in_room) == org_room;
-            if same_room && is_affected(g, k, AFF_CHARM) {
+            if same_room
+                && is_affected(g, k, AFF_CHARM)
+                && crate::interpreter::indirect_command_target_is_forceable(g, k)
+            {
                 found = true;
                 crate::interpreter::command_interpreter(g, k, &message);
             }
@@ -1761,6 +1771,40 @@ pub fn do_blanket(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) 
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::connection::Descriptor;
+    use crate::room::Room;
+
+    fn connected_player(
+        g: &mut GameState,
+        conn: ConnId,
+        name: &str,
+        level: Level,
+        trust: i32,
+    ) -> CharId {
+        let mut character =
+            crate::character::Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        character.idnum = conn.0 as i64;
+        character.player.level = level;
+        character.trust = trust;
+        character.desc = Some(conn);
+        let character = g.create_char(character);
+        let mut descriptor = Descriptor::new(conn, "kill.test".to_string());
+        descriptor.state = crate::connection::ConState::Playing;
+        descriptor.character = Some(character);
+        g.descriptors.insert(conn, descriptor);
+        character
+    }
+
+    fn durable_kill_target(g: &mut GameState, room: RoomRnum, name: &str) -> CharId {
+        let mut victim = crate::character::Character::new_npc(7100);
+        victim.player.name = name.to_string();
+        victim.points.hit = 100_000;
+        victim.points.max_hit = 100_000;
+        victim.real_points = victim.points.clone();
+        let victim = g.create_char(victim);
+        g.char_to_room(victim, room);
+        victim
+    }
 
     fn hidden_player_with_affect(duration: Option<i32>) -> (GameState, CharId) {
         let mut g = GameState::new(Config::default());
@@ -1800,5 +1844,94 @@ mod tests {
         remove_temporary_hide(&mut g, ch);
 
         assert!(!is_affected(&g, ch, AFF_HIDE));
+    }
+
+    #[test]
+    fn kill_instakill_uses_authenticated_trust_and_not_display_level() {
+        let mut display_game = GameState::new(Config::default());
+        let display_room =
+            display_game.add_room(Room::new(71_001, 0, "Kill test".to_string(), String::new()));
+        let display = connected_player(&mut display_game, ConnId(811), "Display", LVL_IMPL, 1);
+        display_game.char_to_room(display, display_room);
+        let display_victim = durable_kill_target(&mut display_game, display_room, "Displayvictim");
+
+        crate::interpreter::run_authenticated_command(
+            &mut display_game,
+            display,
+            "kill Displayvictim",
+        );
+
+        assert!(
+            display_game.char_exists(display_victim),
+            "display level 105 with trust 1 must take only the ordinary hit path"
+        );
+
+        let mut trust_game = GameState::new(Config::default());
+        let trust_room =
+            trust_game.add_room(Room::new(71_002, 0, "Kill test".to_string(), String::new()));
+        let trusted = connected_player(
+            &mut trust_game,
+            ConnId(812),
+            "Trusted",
+            1,
+            i32::from(LVL_IMPL),
+        );
+        trust_game.char_to_room(trusted, trust_room);
+        let trust_victim = durable_kill_target(&mut trust_game, trust_room, "Trustvictim");
+
+        crate::interpreter::run_authenticated_command(&mut trust_game, trusted, "kill Trustvictim");
+
+        assert!(
+            !trust_game.char_exists(trust_victim),
+            "display level 1 with Implementor trust must receive the authenticated raw-kill path"
+        );
+
+        let quarantine_victim =
+            durable_kill_target(&mut trust_game, trust_room, "Quarantinevictim");
+        trust_game.authority_quarantine.insert(812);
+        crate::interpreter::run_authenticated_command(
+            &mut trust_game,
+            trusted,
+            "kill Quarantinevictim",
+        );
+        assert!(
+            trust_game.char_exists(quarantine_victim),
+            "a quarantined Implementor must receive only the ordinary combat path"
+        );
+    }
+
+    #[test]
+    fn kill_instakill_rejects_a_duplicate_switched_principal_alias() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(71_003, 0, "Kill test".to_string(), String::new()));
+        let principal = connected_player(&mut g, ConnId(813), "Principal", 1, i32::from(LVL_IMPL));
+        let mut body = crate::character::Character::new_npc(7101);
+        body.player.name = "Avatar".to_string();
+        body.player.level = LVL_IMPL;
+        body.desc = Some(ConnId(813));
+        let body = g.create_char(body);
+        g.get_char_mut(principal).unwrap().desc = None;
+        {
+            let descriptor = g.descriptors.get_mut(&ConnId(813)).unwrap();
+            descriptor.character = Some(body);
+            descriptor.original = Some(principal);
+        }
+        g.char_to_room(body, room);
+
+        let mut alias_body = crate::character::Character::new_npc(7102);
+        alias_body.desc = Some(ConnId(814));
+        let alias_body = g.create_char(alias_body);
+        let mut duplicate = Descriptor::new(ConnId(814), "kill.test".to_string());
+        duplicate.character = Some(alias_body);
+        duplicate.original = Some(principal);
+        g.descriptors.insert(ConnId(814), duplicate);
+
+        let victim = durable_kill_target(&mut g, room, "Aliasvictim");
+        crate::interpreter::run_authenticated_command(&mut g, body, "kill Aliasvictim");
+
+        assert!(
+            g.char_exists(victim),
+            "a malformed switched alias must fail closed to ordinary combat"
+        );
     }
 }

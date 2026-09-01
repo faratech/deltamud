@@ -308,6 +308,17 @@ pub fn do_pfileclean(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let argument = arg.trim_start();
 
     if argument == "OptimisePfile" {
+        let Some(request) = crate::interpreter::authenticated_command_request(g, ch) else {
+            g.send_to_char(
+                ch,
+                "Player-file cleanup requires direct authenticated input.\r\n",
+            );
+            return;
+        };
+        if !g.queue_pfileclean(request) {
+            g.send_to_char(ch, "A player-file cleanup is already pending.\r\n");
+            return;
+        }
         g.send_to_char(ch, "Cleaning Player File Now.\r\n");
         let name = g
             .get_char(ch)
@@ -315,7 +326,6 @@ pub fn do_pfileclean(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             .unwrap_or_default();
         // C: mudlog(buf, NRM, LVL_IMPL, TRUE).
         mudlog_imp(g, &format!("{} initiated playerfile clean.", name));
-        g.queue_pfileclean();
     } else {
         g.send_to_char(ch, "Not unless you know the password.\r\n");
     }

@@ -1,0 +1,10 @@
+# Install as /etc/deltamud/backup.cnf, owned root:root and mode 0600.
+# This credential is separate from the runtime account. It needs read/dump
+# access to `deltamud` and narrowly scoped CREATE/DROP rights for temporary
+# `deltamud_restorecheck_*` databases used by the mandatory restore drill.
+[client]
+protocol=tcp
+host=127.0.0.1
+port=3306
+user=deltamud_backup
+password=CHANGE_ME

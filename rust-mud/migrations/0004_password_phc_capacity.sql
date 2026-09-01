@@ -1,0 +1,1 @@
+ALTER TABLE player_main MODIFY COLUMN pwd VARCHAR(255)

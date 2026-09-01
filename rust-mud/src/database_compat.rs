@@ -27,6 +27,7 @@
 
 use crate::character::{Affect, Character};
 use crate::types::*;
+use anyhow::{Result, bail};
 use mysql_async::prelude::*;
 use mysql_async::{Row, Value};
 
@@ -236,12 +237,57 @@ fn col_opt_string(row: &Row, name: &str) -> Option<String> {
     }
 }
 
+fn required_i32(row: &Row, name: &str) -> Result<i32> {
+    match row.get_opt::<i32, _>(name) {
+        Some(Ok(value)) => Ok(value),
+        Some(Err(_)) => bail!("player_main.{name} has an incompatible SQL value"),
+        None => bail!("player_main.{name} is missing or NULL"),
+    }
+}
+
+fn required_string(row: &Row, name: &str) -> Result<String> {
+    match row.get_opt::<String, _>(name) {
+        Some(Ok(value)) => Ok(value),
+        Some(Err(_)) => bail!("player_main.{name} has an incompatible SQL value"),
+        None => bail!("player_main.{name} is missing or NULL"),
+    }
+}
+
+pub(crate) fn validate_persisted_player_name(name: &str) -> Result<()> {
+    if !(2..=20).contains(&name.len()) || !name.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        bail!("persisted player name must be 2-20 ASCII letters");
+    }
+    Ok(())
+}
+
+pub(crate) fn validated_player_level(level: i32) -> Result<Level> {
+    if !(0..=i32::from(LVL_IMPL)).contains(&level) {
+        bail!("player_main.level {level} is outside 0..={LVL_IMPL}");
+    }
+    Ok(level as Level)
+}
+
+pub(crate) fn validated_player_trust(trust: i32) -> Result<i32> {
+    if !(0..=i32::from(LVL_IMPL)).contains(&trust) {
+        bail!("player_main.trust {trust} is outside 0..={LVL_IMPL}");
+    }
+    Ok(trust)
+}
+
 /// Convert a fully-selected `player_main` row into a `Character`, mirroring the
 /// C retrieve_player_entry field assignments. Skills and affects are loaded
 /// separately (see `load_skills` / `load_affects`).
-pub fn player_main_to_character(row: &Row) -> Character {
+pub fn player_main_to_character(row: &Row) -> Result<Character> {
+    // This field is an authorization boundary. In particular, a negative
+    // signed TINYINT must never wrap through `as u8` into an immortal level.
+    // Reject malformed/imported rows instead of silently manufacturing
+    // privilege from a type error or out-of-range value.
+    let level = validated_player_level(required_i32(row, "level")?)?;
+    let trust = validated_player_trust(required_i32(row, "trust")?)?;
+    let name = required_string(row, "name")?;
+    validate_persisted_player_name(&name)?;
     let mut ch = Character::new_player(
-        col::<String>(row, "name"),
+        name,
         Class::from_u8(col::<i32>(row, "class") as u8),
         Race::from_u8(col::<i32>(row, "race") as u8),
     );
@@ -251,7 +297,7 @@ pub fn player_main_to_character(row: &Row) -> Character {
     ch.player.title = col_opt_string(row, "title");
     ch.player.sex = Gender::from_u8(col::<i32>(row, "sex") as u8);
     ch.player.deity = col::<i32>(row, "deity") as u8;
-    ch.player.level = col::<i32>(row, "level") as u8;
+    ch.player.level = level;
     ch.player.hometown = col::<i32>(row, "hometown");
     ch.player.time_birth = col::<i64>(row, "birth");
     ch.player.time_played = col::<i64>(row, "played");
@@ -319,7 +365,7 @@ pub fn player_main_to_character(row: &Row) -> Character {
     ch.quest_mob = col::<i32>(row, "questmob");
     ch.recall_level = col::<i32>(row, "recall_level");
     ch.retreat_level = col::<i32>(row, "retreat_level");
-    ch.trust = col::<i32>(row, "trust");
+    ch.trust = trust;
     ch.bail_amt = col::<i32>(row, "bail_amt");
     ch.wins = col::<i32>(row, "wins") as u8;
     ch.losses = col::<i32>(row, "losses") as u8;
@@ -344,7 +390,7 @@ pub fn player_main_to_character(row: &Row) -> Character {
     if ch.points.max_mana < 100 {
         ch.points.max_mana = 100;
     }
-    ch
+    Ok(ch)
 }
 
 fn clamp_corrupt_gold(value: i32) -> i32 {
@@ -479,6 +525,49 @@ mod tests {
             Value::from(0x1),
             "transient AFF_HIDE not persisted"
         );
+    }
+
+    #[test]
+    fn persisted_player_level_rejects_values_that_could_wrap_into_privilege() {
+        assert_eq!(validated_player_level(0).unwrap(), 0);
+        assert_eq!(
+            validated_player_level(i32::from(LVL_IMPL)).unwrap(),
+            LVL_IMPL
+        );
+        assert!(validated_player_level(-151).is_err());
+        assert!(validated_player_level(-1).is_err());
+        assert!(validated_player_level(i32::from(LVL_IMPL) + 1).is_err());
+    }
+
+    #[test]
+    fn persisted_player_trust_rejects_values_outside_the_authority_domain() {
+        assert_eq!(validated_player_trust(0).unwrap(), 0);
+        assert_eq!(
+            validated_player_trust(i32::from(LVL_IMPL)).unwrap(),
+            i32::from(LVL_IMPL)
+        );
+        assert!(validated_player_trust(-1).is_err());
+        assert!(validated_player_trust(i32::from(LVL_IMPL) + 1).is_err());
+    }
+
+    #[test]
+    fn persisted_player_names_use_the_same_ascii_identity_domain_as_login() {
+        for accepted in ["Alice", "ALICE", "alice", "Wayfarer"] {
+            validate_persisted_player_name(accepted).unwrap();
+        }
+        for rejected in [
+            "A",
+            "Alice1",
+            "Alice ",
+            "Alice-",
+            "Élodie",
+            "TwentyOneLettersLonggg",
+        ] {
+            assert!(
+                validate_persisted_player_name(rejected).is_err(),
+                "unexpectedly accepted {rejected:?}"
+            );
+        }
     }
 }
 

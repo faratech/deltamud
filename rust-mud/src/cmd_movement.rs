@@ -20,7 +20,7 @@ use crate::act::{ActArg, To, act};
 use crate::constants;
 use crate::flags::*;
 use crate::handler::isname;
-use crate::interpreter::{one_argument, search_block};
+use crate::interpreter::{authenticated_input_authority, one_argument, search_block};
 use crate::object::{ObjLoc, ObjectType};
 use crate::room::{EX_CLOSED, EX_HIDDEN, EX_ISDOOR, EX_LOCKED, EX_PICKPROOF};
 use crate::room::{RoomFlags, SectorType};
@@ -92,6 +92,15 @@ fn room_is_atrium(g: &GameState, rnum: RoomRnum) -> bool {
     g.room_opt(rnum)
         .map(|r| r.room_flags.bits() & ROOM_ATRIUM != 0)
         .unwrap_or(false)
+}
+
+/// Administrative movement/door exceptions are valid only for the exact
+/// player principal currently supplying descriptor input. Ordinary movement
+/// mechanics may still use character/NPC level, but display level and
+/// indirect/forced calls never cross protected-room or key boundaries.
+fn has_authenticated_authority(g: &GameState, ch: CharId, minimum: Level) -> bool {
+    authenticated_input_authority(g, ch)
+        .is_some_and(|authority| authority.authority >= i32::from(minimum))
 }
 
 fn has_boat(g: &GameState, ch: CharId) -> bool {
@@ -450,7 +459,9 @@ pub(crate) fn do_simple_move(
     if dt_precheck(g, ch, to_rnum, dir) {
         return false;
     }
-    if (level as u8) < LVL_GRGOD && g.room(to_rnum).room_flags.contains(RoomFlags::IMPROOM) {
+    if g.room(to_rnum).room_flags.contains(RoomFlags::IMPROOM)
+        && !has_authenticated_authority(g, ch, LVL_GRGOD)
+    {
         g.send_to_char(ch, "You are not godly enough to use that room!\r\n");
         return false;
     }
@@ -1188,7 +1199,6 @@ pub fn do_gen_door(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
     };
 
     let keynum = door_key(g, &target, ch, rnum);
-    let level = g.get_char(ch).map(|c| c.player.level).unwrap_or(1);
     let flags = FLAGS_DOOR[subcmd as usize];
 
     if !door_is_openable(g, &target, ch, rnum) {
@@ -1211,7 +1221,7 @@ pub fn do_gen_door(g: &mut GameState, ch: CharId, arg: &str, subcmd: i32) {
     } else if !door_is_unlocked(g, &target, ch, rnum) && (flags & NEED_UNLOCKED) != 0 {
         g.send_to_char(ch, "It seems to be locked.\r\n");
     } else if !has_key(g, ch, keynum)
-        && (level as u8) < LVL_GOD
+        && !has_authenticated_authority(g, ch, LVL_GOD)
         && (subcmd == SCMD_LOCK || subcmd == SCMD_UNLOCK)
     {
         g.send_to_char(ch, "You don't seem to have the proper key.\r\n");
@@ -1522,7 +1532,9 @@ fn do_special_move(g: &mut GameState, ch: CharId) -> bool {
     // wrong string and never checked IMPROOM, so impl-only rooms were open
     // and god rooms were blocked (#118).
 
-    if (level as u8) < LVL_GRGOD && g.room(to_rnum).room_flags.contains(RoomFlags::IMPROOM) {
+    if g.room(to_rnum).room_flags.contains(RoomFlags::IMPROOM)
+        && !has_authenticated_authority(g, ch, LVL_GRGOD)
+    {
         g.send_to_char(ch, "You are not godly enough to use that room!\r\n");
         return false;
     }
@@ -2810,7 +2822,7 @@ mod tests {
     use super::*;
     use crate::character::Character;
     use crate::config::Config;
-    use crate::connection::Descriptor;
+    use crate::connection::{ConState, Descriptor};
     use crate::object::Object;
     use crate::room::{Exit, Room, SpecialExit};
 
@@ -3106,12 +3118,72 @@ mod tests {
             .insert(conn, Descriptor::new(conn, "test".to_string()));
         let mut ch = Character::new_player("Opener".to_string(), Class::Warrior, Race::Human);
         ch.desc = Some(conn);
+        ch.idnum = 1;
+        ch.trust = 1;
         ch.points.hit = 100;
         ch.points.max_hit = 100;
         ch.aff_abils.str = 18;
         let ch = g.create_char(ch);
+        {
+            let descriptor = g.descriptors.get_mut(&conn).unwrap();
+            descriptor.character = Some(ch);
+            descriptor.state = ConState::Playing;
+        }
         g.char_to_room(ch, from);
         (g, ch, from, to)
+    }
+
+    fn protected_exit_game(special: bool) -> (GameState, CharId, RoomRnum, RoomRnum) {
+        let mut g = GameState::new(Config::default());
+        let from = g.add_room(Room::new(
+            200,
+            0,
+            "Approach".to_string(),
+            "An approach.".to_string(),
+        ));
+        let mut protected = Room::new(
+            201,
+            0,
+            "Protected".to_string(),
+            "A protected room.".to_string(),
+        );
+        protected.room_flags |= RoomFlags::IMPROOM;
+        let to = g.add_room(protected);
+        if special {
+            g.rooms[from].special_exit = Some(SpecialExit {
+                general_description: None,
+                keyword: None,
+                ex_name: Some("portal".to_string()),
+                leave_msg: None,
+                exit_info: 0,
+                key: NOTHING,
+                to_room: 201,
+            });
+        } else {
+            g.rooms[from].exits[NORTH] = Some(Exit {
+                description: None,
+                keyword: None,
+                exit_info: 0,
+                key: NOTHING,
+                to_room: 201,
+            });
+        }
+
+        let conn = ConnId(11);
+        let mut descriptor = Descriptor::new(conn, "movement.test".to_string());
+        descriptor.state = ConState::Playing;
+        g.descriptors.insert(conn, descriptor);
+        let mut character =
+            Character::new_player("Walker".to_string(), Class::Warrior, Race::Human);
+        character.desc = Some(conn);
+        character.idnum = 11;
+        character.player.level = LVL_GRGOD;
+        character.trust = 1;
+        character.points.move_points = 100;
+        let character = g.create_char(character);
+        g.descriptors.get_mut(&conn).unwrap().character = Some(character);
+        g.char_to_room(character, from);
+        (g, character, from, to)
     }
 
     #[test]
@@ -3244,6 +3316,127 @@ mod tests {
         );
         assert_eq!(
             g.rooms[to].exits[WEST].as_ref().unwrap().exit_info & EX_LOCKED,
+            0
+        );
+    }
+
+    #[test]
+    fn improom_normal_exit_requires_direct_authenticated_principal_trust() {
+        let (mut g, ch, from, to) = protected_exit_game(false);
+
+        crate::interpreter::run_authenticated_command(&mut g, ch, "north");
+        assert_eq!(
+            g.get_char(ch).unwrap().in_room,
+            Some(from),
+            "display-only GRGOD rank must not enter an IMPROOM"
+        );
+
+        {
+            let character = g.get_char_mut(ch).unwrap();
+            character.player.level = 1;
+            character.trust = i32::from(LVL_GRGOD);
+        }
+        crate::interpreter::command_interpreter(&mut g, ch, "north");
+        assert_eq!(
+            g.get_char(ch).unwrap().in_room,
+            Some(from),
+            "indirect command dispatch must not use the admin exception"
+        );
+
+        crate::interpreter::run_authenticated_command(&mut g, ch, "north");
+        assert_eq!(g.get_char(ch).unwrap().in_room, Some(to));
+    }
+
+    #[test]
+    fn improom_special_exit_requires_direct_authenticated_principal_trust() {
+        let (mut g, ch, from, to) = protected_exit_game(true);
+
+        crate::interpreter::run_authenticated_command(&mut g, ch, "portal");
+        assert_eq!(
+            g.get_char(ch).unwrap().in_room,
+            Some(from),
+            "display-only GRGOD rank must not enter through a special exit"
+        );
+
+        {
+            let character = g.get_char_mut(ch).unwrap();
+            character.player.level = 1;
+            character.trust = i32::from(LVL_GRGOD);
+        }
+        crate::interpreter::command_interpreter(&mut g, ch, "portal");
+        assert_eq!(
+            g.get_char(ch).unwrap().in_room,
+            Some(from),
+            "indirect special-exit dispatch must not use the admin exception"
+        );
+
+        crate::interpreter::run_authenticated_command(&mut g, ch, "portal");
+        assert_eq!(g.get_char(ch).unwrap().in_room, Some(to));
+    }
+
+    #[test]
+    fn improom_override_does_not_treat_descriptorless_npc_level_as_authority() {
+        let (mut g, _player, from, _to) = protected_exit_game(false);
+        let mut npc = Character::new_npc(8_100);
+        npc.player.name = "guard".to_string();
+        npc.player.level = LVL_IMPL;
+        npc.points.move_points = 100;
+        let npc = g.create_char(npc);
+        g.char_to_room(npc, from);
+
+        assert!(!perform_move(&mut g, npc, NORTH as i32, false));
+        assert_eq!(g.get_char(npc).unwrap().in_room, Some(from));
+    }
+
+    #[test]
+    fn keyless_lock_and_unlock_require_direct_authenticated_principal_trust() {
+        let (mut g, ch, from, _to) = locked_door_game();
+        g.get_char_mut(ch).unwrap().player.level = LVL_GOD;
+
+        crate::interpreter::run_authenticated_command(&mut g, ch, "unlock gate east");
+        assert_ne!(
+            g.rooms[from].exits[EAST].as_ref().unwrap().exit_info & EX_LOCKED,
+            0,
+            "display-only GOD rank must still need the key"
+        );
+
+        {
+            let character = g.get_char_mut(ch).unwrap();
+            character.player.level = 1;
+            character.trust = i32::from(LVL_GOD);
+        }
+        crate::interpreter::run_authenticated_command(&mut g, ch, "unlock gate east");
+        assert_eq!(
+            g.rooms[from].exits[EAST].as_ref().unwrap().exit_info & EX_LOCKED,
+            0,
+            "direct authenticated GOD trust should unlock without a key"
+        );
+
+        crate::interpreter::run_authenticated_command(&mut g, ch, "lock gate east");
+        assert_ne!(
+            g.rooms[from].exits[EAST].as_ref().unwrap().exit_info & EX_LOCKED,
+            0,
+            "the same authenticated exception should cover keyless lock"
+        );
+
+        crate::interpreter::command_interpreter(&mut g, ch, "unlock gate east");
+        assert_ne!(
+            g.rooms[from].exits[EAST].as_ref().unwrap().exit_info & EX_LOCKED,
+            0,
+            "indirect dispatch must not use the keyless exception"
+        );
+    }
+
+    #[test]
+    fn ordinary_key_still_works_without_admin_input_authority() {
+        let (mut g, ch, from, _to) = locked_door_game();
+        let key = g.create_obj(Object::new(1234, "key".to_string(), "a key".to_string()));
+        g.obj_to_char(key, ch);
+
+        do_gen_door(&mut g, ch, "gate east", SCMD_UNLOCK);
+
+        assert_eq!(
+            g.rooms[from].exits[EAST].as_ref().unwrap().exit_info & EX_LOCKED,
             0
         );
     }

@@ -30,7 +30,7 @@
 use crate::act::{ActArg, To, act};
 use crate::dg_comm::{TO_CHAR, TO_ROOM, sub_write};
 use crate::dg_handler::ROOM_ID_BASE;
-use crate::interpreter::{command_interpreter, is_abbrev};
+use crate::interpreter::{command_interpreter, indirect_command_target_is_forceable, is_abbrev};
 use crate::object::{ObjLoc, ObjectGraphOrder, ObjectType, walk_object_graph};
 use crate::room::RoomFlags;
 use crate::state::GameState;
@@ -769,7 +769,6 @@ fn do_odamage(g: &mut GameState, obj: ObjId, argument: &str) {
 
     // Build the target set. "all" -> everyone in the room of the outermost
     // container's carrier/wearer; otherwise the single named target.
-    let all = name.eq_ignore_ascii_case("all");
     // C dg_objcmd.c:502-510: for 'all', only an object that is carried or
     // worn has a room; an object LYING ON THE FLOOR resolves in_room == -1
     // and 'odamage all' does NOTHING (the Rust arm added ObjLoc::Room and
@@ -1151,11 +1150,10 @@ fn respawn_pc(g: &mut GameState, victim: CharId) {
     g.char_to_room(victim, rnum);
 }
 
-/// GET_LEVEL(ch) >= LVL_IMMORT (immortals are spared script damage / forces).
+/// Staff principals (including switched or quarantined sessions) are spared
+/// script damage and forced commands regardless of display level.
 fn is_immortal(g: &GameState, ch: CharId) -> bool {
-    g.get_char(ch)
-        .map(|c| c.player.level >= LVL_IMMORT)
-        .unwrap_or(false)
+    !indirect_command_target_is_forceable(g, ch)
 }
 
 #[cfg(test)]

@@ -102,7 +102,8 @@ struct ObjEdit {
 }
 
 struct OeditState {
-    znum: usize,
+    zone_number: i32,
+    authorization: olc::OlcAuthorization,
     obj: ObjEdit,
     mode: OeditMode,
     modified: bool,
@@ -128,6 +129,12 @@ fn conn_char(g: &GameState, conn: ConnId) -> Option<CharId> {
     g.descriptors.get(&conn).and_then(|d| d.character)
 }
 
+fn can_edit_permanent_affects(g: &GameState, conn: ConnId) -> bool {
+    conn_char(g, conn)
+        .and_then(|ch| olc::validated_olc_trust(g, ch))
+        .is_some_and(|authority| authority >= i32::from(LVL_GRGOD))
+}
+
 fn obj_type_num(t: ObjectType) -> i32 {
     t as i32
 }
@@ -139,6 +146,10 @@ pub fn do_oedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let conn = match g.get_char(ch).and_then(|c| c.desc) {
         Some(c) => c,
         None => return,
+    };
+    let Some(authorization) = olc::capture_olc_authorization(g, ch) else {
+        g.send_to_char(ch, "You do not have permission to use OLC.\r\n");
+        return;
     };
     let Some(vnum) = olc::parse_i32_input(g, conn, arg.trim(), NOTHING) else {
         return;
@@ -196,7 +207,8 @@ pub fn do_oedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     crate::lock_ok::lock(&states()).insert(
         conn,
         OeditState {
-            znum,
+            zone_number: g.zones[znum].number,
+            authorization,
             obj,
             mode: OeditMode::MainMenu,
             modified: false,
@@ -701,11 +713,20 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
 
     match mode {
         OeditMode::ConfirmSave => match arg.chars().next().map(|c| c.to_ascii_lowercase()) {
-            Some('y') => {
-                send(g, conn, "Saving object to memory.\r\n");
-                save_internally(g, conn);
-                finish(g, conn);
-            }
+            Some('y') => match save_internally(g, conn) {
+                Ok(()) => {
+                    send(g, conn, "Saving object to memory.\r\n");
+                    finish(g, conn);
+                }
+                Err(error) => {
+                    log::warn!("SYSERR: OLC: refused object publication: {error}");
+                    send(
+                        g,
+                        conn,
+                        "Your OLC authorization changed; the object was not saved.\r\nDo you wish to save this object internally?\r\n",
+                    );
+                }
+            },
             Some('n') => finish(g, conn),
             _ => {
                 send(g, conn, "Invalid choice!\r\n");
@@ -865,6 +886,14 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
 
         OeditMode::PermAffects => {
+            // Recheck at the mutation sink: an administrator can change the
+            // principal's trust while this nested menu is open.
+            if !can_edit_permanent_affects(g, conn) {
+                send(g, conn, "Your level isn't high enough to do that...\r\n");
+                set_mode(conn, OeditMode::MainMenu);
+                disp_menu(g, conn);
+                return;
+            }
             let Some(number) = olc::parse_i32_input(g, conn, arg, -1) else {
                 return;
             };
@@ -1072,11 +1101,7 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, arg: &str) {
             set_mode(conn, OeditMode::Durability2);
         }
         Some('h') => {
-            let level = conn_char(g, conn)
-                .and_then(|c| g.get_char(c))
-                .map(|c| c.player.level)
-                .unwrap_or(0);
-            if level < LVL_GRGOD {
+            if !can_edit_permanent_affects(g, conn) {
                 send(g, conn, "Your level isn't high enough to do that...\r\n");
             } else {
                 disp_perm_affects_menu(g, conn);
@@ -1343,11 +1368,30 @@ mod autoset_tests {
 // Save to memory: install the editable subset into obj_protos and live
 // instances of this prototype.
 // ===========================================================================
-fn save_internally(g: &mut GameState, conn: ConnId) {
-    let (znum, edit) = match with_state(conn, |s| (s.znum, s.obj.clone())) {
-        Some(v) => v,
-        None => return,
-    };
+fn save_internally(g: &mut GameState, conn: ConnId) -> std::io::Result<()> {
+    let (zone_number, authorization, edit) =
+        match with_state(conn, |s| (s.zone_number, s.authorization, s.obj.clone())) {
+            Some(v) => v,
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "object editor state is missing",
+                ));
+            }
+        };
+    let znum = olc::real_zone(g, edit.vnum).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "object editor zone mapping changed",
+        )
+    })?;
+    if g.zones.get(znum).map(|zone| zone.number) != Some(zone_number) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "object editor zone mapping changed",
+        ));
+    }
+    olc::revalidate_olc_authorization(g, authorization, false, Some(znum))?;
     let proto = ObjectProto {
         vnum: edit.vnum,
         name: edit.name.clone(),
@@ -1408,12 +1452,8 @@ fn save_internally(g: &mut GameState, conn: ConnId) {
         }
     }
 
-    let zone_number = g
-        .zones
-        .get(znum)
-        .map(|z| z.number)
-        .unwrap_or(edit.vnum / 100);
     olc::olc_add_to_save_list(zone_number, olc::OLC_SAVE_OBJ);
+    Ok(())
 }
 
 /// abort: drop this conn's editor state without saving (player disconnected
@@ -1451,14 +1491,25 @@ fn finish(g: &mut GameState, conn: ConnId) {
 // the perm-affect (`A`) blocks, and the extra-description (`E`) blocks — so the
 // full object is written back, not a lossy subset.
 // ===========================================================================
-pub fn oedit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
+pub fn oedit_save_to_disk(g: &mut GameState, zone_rnum: usize) -> std::io::Result<()> {
     let (zone_number, start, top) = match g.zones.get(zone_rnum) {
         Some(z) => match z.vnum_start() {
             Some(start) => (z.number, start, z.top),
-            None => return,
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "zone number is outside the supported range",
+                ));
+            }
         },
-        None => return,
+        None => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "zone index is not loaded",
+            ));
+        }
     };
+    olc::olc_add_to_save_list(zone_number, olc::OLC_SAVE_OBJ);
 
     let mut out = String::new();
     for vnum in start..=top {
@@ -1554,15 +1605,93 @@ pub fn oedit_save_to_disk(g: &mut GameState, zone_rnum: usize) {
         .join("world")
         .join("obj")
         .join(format!("{}.obj", zone_number));
-    let tmp = path.with_extension("new");
-    if std::fs::write(&tmp, &out).is_err() {
-        log::warn!("OLC: cannot write {:?}", tmp);
-        return;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
-    let _ = std::fs::remove_file(&path);
-    if std::fs::rename(&tmp, &path).is_err() {
-        log::warn!("OLC: cannot rename {:?} -> {:?}", tmp, path);
+    olc::atomic_replace(&path, out.as_bytes())?;
+    olc::olc_remove_from_save_list(zone_number, olc::OLC_SAVE_OBJ);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::connection::Descriptor;
+    use crate::world::{Zone, zone_vnum_bounds};
+
+    fn zone(number: i32) -> Zone {
+        let (_, top) = zone_vnum_bounds(number).expect("valid test zone");
+        Zone {
+            number,
+            name: format!("Zone {number}"),
+            builders: "Builder".to_string(),
+            lifespan: 30,
+            age: 0,
+            top,
+            reset_mode: 2,
+            min_level: 0,
+            max_level: 60,
+            status_mode: 0,
+            map_x: None,
+            map_y: None,
+            reset_commands: Vec::new(),
+        }
     }
 
-    olc::olc_remove_from_save_list(zone_number, olc::OLC_SAVE_OBJ);
+    #[test]
+    fn permanent_affects_gate_uses_persisted_principal_trust_not_display_level() {
+        let mut g = GameState::new(Config::default());
+        g.zones.push(zone(1));
+        let conn = ConnId(10_741);
+        let mut builder = Character::new_player("Builder".into(), Class::Cleric, Race::Human);
+        builder.player.level = LVL_IMPL;
+        builder.trust = i32::from(LVL_IMMORT);
+        let builder = g.create_char(builder);
+        g.get_char_mut(builder).unwrap().desc = Some(conn);
+        let mut descriptor = Descriptor::new(conn, "example.test".to_string());
+        descriptor.character = Some(builder);
+        g.descriptors.insert(conn, descriptor);
+
+        do_oedit(&mut g, builder, "101", 0);
+        oedit_parse(&mut g, conn, "h");
+        assert_eq!(
+            with_state(conn, |state| state.mode),
+            Some(OeditMode::MainMenu),
+            "a cosmetic Implementor level must not grant permanent-affect editing"
+        );
+        assert!(
+            g.descriptors[&conn]
+                .outbuf
+                .contains("level isn't high enough")
+        );
+
+        {
+            let character = g.get_char_mut(builder).unwrap();
+            character.player.level = 1;
+            character.trust = i32::from(LVL_GRGOD);
+        }
+        oedit_parse(&mut g, conn, "h");
+        assert_eq!(
+            with_state(conn, |state| state.mode),
+            Some(OeditMode::PermAffects),
+            "persisted GRGOD trust must retain the legitimate editor path"
+        );
+
+        let before = with_state(conn, |state| state.obj.bitvector).unwrap();
+        g.get_char_mut(builder).unwrap().trust = i32::from(LVL_IMMORT);
+        oedit_parse(&mut g, conn, "1");
+        assert_eq!(
+            with_state(conn, |state| state.obj.bitvector),
+            Some(before),
+            "a mid-editor trust demotion must be rechecked at the mutation sink"
+        );
+        assert_eq!(
+            with_state(conn, |state| state.mode),
+            Some(OeditMode::MainMenu)
+        );
+
+        finish(&mut g, conn);
+    }
 }

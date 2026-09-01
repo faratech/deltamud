@@ -15,8 +15,10 @@
 //! };
 //! ```
 //!
-//! This table preserves the EXACT C order and EXACT command-name strings.
-//! Order is load-bearing: abbreviation matching in `command_interpreter`
+//! This table preserves the C order and command-name strings except for
+//! security exclusions recorded in COMPATIBILITY.md (notably the public
+//! name-based `levelme` privilege backdoor). Order remains load-bearing:
+//! abbreviation matching in `command_interpreter`
 //! walks the table top-to-bottom and stops at the first prefix match, so the
 //! leading `RESERVED` sentinel, the six direction entries, and the trailing
 //! `"\n"` terminator must all appear in their original positions.
@@ -437,7 +439,6 @@ pub enum HandlerId {
     DoWrite,
     DoWrestrict,
     DoZreset,
-    DoLevelme,
     DoAttach,
     DoDetach,
     DoTlist,
@@ -884,7 +885,6 @@ pub static CMD_INFO: &[CommandDef] = &[
     g("wrestrict", Dead, DoWrestrict, 2, GCMD2_WRESTRICT, 0),
     g("zedit", Dead, DoOlc, 2, GCMD2_OLC, SCMD_OLC_ZEDIT),
     g("zreset", Dead, DoZreset, 2, GCMD2_ZRESET, 0),
-    c("levelme", Dead, DoLevelme, 0, 0),
     g("attach", Dead, DoAttach, 2, GCMD2_ATTACH, 0),
     g("detach", Dead, DoDetach, 2, GCMD2_ATTACH, 0),
     g("tlist", Dead, DoTlist, 2, GCMD2_OLC, 0),

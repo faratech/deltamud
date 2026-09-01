@@ -279,9 +279,12 @@ fn mudlog(g: &mut GameState, line: &str, min_level: u8) {
         .values()
         .copied()
         .filter(|&id| {
-            g.get_char(id)
-                .map(|c| c.player.level >= min_level && c.player.level >= LVL_IMMORT)
-                .unwrap_or(false)
+            g.principal_authority(id)
+                .filter(|authority| authority.is_authenticated_player())
+                .is_some_and(|authority| {
+                    authority.authority >= i32::from(min_level)
+                        && authority.authority >= i32::from(LVL_IMMORT)
+                })
         })
         .collect();
     for id in imms {
@@ -1804,7 +1807,6 @@ pub fn do_bed(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
     // C act.other.c:506 do_bed: Crash_rentsave then House_crashsave for the
     // house room before quitting (#164).
     {
-        let lib = g.config.lib_path.clone();
         crate::objsave::crash_rentsave(g, ch, 0);
         house_crashsave(g, room_vnum);
     }
@@ -1899,8 +1901,11 @@ pub fn house_owned_by(vnum: RoomVnum, owner_idnum: i64) -> bool {
 /// House_can_enter(ch, house): true if `ch` may enter the house at vnum `house`.
 /// GRGOD+ and non-houses always pass. Consulted by the movement gate.
 pub fn house_can_enter(g: &GameState, ch: CharId, house: RoomVnum) -> bool {
-    let level = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
-    if level >= LVL_GRGOD {
+    // The privacy override is administrative authority, so connected PCs use
+    // persisted trust (including through switch) rather than display level.
+    // Descriptorless NPC levels remain available to ordinary movement logic,
+    // but never confer this private-property override.
+    if has_house_privacy_override(g, ch) {
         return true;
     }
     let i = match find_house(house) {
@@ -1923,6 +1928,20 @@ pub fn house_can_enter(g: &GameState, ch: CharId, house: RoomVnum) -> bool {
         x if x == HOUSE_OPEN => true,
         _ => false,
     }
+}
+
+fn has_house_privacy_override(g: &GameState, ch: CharId) -> bool {
+    let Some(authority) = g
+        .principal_authority(ch)
+        .filter(|authority| authority.is_authenticated_player())
+    else {
+        return false;
+    };
+    let Some(principal) = g.get_char(authority.principal) else {
+        return false;
+    };
+    !g.authority_quarantine.contains(&principal.idnum)
+        && authority.authority >= i32::from(LVL_GRGOD)
 }
 
 #[cfg(test)]
@@ -1983,6 +2002,64 @@ mod tests {
             affects: Vec::new(),
             ex_descriptions: Vec::new(),
         }
+    }
+
+    fn connected_player(
+        g: &mut GameState,
+        conn: ConnId,
+        name: &str,
+        level: Level,
+        trust: i32,
+    ) -> CharId {
+        let mut character = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        character.player.level = level;
+        character.trust = trust;
+        character.idnum = conn.0 as i64;
+        character.desc = Some(conn);
+        let character = g.create_char(character);
+        let mut descriptor = Descriptor::new(conn, "house-authority.test".to_string());
+        descriptor.character = Some(character);
+        g.descriptors.insert(conn, descriptor);
+        character
+    }
+
+    #[test]
+    fn house_privacy_override_uses_trust_and_switched_aliases_fail_closed() {
+        let mut g = GameState::new(Config::default());
+        let display = connected_player(&mut g, ConnId(901), "Display", LVL_IMPL, 1);
+        let trusted = connected_player(&mut g, ConnId(902), "Trusted", 1, i32::from(LVL_GRGOD));
+        assert!(!has_house_privacy_override(&g, display));
+        assert!(has_house_privacy_override(&g, trusted));
+
+        let mut high_level_npc = Character::new_npc(7_199);
+        high_level_npc.player.level = LVL_IMPL;
+        let high_level_npc = g.create_char(high_level_npc);
+        assert!(!has_house_privacy_override(&g, high_level_npc));
+
+        g.authority_quarantine.insert(ConnId(902).0 as i64);
+        assert!(!has_house_privacy_override(&g, trusted));
+        g.authority_quarantine.remove(&(ConnId(902).0 as i64));
+
+        let mut body = Character::new_npc(7_200);
+        body.desc = Some(ConnId(902));
+        let body = g.create_char(body);
+        g.get_char_mut(trusted).unwrap().desc = None;
+        {
+            let descriptor = g.descriptors.get_mut(&ConnId(902)).unwrap();
+            descriptor.character = Some(body);
+            descriptor.original = Some(trusted);
+        }
+        assert!(has_house_privacy_override(&g, body));
+
+        let mut alias_body = Character::new_npc(7_201);
+        alias_body.desc = Some(ConnId(903));
+        let alias_body = g.create_char(alias_body);
+        let mut duplicate = Descriptor::new(ConnId(903), "house-authority.test".to_string());
+        duplicate.character = Some(alias_body);
+        duplicate.original = Some(trusted);
+        g.descriptors.insert(ConnId(903), duplicate);
+
+        assert!(!has_house_privacy_override(&g, body));
     }
 
     #[test]

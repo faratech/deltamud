@@ -1,7 +1,6 @@
 # Rust
 /target/
 **/*.rs.bk
-Cargo.lock
 
 # IDE files
 .vscode/
@@ -48,6 +47,10 @@ core.*
 
 # Development/testing files
 test_*
+# Validation byte-compiles the Python gate drivers; keep those generated
+# interpreter caches out of release-input status checks.
+__pycache__/
+*.py[cod]
 # The parity protocol regression suite is repository infrastructure, not a
 # local scratch test.
 !scripts/parity/test_driver.py

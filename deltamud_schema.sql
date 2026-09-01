@@ -1,5 +1,9 @@
 -- DeltaMUD Database Schema
 -- Based on analysis of dbinterface.c
+-- This is an empty compatibility snapshot for isolated tooling and the C
+-- oracle. Production Rust deployments must run `deltamud --migrate`, which
+-- owns the checksummed schema_migrations ledger. No administrative identity or
+-- password is seeded here.
 
 USE deltamud;
 
@@ -19,7 +23,8 @@ CREATE TABLE IF NOT EXISTS player_main (
     played BIGINT,
     weight INT,
     height INT,
-    pwd VARCHAR(50),
+    -- PHC strings (Argon2id) exceed the legacy crypt(3) field width.
+    pwd VARCHAR(255),
     last_logon BIGINT,
     host VARCHAR(80),
     
@@ -99,7 +104,7 @@ CREATE TABLE IF NOT EXISTS player_main (
     
     INDEX idx_name (name),
     INDEX idx_level (level)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Player affects table
 CREATE TABLE IF NOT EXISTS player_affects (
@@ -109,8 +114,7 @@ CREATE TABLE IF NOT EXISTS player_affects (
     modifier INT,
     location TINYINT,
     bitvector BIGINT,
-    INDEX idx_idnum (idnum),
-    FOREIGN KEY (idnum) REFERENCES player_main(idnum) ON DELETE CASCADE
+    INDEX idx_idnum (idnum)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Player skills table
@@ -119,14 +123,5 @@ CREATE TABLE IF NOT EXISTS player_skills (
     skill INT,
     learned TINYINT,
     INDEX idx_idnum (idnum),
-    INDEX idx_skill (skill),
-    FOREIGN KEY (idnum) REFERENCES player_main(idnum) ON DELETE CASCADE
+    INDEX idx_skill (skill)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
--- Add a test immortal character for initial login
-INSERT INTO player_main (idnum, name, pwd, level, sex, class, race, deity, hometown, birth, played, last_logon, 
-                        hit, max_hit, mana, max_mana, move, max_move, gold, exp, 
-                        str, intel, wis, dex, con, cha, alignment, load_room)
-VALUES (1, 'Admin', 'XXXXXXXXXXXX', 60, 1, 0, 0, 0, 0, UNIX_TIMESTAMP(), 0, UNIX_TIMESTAMP(),
-        500, 500, 100, 100, 100, 100, 50000, 0,
-        18, 18, 18, 18, 18, 18, 0, 0);

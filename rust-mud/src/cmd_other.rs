@@ -69,6 +69,13 @@ const PLR_NOTITLE: i64 = 1 << 9;
 const ROOM_NOMAGIC: u32 = 1 << 7;
 const ROOM_PEACEFUL: u32 = 1 << 4;
 
+/// Peaceful-room theft is an administrative exception.  Body display level,
+/// descriptorless NPC level, and force/script re-entry never confer it.
+fn has_direct_implementor_authority(g: &GameState, ch: CharId) -> bool {
+    crate::interpreter::authenticated_input_authority(g, ch)
+        .is_some_and(|authority| authority.authority >= i32::from(LVL_IMPL))
+}
+
 // ---------------------------------------------------------------------------
 // SCMD_* values (interpreter.h) — passed as integers by the dispatcher. Listed
 // here so the match arms read like the C switch.
@@ -2375,7 +2382,7 @@ pub fn do_steal(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         .unwrap_or((None, 1));
     if let Some(r) = in_room {
         let peaceful = g.room(r).room_flags.bits() & ROOM_PEACEFUL != 0;
-        if peaceful && ch_level < LVL_IMPL {
+        if peaceful && !has_direct_implementor_authority(g, ch) {
             g.send_to_char(
                 ch,
                 "This room just has such a peaceful, easy feeling...\r\n",
@@ -2899,8 +2906,6 @@ pub fn do_observe(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 }
 
 pub fn do_lockout(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
-    // PRF2_LOCKOUT (structs.h) — the AFK terminal lock.
-    const PRF2_LOCKOUT: i64 = 1 << 1;
     let argument = argument.trim();
 
     let locked = g
@@ -2908,48 +2913,58 @@ pub fn do_lockout(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         .map(|c| c.prf2_flags & PRF2_LOCKOUT != 0)
         .unwrap_or(false);
     if locked {
-        // C act.other.c:1852-1857: strncmp(CRYPT(argument, GET_PASSWD(ch)),
-        // GET_PASSWD(ch), strlen(GET_PASSWD(ch))) — the typed password is
-        // hashed and compared against the stored one. The session hash is
-        // cached on the descriptor at login (the Character never carries it);
-        // a pending `set password` re-hash takes precedence, since that is what
-        // the saved pfile now holds. With no cached hash at all (a copyover
-        // recovery re-attaches without the nanny) the gate degrades to the
-        // pre-fix behaviour rather than locking the player out for good.
-        let hash = g
-            .get_char(ch)
-            .and_then(|c| c.desc)
-            .and_then(|conn| g.descriptors.get(&conn))
-            .and_then(|d| d.password_hash.clone());
-        let hash = g
-            .get_char(ch)
-            .and_then(|c| c.pending_password_hash.clone())
-            .or(hash);
-
-        let ok = match hash.as_deref() {
-            Some(stored) => crate::password::check_password(stored, argument),
-            None => true,
-        };
-        if ok {
-            g.send_to_char(ch, "OK. Your terminal is now unlocked.\r\n");
-            if let Some(c) = g.get_char_mut(ch) {
-                c.prf2_flags &= !PRF2_LOCKOUT;
-            }
-            act(
-                g,
-                "$n has come back from AFK-lockout.",
-                true,
-                ch,
-                None,
-                ActArg::None,
-                To::Room,
-            );
-        } else {
+        if argument.is_empty() || argument.len() > crate::password::MAX_PASSWORD_INPUT_BYTES {
             g.send_to_char(
                 ch,
                 "Password mismatch! Sorry.\r\nTo unlock please type 'unlock <yourpassword>'\r\n",
             );
+            return;
         }
+        let Some(principal) = g
+            .principal_authority(ch)
+            .filter(|principal| principal.is_authenticated_player() && principal.principal == ch)
+        else {
+            g.send_to_char(
+                ch,
+                "Password verification is unavailable for this session; reconnect to unlock.\r\n",
+            );
+            return;
+        };
+        let Some((descriptor, idnum, name, hash)) = g.get_char(ch).and_then(|character| {
+            let descriptor = character.desc?;
+            let session_hash = g
+                .descriptors
+                .get(&descriptor)
+                .and_then(|descriptor| descriptor.password_hash.clone());
+            character
+                .pending_password_hash
+                .clone()
+                .or(session_hash)
+                .map(|hash| {
+                    (
+                        descriptor,
+                        character.idnum,
+                        character.get_name().to_string(),
+                        hash,
+                    )
+                })
+        }) else {
+            g.send_to_char(
+                ch,
+                "Password verification is unavailable after recovery; reconnect to unlock.\r\n",
+            );
+            return;
+        };
+        g.queue_lockout_unlock(crate::state::LockoutUnlockRequest {
+            character: ch,
+            principal: principal.principal,
+            descriptor,
+            idnum,
+            name,
+            expected_hash: hash,
+            plaintext_password: argument.to_string(),
+        });
+        g.send_to_char(ch, "Password verification queued.\r\n");
         return;
     }
     g.send_to_char(
@@ -2962,6 +2977,24 @@ pub fn do_lockout(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     act(
         g,
         "$n has gone AFK-lockout.",
+        true,
+        ch,
+        None,
+        ActArg::None,
+        To::Room,
+    );
+}
+
+/// Clear a terminal lock only after the async Game shell has completed the
+/// bounded password check and revalidated the exact authenticated session.
+pub(crate) fn complete_lockout_unlock(g: &mut GameState, ch: CharId) {
+    g.send_to_char(ch, "OK. Your terminal is now unlocked.\r\n");
+    if let Some(character) = g.get_char_mut(ch) {
+        character.prf2_flags &= !PRF2_LOCKOUT;
+    }
+    act(
+        g,
+        "$n has come back from AFK-lockout.",
         true,
         ch,
         None,
@@ -3838,8 +3871,14 @@ fn is_abbrev_local(arg: &str, full: &str) -> bool {
 pub fn do_email(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     let argument = argument.trim();
     let (farg, _) = one_argument(argument);
+    let authenticated_input = crate::interpreter::authenticated_input_authority(g, ch)
+        .filter(|authority| authority.principal == ch);
 
     if farg.is_empty() {
+        if authenticated_input.is_none() {
+            g.send_to_char(ch, "Email changes require direct authenticated input.\r\n");
+            return;
+        }
         // No target: register/clear the caller's own email and persist the C
         // extra-data sidecar (plredata/<bucket>/<name>.data).
         let mut name = None;
@@ -3862,7 +3901,8 @@ pub fn do_email(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     // Targeting another player: prefer their live slot if online, otherwise
     // read the C-compatible extra-data file. C treats no leading '*' as private
     // to mortals and leading '*' as publicly visible.
-    let viewer_level = g.get_char(ch).map(|c| c.player.level).unwrap_or(1);
+    let viewer_can_read_private =
+        authenticated_input.is_some_and(|authority| authority.authority >= i32::from(LVL_IMMORT));
     let mut email = None;
     let mut known_player = false;
     if let Some(target) = g.find_player_by_name(&farg) {
@@ -3880,12 +3920,16 @@ pub fn do_email(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     }
 
     if known_player {
-        send_email_result(g, ch, viewer_level, email.as_deref());
+        send_email_result(g, ch, viewer_can_read_private, email.as_deref());
         return;
     }
 
     // Unknown name: register the caller's own email to `argument` (C falls
     // through to the self-registration branch when the file is absent).
+    if authenticated_input.is_none() {
+        g.send_to_char(ch, "Email changes require direct authenticated input.\r\n");
+        return;
+    }
     let mut name = None;
     if let Some(c) = g.get_char_mut(ch) {
         c.email = if argument.is_empty() {
@@ -3902,7 +3946,7 @@ pub fn do_email(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     g.send_to_char(ch, "Ok.\r\n");
 }
 
-fn send_email_result(g: &mut GameState, ch: CharId, viewer_level: Level, email: Option<&str>) {
+fn send_email_result(g: &mut GameState, ch: CharId, may_read_private: bool, email: Option<&str>) {
     let Some(addr) = email.filter(|addr| !addr.is_empty()) else {
         g.send_to_char(ch, "They have not registered an email address.\r\n");
         return;
@@ -3913,7 +3957,7 @@ fn send_email_result(g: &mut GameState, ch: CharId, viewer_level: Level, email: 
         } else {
             g.send_to_char(ch, &format!("{}\r\n", public));
         }
-    } else if viewer_level < LVL_IMMORT {
+    } else if !may_read_private {
         g.send_to_char(ch, "Their email address is private.\r\n");
     } else {
         g.send_to_char(ch, &format!("{}\r\n", addr));
@@ -3979,6 +4023,51 @@ fn write_extra_email(lib: &str, name: &str, email: Option<&str>) {
 // do_build — mortal building program toggle / goto.
 // ===========================================================================
 
+/// Leave mortal build mode without re-entering the player command authority
+/// gate. Idle/session cleanup invokes this trusted internal transition; the
+/// public command path still requires direct authenticated input.
+pub(crate) fn exit_build_mode(g: &mut GameState, ch: CharId) -> bool {
+    const PRF2_INTANGIBLE: i64 = 1 << 9;
+    const PRF2_MBUILDING: i64 = 1 << 6;
+
+    if !g
+        .get_char(ch)
+        .is_some_and(|character| character.prf2_flags & PRF2_MBUILDING != 0)
+    {
+        return false;
+    }
+    let back = g.get_char(ch).and_then(|character| character.was_in_room);
+    match back {
+        Some(room) => {
+            g.send_to_char(ch, "Exiting build mode.\r\n");
+            g.char_from_room(ch);
+            g.char_to_room(ch, room);
+            act(
+                g,
+                "$n has arrived from building mode.",
+                true,
+                ch,
+                None,
+                ActArg::None,
+                To::Room,
+            );
+            crate::cmd_informative::look_at_room(g, ch, true);
+        }
+        None => {
+            g.send_to_char(
+                ch,
+                "AHH! Something happened and your original room didn't save!\r\nSending you to the void.\r\n",
+            );
+            g.char_from_room(ch);
+            g.char_to_room(ch, 0);
+        }
+    }
+    if let Some(character) = g.get_char_mut(ch) {
+        character.prf2_flags &= !(PRF2_MBUILDING | PRF2_INTANGIBLE);
+    }
+    true
+}
+
 pub fn do_build(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     // PRF/PRF2/GCMD building flags (structs.h / gcmd.h).
     const PRF2_INTANGIBLE: i64 = 1 << 9;
@@ -3986,6 +4075,15 @@ pub fn do_build(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     const PRF_ROOMFLAGS_L: i64 = PRF_ROOMFLAGS;
 
     let argument = argument.trim();
+    let Some(authority) = crate::interpreter::authenticated_input_authority(g, ch)
+        .filter(|authority| authority.principal_is_player && authority.principal == ch)
+    else {
+        g.send_to_char(
+            ch,
+            "You are not authorized for the mortal building program.\r\n",
+        );
+        return;
+    };
 
     // IS_ARENACOMBATANT not modelled (arena subsystem) -> never a combatant.
     let intang = g
@@ -4020,43 +4118,12 @@ pub fn do_build(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
             g.send_to_char(ch, "You weren't building to begin with.\r\n");
             return;
         }
-        // buildmoderoom (player_specials) isn't modelled; route to was_in_room
-        // if known, else the void, matching C's NOWHERE -> void fallback.
-        let back = g.get_char(ch).and_then(|c| c.was_in_room);
-        match back {
-            Some(r) => {
-                g.send_to_char(ch, "Exiting build mode.\r\n");
-                g.char_from_room(ch);
-                g.char_to_room(ch, r);
-                act(
-                    g,
-                    "$n has arrived from building mode.",
-                    true,
-                    ch,
-                    None,
-                    ActArg::None,
-                    To::Room,
-                );
-                crate::cmd_informative::look_at_room(g, ch, true);
-            }
-            None => {
-                g.send_to_char(
-                    ch,
-                    "AHH! Something happened and your original room didn't save!\r\nSending you to the void.\r\n",
-                );
-                g.char_from_room(ch);
-                g.char_to_room(ch, 0);
-            }
-        }
-        if let Some(c) = g.get_char_mut(ch) {
-            c.prf2_flags &= !(PRF2_MBUILDING | PRF2_INTANGIBLE);
-        }
+        exit_build_mode(g, ch);
         return;
     }
 
     let dest = target_rnum.unwrap();
-    let level = g.get_char(ch).map(|c| c.player.level).unwrap_or(1);
-    if level >= LVL_IMMORT {
+    if authority.authority >= i32::from(LVL_IMMORT) {
         g.send_to_char(
             ch,
             "Sorry, immortals don't really participate in the mortal building program.\r\n",
@@ -4073,8 +4140,14 @@ pub fn do_build(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         g.send_to_char(ch, "You're not part of the mortal building program.\r\n");
         return;
     }
-    // can_edit_zone permissions aren't modelled (OLC subsystem); the membership
-    // check above is the gate that exists. Proceed as if zone-permitted.
+    let Some(zone_rnum) = crate::olc::real_zone(g, target_vnum) else {
+        g.send_to_char(ch, "You don't have permission to edit that zone.\r\n");
+        return;
+    };
+    if !crate::olc::can_edit_zone(g, ch, zone_rnum) {
+        g.send_to_char(ch, "You don't have permission to edit that zone.\r\n");
+        return;
+    }
 
     let pos = g
         .get_char(ch)
@@ -4168,13 +4241,71 @@ mod tests {
         let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
         ch.desc = Some(conn);
         ch.player.level = level;
+        ch.trust = i32::from(level);
         let id = g.create_char(ch);
+        let descriptor = g.descriptors.get_mut(&conn).unwrap();
+        descriptor.state = crate::connection::ConState::Playing;
+        descriptor.character = Some(id);
         g.players_by_name.insert(name.to_lowercase(), id);
         id
     }
 
     fn output(g: &GameState, conn: ConnId) -> &str {
         &g.descriptors.get(&conn).unwrap().outbuf
+    }
+
+    fn peaceful_steal_fixture(level: Level, trust: i32) -> (GameState, CharId, CharId, ConnId) {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(crate::room::Room::new(
+            87_100,
+            0,
+            "Sanctuary".to_string(),
+            "A peaceful test room.".to_string(),
+        ));
+        g.room_mut(room)
+            .room_flags
+            .insert(crate::room::RoomFlags::PEACEFUL);
+        let conn = ConnId(87_101);
+        let thief = connected_player(&mut g, conn, "Thief", level);
+        {
+            let thief = g.get_char_mut(thief).unwrap();
+            thief.trust = trust;
+            thief.idnum = 87_101;
+            thief.set_skill(SKILL_STEAL, 100);
+        }
+        let mut victim = Character::new_npc(87_102);
+        victim.player.name = "Target".to_string();
+        victim.position = Position::Sleeping;
+        victim.points.gold = 100;
+        let victim = g.create_char(victim);
+        g.char_to_room(thief, room);
+        g.char_to_room(victim, room);
+        (g, thief, victim, conn)
+    }
+
+    #[test]
+    fn peaceful_steal_override_requires_direct_persisted_implementor_trust() {
+        let (mut display_g, display, _, display_conn) = peaceful_steal_fixture(LVL_IMPL, 1);
+        crate::interpreter::run_authenticated_command(
+            &mut display_g,
+            display,
+            "steal coins Target",
+        );
+        assert!(output(&display_g, display_conn).contains("peaceful, easy feeling"));
+
+        let (mut trusted_g, trusted, _, trusted_conn) =
+            peaceful_steal_fixture(1, i32::from(LVL_IMPL));
+        crate::interpreter::run_authenticated_command(
+            &mut trusted_g,
+            trusted,
+            "steal coins Target",
+        );
+        assert!(!output(&trusted_g, trusted_conn).contains("peaceful, easy feeling"));
+
+        let (mut indirect_g, indirect, _, indirect_conn) =
+            peaceful_steal_fixture(1, i32::from(LVL_IMPL));
+        do_steal(&mut indirect_g, indirect, "coins Target", 0);
+        assert!(output(&indirect_g, indirect_conn).contains("peaceful, easy feeling"));
     }
 
     #[test]
@@ -4349,7 +4480,7 @@ mod tests {
         let mut g = GameState::new(cfg);
         let ch = connected_player(&mut g, ConnId(1), "Alice", 1);
 
-        do_email(&mut g, ch, "*alice@example.test", 0);
+        crate::interpreter::run_authenticated_command(&mut g, ch, "email *alice@example.test");
 
         assert_eq!(output(&g, ConnId(1)), "Ok.\r\n");
         let path = extra_data_filename(&lib, "Alice").unwrap();
@@ -4369,6 +4500,7 @@ mod tests {
             idnum: 42,
             name: "Target".to_string(),
             level: 1,
+            trust: 1,
             class: Class::Warrior,
             last_logon: 0,
             host: String::new(),
@@ -4395,6 +4527,7 @@ mod tests {
             idnum: 43,
             name: "Silent".to_string(),
             level: 1,
+            trust: 1,
             class: Class::Warrior,
             last_logon: 0,
             host: String::new(),
@@ -4426,7 +4559,7 @@ mod tests {
         do_email(&mut g, mortal, "Target", 0);
         assert_eq!(output(&g, ConnId(1)), "Their email address is private.\r\n");
 
-        do_email(&mut g, imm, "Target", 0);
+        crate::interpreter::run_authenticated_command(&mut g, imm, "email Target");
         assert_eq!(output(&g, ConnId(2)), "private@example.test\r\n");
 
         g.descriptors.get_mut(&ConnId(1)).unwrap().outbuf.clear();
@@ -4443,6 +4576,59 @@ mod tests {
             "A test room".to_string(),
             "A featureless test room.".to_string(),
         ))
+    }
+
+    #[test]
+    fn mortal_build_requires_authenticated_zone_ownership() {
+        let mut g = GameState::new(Config::default());
+        for (number, builders) in [(1, "Owner"), (2, "OtherBuilder")] {
+            g.zones.push(crate::world::Zone {
+                number,
+                name: format!("Zone {number}"),
+                builders: builders.into(),
+                lifespan: 30,
+                age: 0,
+                top: number * 100 + 99,
+                reset_mode: 2,
+                min_level: 0,
+                max_level: 60,
+                status_mode: 0,
+                map_x: None,
+                map_y: None,
+                reset_commands: Vec::new(),
+            });
+        }
+        let origin = g.add_room(crate::room::Room::new(
+            101,
+            0,
+            "Origin".into(),
+            "Origin.".into(),
+        ));
+        let destination = g.add_room(crate::room::Room::new(
+            201,
+            1,
+            "Destination".into(),
+            "Destination.".into(),
+        ));
+        let conn = ConnId(91);
+        let ch = connected_player(&mut g, conn, "Owner", 1);
+        g.get_char_mut(ch).unwrap().act_flags |= 1 << 18; // PLR_MBUILDER
+        g.char_to_room(ch, origin);
+
+        crate::interpreter::run_authenticated_command(&mut g, ch, "build 201");
+        assert_eq!(g.get_char(ch).unwrap().in_room, Some(origin));
+        assert!(output(&g, conn).contains("permission to edit that zone"));
+
+        g.zones[1].builders = "Owner".into();
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        crate::interpreter::run_command(&mut g, ch, "build 201");
+        assert_eq!(g.get_char(ch).unwrap().in_room, Some(origin));
+        assert!(output(&g, conn).contains("not authorized"));
+
+        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
+        crate::interpreter::run_authenticated_command(&mut g, ch, "build 201");
+        assert_eq!(g.get_char(ch).unwrap().in_room, Some(destination));
+        assert_ne!(g.get_char(ch).unwrap().prf2_flags & (1 << 6), 0);
     }
 
     #[test]
@@ -4582,7 +4768,7 @@ mod tests {
     }
 
     #[test]
-    fn lockout_rejects_a_wrong_password_313() {
+    fn lockout_defers_password_kdf_and_success_publication_313() {
         let mut g = GameState::new(Config::default());
         let conn = ConnId(1);
         let ch = connected_player(&mut g, conn, "Locked", 10);
@@ -4590,17 +4776,11 @@ mod tests {
             Some(crate::password::hash_password("sesame"));
         g.get_char_mut(ch).unwrap().prf2_flags |= 1 << 1; // PRF2_LOCKOUT
 
-        do_lockout(&mut g, ch, "wrong", 0);
-        assert_eq!(
-            output(&g, conn),
-            "Password mismatch! Sorry.\r\nTo unlock please type 'unlock <yourpassword>'\r\n"
-        );
-        assert_ne!(g.get_char(ch).unwrap().prf2_flags & (1 << 1), 0);
-
-        g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
         do_lockout(&mut g, ch, "sesame", 0);
-        assert_eq!(output(&g, conn), "OK. Your terminal is now unlocked.\r\n");
-        assert_eq!(g.get_char(ch).unwrap().prf2_flags & (1 << 1), 0);
+        assert_eq!(output(&g, conn), "Password verification queued.\r\n");
+        assert_ne!(g.get_char(ch).unwrap().prf2_flags & (1 << 1), 0);
+        assert_eq!(g.lockout_unlock_requests.len(), 1);
+        assert_eq!(g.lockout_unlock_requests[0].plaintext_password, "sesame");
     }
 
     #[test]
@@ -4614,6 +4794,23 @@ mod tests {
 
         do_lockout(&mut g, ch, "", 0);
         assert!(output(&g, conn).contains("Password mismatch!"));
+        assert_ne!(g.get_char(ch).unwrap().prf2_flags & (1 << 1), 0);
+    }
+
+    #[test]
+    fn lockout_without_a_copyover_password_cache_fails_closed() {
+        let mut g = GameState::new(Config::default());
+        let conn = ConnId(1);
+        let ch = connected_player(&mut g, conn, "Recovered", 10);
+        assert!(g.descriptors[&conn].password_hash.is_none());
+        g.get_char_mut(ch).unwrap().prf2_flags |= 1 << 1;
+
+        do_lockout(&mut g, ch, "anything", 0);
+
+        assert_eq!(
+            output(&g, conn),
+            "Password verification is unavailable after recovery; reconnect to unlock.\r\n"
+        );
         assert_ne!(g.get_char(ch).unwrap().prf2_flags & (1 << 1), 0);
     }
 
