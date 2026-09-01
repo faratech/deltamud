@@ -2089,8 +2089,8 @@ mod tests {
     #[test]
     fn pet_shop_purchase_fires_load_trigger_on_new_pet() {
         let _dg = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        crate::dg_handler::boot_handler();
         let mut g = GameState::new(Config::default());
+        crate::dg_handler::boot_handler(&mut g);
         let shop_room = g.add_room(Room::new(
             3031,
             0,
@@ -2145,7 +2145,7 @@ mod tests {
             .find(|&cid| cid != display_pet)
             .unwrap();
         assert_eq!(
-            crate::dg_handler::get_global_var(ScriptKey::Mob(bought_pet), "adopted").as_deref(),
+            crate::dg_handler::get_global_var(&g, ScriptKey::Mob(bought_pet), "adopted").as_deref(),
             Some("yes")
         );
     }

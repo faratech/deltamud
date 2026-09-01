@@ -2588,28 +2588,32 @@ mod tests {
     }
 
     fn make_dg_trigger(
+        g: &mut GameState,
         attach_type: i32,
         trigger_type: i64,
         narg: i32,
         cmds: &[&str],
     ) -> crate::dg_handler::TrigId {
-        install_trig(TrigData {
-            nr: 0,
-            vnum: 9999,
-            attach_type,
-            name: "combat test".to_string(),
-            trigger_type,
-            narg,
-            arglist: String::new(),
-            cmdlist: cmds.iter().map(|s| s.to_string()).collect(),
-            curr_line: 0,
-            depth: 0,
-            loops: 0,
-            wait_event: None,
-            var_list: Vec::new(),
-            purged: false,
-            loop_origin: HashMap::new(),
-        })
+        install_trig(
+            g,
+            TrigData {
+                nr: 0,
+                vnum: 9999,
+                attach_type,
+                name: "combat test".to_string(),
+                trigger_type,
+                narg,
+                arglist: String::new(),
+                cmdlist: cmds.iter().map(|s| s.to_string()).collect(),
+                curr_line: 0,
+                depth: 0,
+                loops: 0,
+                wait_event: None,
+                var_list: Vec::new(),
+                purged: false,
+                loop_origin: HashMap::new(),
+            },
+        )
     }
 
     #[test]
@@ -3140,8 +3144,8 @@ mod tests {
     #[test]
     fn hit_fires_mob_fight_trigger() {
         let _dg = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        dg_handler::boot_handler();
         let mut g = GameState::new(Config::default());
+        dg_handler::boot_handler(&mut g);
         let room = g.add_room(Room::new(
             100,
             0,
@@ -3159,17 +3163,18 @@ mod tests {
         g.char_to_room(victim, room);
         g.get_char_mut(mob).unwrap().fighting = Some(victim);
         let trig = make_dg_trigger(
+            &mut g,
             MOB_TRIGGER,
             MTRIG_FIGHT,
             100,
             &["set fired yes", "global fired", "halt"],
         );
-        add_trigger(ScriptKey::Mob(mob), trig, -1);
+        add_trigger(&mut g, ScriptKey::Mob(mob), trig, -1);
 
         hit(&mut g, mob, victim);
 
         assert_eq!(
-            dg_handler::get_global_var(ScriptKey::Mob(mob), "fired").as_deref(),
+            dg_handler::get_global_var(&g, ScriptKey::Mob(mob), "fired").as_deref(),
             Some("yes")
         );
     }
@@ -3177,8 +3182,8 @@ mod tests {
     #[test]
     fn hit_fires_equipped_object_fight_trigger() {
         let _dg = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        dg_handler::boot_handler();
         let mut g = GameState::new(Config::default());
+        dg_handler::boot_handler(&mut g);
         let room = g.add_room(Room::new(
             100,
             0,
@@ -3198,17 +3203,18 @@ mod tests {
             a.points.technique = 1000;
         }
         let trig = make_dg_trigger(
+            &mut g,
             OBJ_TRIGGER,
             OTRIG_FIGHT,
             100,
             &["set fired yes", "global fired", "halt"],
         );
-        add_trigger(ScriptKey::Obj(obj), trig, -1);
+        add_trigger(&mut g, ScriptKey::Obj(obj), trig, -1);
 
         hit(&mut g, attacker, victim);
 
         assert_eq!(
-            dg_handler::get_global_var(ScriptKey::Obj(obj), "fired").as_deref(),
+            dg_handler::get_global_var(&g, ScriptKey::Obj(obj), "fired").as_deref(),
             Some("yes")
         );
     }
@@ -3216,8 +3222,8 @@ mod tests {
     #[test]
     fn hit_fires_victim_hitprcnt_trigger_after_damage() {
         let _dg = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        dg_handler::boot_handler();
         let mut g = GameState::new(Config::default());
+        dg_handler::boot_handler(&mut g);
         let room = g.add_room(Room::new(
             100,
             0,
@@ -3242,17 +3248,18 @@ mod tests {
         }
         g.get_char_mut(victim).unwrap().fighting = Some(attacker);
         let trig = make_dg_trigger(
+            &mut g,
             MOB_TRIGGER,
             MTRIG_HITPRCNT,
             50,
             &["set low yes", "global low", "halt"],
         );
-        add_trigger(ScriptKey::Mob(victim), trig, -1);
+        add_trigger(&mut g, ScriptKey::Mob(victim), trig, -1);
 
         hit(&mut g, attacker, victim);
 
         assert_eq!(
-            dg_handler::get_global_var(ScriptKey::Mob(victim), "low").as_deref(),
+            dg_handler::get_global_var(&g, ScriptKey::Mob(victim), "low").as_deref(),
             Some("yes")
         );
     }

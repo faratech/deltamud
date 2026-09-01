@@ -27,16 +27,12 @@ use crate::dg_handler::{
 use crate::object::{ObjLoc, ObjectGraphOrder, walk_object_graph};
 use crate::state::GameState;
 use crate::types::*;
-use std::cell::Cell;
 
 pub const UID_CHAR: char = '\x1b';
 const MAX_DEPTH_RECURSE: i32 = MAX_SCRIPT_DEPTH;
 
-thread_local! {
-    // C static `depth` in script_driver, and dg_owner_purged.
-    static SCRIPT_DEPTH: Cell<i32> = const { Cell::new(0) };
-    static OWNER_PURGED: Cell<bool> = const { Cell::new(false) };
-}
+// C static `depth` in script_driver and dg_owner_purged now live on
+// GameState: g.dg.script_depth / g.dg.owner_purged.
 
 // ---------------------------------------------------------------------------
 // GoRef — the "void *go" the trigger runs on, with its trig_type.
@@ -340,8 +336,8 @@ fn find_replacement(
 
     // Look up var in trigger-local vars, then script globals (context-honoured).
     let local_val =
-        dg_handler::with_trig(trig, |t| t.get_var(var).map(|v| v.value.clone())).flatten();
-    let var_value = local_val.or_else(|| dg_handler::get_global_var(key, var));
+        dg_handler::with_trig(g, trig, |t| t.get_var(var).map(|v| v.value.clone())).flatten();
+    let var_value = local_val.or_else(|| dg_handler::get_global_var(&g, key, var));
 
     // No field: return the var's plain value, or "self"/"" specials.
     if field.is_empty() {
@@ -596,7 +592,7 @@ fn resolve_random(g: &GameState, go: GoRef, field: &str) -> String {
                     }
                 }
             }
-            if rng_number(0, count) == 0 {
+            if rng_number(g, 0, count) == 0 {
                 rndm = Some(c);
             }
             count += 1;
@@ -606,7 +602,7 @@ fn resolve_random(g: &GameState, go: GoRef, field: &str) -> String {
             None => String::new(),
         }
     } else if field.eq_ignore_ascii_case("letter") {
-        let n = rng_number(1, 26);
+        let n = rng_number(g, 1, 26);
         let ch = (96 + n) as u8 as char;
         ch.to_string()
     } else {
@@ -619,28 +615,25 @@ fn resolve_random(g: &GameState, go: GoRef, field: &str) -> String {
             Err(_) => 0,
         };
         if num > 0 {
-            rng_number(1, num).to_string()
+            rng_number(g, 1, num).to_string()
         } else {
             "0".to_string()
         }
     }
 }
 
-// The VM needs number() during pure substitution (immutable &GameState). We
-// route through a thread-local clone of the master rng that script_driver
-// re-syncs each run, preserving CircleMUD number() semantics within a script.
-thread_local! {
-    static SCRIPT_RNG: std::cell::RefCell<crate::rng::Rng> =
-        std::cell::RefCell::new(crate::rng::Rng::new(1));
-}
-fn rng_number(from: i32, to: i32) -> i32 {
-    SCRIPT_RNG.with(|r| r.borrow_mut().number(from, to))
+// The VM needs number() during pure substitution (immutable &GameState). The
+// script RNG lives on GameState (`dg.script_rng`, a RefCell) — re-synced from
+// the master rng each driver entry, preserving CircleMUD number() semantics
+// within a script.
+fn rng_number(g: &GameState, from: i32, to: i32) -> i32 {
+    (g.dg.script_rng.borrow_mut()).number(from, to)
 }
 fn sync_script_rng(g: &mut GameState) {
     // Pull entropy from the master rng so script randomness advances the same
     // global stream (one draw seeds the script rng each driver entry).
     let seed = g.rng.circle_random() as u64;
-    SCRIPT_RNG.with(|r| r.borrow_mut().srandom(seed));
+    g.dg.script_rng.borrow_mut().srandom(seed);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -738,10 +731,10 @@ fn resolve_char_field(
         }
         _ => {
             // unknown field: try the target's own script globals.
-            if let Some(v) = dg_handler::get_global_var(ScriptKey::Mob(c), field) {
+            if let Some(v) = dg_handler::get_global_var(&g, ScriptKey::Mob(c), field) {
                 return v;
             }
-            log_unknown(trig, "char", field);
+            log_unknown(g, trig, "char", field);
             String::new()
         }
     }
@@ -823,7 +816,7 @@ fn resolve_obj_field(
         "val2" => obj.values[2].to_string(),
         "val3" => obj.values[3].to_string(),
         _ => {
-            log_unknown(trig, "object", field);
+            log_unknown(g, trig, "object", field);
             String::new()
         }
     }
@@ -861,15 +854,15 @@ fn resolve_room_field(
         "down" => dir(DOWN),
         "vnum" => room.number.to_string(),
         _ => {
-            log_unknown(trig, "room", field);
+            log_unknown(g, trig, "room", field);
             String::new()
         }
     }
 }
 
-fn log_unknown(trig: TrigId, kind: &str, field: &str) {
+fn log_unknown(g: &GameState, trig: TrigId, kind: &str, field: &str) {
     let (name, vnum) =
-        dg_handler::with_trig(trig, |t| (t.name.clone(), t.vnum)).unwrap_or_default();
+        dg_handler::with_trig(g, trig, |t| (t.name.clone(), t.vnum)).unwrap_or_default();
     script_log(&format!(
         "Trigger: {}, VNum {}. unknown {} field: '{}'",
         name, vnum, kind, field
@@ -1298,110 +1291,114 @@ fn find_case(
 // ---------------------------------------------------------------------------
 // Command processors that mutate trigger/script vars.
 // ---------------------------------------------------------------------------
-fn process_set(go: GoRef, trig: TrigId, cmd: &str) {
+fn process_set(g: &mut GameState, go: GoRef, trig: TrigId, cmd: &str) {
     // "set name value..."
     let (name, value) = two_arg_rest(cmd);
     if name.is_empty() {
-        log_cmd_err(trig, "set", cmd);
+        log_cmd_err(g, trig, "set", cmd);
         return;
     }
-    let ctx = dg_handler::get_context(go.key());
-    dg_handler::with_trig_mut(trig, |t| {
+    let ctx = dg_handler::get_context(g, go.key());
+    dg_handler::with_trig_mut(g, trig, |t| {
         add_var_in(&mut t.var_list, &name, value.trim_start(), ctx);
     });
 }
 
-fn process_eval(g: &GameState, go: GoRef, trig: TrigId, cmd: &str) {
+fn process_eval(g: &mut GameState, go: GoRef, trig: TrigId, cmd: &str) {
     let (name, expr) = two_arg_rest(cmd);
     if name.is_empty() {
-        log_cmd_err(trig, "eval", cmd);
+        log_cmd_err(g, trig, "eval", cmd);
         return;
     }
     let result = eval_expr(g, expr.trim_start(), go, trig);
-    let ctx = dg_handler::get_context(go.key());
-    dg_handler::with_trig_mut(trig, |t| add_var_in(&mut t.var_list, &name, &result, ctx));
+    let ctx = dg_handler::get_context(g, go.key());
+    dg_handler::with_trig_mut(g, trig, |t| {
+        add_var_in(&mut t.var_list, &name, &result, ctx)
+    });
 }
 
-fn makeuid_var(g: &GameState, go: GoRef, trig: TrigId, cmd: &str) {
+fn makeuid_var(g: &mut GameState, go: GoRef, trig: TrigId, cmd: &str) {
     let (varname, uid_p) = two_arg_rest(cmd);
     let uid_p = uid_p.trim();
     if varname.is_empty() {
-        log_cmd_err(trig, "makeuid", cmd);
+        log_cmd_err(g, trig, "makeuid", cmd);
         return;
     }
     if uid_p.is_empty() || atoi(uid_p) == 0 {
-        log_cmd_err(trig, "makeuid", cmd);
+        log_cmd_err(g, trig, "makeuid", cmd);
         return;
     }
     let result = eval_expr(g, uid_p, go, trig);
     let uid = format!("{}{}", UID_CHAR, result);
-    let ctx = dg_handler::get_context(go.key());
-    dg_handler::with_trig_mut(trig, |t| add_var_in(&mut t.var_list, &varname, &uid, ctx));
+    let ctx = dg_handler::get_context(g, go.key());
+    dg_handler::with_trig_mut(g, trig, |t| {
+        add_var_in(&mut t.var_list, &varname, &uid, ctx)
+    });
 }
 
-fn process_unset(go: GoRef, trig: TrigId, cmd: &str) {
+fn process_unset(g: &mut GameState, go: GoRef, trig: TrigId, cmd: &str) {
     let var = one_arg_rest(cmd);
     let var = var.trim();
     if var.is_empty() {
-        log_cmd_err(trig, "unset", cmd);
+        log_cmd_err(g, trig, "unset", cmd);
         return;
     }
-    if !dg_handler::remove_global_var(go.key(), var) {
-        dg_handler::with_trig_mut(trig, |t| {
+    if !dg_handler::remove_global_var(g, go.key(), var) {
+        dg_handler::with_trig_mut(g, trig, |t| {
             remove_var_in(&mut t.var_list, var);
         });
     }
 }
 
-fn process_global(go: GoRef, trig: TrigId, cmd: &str, id: i64) {
+fn process_global(g: &mut GameState, go: GoRef, trig: TrigId, cmd: &str, id: i64) {
     let var = one_arg_rest(cmd);
     let var = var.trim();
     if var.is_empty() {
-        log_cmd_err(trig, "global", cmd);
+        log_cmd_err(g, trig, "global", cmd);
         return;
     }
-    let val = dg_handler::with_trig(trig, |t| t.get_var(var).map(|v| v.value.clone())).flatten();
+    let val = dg_handler::with_trig(g, trig, |t| t.get_var(var).map(|v| v.value.clone())).flatten();
     match val {
         Some(v) => {
-            dg_handler::add_global_var(go.key(), var, &v, id);
-            dg_handler::with_trig_mut(trig, |t| {
+            dg_handler::add_global_var(g, go.key(), var, &v, id);
+            dg_handler::with_trig_mut(g, trig, |t| {
                 remove_var_in(&mut t.var_list, var);
             });
         }
         None => {
-            log_cmd_err(trig, "global", &format!("local var '{}' not found", var));
+            log_cmd_err(g, trig, "global", &format!("local var '{}' not found", var));
         }
     }
 }
 
-fn process_context(go: GoRef, trig: TrigId, cmd: &str) {
+fn process_context(g: &mut GameState, go: GoRef, trig: TrigId, cmd: &str) {
     let var = one_arg_rest(cmd);
     let var = var.trim();
     if var.is_empty() {
-        log_cmd_err(trig, "context", cmd);
+        log_cmd_err(g, trig, "context", cmd);
         return;
     }
-    dg_handler::set_context(go.key(), atoi(var));
+    dg_handler::set_context(g, go.key(), atoi(var));
 }
 
-fn process_remote(g: &GameState, go: GoRef, trig: TrigId, cmd: &str) {
+fn process_remote(g: &mut GameState, go: GoRef, trig: TrigId, cmd: &str) {
     // "remote <var> <uid>"
     let rest = one_arg_rest(cmd); // drop "remote"
     let (var, uid_s) = two_arg(&rest);
     if var.is_empty() || uid_s.is_empty() {
-        log_cmd_err(trig, "remote", cmd);
+        log_cmd_err(g, trig, "remote", cmd);
         return;
     }
-    let ctx = dg_handler::get_context(go.key());
+    let ctx = dg_handler::get_context(g, go.key());
     // find local var, then context-global.
-    let vd = dg_handler::with_trig(trig, |t| {
+    let vd = dg_handler::with_trig(g, trig, |t| {
         t.get_var(&var)
             .map(|v| (v.name.clone(), v.value.clone(), v.context))
     })
     .flatten()
-    .or_else(|| dg_handler::get_global_var(go.key(), &var).map(|v| (var.clone(), v, ctx)));
+    .or_else(|| dg_handler::get_global_var(&g, go.key(), &var).map(|v| (var.clone(), v, ctx)));
     let Some((name, value, vctx)) = vd else {
-        log_cmd_err(trig, "remote", "local var not found");
+        log_cmd_err(g, trig, "remote", "local var not found");
         return;
     };
     let uid = atoi(&uid_s);
@@ -1412,7 +1409,7 @@ fn process_remote(g: &GameState, go: GoRef, trig: TrigId, cmd: &str) {
     // range gate would reject every valid mob/obj target. Drop it: remote may set
     // a global on any valid target (mob/obj/room).
     if uid <= 0 {
-        log_cmd_err(trig, "remote", "illegal uid");
+        log_cmd_err(g, trig, "remote", "illegal uid");
         return;
     }
     let target = if let Some(r) = find_room_by_uid(g, uid) {
@@ -1423,11 +1420,11 @@ fn process_remote(g: &GameState, go: GoRef, trig: TrigId, cmd: &str) {
         find_obj_by_uid(g, uid).map(ScriptKey::Obj)
     };
     if let Some(key) = target {
-        dg_handler::add_global_var(key, &name, &value, vctx);
+        dg_handler::add_global_var(g, key, &name, &value, vctx);
     }
 }
 
-fn extract_value(go: GoRef, trig: TrigId, cmd: &str) {
+fn extract_value(g: &mut GameState, go: GoRef, trig: TrigId, cmd: &str) {
     // "extract <to> <num> <space-separated source...>"
     // C (dg_scripts.c:2217) parses with half_chop, NOT two_arguments — so the
     // source argument keeps the whole line remainder. The previous `two_arg`
@@ -1448,20 +1445,20 @@ fn extract_value(go: GoRef, trig: TrigId, cmd: &str) {
         .nth((num - 1) as usize)
         .unwrap_or("")
         .to_string();
-    let ctx = dg_handler::get_context(go.key());
-    dg_handler::with_trig_mut(trig, |t| add_var_in(&mut t.var_list, &to, &token, ctx));
+    let ctx = dg_handler::get_context(g, go.key());
+    dg_handler::with_trig_mut(g, trig, |t| add_var_in(&mut t.var_list, &to, &token, ctx));
 }
 
-fn process_return(trig: TrigId, cmd: &str) -> i32 {
+fn process_return(g: &GameState, trig: TrigId, cmd: &str) -> i32 {
     let (_a1, a2) = two_arg(&one_arg_rest_keep(cmd));
     if a2.is_empty() {
-        log_cmd_err(trig, "return", cmd);
+        log_cmd_err(g, trig, "return", cmd);
         return 1;
     }
     match crate::text::parse_i32_atoi(&a2) {
         Ok(value) => value,
         Err(crate::text::ParseIntError::Overflow) => {
-            log_cmd_err(trig, "return", "value outside supported 32-bit range");
+            log_cmd_err(g, trig, "return", "value outside supported 32-bit range");
             0
         }
         Err(_) => unreachable!("parse_i32_atoi maps nonnumeric input to zero"),
@@ -1473,7 +1470,7 @@ fn process_wait(g: &mut GameState, go: GoRef, trig: TrigId, cmd: &str, cur_line:
     let arg = one_arg_rest(cmd);
     let arg = arg.trim();
     if arg.is_empty() {
-        log_cmd_err(trig, "wait", cmd);
+        log_cmd_err(g, trig, "wait", cmd);
         return;
     }
 
@@ -1507,7 +1504,7 @@ fn process_wait(g: &mut GameState, go: GoRef, trig: TrigId, cmd: &str, cur_line:
             trig_type: go.trig_type(),
         },
     );
-    dg_handler::with_trig_mut(trig, |t| {
+    dg_handler::with_trig_mut(g, trig, |t| {
         t.wait_event = Some(ev);
         t.curr_line = cur_line + 1;
     });
@@ -1533,9 +1530,9 @@ fn wait_until_delay_from(pulse: u64, current_mud_min: i64, hr: i64, min: i64) ->
     }
 }
 
-fn log_cmd_err(trig: TrigId, what: &str, cmd: &str) {
+fn log_cmd_err(g: &GameState, trig: TrigId, what: &str, cmd: &str) {
     let (name, vnum) =
-        dg_handler::with_trig(trig, |t| (t.name.clone(), t.vnum)).unwrap_or_default();
+        dg_handler::with_trig(g, trig, |t| (t.name.clone(), t.vnum)).unwrap_or_default();
     script_log(&format!(
         "Trigger: {}, VNum {}. {}: '{}'",
         name, vnum, what, cmd
@@ -1580,11 +1577,11 @@ fn split_word(s: &str) -> (String, &str) {
 /// Resume a trigger after its wait event fires (trig_wait_event).
 pub fn trig_wait_event(g: &mut GameState, ev: WaitEvent) {
     // Clear the parked event handle and resume.
-    let still_attached = dg_handler::with_trig(ev.trig, |t| t.wait_event.is_some()).is_some();
+    let still_attached = dg_handler::with_trig(g, ev.trig, |t| t.wait_event.is_some()).is_some();
     if !still_attached {
         return;
     }
-    dg_handler::with_trig_mut(ev.trig, |t| t.wait_event = None);
+    dg_handler::with_trig_mut(g, ev.trig, |t| t.wait_event = None);
     if ev.go.exists(g) {
         script_driver(g, ev.go, ev.trig, ev.trig_type, TRIG_RESTART);
     }
@@ -1593,12 +1590,12 @@ pub fn trig_wait_event(g: &mut GameState, ev: WaitEvent) {
 /// script_driver(go, trig, type, mode): run a trigger's command list. Returns
 /// the script return value (default 1; a `return N` sets it).
 pub fn script_driver(g: &mut GameState, go: GoRef, trig: TrigId, type_: i32, mode: i32) -> i32 {
-    let depth = SCRIPT_DEPTH.with(|d| d.get());
+    let depth = g.dg.script_depth;
     if depth > MAX_DEPTH_RECURSE {
         script_log("Triggers recursed beyond maximum allowed depth.");
         return 1;
     }
-    SCRIPT_DEPTH.with(|d| d.set(depth + 1));
+    g.dg.script_depth = depth + 1;
     sync_script_rng(g);
 
     // C comm.c: dg_act_check is cleared while the VM runs so %echo%-style
@@ -1611,12 +1608,12 @@ pub fn script_driver(g: &mut GameState, go: GoRef, trig: TrigId, type_: i32, mod
         script_driver_inner(g, go, trig, type_, mode)
     }));
     g.dg_act_check = prev_check;
-    SCRIPT_DEPTH.with(|d| d.set(depth));
+    g.dg.script_depth = depth;
     match result {
         Ok(result) => result,
         Err(payload) => {
-            OWNER_PURGED.with(|purged| purged.set(false));
-            dg_handler::with_trig_mut(trig, |trigger| {
+            g.dg.owner_purged = false;
+            dg_handler::with_trig_mut(g, trig, |trigger| {
                 trigger.depth = 0;
                 trigger.curr_line = 0;
                 trigger.var_list.clear();
@@ -1631,31 +1628,31 @@ fn script_driver_inner(g: &mut GameState, go: GoRef, trig: TrigId, type_: i32, m
     let mut ret_val = 1;
 
     // Snapshot the command list (immutable across the run; cmdlist is shared).
-    let cmds = match dg_handler::with_trig(trig, |t| t.cmdlist.clone()) {
+    let cmds = match dg_handler::with_trig(g, trig, |t| t.cmdlist.clone()) {
         Some(c) => c,
         None => return 1,
     };
 
     if mode == TRIG_NEW {
-        dg_handler::with_trig_mut(trig, |t| {
+        dg_handler::with_trig_mut(g, trig, |t| {
             t.depth = 1;
             t.loops = 0;
             t.loop_origin.clear();
         });
-        dg_handler::set_context(key, 0);
+        dg_handler::set_context(g, key, 0);
     }
 
-    OWNER_PURGED.with(|p| p.set(false));
+    g.dg.owner_purged = false;
 
     let mut cl = if mode == TRIG_NEW {
         0
     } else {
-        dg_handler::with_trig(trig, |t| t.curr_line).unwrap_or(0)
+        dg_handler::with_trig(&g, trig, |t| t.curr_line).unwrap_or(0)
     };
     let mut loops: u32 = 0;
 
     while cl < cmds.len() {
-        let cur_depth = dg_handler::with_trig(trig, |t| t.depth).unwrap_or(0);
+        let cur_depth = dg_handler::with_trig(&g, trig, |t| t.depth).unwrap_or(0);
         if cur_depth == 0 {
             break;
         }
@@ -1666,21 +1663,21 @@ fn script_driver_inner(g: &mut GameState, go: GoRef, trig: TrigId, type_: i32, m
             // comment
         } else if let Some(rest) = p.strip_prefix("if ") {
             if process_if(g, rest, go, trig) {
-                dg_handler::with_trig_mut(trig, |t| t.depth += 1);
+                dg_handler::with_trig_mut(g, trig, |t| t.depth += 1);
             } else {
                 let (line, inc) = find_else_end(g, &cmds, cl, go, trig);
                 cl = line;
                 if inc {
-                    dg_handler::with_trig_mut(trig, |t| t.depth += 1);
+                    dg_handler::with_trig_mut(g, trig, |t| t.depth += 1);
                 }
             }
         } else if p.starts_with("elseif ") || p.starts_with("else") {
             cl = find_end(&cmds, cl);
-            dg_handler::with_trig_mut(trig, |t| t.depth -= 1);
+            dg_handler::with_trig_mut(g, trig, |t| t.depth -= 1);
         } else if let Some(rest) = p.strip_prefix("while ") {
             let done = find_done(&cmds, cl);
             if process_if(g, rest, go, trig) {
-                dg_handler::with_trig_mut(trig, |t| {
+                dg_handler::with_trig_mut(g, trig, |t| {
                     t.loop_origin.insert(done, cl);
                 });
             } else {
@@ -1690,9 +1687,10 @@ fn script_driver_inner(g: &mut GameState, go: GoRef, trig: TrigId, type_: i32, m
         } else if let Some(rest) = p.strip_prefix("switch ") {
             cl = find_case(g, &cmds, cl, go, trig, rest);
         } else if p.starts_with("end") {
-            dg_handler::with_trig_mut(trig, |t| t.depth -= 1);
+            dg_handler::with_trig_mut(g, trig, |t| t.depth -= 1);
         } else if p.starts_with("done") {
-            let origin = dg_handler::with_trig(trig, |t| t.loop_origin.get(&cl).copied()).flatten();
+            let origin =
+                dg_handler::with_trig(g, trig, |t| t.loop_origin.get(&cl).copied()).flatten();
             if let Some(while_line) = origin {
                 let while_cond = leading(&cmds[while_line])
                     .strip_prefix("while ")
@@ -1701,7 +1699,7 @@ fn script_driver_inner(g: &mut GameState, go: GoRef, trig: TrigId, type_: i32, m
                 if process_if(g, &while_cond, go, trig) {
                     cl = while_line;
                     loops += 1;
-                    let total = dg_handler::with_trig_mut(trig, |t| {
+                    let total = dg_handler::with_trig_mut(g, trig, |t| {
                         t.loops += 1;
                         t.loops
                     })
@@ -1711,7 +1709,7 @@ fn script_driver_inner(g: &mut GameState, go: GoRef, trig: TrigId, type_: i32, m
                         return ret_val;
                     }
                     if total == 100 {
-                        let vnum = dg_handler::with_trig(trig, |t| t.vnum).unwrap_or(0);
+                        let vnum = dg_handler::with_trig(g, trig, |t| t.vnum).unwrap_or(0);
                         script_log(&format!("Trigger VNum {} has looped 100 times!!!", vnum));
                     }
                 }
@@ -1733,24 +1731,24 @@ fn script_driver_inner(g: &mut GameState, go: GoRef, trig: TrigId, type_: i32, m
                 let _ = rest;
                 process_eval(g, go, trig, &cmd);
             } else if strip_kw(lc, "extract ").is_some() {
-                extract_value(go, trig, &cmd);
+                extract_value(g, go, trig, &cmd);
             } else if strip_kw(lc, "makeuid ").is_some() {
                 makeuid_var(g, go, trig, &cmd);
             } else if lc.starts_with("halt") {
                 break;
             } else if strip_kw(lc, "global ").is_some() {
-                let ctx = dg_handler::get_context(key);
-                process_global(go, trig, &cmd, ctx);
+                let ctx = dg_handler::get_context(g, key);
+                process_global(g, go, trig, &cmd, ctx);
             } else if strip_kw(lc, "context ").is_some() {
-                process_context(go, trig, &cmd);
+                process_context(g, go, trig, &cmd);
             } else if strip_kw(lc, "remote ").is_some() {
                 process_remote(g, go, trig, &cmd);
             } else if strip_kw(lc, "return ").is_some() {
-                ret_val = process_return(trig, &cmd);
+                ret_val = process_return(g, trig, &cmd);
             } else if strip_kw(lc, "set ").is_some() {
-                process_set(go, trig, &cmd);
+                process_set(g, go, trig, &cmd);
             } else if strip_kw(lc, "unset ").is_some() {
-                process_unset(go, trig, &cmd);
+                process_unset(g, go, trig, &cmd);
             } else if strip_kw(lc, "wait ").is_some() {
                 process_wait(g, go, trig, &cmd, cl);
                 return ret_val;
@@ -1780,7 +1778,7 @@ fn script_driver_inner(g: &mut GameState, go: GoRef, trig: TrigId, type_: i32, m
     }
 
     // End of trigger: clear local vars + running state.
-    dg_handler::with_trig_mut(trig, |t| {
+    dg_handler::with_trig_mut(g, trig, |t| {
         t.var_list.clear();
         t.depth = 0;
         t.curr_line = 0;
@@ -1799,8 +1797,8 @@ fn strip_kw<'a>(s: &'a str, kw: &str) -> Option<&'a str> {
 }
 
 /// Mark the owner purged from inside a DG command (set when *self is opurge'd).
-pub fn set_owner_purged() {
-    OWNER_PURGED.with(|p| p.set(true));
+pub fn set_owner_purged(g: &mut GameState) {
+    g.dg.owner_purged = true;
 }
 
 // ===========================================================================
@@ -1823,15 +1821,15 @@ fn run_one_command(g: &mut GameState, go: GoRef, type_: i32, cmd: &str) -> bool 
                 if !g.char_exists(c) {
                     return false;
                 }
-                crate::dg_mobcmd::clear_owner_purged();
+                crate::dg_mobcmd::clear_owner_purged(g);
                 let (verb, rest) = split_word(cmd);
                 let handled = crate::dg_mobcmd::dispatch_mob_command(g, c, &verb, rest);
                 if !handled && g.char_exists(c) {
                     crate::interpreter::command_interpreter(g, c, cmd);
                 }
-                let purged = crate::dg_mobcmd::take_owner_purged();
+                let purged = crate::dg_mobcmd::take_owner_purged(g);
                 if purged {
-                    set_owner_purged();
+                    set_owner_purged(g);
                 }
                 purged
             } else {
@@ -1840,11 +1838,11 @@ fn run_one_command(g: &mut GameState, go: GoRef, type_: i32, cmd: &str) -> bool 
         }
         OBJ_TRIGGER => {
             if let GoRef::Obj(o) = go {
-                crate::dg_objcmd::clear_owner_purged();
+                crate::dg_objcmd::clear_owner_purged(g);
                 crate::dg_objcmd::dispatch_obj_command(g, o, cmd);
-                let purged = crate::dg_objcmd::take_owner_purged();
+                let purged = crate::dg_objcmd::take_owner_purged(g);
                 if purged {
-                    set_owner_purged();
+                    set_owner_purged(g);
                 }
                 purged
             } else {
@@ -1880,7 +1878,7 @@ pub fn script_trigger_check(g: &mut GameState) {
         if !g.char_exists(c) {
             continue;
         }
-        let ty = dg_handler::script_types(ScriptKey::Mob(c));
+        let ty = dg_handler::script_types(g, ScriptKey::Mob(c));
         if ty & MTRIG_RANDOM != 0 && ((ty & MTRIG_GLOBAL != 0) || !zone_empty_for_char(g, c)) {
             crate::dg_triggers::random_mtrigger(g, c);
         }
@@ -1890,7 +1888,7 @@ pub fn script_trigger_check(g: &mut GameState) {
         if g.get_obj(o).is_none() {
             continue;
         }
-        if dg_handler::script_types(ScriptKey::Obj(o)) & OTRIG_RANDOM != 0 {
+        if dg_handler::script_types(g, ScriptKey::Obj(o)) & OTRIG_RANDOM != 0 {
             crate::dg_triggers::random_otrigger(g, o);
         }
     }
@@ -1900,7 +1898,7 @@ pub fn script_trigger_check(g: &mut GameState) {
     // Snapshot it because a fired trigger mutably borrows the whole game.
     let rooms = g.non_map_room_rnums().to_vec();
     for r in rooms {
-        let ty = dg_handler::script_types(ScriptKey::Room(r));
+        let ty = dg_handler::script_types(g, ScriptKey::Room(r));
         if ty & WTRIG_RANDOM != 0 && ((ty & WTRIG_GLOBAL != 0) || !zone_empty_for_room(g, r)) {
             crate::dg_triggers::random_wtrigger(g, r);
         }
@@ -1939,7 +1937,7 @@ fn zone_empty_for_room(g: &GameState, r: RoomRnum) -> bool {
 // ---------------------------------------------------------------------------
 pub fn boot_dg_scripts(g: &mut GameState, lib_path: &str) {
     crate::dg_event::boot_events(g);
-    dg_handler::boot_handler();
+    dg_handler::boot_handler(g);
     crate::dg_db_scripts::boot_triggers(g, lib_path);
 }
 
@@ -2096,8 +2094,8 @@ mod vm_tests {
     /// test's duration (the caller binds it to `_lock`).
     fn world() -> (MutexGuard<'static, ()>, GameState, CharId) {
         let lock = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        dg_handler::boot_handler();
         let mut g = GameState::new(Config::default());
+        dg_handler::boot_handler(&mut g);
         let rn = g.add_room(Room::new(
             3001,
             0,
@@ -2115,48 +2113,54 @@ mod vm_tests {
         (lock, g, cid)
     }
 
-    fn make_trig(cmds: &[&str]) -> TrigId {
-        install_trig(TrigData {
-            nr: 0,
-            vnum: 9999,
-            attach_type: MOB_TRIGGER,
-            name: "test".into(),
-            trigger_type: 1 << 1,
-            narg: 100,
-            arglist: String::new(),
-            cmdlist: cmds.iter().map(|s| s.to_string()).collect(),
-            curr_line: 0,
-            depth: 0,
-            loops: 0,
-            wait_event: None,
-            var_list: Vec::new(),
-            purged: false,
-            loop_origin: HashMap::new(),
-        })
+    fn make_trig(g: &mut GameState, cmds: &[&str]) -> TrigId {
+        install_trig(
+            g,
+            TrigData {
+                nr: 0,
+                vnum: 9999,
+                attach_type: MOB_TRIGGER,
+                name: "test".into(),
+                trigger_type: 1 << 1,
+                narg: 100,
+                arglist: String::new(),
+                cmdlist: cmds.iter().map(|s| s.to_string()).collect(),
+                curr_line: 0,
+                depth: 0,
+                loops: 0,
+                wait_event: None,
+                var_list: Vec::new(),
+                purged: false,
+                loop_origin: HashMap::new(),
+            },
+        )
     }
 
-    fn make_world_random_trig(global: bool, marker: &str) -> TrigId {
-        install_trig(TrigData {
-            nr: 0,
-            vnum: 10_000,
-            attach_type: WLD_TRIGGER,
-            name: format!("random room {marker}"),
-            trigger_type: WTRIG_RANDOM | if global { WTRIG_GLOBAL } else { 0 },
-            narg: 100,
-            arglist: String::new(),
-            cmdlist: vec![
-                format!("set {marker} yes"),
-                format!("global {marker}"),
-                "halt".into(),
-            ],
-            curr_line: 0,
-            depth: 0,
-            loops: 0,
-            wait_event: None,
-            var_list: Vec::new(),
-            purged: false,
-            loop_origin: HashMap::new(),
-        })
+    fn make_world_random_trig(g: &mut GameState, global: bool, marker: &str) -> TrigId {
+        install_trig(
+            g,
+            TrigData {
+                nr: 0,
+                vnum: 10_000,
+                attach_type: WLD_TRIGGER,
+                name: format!("random room {marker}"),
+                trigger_type: WTRIG_RANDOM | if global { WTRIG_GLOBAL } else { 0 },
+                narg: 100,
+                arglist: String::new(),
+                cmdlist: vec![
+                    format!("set {marker} yes"),
+                    format!("global {marker}"),
+                    "halt".into(),
+                ],
+                curr_line: 0,
+                depth: 0,
+                loops: 0,
+                wait_event: None,
+                var_list: Vec::new(),
+                purged: false,
+                loop_origin: HashMap::new(),
+            },
+        )
     }
 
     // Local trigger vars are freed when the trigger finishes (C frees
@@ -2165,24 +2169,27 @@ mod vm_tests {
     // persistent global table.
     fn read_global(g: &GameState, cid: CharId, name: &str) -> Option<String> {
         let _ = g;
-        dg_handler::get_global_var(ScriptKey::Mob(cid), name)
+        dg_handler::get_global_var(&g, ScriptKey::Mob(cid), name)
     }
 
     #[test]
     fn eval_and_self_fields() {
         let (_lock, mut g, cid) = world();
-        let trig = make_trig(&[
-            "eval doubled %self.level% * 2",
-            "if %self.align% > 0",
-            "  set good yes",
-            "else",
-            "  set good no",
-            "end",
-            "global doubled",
-            "global good",
-            "halt",
-        ]);
-        add_trigger(ScriptKey::Mob(cid), trig, -1);
+        let trig = make_trig(
+            &mut g,
+            &[
+                "eval doubled %self.level% * 2",
+                "if %self.align% > 0",
+                "  set good yes",
+                "else",
+                "  set good no",
+                "end",
+                "global doubled",
+                "global good",
+                "halt",
+            ],
+        );
+        add_trigger(&mut g, ScriptKey::Mob(cid), trig, -1);
         script_driver(&mut g, GoRef::Mob(cid), trig, MOB_TRIGGER, TRIG_NEW);
         assert_eq!(read_global(&g, cid, "doubled").as_deref(), Some("14"));
         assert_eq!(read_global(&g, cid, "good").as_deref(), Some("yes"));
@@ -2191,15 +2198,18 @@ mod vm_tests {
     #[test]
     fn while_loop_counts() {
         let (_lock, mut g, cid) = world();
-        let trig = make_trig(&[
-            "set i 0",
-            "while %i% < 3",
-            "  eval i %i% + 1",
-            "done",
-            "global i",
-            "halt",
-        ]);
-        add_trigger(ScriptKey::Mob(cid), trig, -1);
+        let trig = make_trig(
+            &mut g,
+            &[
+                "set i 0",
+                "while %i% < 3",
+                "  eval i %i% + 1",
+                "done",
+                "global i",
+                "halt",
+            ],
+        );
+        add_trigger(&mut g, ScriptKey::Mob(cid), trig, -1);
         script_driver(&mut g, GoRef::Mob(cid), trig, MOB_TRIGGER, TRIG_NEW);
         assert_eq!(read_global(&g, cid, "i").as_deref(), Some("3"));
     }
@@ -2208,21 +2218,21 @@ mod vm_tests {
     fn panicking_trigger_restores_all_reentry_latches() {
         let (_lock, mut g, cid) = world();
         g.dg_act_check = true;
-        let trig = make_trig(&["__panic_for_test"]);
-        add_trigger(ScriptKey::Mob(cid), trig, -1);
+        let trig = make_trig(&mut g, &["__panic_for_test"]);
+        add_trigger(&mut g, ScriptKey::Mob(cid), trig, -1);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             script_driver(&mut g, GoRef::Mob(cid), trig, MOB_TRIGGER, TRIG_NEW)
         }));
         assert!(result.is_err());
         assert!(g.dg_act_check, "act-trigger gate must be restored");
-        assert_eq!(SCRIPT_DEPTH.with(|depth| depth.get()), 0);
-        assert_eq!(dg_handler::with_trig(trig, |t| t.depth), Some(0));
-        assert_eq!(dg_handler::with_trig(trig, |t| t.curr_line), Some(0));
+        assert_eq!(g.dg.script_depth, 0);
+        assert_eq!(dg_handler::with_trig(&g, trig, |t| t.depth), Some(0));
+        assert_eq!(dg_handler::with_trig(&g, trig, |t| t.curr_line), Some(0));
 
         // A subsequent trigger on the same thread must execute normally.
-        let followup = make_trig(&["set survived yes", "global survived", "halt"]);
-        add_trigger(ScriptKey::Mob(cid), followup, -1);
+        let followup = make_trig(&mut g, &["set survived yes", "global survived", "halt"]);
+        add_trigger(&mut g, ScriptKey::Mob(cid), followup, -1);
         assert_eq!(
             script_driver(&mut g, GoRef::Mob(cid), followup, MOB_TRIGGER, TRIG_NEW),
             1
@@ -2233,8 +2243,8 @@ mod vm_tests {
     #[test]
     fn heartbeat_fires_random_triggers_on_real_rooms_added_after_the_map() {
         let _lock = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        dg_handler::boot_handler();
         let mut g = GameState::new(Config::default());
+        dg_handler::boot_handler(&mut g);
         g.add_room(Room::new(100, 1, "Before map".into(), String::new()));
         let mut map = Room::new(2_000_000, 2, "Synthetic map".into(), String::new());
         map.map_x = Some(10);
@@ -2244,25 +2254,25 @@ mod vm_tests {
         let local_room = g.add_room(Room::new(101, 3, "OLC local".into(), String::new()));
         let global_room = g.add_room(Room::new(102, 4, "OLC global".into(), String::new()));
 
-        let local = make_world_random_trig(false, "local_fired");
-        let global = make_world_random_trig(true, "global_fired");
-        let synthetic = make_world_random_trig(true, "map_fired");
-        add_trigger(ScriptKey::Room(local_room), local, -1);
-        add_trigger(ScriptKey::Room(global_room), global, -1);
-        add_trigger(ScriptKey::Room(map_room), synthetic, -1);
+        let local = make_world_random_trig(&mut g, false, "local_fired");
+        let global = make_world_random_trig(&mut g, true, "global_fired");
+        let synthetic = make_world_random_trig(&mut g, true, "map_fired");
+        add_trigger(&mut g, ScriptKey::Room(local_room), local, -1);
+        add_trigger(&mut g, ScriptKey::Room(global_room), global, -1);
+        add_trigger(&mut g, ScriptKey::Room(map_room), synthetic, -1);
 
         // With no connected player in either zone, only GLOBAL may fire.
         script_trigger_check(&mut g);
         assert_eq!(
-            dg_handler::get_global_var(ScriptKey::Room(global_room), "global_fired").as_deref(),
+            dg_handler::get_global_var(&g, ScriptKey::Room(global_room), "global_fired").as_deref(),
             Some("yes")
         );
         assert_eq!(
-            dg_handler::get_global_var(ScriptKey::Room(local_room), "local_fired"),
+            dg_handler::get_global_var(&g, ScriptKey::Room(local_room), "local_fired"),
             None
         );
         assert_eq!(
-            dg_handler::get_global_var(ScriptKey::Room(map_room), "map_fired"),
+            dg_handler::get_global_var(&g, ScriptKey::Room(map_room), "map_fired"),
             None
         );
 
@@ -2274,11 +2284,11 @@ mod vm_tests {
         // The next eligible heartbeat includes the real post-map room.
         script_trigger_check(&mut g);
         assert_eq!(
-            dg_handler::get_global_var(ScriptKey::Room(local_room), "local_fired").as_deref(),
+            dg_handler::get_global_var(&g, ScriptKey::Room(local_room), "local_fired").as_deref(),
             Some("yes")
         );
         assert_eq!(
-            dg_handler::get_global_var(ScriptKey::Room(map_room), "map_fired"),
+            dg_handler::get_global_var(&g, ScriptKey::Room(map_room), "map_fired"),
             None
         );
     }
@@ -2288,23 +2298,26 @@ mod vm_tests {
         // The `%x% == 1 || 2 || 3` idiom from 2190.trg: with C left-to-right
         // eval, the trailing non-zero literals make the whole thing truthy.
         let (_lock, mut g, cid) = world();
-        let trig = make_trig(&[
-            "set gib 5",
-            "if %gib% == 1 || 2 || 3",
-            "  set hit yes",
-            "end",
-            "global hit",
-            "halt",
-        ]);
-        add_trigger(ScriptKey::Mob(cid), trig, -1);
+        let trig = make_trig(
+            &mut g,
+            &[
+                "set gib 5",
+                "if %gib% == 1 || 2 || 3",
+                "  set hit yes",
+                "end",
+                "global hit",
+                "halt",
+            ],
+        );
+        add_trigger(&mut g, ScriptKey::Mob(cid), trig, -1);
         script_driver(&mut g, GoRef::Mob(cid), trig, MOB_TRIGGER, TRIG_NEW);
         assert_eq!(read_global(&g, cid, "hit").as_deref(), Some("yes"));
     }
 
     #[test]
     fn random_numeric_field_zero() {
-        let (_lock, g, _cid) = world();
-        let trig = make_trig(&["* noop"]);
+        let (_lock, mut g, _cid) = world();
+        let trig = make_trig(&mut g, &["* noop"]);
         let s = var_subst(&g, GoRef::Mob(CharId(1)), trig, "value=%random.0%");
         assert_eq!(s, "value=0");
     }
@@ -2313,9 +2326,9 @@ mod vm_tests {
     fn multibyte_substitution_is_clipped_on_a_char_boundary() {
         let (_lock, mut g, cid) = world();
         let expanded = "€".repeat(100);
-        dg_handler::add_global_var(ScriptKey::Mob(cid), "source", &expanded, 0);
-        let trig = make_trig(&["set payload %source%", "global payload", "halt"]);
-        add_trigger(ScriptKey::Mob(cid), trig, -1);
+        dg_handler::add_global_var(&mut g, ScriptKey::Mob(cid), "source", &expanded, 0);
+        let trig = make_trig(&mut g, &["set payload %source%", "global payload", "halt"]);
+        add_trigger(&mut g, ScriptKey::Mob(cid), trig, -1);
 
         script_driver(&mut g, GoRef::Mob(cid), trig, MOB_TRIGGER, TRIG_NEW);
 

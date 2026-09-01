@@ -514,6 +514,21 @@ pub struct DgState {
     pub mob_memory: HashMap<CharId, Vec<i64>>,
     /// dg_mobcmd.rs: mob script memory (mremember/mforget, MEMORY triggers).
     pub script_memory: HashMap<CharId, Vec<crate::dg_mobcmd::ScriptMemory>>,
+    /// dg_handler.rs: live script containers keyed by (owner kind, id).
+    pub scripts: HashMap<crate::dg_handler::ScriptKey, crate::dg_handler::ScriptData>,
+    /// dg_handler.rs: the live trigger arena.
+    pub trigs: HashMap<crate::dg_handler::TrigId, crate::dg_handler::TrigData>,
+    /// dg_handler.rs: per-mob greet/entry memory lists.
+    pub dg_memory: HashMap<CharId, Vec<crate::dg_handler::ScriptMemory>>,
+    /// dg_handler.rs: monotonically increasing trigger id source.
+    pub next_trig_id: u64,
+    /// dg_scripts.rs: current script recursion depth (was a thread_local).
+    pub script_depth: i32,
+    /// dg_scripts.rs: dg_owner_purged latch (was a thread_local).
+    pub owner_purged: bool,
+    /// dg_scripts.rs: the script-side RNG stream (was a thread_local; the
+    /// substitution path is non-reentrant and panic-isolated).
+    pub script_rng: std::cell::RefCell<crate::rng::Rng>,
 }
 
 /// Social/economy-adjacent player-facing stores that used to live in module
@@ -725,6 +740,9 @@ pub struct GameState {
     pub social: SocialState,
     /// DG script VM state (prototype tables; live arenas as families migrate).
     pub dg: DgState,
+    /// interpreter.rs: whether the in-flight command arrived from the live
+    /// Playing descriptor of the acting principal (Indirect for force/queue/DM).
+    pub command_source: crate::interpreter::CommandSource,
     /// The mud calendar + sun state (weather.rs TimeWeather).
     pub clock: crate::weather::MudClock,
     /// Economy stores (quest givers; shops/clans/houses/auction as families
@@ -779,6 +797,7 @@ impl GameState {
             world: WorldState::default(),
             social: SocialState::default(),
             dg: DgState::default(),
+            command_source: crate::interpreter::CommandSource::Indirect,
             clock: crate::weather::MudClock::default(),
             econ: EconomyState::default(),
             credits: String::new(),

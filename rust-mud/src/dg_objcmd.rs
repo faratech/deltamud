@@ -35,7 +35,6 @@ use crate::object::{ObjLoc, ObjectGraphOrder, ObjectType, walk_object_graph};
 use crate::room::RoomFlags;
 use crate::state::GameState;
 use crate::types::*;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 // do_osend subcmd selectors (dg_objcmd.c).
 const SCMD_OSEND: i32 = 0;
@@ -51,18 +50,16 @@ const UID_CHAR: char = '\x1b';
 // The VM resets it before each command and checks it after; we expose accessors
 // so the VM (dg_scripts.rs) can wire the same protocol without a struct field.
 // ---------------------------------------------------------------------------
-static OWNER_PURGED: AtomicBool = AtomicBool::new(false);
-
 /// VM hook: clear the self-purge flag before running a command (C zeroes the
 /// dg_owner_purged global at the top of the dispatch loop). Mirrors the peer
-/// dg_mobcmd.rs API so the VM wires every command module identically.
-pub fn clear_owner_purged() {
-    OWNER_PURGED.store(false, Ordering::Relaxed);
+/// dg_mobcmd.rs API; the latch lives on GameState (`dg.owner_purged`).
+pub fn clear_owner_purged(g: &mut GameState) {
+    g.dg.owner_purged = false;
 }
 
 /// VM hook: read-and-clear whether the just-run o* command purged its owner.
-pub fn take_owner_purged() -> bool {
-    OWNER_PURGED.swap(false, Ordering::Relaxed)
+pub fn take_owner_purged(g: &mut GameState) -> bool {
+    std::mem::take(&mut g.dg.owner_purged)
 }
 
 // ---------------------------------------------------------------------------
@@ -652,8 +649,8 @@ fn do_opurge(g: &mut GameState, obj: ObjId, argument: &str) {
             // module-static (read via take_owner_purged) and the VM's
             // thread-local (set_owner_purged), so the integration works whether
             // the VM polls our flag or relies on the shared one.
-            OWNER_PURGED.store(true, Ordering::Relaxed);
-            crate::dg_scripts::set_owner_purged();
+            g.dg.owner_purged = true;
+            crate::dg_scripts::set_owner_purged(g);
         }
         crate::dg_handler::on_obj_extracted(g, o);
         g.extract_obj(o);

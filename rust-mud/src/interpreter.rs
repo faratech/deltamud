@@ -7,7 +7,6 @@ use crate::connection::ConState;
 use crate::flags::{AFF_HIDE, PLR_FROZEN, PRF2_INTANGIBLE, PRF2_LOCKOUT, PRF2_MBUILDING};
 use crate::state::{GameState, PrincipalAuthority};
 use crate::types::*;
-use std::cell::Cell;
 
 const CMD_LOCKOUT_MSG: &str =
     "Your terminal is currently locked!\r\nTo unlock please type 'unlock <yourpassword>'\r\n";
@@ -101,27 +100,25 @@ pub(crate) fn command_interpreter_authenticated(g: &mut GameState, ch: CharId, i
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum CommandSource {
+pub enum CommandSource {
     Indirect,
     AuthenticatedInput,
 }
 
-thread_local! {
-    static COMMAND_SOURCE: Cell<CommandSource> = const { Cell::new(CommandSource::Indirect) };
-}
-
+// The command source latch lives on GameState (`command_source`) — it used to
+// be a thread_local implicit parameter to every handler.
 struct CommandSourceGuard(CommandSource);
 
 impl CommandSourceGuard {
-    fn enter(source: CommandSource) -> Self {
-        let previous = COMMAND_SOURCE.with(|current| current.replace(source));
+    fn enter(g: &mut GameState, source: CommandSource) -> Self {
+        let previous = std::mem::replace(&mut g.command_source, source);
         Self(previous)
     }
 }
 
-impl Drop for CommandSourceGuard {
-    fn drop(&mut self) {
-        COMMAND_SOURCE.with(|current| current.set(self.0));
+impl CommandSourceGuard {
+    fn restore(self, g: &mut GameState) {
+        g.command_source = self.0;
     }
 }
 
@@ -132,7 +129,7 @@ pub(crate) fn authenticated_input_authority(
     g: &GameState,
     ch: CharId,
 ) -> Option<PrincipalAuthority> {
-    if !COMMAND_SOURCE.with(|source| source.get() == CommandSource::AuthenticatedInput) {
+    if g.command_source != CommandSource::AuthenticatedInput {
         return None;
     }
     let authority = g
@@ -208,13 +205,15 @@ pub fn position_refusal_msg(pos: Position) -> &'static str {
 /// The central dispatcher body (CircleMUD command_interpreter proper), run on
 /// input that has already passed alias expansion.
 pub(crate) fn run_command(g: &mut GameState, ch: CharId, input: &str) {
-    let _source = CommandSourceGuard::enter(CommandSource::Indirect);
+    let _source = CommandSourceGuard::enter(g, CommandSource::Indirect);
     run_command_body(g, ch, input);
+    _source.restore(g);
 }
 
 pub(crate) fn run_authenticated_command(g: &mut GameState, ch: CharId, input: &str) {
-    let _source = CommandSourceGuard::enter(CommandSource::AuthenticatedInput);
+    let _source = CommandSourceGuard::enter(g, CommandSource::AuthenticatedInput);
     run_command_body(g, ch, input);
+    _source.restore(g);
 }
 
 fn run_command_body(g: &mut GameState, ch: CharId, input: &str) {
@@ -900,9 +899,9 @@ mod tests {
     #[test]
     fn command_triggers_never_receive_staff_principal_input() {
         let _dg = crate::lock_ok::lock(&crate::dg_handler::DG_TEST_LOCK);
-        crate::dg_handler::boot_handler();
 
         let (mut g, ch, conn) = test_game_with_player();
+        crate::dg_handler::boot_handler(&mut g);
         let room = g.add_room(crate::room::Room::new(
             87_100,
             0,
@@ -916,24 +915,32 @@ mod tests {
             player.player.level = 1;
             player.trust = i32::from(LVL_IMPL);
         }
-        let trigger = crate::dg_handler::install_trig(crate::dg_handler::TrigData {
-            nr: 0,
-            vnum: 87_102,
-            attach_type: crate::dg_handler::WLD_TRIGGER,
-            name: "wildcard command consumer".to_string(),
-            trigger_type: crate::dg_handler::WTRIG_COMMAND,
-            narg: 0,
-            arglist: "*".to_string(),
-            cmdlist: vec!["return 1".to_string()],
-            curr_line: 0,
-            depth: 0,
-            loops: 0,
-            wait_event: None,
-            var_list: Vec::new(),
-            purged: false,
-            loop_origin: std::collections::HashMap::new(),
-        });
-        crate::dg_handler::add_trigger(crate::dg_handler::ScriptKey::Room(room), trigger, -1);
+        let trigger = crate::dg_handler::install_trig(
+            &mut g,
+            crate::dg_handler::TrigData {
+                nr: 0,
+                vnum: 87_102,
+                attach_type: crate::dg_handler::WLD_TRIGGER,
+                name: "wildcard command consumer".to_string(),
+                trigger_type: crate::dg_handler::WTRIG_COMMAND,
+                narg: 0,
+                arglist: "*".to_string(),
+                cmdlist: vec!["return 1".to_string()],
+                curr_line: 0,
+                depth: 0,
+                loops: 0,
+                wait_event: None,
+                var_list: Vec::new(),
+                purged: false,
+                loop_origin: std::collections::HashMap::new(),
+            },
+        );
+        crate::dg_handler::add_trigger(
+            &mut g,
+            crate::dg_handler::ScriptKey::Room(room),
+            trigger,
+            -1,
+        );
 
         run_authenticated_command(&mut g, ch, "look");
         assert!(outbuf(&g, conn).contains("Confidential command room"));

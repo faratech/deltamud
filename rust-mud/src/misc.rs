@@ -473,9 +473,9 @@ fn attach_to(g: &mut GameState, ch: CharId, key: ScriptKey, tn: i32, loc: i32, d
     };
     match tid {
         Some(tid) => {
-            add_trigger(key, tid, loc);
+            add_trigger(g, key, tid, loc);
             persist_proto_attach(g, key, tn);
-            let trig_name = with_trig(tid, |t| t.name.clone()).unwrap_or_default();
+            let trig_name = with_trig(g, tid, |t| t.name.clone()).unwrap_or_default();
             let msg = match desc {
                 AttachDesc::Char(c) => {
                     let short = char_short(g, c);
@@ -523,7 +523,7 @@ pub fn do_detach(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             None => return,
         };
         let key = ScriptKey::Room(room);
-        if !dg_handler::has_script(key) {
+        if !dg_handler::has_script(g, key) {
             g.send_to_char(ch, "This room does not have any triggers.\r\n");
         } else if arg2 == "all" {
             extract_script(g, key);
@@ -597,7 +597,7 @@ pub fn do_detach(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         let trigger_all = trigger.as_deref() == Some("all");
         if !is_npc {
             g.send_to_char(ch, "Players don't have triggers.\r\n");
-        } else if !dg_handler::has_script(key) {
+        } else if !dg_handler::has_script(g, key) {
             g.send_to_char(ch, "That mob doesn't have any triggers.\r\n");
         } else if trigger_all {
             extract_script(g, key);
@@ -615,7 +615,7 @@ pub fn do_detach(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     } else if let Some(o) = object {
         let key = ScriptKey::Obj(o);
         let trigger_all = trigger.as_deref() == Some("all");
-        if !dg_handler::has_script(key) {
+        if !dg_handler::has_script(g, key) {
             g.send_to_char(ch, "That object doesn't have any triggers.\r\n");
         } else if trigger_all {
             extract_script(g, key);
@@ -754,7 +754,7 @@ fn obj_in_room(g: &GameState, ch: CharId, name: &str) -> Option<ObjId> {
 #[allow(dead_code)]
 fn _contract_anchor(g: &GameState, oid: ObjId, key: ScriptKey) -> (bool, usize) {
     let in_room = matches!(g.get_obj(oid).map(|o| o.loc), Some(ObjLoc::Room(_)));
-    (in_room, trigger_ids(key).len())
+    (in_room, trigger_ids(g, key).len())
 }
 
 // ===========================================================================

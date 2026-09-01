@@ -2781,8 +2781,8 @@ mod tests {
     #[test]
     fn producing_shop_purchase_fires_load_trigger_on_fresh_object() {
         let _dg = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        crate::dg_handler::boot_handler();
         let mut g = GameState::new(Config::default());
+        crate::dg_handler::boot_handler(&mut g);
         let room = g.add_room(Room::new(
             100,
             0,
@@ -2844,7 +2844,7 @@ mod tests {
             .copied()
             .unwrap();
         assert_eq!(
-            crate::dg_handler::get_global_var(ScriptKey::Obj(bought), "bought").as_deref(),
+            crate::dg_handler::get_global_var(&g, ScriptKey::Obj(bought), "bought").as_deref(),
             Some("yes")
         );
         shops_mut(&mut g).clear();

@@ -1412,8 +1412,6 @@ mod affect_update_tests {
         // low-level command-dispatch regression with DG tests so a trigger
         // attached to another test's room-rnum zero cannot consume `cast`.
         let _dg = crate::lock_ok::lock(&crate::dg_handler::DG_TEST_LOCK);
-        crate::dg_handler::boot_handler();
-
         let (mut display_g, display, _, display_conn) =
             authority_magic_fixture(RoomFlags::NO_MAGIC, LVL_IMPL, 1);
         crate::interpreter::run_authenticated_command(&mut display_g, display, "cast 'armor'");
@@ -1465,8 +1463,6 @@ mod affect_update_tests {
     #[test]
     fn peaceful_magic_override_rejects_display_level_and_indirect_casts() {
         let _dg = crate::lock_ok::lock(&crate::dg_handler::DG_TEST_LOCK);
-        crate::dg_handler::boot_handler();
-
         let (mut display_g, display, _, display_conn) =
             authority_magic_fixture(RoomFlags::PEACEFUL, LVL_IMPL, 1);
         crate::interpreter::run_authenticated_command(

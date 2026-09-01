@@ -126,7 +126,7 @@ pub fn upsert_proto_trigger(g: &mut GameState, proto: TrigProto) {
 
 /// read_trigger(g, rnum): instantiate a live TrigData from a prototype, returning
 /// its TrigId (trig_data_copy + install). Returns None if rnum is invalid.
-pub fn read_trigger(g: &GameState, rnum: usize) -> Option<dg_handler::TrigId> {
+pub fn read_trigger(g: &mut GameState, rnum: usize) -> Option<dg_handler::TrigId> {
     let proto = g.dg.proto_trigs.get(rnum).cloned()?;
     let t = TrigData {
         nr: rnum,
@@ -145,7 +145,7 @@ pub fn read_trigger(g: &GameState, rnum: usize) -> Option<dg_handler::TrigId> {
         purged: false,
         loop_origin: HashMap::new(),
     };
-    Some(install_trig(t))
+    Some(install_trig(g, t))
 }
 
 /// boot_triggers(lib_path): load every prototype from lib/world/trg. Reads the
@@ -531,7 +531,7 @@ pub fn assign_triggers(g: &mut GameState, key: ScriptKey, entity_vnum: i32) {
             continue;
         }
         if let Some(tid) = read_trigger(g, rnum as usize) {
-            add_trigger(key, tid, -1);
+            add_trigger(g, key, tid, -1);
         }
     }
 }

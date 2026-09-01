@@ -32,8 +32,6 @@ use crate::dg_event::{self, EventId};
 use crate::state::GameState;
 use crate::types::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 // Attach-type / data-type discriminants (dg_scripts.h).
 pub const MOB_TRIGGER: i32 = 0;
@@ -181,85 +179,71 @@ pub struct ScriptMemory {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TrigId(pub u64);
 
-static SCRIPTS: OnceLock<Mutex<HashMap<ScriptKey, ScriptData>>> = OnceLock::new();
-static TRIGS: OnceLock<Mutex<HashMap<TrigId, TrigData>>> = OnceLock::new();
-static MEMORY: OnceLock<Mutex<HashMap<CharId, Vec<ScriptMemory>>>> = OnceLock::new();
-static NEXT_TRIG_ID: AtomicU64 = AtomicU64::new(1);
+// The script/trigger arenas and per-mob script memory live on GameState as
+// `dg.scripts` / `dg.trigs` / `dg.dg_memory` (phase-1 statics migration).
 
-fn scripts() -> &'static Mutex<HashMap<ScriptKey, ScriptData>> {
-    SCRIPTS.get_or_init(|| Mutex::new(HashMap::new()))
+fn scripts(g: &GameState) -> &HashMap<ScriptKey, ScriptData> {
+    &g.dg.scripts
 }
-fn trigs() -> &'static Mutex<HashMap<TrigId, TrigData>> {
-    TRIGS.get_or_init(|| Mutex::new(HashMap::new()))
+fn trigs(g: &GameState) -> &HashMap<TrigId, TrigData> {
+    &g.dg.trigs
 }
-fn memory() -> &'static Mutex<HashMap<CharId, Vec<ScriptMemory>>> {
-    MEMORY.get_or_init(|| Mutex::new(HashMap::new()))
+fn trigs_mut(g: &mut GameState) -> &mut HashMap<TrigId, TrigData> {
+    &mut g.dg.trigs
+}
+fn scripts_mut(g: &mut GameState) -> &mut HashMap<ScriptKey, ScriptData> {
+    &mut g.dg.scripts
 }
 
 /// Wipe all runtime script state (boot / copyover). Prototypes (dg_db_scripts)
 /// are reloaded separately.
-pub fn boot_handler() {
-    crate::lock_ok::lock(&scripts()).clear();
-    crate::lock_ok::lock(&trigs()).clear();
-    crate::lock_ok::lock(&memory()).clear();
-    NEXT_TRIG_ID.store(1, Ordering::Relaxed);
+pub fn boot_handler(g: &mut GameState) {
+    g.dg.scripts.clear();
+    g.dg.trigs.clear();
+    g.dg.dg_memory.clear();
+    g.dg.next_trig_id = 1;
 }
 
 // ---- ScriptData access ----------------------------------------------------
 
 /// SCRIPT_CHECK(go, type): entity has a script whose type-bitvector includes
 /// `type`. Cheap fast-path the fire hooks call before doing any work.
-pub fn script_check(key: ScriptKey, ty: i64) -> bool {
-    scripts()
-        .lock()
-        .unwrap()
+pub fn script_check(g: &GameState, key: ScriptKey, ty: i64) -> bool {
+    scripts(g)
         .get(&key)
         .map(|sc| sc.types & ty != 0)
         .unwrap_or(false)
 }
 
-pub fn has_script(key: ScriptKey) -> bool {
-    crate::lock_ok::lock(&scripts()).contains_key(&key)
+pub fn has_script(g: &GameState, key: ScriptKey) -> bool {
+    scripts(g).contains_key(&key)
 }
 
-pub fn script_types(key: ScriptKey) -> i64 {
-    scripts()
-        .lock()
-        .unwrap()
-        .get(&key)
-        .map(|s| s.types)
-        .unwrap_or(0)
+pub fn script_types(g: &GameState, key: ScriptKey) -> i64 {
+    scripts(g).get(&key).map(|s| s.types).unwrap_or(0)
 }
 
 /// Snapshot the attached trigger ids for an entity (TRIGGERS(sc) walk).
-pub fn trigger_ids(key: ScriptKey) -> Vec<TrigId> {
-    scripts()
-        .lock()
-        .unwrap()
+pub fn trigger_ids(g: &GameState, key: ScriptKey) -> Vec<TrigId> {
+    scripts(g)
         .get(&key)
         .map(|s| s.trig_list.clone())
         .unwrap_or_default()
 }
 
-pub fn get_context(key: ScriptKey) -> i64 {
-    scripts()
-        .lock()
-        .unwrap()
-        .get(&key)
-        .map(|s| s.context)
-        .unwrap_or(0)
+pub fn get_context(g: &GameState, key: ScriptKey) -> i64 {
+    scripts(g).get(&key).map(|s| s.context).unwrap_or(0)
 }
-pub fn set_context(key: ScriptKey, ctx: i64) {
-    if let Some(sc) = crate::lock_ok::lock(&scripts()).get_mut(&key) {
+pub fn set_context(g: &mut GameState, key: ScriptKey, ctx: i64) {
+    if let Some(sc) = scripts_mut(g).get_mut(&key) {
         sc.context = ctx;
     }
 }
 
 /// Read a global variable honouring context (find_replacement global-var path):
 /// matches name and (context==0 || context==sc.context).
-pub fn get_global_var(key: ScriptKey, name: &str) -> Option<String> {
-    let map = crate::lock_ok::lock(&scripts());
-    let sc = map.get(&key)?;
+pub fn get_global_var(g: &GameState, key: ScriptKey, name: &str) -> Option<String> {
+    let sc = scripts(g).get(&key)?;
     sc.global_vars
         .iter()
         .find(|v| v.name.eq_ignore_ascii_case(name) && (v.context == 0 || v.context == sc.context))
@@ -268,10 +252,8 @@ pub fn get_global_var(key: ScriptKey, name: &str) -> Option<String> {
 
 /// Snapshot a script's global variable list as (name, value, context) tuples,
 /// in storage order (script_stat enumerates `sc->global_vars` in order).
-pub fn global_vars(key: ScriptKey) -> Vec<(String, String, i64)> {
-    scripts()
-        .lock()
-        .unwrap()
+pub fn global_vars(g: &GameState, key: ScriptKey) -> Vec<(String, String, i64)> {
+    scripts(g)
         .get(&key)
         .map(|sc| {
             sc.global_vars
@@ -283,15 +265,15 @@ pub fn global_vars(key: ScriptKey) -> Vec<(String, String, i64)> {
 }
 
 /// add_var into a script's global list (used by remote/global, and load).
-pub fn add_global_var(key: ScriptKey, name: &str, value: &str, context: i64) {
-    let mut map = crate::lock_ok::lock(&scripts());
+pub fn add_global_var(g: &mut GameState, key: ScriptKey, name: &str, value: &str, context: i64) {
+    let map = scripts_mut(g);
     let sc = map.entry(key).or_default();
     add_var_in(&mut sc.global_vars, name, value, context);
 }
 
 /// remove_var from a script's globals; returns true if found.
-pub fn remove_global_var(key: ScriptKey, name: &str) -> bool {
-    if let Some(sc) = crate::lock_ok::lock(&scripts()).get_mut(&key) {
+pub fn remove_global_var(g: &mut GameState, key: ScriptKey, name: &str) -> bool {
+    if let Some(sc) = scripts_mut(g).get_mut(&key) {
         let before = sc.global_vars.len();
         sc.global_vars
             .retain(|v| !v.name.eq_ignore_ascii_case(name));
@@ -326,23 +308,28 @@ pub fn remove_var_in(list: &mut Vec<TrigVar>, name: &str) -> bool {
 // ---- Trigger arena access -------------------------------------------------
 
 /// Insert a freshly-read TrigData into the arena, returning its id.
-pub fn install_trig(mut t: TrigData) -> TrigId {
-    let id = TrigId(NEXT_TRIG_ID.fetch_add(1, Ordering::Relaxed));
+pub fn install_trig(g: &mut GameState, mut t: TrigData) -> TrigId {
+    let id = TrigId(g.dg.next_trig_id);
+    g.dg.next_trig_id += 1;
     t.purged = false;
-    crate::lock_ok::lock(&trigs()).insert(id, t);
+    g.dg.trigs.insert(id, t);
     id
 }
 
-pub fn with_trig<R>(id: TrigId, f: impl FnOnce(&TrigData) -> R) -> Option<R> {
-    crate::lock_ok::lock(&trigs()).get(&id).map(f)
+pub fn with_trig<R>(g: &GameState, id: TrigId, f: impl FnOnce(&TrigData) -> R) -> Option<R> {
+    g.dg.trigs.get(&id).map(f)
 }
 
-pub fn with_trig_mut<R>(id: TrigId, f: impl FnOnce(&mut TrigData) -> R) -> Option<R> {
-    crate::lock_ok::lock(&trigs()).get_mut(&id).map(f)
+pub fn with_trig_mut<R>(
+    g: &mut GameState,
+    id: TrigId,
+    f: impl FnOnce(&mut TrigData) -> R,
+) -> Option<R> {
+    g.dg.trigs.get_mut(&id).map(f)
 }
 
-pub fn trig_clone(id: TrigId) -> Option<TrigData> {
-    crate::lock_ok::lock(&trigs()).get(&id).cloned()
+pub fn trig_clone(g: &GameState, id: TrigId) -> Option<TrigData> {
+    trigs(g).get(&id).cloned()
 }
 
 // ---- add_trigger / remove_trigger / extract (dg_scripts.c / dg_handler.c) --
@@ -350,9 +337,9 @@ pub fn trig_clone(id: TrigId) -> Option<TrigData> {
 /// add_trigger(sc, t, loc): attach trigger id `t` to entity `key`. loc < 0 =>
 /// append; loc == 0 => prepend; loc == n => after the (n)th. Folds the
 /// trigger's type bits into SCRIPT_TYPES.
-pub fn add_trigger(key: ScriptKey, t: TrigId, loc: i32) {
-    let ttype = with_trig(t, |tr| tr.trigger_type).unwrap_or(0);
-    let mut map = crate::lock_ok::lock(&scripts());
+pub fn add_trigger(g: &mut GameState, key: ScriptKey, t: TrigId, loc: i32) {
+    let ttype = with_trig(g, t, |tr| tr.trigger_type).unwrap_or(0);
+    let map = scripts_mut(g);
     let sc = map.entry(key).or_default();
 
     if loc == 0 {
@@ -368,19 +355,19 @@ pub fn add_trigger(key: ScriptKey, t: TrigId, loc: i32) {
 /// extract_trigger(trig): cancel any wait event, drop from the arena. Caller
 /// has already unlinked it from the owning ScriptData (remove_trigger does).
 pub fn extract_trigger(g: &mut GameState, id: TrigId) {
-    let ev = with_trig(id, |t| t.wait_event).flatten();
+    let ev = with_trig(g, id, |t| t.wait_event).flatten();
     dg_event::cancel_for_trigger(g, ev);
-    crate::lock_ok::lock(&trigs()).remove(&id);
+    trigs_mut(g).remove(&id);
 }
 
 /// extract_script(sc): remove every trigger on `key`, then drop the script
 /// container. (C frees the script struct; we just remove the table entry.)
 pub fn extract_script(g: &mut GameState, key: ScriptKey) {
-    let ids = trigger_ids(key);
+    let ids = trigger_ids(g, key);
     for id in ids {
         extract_trigger(g, id);
     }
-    crate::lock_ok::lock(&scripts()).remove(&key);
+    scripts_mut(g).remove(&key);
 }
 
 /// remove_trigger(sc, name): name may be "N.keyword", a bare number, or a
@@ -417,11 +404,11 @@ pub fn remove_trigger(g: &mut GameState, key: ScriptKey, name: &str) -> bool {
         (0, name.to_string(), true)
     };
 
-    let ids = trigger_ids(key);
+    let ids = trigger_ids(g, key);
     let mut found: Option<usize> = None;
     let mut n = 0;
     for (idx, &tid) in ids.iter().enumerate() {
-        let tname = with_trig(tid, |t| t.name.clone()).unwrap_or_default();
+        let tname = with_trig(g, tid, |t| t.name.clone()).unwrap_or_default();
         if by_string {
             if crate::handler::isname(&search_name, &tname) {
                 n += 1;
@@ -444,7 +431,7 @@ pub fn remove_trigger(g: &mut GameState, key: ScriptKey, name: &str) -> bool {
     let tid = ids[idx];
 
     {
-        let mut map = crate::lock_ok::lock(&scripts());
+        let map = scripts_mut(g);
         if let Some(sc) = map.get_mut(&key) {
             sc.trig_list.retain(|&t| t != tid);
         }
@@ -452,15 +439,15 @@ pub fn remove_trigger(g: &mut GameState, key: ScriptKey, name: &str) -> bool {
     extract_trigger(g, tid);
 
     // Recompute SCRIPT_TYPES; drop empty script.
-    let remaining = trigger_ids(key);
+    let remaining = trigger_ids(g, key);
     if remaining.is_empty() {
-        crate::lock_ok::lock(&scripts()).remove(&key);
+        scripts_mut(g).remove(&key);
     } else {
         let mut types = 0i64;
         for t in &remaining {
-            types |= with_trig(*t, |x| x.trigger_type).unwrap_or(0);
+            types |= with_trig(g, *t, |x| x.trigger_type).unwrap_or(0);
         }
-        if let Some(sc) = crate::lock_ok::lock(&scripts()).get_mut(&key) {
+        if let Some(sc) = scripts_mut(g).get_mut(&key) {
             sc.types = types;
         }
     }
@@ -469,37 +456,31 @@ pub fn remove_trigger(g: &mut GameState, key: ScriptKey, name: &str) -> bool {
 
 // ---- script memory (mob greet/entry memory triggers) ----------------------
 
-pub fn remember(ch: CharId, id: i64, cmd: Option<String>) {
-    let mut map = crate::lock_ok::lock(&memory());
-    let list = map.entry(ch).or_default();
+pub fn remember(g: &mut GameState, ch: CharId, id: i64, cmd: Option<String>) {
+    let list = g.dg.dg_memory.entry(ch).or_default();
     // C remember() prepends a new node unconditionally.
     list.insert(0, ScriptMemory { id, cmd });
 }
 
-pub fn forget(ch: CharId, id: i64) {
-    if let Some(list) = crate::lock_ok::lock(&memory()).get_mut(&ch) {
+pub fn forget(g: &mut GameState, ch: CharId, id: i64) {
+    if let Some(list) = g.dg.dg_memory.get_mut(&ch) {
         list.retain(|m| m.id != id);
     }
 }
 
-pub fn memory_for(ch: CharId) -> Vec<ScriptMemory> {
-    memory()
-        .lock()
-        .unwrap()
-        .get(&ch)
-        .cloned()
-        .unwrap_or_default()
+pub fn memory_for(g: &GameState, ch: CharId) -> Vec<ScriptMemory> {
+    g.dg.dg_memory.get(&ch).cloned().unwrap_or_default()
 }
 
-pub fn extract_script_mem(ch: CharId) {
-    crate::lock_ok::lock(&memory()).remove(&ch);
+pub fn extract_script_mem(g: &mut GameState, ch: CharId) {
+    g.dg.dg_memory.remove(&ch);
 }
 
 /// Called when a char/obj is extracted from the world so its attached script
 /// state does not leak (mirrors free_char/free_obj clearing ->script).
 pub fn on_char_extracted(g: &mut GameState, ch: CharId) {
     extract_script(g, ScriptKey::Mob(ch));
-    extract_script_mem(ch);
+    extract_script_mem(g, ch);
     // The mob memory used by the MEMORY trigger lives in dg_mobcmd's table
     // (mremember/mforget write there); clear it too so a recycled CharId can't
     // inherit stale remembered victims.
@@ -514,7 +495,7 @@ pub fn on_obj_extracted(g: &mut GameState, obj: ObjId) {
 // DG test acquires this guard for its duration so one test's boot_handler()
 // can't clear another test's triggers mid-run.
 #[cfg(test)]
-pub static DG_TEST_LOCK: Mutex<()> = Mutex::new(());
+pub static DG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -543,16 +524,16 @@ mod tests {
     #[test]
     fn overflowing_detach_ordinal_cannot_remove_the_first_trigger() {
         let mut g = crate::state::GameState::new(crate::config::Config::default());
-        boot_handler();
+        boot_handler(&mut g);
         let key = ScriptKey::Room(987_654);
-        let first = install_trig(trigger("first"));
-        let second = install_trig(trigger("second"));
-        add_trigger(key, first, -1);
-        add_trigger(key, second, -1);
+        let first = install_trig(&mut g, trigger("first"));
+        let second = install_trig(&mut g, trigger("second"));
+        add_trigger(&mut g, key, first, -1);
+        add_trigger(&mut g, key, second, -1);
 
         assert!(!remove_trigger(&mut g, key, "2147483648"));
         assert!(!remove_trigger(&mut g, key, "2147483648.first"));
-        assert_eq!(trigger_ids(key), vec![first, second]);
+        assert_eq!(trigger_ids(&g, key), vec![first, second]);
 
         extract_script(&mut g, key);
     }

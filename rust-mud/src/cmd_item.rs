@@ -3377,24 +3377,27 @@ mod tests {
         );
     }
 
-    fn make_obj_trigger(cmds: &[&str]) -> crate::dg_handler::TrigId {
-        install_trig(TrigData {
-            nr: 0,
-            vnum: 9999,
-            attach_type: OBJ_TRIGGER,
-            name: "veto armor".to_string(),
-            trigger_type: OTRIG_WEAR,
-            narg: 100,
-            arglist: String::new(),
-            cmdlist: cmds.iter().map(|s| s.to_string()).collect(),
-            curr_line: 0,
-            depth: 0,
-            loops: 0,
-            wait_event: None,
-            var_list: Vec::new(),
-            purged: false,
-            loop_origin: HashMap::new(),
-        })
+    fn make_obj_trigger(g: &mut GameState, cmds: &[&str]) -> crate::dg_handler::TrigId {
+        install_trig(
+            g,
+            TrigData {
+                nr: 0,
+                vnum: 9999,
+                attach_type: OBJ_TRIGGER,
+                name: "veto armor".to_string(),
+                trigger_type: OTRIG_WEAR,
+                narg: 100,
+                arglist: String::new(),
+                cmdlist: cmds.iter().map(|s| s.to_string()).collect(),
+                curr_line: 0,
+                depth: 0,
+                loops: 0,
+                wait_event: None,
+                var_list: Vec::new(),
+                purged: false,
+                loop_origin: HashMap::new(),
+            },
+        )
     }
 
     #[test]
@@ -3431,15 +3434,18 @@ mod tests {
     #[test]
     fn perform_wear_runs_wear_trigger_and_honors_veto() {
         let _dg = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        dg_handler::boot_handler();
         let (mut g, ch, obj, conn) = wearable_game(ExtraFlags::empty(), 0);
-        let trig = make_obj_trigger(&["set fired yes", "global fired", "return 0", "halt"]);
-        add_trigger(ScriptKey::Obj(obj), trig, -1);
+        dg_handler::boot_handler(&mut g);
+        let trig = make_obj_trigger(
+            &mut g,
+            &["set fired yes", "global fired", "return 0", "halt"],
+        );
+        add_trigger(&mut g, ScriptKey::Obj(obj), trig, -1);
 
         perform_wear(&mut g, ch, obj, W_BODY);
 
         assert_eq!(
-            dg_handler::get_global_var(ScriptKey::Obj(obj), "fired").as_deref(),
+            dg_handler::get_global_var(&g, ScriptKey::Obj(obj), "fired").as_deref(),
             Some("yes")
         );
         assert_eq!(g.get_char(ch).unwrap().equipment[W_BODY], None);

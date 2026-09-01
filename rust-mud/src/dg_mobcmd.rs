@@ -43,26 +43,22 @@ use crate::interpreter::{
 use crate::object::{ObjLoc, WearFlags};
 use crate::state::GameState;
 use crate::types::*;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
 // DG UID encoding: ESC byte then decimal id (dg_scripts.h: UID_CHAR '\x1b').
 // ---------------------------------------------------------------------------
 const UID_CHAR: char = '\x1b';
 
-/// The C `dg_owner_purged` global. Set by `mpurge` when a mob purges itself so
-/// the VM can stop running that trigger. The VM clears it before each command.
-static OWNER_PURGED: AtomicBool = AtomicBool::new(false);
-
 /// VM hook: clear the self-purge flag before running a command (C zeroes the
-/// global at the top of the dispatch loop).
-pub fn clear_owner_purged() {
-    OWNER_PURGED.store(false, Ordering::Relaxed);
+/// global at the top of the dispatch loop). Lives on GameState
+/// (`dg.owner_purged`) — the same latch the VM itself uses.
+pub fn clear_owner_purged(g: &mut GameState) {
+    g.dg.owner_purged = false;
 }
 
 /// VM hook: read-and-clear whether the just-run command purged its owning mob.
-pub fn take_owner_purged() -> bool {
-    OWNER_PURGED.swap(false, Ordering::Relaxed)
+pub fn take_owner_purged(g: &mut GameState) -> bool {
+    std::mem::take(&mut g.dg.owner_purged)
 }
 
 // ---------------------------------------------------------------------------
@@ -988,7 +984,7 @@ fn do_mpurge(g: &mut GameState, ch: CharId, argument: &str) {
         return;
     }
     if victim == ch {
-        OWNER_PURGED.store(true, Ordering::Relaxed);
+        g.dg.owner_purged = true;
     }
     g.extract_char(victim);
 }

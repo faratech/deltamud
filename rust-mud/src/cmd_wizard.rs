@@ -397,8 +397,8 @@ fn script_stat(g: &mut GameState, ch: CharId, key: ScriptKey) {
         value.to_string()
     }
 
-    let context = dg_handler::get_context(key);
-    let globals = dg_handler::global_vars(key);
+    let context = dg_handler::get_context(g, key);
+    let globals = dg_handler::global_vars(g, key);
     g.send_to_char(
         ch,
         &format!(
@@ -421,8 +421,8 @@ fn script_stat(g: &mut GameState, ch: CharId, key: ScriptKey) {
         g.send_to_char(ch, &format!("    {:>15}:  {}\r\n", label, shown));
     }
 
-    for tid in dg_handler::trigger_ids(key) {
-        let t = match dg_handler::trig_clone(tid) {
+    for tid in dg_handler::trigger_ids(g, key) {
+        let t = match dg_handler::trig_clone(g, tid) {
             Some(t) => t,
             None => continue,
         };
@@ -486,7 +486,7 @@ fn script_stat(g: &mut GameState, ch: CharId, key: ScriptKey) {
 /// do_sstat_*(): "Script information:" header, then script_stat (or "None.").
 fn do_sstat(g: &mut GameState, ch: CharId, key: ScriptKey) {
     g.send_to_char(ch, "Script information:\r\n");
-    if !dg_handler::has_script(key) {
+    if !dg_handler::has_script(g, key) {
         g.send_to_char(ch, "  None.\r\n");
         return;
     }

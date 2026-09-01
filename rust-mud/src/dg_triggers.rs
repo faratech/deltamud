@@ -20,9 +20,9 @@
 // so per-entity script state lives in dg_handler's module-static tables keyed
 // by a `ScriptKey` (Mob(CharId)/Obj(ObjId)/Room(RoomRnum)). This file reads
 // those tables through dg_handler's accessors and drives the VM in dg_scripts:
-//   * dg_handler::script_check(key,ty)  = SCRIPT_CHECK
-//   * dg_handler::trigger_ids(key)      = TRIGGERS(SCRIPT(go)) walk
-//   * dg_handler::with_trig(id, |t| …)  = GET_TRIG_* field reads
+//   * dg_handler::script_check(g, key,ty)  = SCRIPT_CHECK
+//   * dg_handler::trigger_ids(g, key)      = TRIGGERS(SCRIPT(go)) walk
+//   * dg_handler::with_trig(g, id, |t| …)  = GET_TRIG_* field reads
 //   * dg_handler::with_trig_mut + add_var_in = add_var / ADD_UID_VAR
 //   * dg_handler::memory_for / forget   = SCRIPT_MEM walk / delete
 //   * dg_scripts::script_driver(g, go, trig, type, mode) -> i32 = the VM
@@ -104,49 +104,49 @@ fn pct(g: &mut GameState) -> i32 {
 // --- GET_TRIG_* field reads (snapshot, to avoid holding the handler lock) ---
 
 #[inline]
-fn trig_type(t: TrigId) -> i64 {
-    dh::with_trig(t, |tr| tr.trigger_type).unwrap_or(0)
+fn trig_type(g: &GameState, t: TrigId) -> i64 {
+    dh::with_trig(g, t, |tr| tr.trigger_type).unwrap_or(0)
 }
 #[inline]
-fn trig_narg(t: TrigId) -> i32 {
-    dh::with_trig(t, |tr| tr.narg).unwrap_or(0)
+fn trig_narg(g: &GameState, t: TrigId) -> i32 {
+    dh::with_trig(g, t, |tr| tr.narg).unwrap_or(0)
 }
 #[inline]
-fn trig_depth(t: TrigId) -> i32 {
-    dh::with_trig(t, |tr| tr.depth).unwrap_or(0)
+fn trig_depth(g: &GameState, t: TrigId) -> i32 {
+    dh::with_trig(g, t, |tr| tr.depth).unwrap_or(0)
 }
 #[inline]
-fn trig_vnum(t: TrigId) -> i32 {
-    dh::with_trig(t, |tr| tr.vnum).unwrap_or(0)
+fn trig_vnum(g: &GameState, t: TrigId) -> i32 {
+    dh::with_trig(g, t, |tr| tr.vnum).unwrap_or(0)
 }
 #[inline]
-fn trig_arg(t: TrigId) -> String {
-    dh::with_trig(t, |tr| tr.arglist.clone()).unwrap_or_default()
+fn trig_arg(g: &GameState, t: TrigId) -> String {
+    dh::with_trig(g, t, |tr| tr.arglist.clone()).unwrap_or_default()
 }
 
 /// TRIGGER_CHECK(t, type): type bit set AND depth == 0 (not already running).
 #[inline]
-fn trigger_check(t: TrigId, mask: i64) -> bool {
-    is_set(trig_type(t), mask) && trig_depth(t) == 0
+fn trigger_check(g: &GameState, t: TrigId, mask: i64) -> bool {
+    is_set(trig_type(g, t), mask) && trig_depth(g, t) == 0
 }
 
 // --- add_var / ADD_UID_VAR onto a trigger's local var list -------------------
 
-/// add_var(&GET_TRIG_VARS(t), name, value, context).
-fn add_var(t: TrigId, name: &str, value: &str) {
-    dh::with_trig_mut(t, |tr| dh::add_var_in(&mut tr.var_list, name, value, 0));
+/// add_var(g, &GET_TRIG_VARS(t), name, value, context).
+fn add_var(g: &mut GameState, t: TrigId, name: &str, value: &str) {
+    dh::with_trig_mut(g, t, |tr| dh::add_var_in(&mut tr.var_list, name, value, 0));
 }
 
 /// ADD_UID_VAR(buf, t, ch, name, 0): set %name% to a character's UID token.
-fn add_uid_var_char(t: TrigId, name: &str, ch: CharId) {
+fn add_uid_var_char(g: &mut GameState, t: TrigId, name: &str, ch: CharId) {
     let buf = format!("{}{}", UID_CHAR, ch.0);
-    add_var(t, name, &buf);
+    add_var(g, t, name, &buf);
 }
 
 /// ADD_UID_VAR(buf, t, obj, name, 0): set %name% to an object's UID token.
-fn add_uid_var_obj(t: TrigId, name: &str, obj: ObjId) {
+fn add_uid_var_obj(g: &mut GameState, t: TrigId, name: &str, obj: ObjId) {
     let buf = format!("{}{}", UID_CHAR, obj.0);
-    add_var(t, name, &buf);
+    add_var(g, t, name, &buf);
 }
 
 // --- script_driver dispatch (GoRef-typed VM call) ----------------------------
@@ -173,11 +173,11 @@ fn drive_wld(g: &mut GameState, room: RoomRnum, t: TrigId) -> i32 {
 /// `random_mtrigger(ch)` call inside the mobile_activity loop.
 pub fn random_mtrigger(g: &mut GameState, ch: CharId) {
     let key = ScriptKey::Mob(ch);
-    if !dh::script_check(key, MTRIG_RANDOM) || charmed(g, ch) {
+    if !dh::script_check(g, key, MTRIG_RANDOM) || charmed(g, ch) {
         return;
     }
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, MTRIG_RANDOM) && pct(g) <= trig_narg(t) {
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, MTRIG_RANDOM) && pct(g) <= trig_narg(g, t) {
             drive_mob(g, ch, t);
             break;
         }
@@ -189,13 +189,13 @@ pub fn random_mtrigger(g: &mut GameState, ch: CharId) {
 /// gold `amount`, after the mob pockets the coins (C act.item.c ordering).
 pub fn bribe_mtrigger(g: &mut GameState, ch: CharId, actor: CharId, amount: i32) {
     let key = ScriptKey::Mob(ch);
-    if !dh::script_check(key, MTRIG_BRIBE) || charmed(g, ch) {
+    if !dh::script_check(g, key, MTRIG_BRIBE) || charmed(g, ch) {
         return;
     }
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, MTRIG_BRIBE) && amount >= trig_narg(t) {
-            add_var(t, "amount", &amount.to_string());
-            add_uid_var_char(t, "actor", actor);
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, MTRIG_BRIBE) && amount >= trig_narg(g, t) {
+            add_var(g, t, "amount", &amount.to_string());
+            add_uid_var_char(g, t, "actor", actor);
             drive_mob(g, ch, t);
             break;
         }
@@ -213,8 +213,8 @@ pub fn greet_memory_mtrigger(g: &mut GameState, actor: CharId) {
     let people = g.room(rnum).people.clone();
     for ch in people {
         let key = ScriptKey::Mob(ch);
-        if !dh::script_check(key, MTRIG_MEMORY)
-            || dh::memory_for(ch).is_empty()
+        if !dh::script_check(g, key, MTRIG_MEMORY)
+            || dh::memory_for(g, ch).is_empty()
             || !awake(g, ch)
             || fighting(g, ch).is_some()
             || ch == actor
@@ -222,27 +222,27 @@ pub fn greet_memory_mtrigger(g: &mut GameState, actor: CharId) {
         {
             continue;
         }
-        for t in dh::trigger_ids(key) {
-            if !is_set(trig_type(t), MTRIG_MEMORY)
+        for t in dh::trigger_ids(g, key) {
+            if !is_set(trig_type(g, t), MTRIG_MEMORY)
                 || !can_see(g, ch, actor)
-                || trig_depth(t) != 0
-                || !(pct(g) <= trig_narg(t))
+                || trig_depth(g, t) != 0
+                || !(pct(g) <= trig_narg(g, t))
             {
                 continue;
             }
             // Walk the mob's memory; if it remembers `actor`, react then forget.
-            for mem in dh::memory_for(ch) {
+            for mem in dh::memory_for(g, ch) {
                 if mem.id != actor.0 as i64 {
                     continue;
                 }
                 match mem.cmd {
                     Some(c) => crate::interpreter::command_interpreter(g, ch, &c),
                     None => {
-                        add_uid_var_char(t, "actor", actor);
+                        add_uid_var_char(g, t, "actor", actor);
                         drive_mob(g, ch, t);
                     }
                 }
-                dh::forget(ch, actor.0 as i64);
+                dh::forget(g, ch, actor.0 as i64);
             }
         }
     }
@@ -263,7 +263,7 @@ pub fn greet_mtrigger(g: &mut GameState, actor: CharId, dir: i32) -> bool {
     let people = g.room(rnum).people.clone();
     for ch in people {
         let key = ScriptKey::Mob(ch);
-        if !(dh::script_check(key, MTRIG_GREET | MTRIG_GREET_ALL))
+        if !(dh::script_check(g, key, MTRIG_GREET | MTRIG_GREET_ALL))
             || !awake(g, ch)
             || fighting(g, ch).is_some()
             || ch == actor
@@ -271,15 +271,15 @@ pub fn greet_mtrigger(g: &mut GameState, actor: CharId, dir: i32) -> bool {
         {
             continue;
         }
-        for t in dh::trigger_ids(key) {
-            let ty = trig_type(t);
+        for t in dh::trigger_ids(g, key) {
+            let ty = trig_type(g, t);
             let greet_seen = is_set(ty, MTRIG_GREET) && can_see(g, ch, actor);
             let greet_all = is_set(ty, MTRIG_GREET_ALL);
-            if (greet_seen || greet_all) && trig_depth(t) == 0 && pct(g) <= trig_narg(t) {
+            if (greet_seen || greet_all) && trig_depth(g, t) == 0 && pct(g) <= trig_narg(g, t) {
                 if dir >= 0 && (dir as usize) < NUM_OF_DIRS {
-                    add_var(t, "direction", DIR_NAMES[REV_DIR[dir as usize]]);
+                    add_var(g, t, "direction", DIR_NAMES[REV_DIR[dir as usize]]);
                 }
-                add_uid_var_char(t, "actor", actor);
+                add_uid_var_char(g, t, "actor", actor);
                 let intermediate = drive_mob(g, ch, t);
                 if intermediate == 0 {
                     final_ok = false;
@@ -295,10 +295,10 @@ pub fn greet_mtrigger(g: &mut GameState, actor: CharId, dir: i32) -> bool {
 /// remembered occupants. Fired from: movement, after the MOB itself moves.
 pub fn entry_memory_mtrigger(g: &mut GameState, ch: CharId) {
     let key = ScriptKey::Mob(ch);
-    if !dh::script_check(key, MTRIG_MEMORY) || charmed(g, ch) {
+    if !dh::script_check(g, key, MTRIG_MEMORY) || charmed(g, ch) {
         return;
     }
-    if dh::memory_for(ch).is_empty() {
+    if dh::memory_for(g, ch).is_empty() {
         return;
     }
     let rnum = match g.get_char(ch).and_then(|c| c.in_room) {
@@ -307,26 +307,26 @@ pub fn entry_memory_mtrigger(g: &mut GameState, ch: CharId) {
     };
     let people = g.room(rnum).people.clone();
     for actor in people {
-        if actor == ch || dh::memory_for(ch).is_empty() {
+        if actor == ch || dh::memory_for(g, ch).is_empty() {
             continue;
         }
-        for mem in dh::memory_for(ch) {
+        for mem in dh::memory_for(g, ch) {
             if mem.id != actor.0 as i64 {
                 continue;
             }
             match mem.cmd {
                 Some(c) => crate::interpreter::command_interpreter(g, ch, &c),
                 None => {
-                    for t in dh::trigger_ids(key) {
-                        if trigger_check(t, MTRIG_MEMORY) && pct(g) <= trig_narg(t) {
-                            add_uid_var_char(t, "actor", actor);
+                    for t in dh::trigger_ids(g, key) {
+                        if trigger_check(g, t, MTRIG_MEMORY) && pct(g) <= trig_narg(g, t) {
+                            add_uid_var_char(g, t, "actor", actor);
                             drive_mob(g, ch, t);
                             break;
                         }
                     }
                 }
             }
-            dh::forget(ch, actor.0 as i64);
+            dh::forget(g, ch, actor.0 as i64);
         }
     }
 }
@@ -336,11 +336,11 @@ pub fn entry_memory_mtrigger(g: &mut GameState, ch: CharId) {
 /// room. Returns 0/false to BLOCK the mob's entry (rare), else true.
 pub fn entry_mtrigger(g: &mut GameState, ch: CharId) -> bool {
     let key = ScriptKey::Mob(ch);
-    if !dh::script_check(key, MTRIG_ENTRY) || charmed(g, ch) {
+    if !dh::script_check(g, key, MTRIG_ENTRY) || charmed(g, ch) {
         return true;
     }
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, MTRIG_ENTRY) && pct(g) <= trig_narg(t) {
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, MTRIG_ENTRY) && pct(g) <= trig_narg(g, t) {
             return drive_mob(g, ch, t) != 0;
         }
     }
@@ -358,25 +358,25 @@ pub fn command_mtrigger(g: &mut GameState, actor: CharId, cmd: &str, argument: &
     let people = g.room(rnum).people.clone();
     for ch in people {
         let key = ScriptKey::Mob(ch);
-        if !(dh::script_check(key, MTRIG_COMMAND) && !charmed(g, ch) && actor != ch) {
+        if !(dh::script_check(g, key, MTRIG_COMMAND) && !charmed(g, ch) && actor != ch) {
             continue;
         }
-        for t in dh::trigger_ids(key) {
-            if !is_set(trig_type(t), MTRIG_COMMAND) || trig_depth(t) != 0 {
+        for t in dh::trigger_ids(g, key) {
+            if !is_set(trig_type(g, t), MTRIG_COMMAND) || trig_depth(g, t) != 0 {
                 continue;
             }
-            let targ = trig_arg(t);
+            let targ = trig_arg(g, t);
             if targ.is_empty() {
                 vm::script_log(&format!(
                     "SYSERR: Command Trigger #{} has no text argument!",
-                    trig_vnum(t)
+                    trig_vnum(g, t)
                 ));
                 continue;
             }
             if targ.starts_with('*') || cmd_prefix_match(&targ, cmd) {
-                add_uid_var_char(t, "actor", actor);
-                add_var(t, "arg", argument.trim_start());
-                add_var(t, "cmd", cmd.trim_start());
+                add_uid_var_char(g, t, "actor", actor);
+                add_var(g, t, "arg", argument.trim_start());
+                add_var(g, t, "cmd", cmd.trim_start());
                 if drive_mob(g, ch, t) != 0 {
                     return true;
                 }
@@ -404,26 +404,29 @@ pub fn speech_mtrigger(g: &mut GameState, actor: CharId, str_: &str) {
     let people = g.room(rnum).people.clone();
     for ch in people {
         let key = ScriptKey::Mob(ch);
-        if !(dh::script_check(key, MTRIG_SPEECH) && awake(g, ch) && !charmed(g, ch) && actor != ch)
+        if !(dh::script_check(g, key, MTRIG_SPEECH)
+            && awake(g, ch)
+            && !charmed(g, ch)
+            && actor != ch)
         {
             continue;
         }
-        for t in dh::trigger_ids(key) {
-            if !is_set(trig_type(t), MTRIG_SPEECH) || trig_depth(t) != 0 {
+        for t in dh::trigger_ids(g, key) {
+            if !is_set(trig_type(g, t), MTRIG_SPEECH) || trig_depth(g, t) != 0 {
                 continue;
             }
-            let targ = trig_arg(t);
+            let targ = trig_arg(g, t);
             if targ.is_empty() {
                 vm::script_log(&format!(
                     "SYSERR: Speech Trigger #{} has no text argument!",
-                    trig_vnum(t)
+                    trig_vnum(g, t)
                 ));
                 continue;
             }
-            let narg = trig_narg(t);
+            let narg = trig_narg(g, t);
             if (narg != 0 && word_check(str_, &targ)) || (narg == 0 && is_substring(&targ, str_)) {
-                add_uid_var_char(t, "actor", actor);
-                add_var(t, "speech", str_);
+                add_uid_var_char(g, t, "actor", actor);
+                add_var(g, t, "speech", str_);
                 drive_mob(g, ch, t);
                 break;
             }
@@ -448,37 +451,37 @@ pub fn act_mtrigger(
     arg: Option<&str>,
 ) {
     let key = ScriptKey::Mob(ch);
-    if !(dh::script_check(key, MTRIG_ACT) && !charmed(g, ch) && actor != Some(ch)) {
+    if !(dh::script_check(g, key, MTRIG_ACT) && !charmed(g, ch) && actor != Some(ch)) {
         return;
     }
-    for t in dh::trigger_ids(key) {
-        if !is_set(trig_type(t), MTRIG_ACT) || trig_depth(t) != 0 {
+    for t in dh::trigger_ids(g, key) {
+        if !is_set(trig_type(g, t), MTRIG_ACT) || trig_depth(g, t) != 0 {
             continue;
         }
-        let targ = trig_arg(t);
+        let targ = trig_arg(g, t);
         if targ.is_empty() {
             vm::script_log(&format!(
                 "SYSERR: Act Trigger #{} has no text argument!",
-                trig_vnum(t)
+                trig_vnum(g, t)
             ));
             continue;
         }
-        let narg = trig_narg(t);
+        let narg = trig_narg(g, t);
         if (narg != 0 && word_check(str_, &targ)) || (narg == 0 && is_substring(&targ, str_)) {
             if let Some(a) = actor {
-                add_uid_var_char(t, "actor", a);
+                add_uid_var_char(g, t, "actor", a);
             }
             if let Some(v) = victim {
-                add_uid_var_char(t, "victim", v);
+                add_uid_var_char(g, t, "victim", v);
             }
             if let Some(o) = object {
-                add_uid_var_obj(t, "object", o);
+                add_uid_var_obj(g, t, "object", o);
             }
             if let Some(tg) = target {
-                add_uid_var_obj(t, "target", tg);
+                add_uid_var_obj(g, t, "target", tg);
             }
             if let Some(a) = arg {
-                add_var(t, "arg", a.trim_start());
+                add_var(g, t, "arg", a.trim_start());
             }
             drive_mob(g, ch, t);
             break;
@@ -494,12 +497,12 @@ pub fn fight_mtrigger(g: &mut GameState, ch: CharId) {
         None => return,
     };
     let key = ScriptKey::Mob(ch);
-    if !dh::script_check(key, MTRIG_FIGHT) || charmed(g, ch) {
+    if !dh::script_check(g, key, MTRIG_FIGHT) || charmed(g, ch) {
         return;
     }
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, MTRIG_FIGHT) && pct(g) <= trig_narg(t) {
-            add_uid_var_char(t, "actor", opponent);
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, MTRIG_FIGHT) && pct(g) <= trig_narg(g, t) {
+            add_uid_var_char(g, t, "actor", opponent);
             drive_mob(g, ch, t);
             break;
         }
@@ -514,7 +517,7 @@ pub fn hitprcnt_mtrigger(g: &mut GameState, ch: CharId) {
         None => return,
     };
     let key = ScriptKey::Mob(ch);
-    if !dh::script_check(key, MTRIG_HITPRCNT) || charmed(g, ch) {
+    if !dh::script_check(g, key, MTRIG_HITPRCNT) || charmed(g, ch) {
         return;
     }
     let (hit, max_hit) = match g.get_char(ch) {
@@ -524,9 +527,9 @@ pub fn hitprcnt_mtrigger(g: &mut GameState, ch: CharId) {
     if max_hit == 0 {
         return;
     }
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, MTRIG_HITPRCNT) && (hit * 100) / max_hit <= trig_narg(t) {
-            add_uid_var_char(t, "actor", opponent);
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, MTRIG_HITPRCNT) && (hit * 100) / max_hit <= trig_narg(g, t) {
+            add_uid_var_char(g, t, "actor", opponent);
             drive_mob(g, ch, t);
             break;
         }
@@ -538,13 +541,13 @@ pub fn hitprcnt_mtrigger(g: &mut GameState, ch: CharId) {
 /// false/0 to BLOCK the give (the mob refuses), else true.
 pub fn receive_mtrigger(g: &mut GameState, ch: CharId, actor: CharId, obj: ObjId) -> bool {
     let key = ScriptKey::Mob(ch);
-    if !dh::script_check(key, MTRIG_RECEIVE) || charmed(g, ch) {
+    if !dh::script_check(g, key, MTRIG_RECEIVE) || charmed(g, ch) {
         return true;
     }
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, MTRIG_RECEIVE) && pct(g) <= trig_narg(t) {
-            add_uid_var_char(t, "actor", actor);
-            add_uid_var_obj(t, "object", obj);
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, MTRIG_RECEIVE) && pct(g) <= trig_narg(g, t) {
+            add_uid_var_char(g, t, "actor", actor);
+            add_uid_var_obj(g, t, "object", obj);
             return drive_mob(g, ch, t) != 0;
         }
     }
@@ -557,13 +560,13 @@ pub fn receive_mtrigger(g: &mut GameState, ch: CharId, actor: CharId, obj: ObjId
 /// death handling, else true.
 pub fn death_mtrigger(g: &mut GameState, ch: CharId, actor: Option<CharId>) -> bool {
     let key = ScriptKey::Mob(ch);
-    if !dh::script_check(key, MTRIG_DEATH) || charmed(g, ch) {
+    if !dh::script_check(g, key, MTRIG_DEATH) || charmed(g, ch) {
         return true;
     }
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, MTRIG_DEATH) {
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, MTRIG_DEATH) {
             if let Some(a) = actor {
-                add_uid_var_char(t, "actor", a);
+                add_uid_var_char(g, t, "actor", a);
             }
             return drive_mob(g, ch, t) != 0;
         }
@@ -576,11 +579,11 @@ pub fn death_mtrigger(g: &mut GameState, ch: CharId, actor: Option<CharId>) -> b
 /// mob is placed.
 pub fn load_mtrigger(g: &mut GameState, ch: CharId) {
     let key = ScriptKey::Mob(ch);
-    if !dh::script_check(key, MTRIG_LOAD) {
+    if !dh::script_check(g, key, MTRIG_LOAD) {
         return;
     }
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, MTRIG_LOAD) && pct(g) <= trig_narg(t) {
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, MTRIG_LOAD) && pct(g) <= trig_narg(g, t) {
             drive_mob(g, ch, t);
             break;
         }
@@ -595,14 +598,14 @@ pub fn load_mtrigger(g: &mut GameState, ch: CharId) {
 /// Fired from: the DG pulse (objects in world iterated each PULSE_DG_SCRIPT).
 pub fn random_otrigger(g: &mut GameState, obj: ObjId) {
     let key = ScriptKey::Obj(obj);
-    if !dh::script_check(key, OTRIG_RANDOM) {
+    if !dh::script_check(g, key, OTRIG_RANDOM) {
         return;
     }
     let carrier = crate::dg_comm::obj_carrier(g, obj);
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, OTRIG_RANDOM) && pct(g) <= trig_narg(t) {
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, OTRIG_RANDOM) && pct(g) <= trig_narg(g, t) {
             if let Some(c) = carrier {
-                add_uid_var_char(t, "actor", c);
+                add_uid_var_char(g, t, "actor", c);
             }
             drive_obj(g, obj, t);
             break;
@@ -615,11 +618,11 @@ pub fn random_otrigger(g: &mut GameState, obj: ObjId) {
 /// reaches zero), BEFORE the default timer-expiry handling.
 pub fn timer_otrigger(g: &mut GameState, obj: ObjId) {
     let key = ScriptKey::Obj(obj);
-    if !dh::script_check(key, OTRIG_TIMER) {
+    if !dh::script_check(g, key, OTRIG_TIMER) {
         return;
     }
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, OTRIG_TIMER) {
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, OTRIG_TIMER) {
             drive_obj(g, obj, t);
         }
     }
@@ -630,12 +633,12 @@ pub fn timer_otrigger(g: &mut GameState, obj: ObjId) {
 /// Returns false/0 to BLOCK the pickup, else true.
 pub fn get_otrigger(g: &mut GameState, obj: ObjId, actor: CharId) -> bool {
     let key = ScriptKey::Obj(obj);
-    if !dh::script_check(key, OTRIG_GET) {
+    if !dh::script_check(g, key, OTRIG_GET) {
         return true;
     }
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, OTRIG_GET) && pct(g) <= trig_narg(t) {
-            add_uid_var_char(t, "actor", actor);
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, OTRIG_GET) && pct(g) <= trig_narg(g, t) {
+            add_uid_var_char(g, t, "actor", actor);
             return drive_obj(g, obj, t) != 0;
         }
     }
@@ -654,27 +657,27 @@ fn cmd_otrig(
     type_: i32,
 ) -> bool {
     let key = ScriptKey::Obj(obj);
-    if !dh::script_check(key, OTRIG_COMMAND) {
+    if !dh::script_check(g, key, OTRIG_COMMAND) {
         return false;
     }
-    for t in dh::trigger_ids(key) {
-        if !is_set(trig_type(t), OTRIG_COMMAND) || trig_depth(t) != 0 {
+    for t in dh::trigger_ids(g, key) {
+        if !is_set(trig_type(g, t), OTRIG_COMMAND) || trig_depth(g, t) != 0 {
             continue;
         }
         // narg here is the OCMD_ placement bitvector, not a percent.
-        if (trig_narg(t) & type_) != 0 {
-            let targ = trig_arg(t);
+        if (trig_narg(g, t) & type_) != 0 {
+            let targ = trig_arg(g, t);
             if targ.is_empty() {
                 vm::script_log(&format!(
                     "SYSERR: O-Command Trigger #{} has no text argument!",
-                    trig_vnum(t)
+                    trig_vnum(g, t)
                 ));
                 continue;
             }
             if targ.starts_with('*') || cmd_prefix_match(&targ, cmd) {
-                add_uid_var_char(t, "actor", actor);
-                add_var(t, "arg", argument.trim_start());
-                add_var(t, "cmd", cmd.trim_start());
+                add_uid_var_char(g, t, "actor", actor);
+                add_var(g, t, "arg", argument.trim_start());
+                add_var(g, t, "cmd", cmd.trim_start());
                 if drive_obj(g, obj, t) != 0 {
                     return true;
                 }
@@ -730,10 +733,10 @@ fn fight_otrig(g: &mut GameState, ch: CharId, obj: ObjId) {
         None => return,
     };
     let key = ScriptKey::Obj(obj);
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, OTRIG_FIGHT) && pct(g) <= trig_narg(t) {
-            add_uid_var_char(t, "actor", opponent);
-            add_uid_var_char(t, "owner", ch);
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, OTRIG_FIGHT) && pct(g) <= trig_narg(g, t) {
+            add_uid_var_char(g, t, "actor", opponent);
+            add_uid_var_char(g, t, "owner", ch);
             drive_obj(g, obj, t);
             break;
         }
@@ -751,7 +754,7 @@ pub fn fight_otrigger(g: &mut GameState, ch: CharId) {
         None => return,
     };
     for oid in equip {
-        if dh::script_check(ScriptKey::Obj(oid), OTRIG_FIGHT) {
+        if dh::script_check(g, ScriptKey::Obj(oid), OTRIG_FIGHT) {
             fight_otrig(g, ch, oid);
         }
     }
@@ -761,12 +764,12 @@ pub fn fight_otrigger(g: &mut GameState, ch: CharId) {
 /// the wear completes. Returns false/0 to BLOCK the wear, else true.
 pub fn wear_otrigger(g: &mut GameState, obj: ObjId, actor: CharId, _where: usize) -> bool {
     let key = ScriptKey::Obj(obj);
-    if !dh::script_check(key, OTRIG_WEAR) {
+    if !dh::script_check(g, key, OTRIG_WEAR) {
         return true;
     }
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, OTRIG_WEAR) {
-            add_uid_var_char(t, "actor", actor);
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, OTRIG_WEAR) {
+            add_uid_var_char(g, t, "actor", actor);
             return drive_obj(g, obj, t) != 0;
         }
     }
@@ -777,12 +780,12 @@ pub fn wear_otrigger(g: &mut GameState, obj: ObjId, actor: CharId, _where: usize
 /// perform_remove, BEFORE removal. Returns false/0 to BLOCK, else true.
 pub fn remove_otrigger(g: &mut GameState, obj: ObjId, actor: CharId) -> bool {
     let key = ScriptKey::Obj(obj);
-    if !dh::script_check(key, OTRIG_REMOVE) {
+    if !dh::script_check(g, key, OTRIG_REMOVE) {
         return true;
     }
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, OTRIG_REMOVE) {
-            add_uid_var_char(t, "actor", actor);
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, OTRIG_REMOVE) {
+            add_uid_var_char(g, t, "actor", actor);
             return drive_obj(g, obj, t) != 0;
         }
     }
@@ -793,12 +796,12 @@ pub fn remove_otrigger(g: &mut GameState, obj: ObjId, actor: CharId) -> bool {
 /// BEFORE the drop. Returns false/0 to BLOCK the drop, else true.
 pub fn drop_otrigger(g: &mut GameState, obj: ObjId, actor: CharId) -> bool {
     let key = ScriptKey::Obj(obj);
-    if !dh::script_check(key, OTRIG_DROP) {
+    if !dh::script_check(g, key, OTRIG_DROP) {
         return true;
     }
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, OTRIG_DROP) && pct(g) <= trig_narg(t) {
-            add_uid_var_char(t, "actor", actor);
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, OTRIG_DROP) && pct(g) <= trig_narg(g, t) {
+            add_uid_var_char(g, t, "actor", actor);
             return drive_obj(g, obj, t) != 0;
         }
     }
@@ -809,13 +812,13 @@ pub fn drop_otrigger(g: &mut GameState, obj: ObjId, actor: CharId) -> bool {
 /// perform_give, BEFORE the give. Returns false/0 to BLOCK the give, else true.
 pub fn give_otrigger(g: &mut GameState, obj: ObjId, actor: CharId, victim: CharId) -> bool {
     let key = ScriptKey::Obj(obj);
-    if !dh::script_check(key, OTRIG_GIVE) {
+    if !dh::script_check(g, key, OTRIG_GIVE) {
         return true;
     }
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, OTRIG_GIVE) && pct(g) <= trig_narg(t) {
-            add_uid_var_char(t, "actor", actor);
-            add_uid_var_char(t, "victim", victim);
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, OTRIG_GIVE) && pct(g) <= trig_narg(g, t) {
+            add_uid_var_char(g, t, "actor", actor);
+            add_uid_var_char(g, t, "victim", victim);
             return drive_obj(g, obj, t) != 0;
         }
     }
@@ -826,11 +829,11 @@ pub fn give_otrigger(g: &mut GameState, obj: ObjId, actor: CharId, victim: CharI
 /// (read_object / zone reset 'O'/'G'/'E'/'P'), right after placement.
 pub fn load_otrigger(g: &mut GameState, obj: ObjId) {
     let key = ScriptKey::Obj(obj);
-    if !dh::script_check(key, OTRIG_LOAD) {
+    if !dh::script_check(g, key, OTRIG_LOAD) {
         return;
     }
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, OTRIG_LOAD) && pct(g) <= trig_narg(t) {
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, OTRIG_LOAD) && pct(g) <= trig_narg(g, t) {
             drive_obj(g, obj, t);
             break;
         }
@@ -845,11 +848,11 @@ pub fn load_otrigger(g: &mut GameState, obj: ObjId) {
 /// Fired from: db zone reset loop, once per reset of the room's zone.
 pub fn reset_wtrigger(g: &mut GameState, room: RoomRnum) {
     let key = ScriptKey::Room(room);
-    if !dh::script_check(key, WTRIG_RESET) {
+    if !dh::script_check(g, key, WTRIG_RESET) {
         return;
     }
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, WTRIG_RESET) && pct(g) <= trig_narg(t) {
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, WTRIG_RESET) && pct(g) <= trig_narg(g, t) {
             drive_wld(g, room, t);
             break;
         }
@@ -860,11 +863,11 @@ pub fn reset_wtrigger(g: &mut GameState, room: RoomRnum) {
 /// Fired from: the DG pulse (rooms iterated each PULSE_DG_SCRIPT).
 pub fn random_wtrigger(g: &mut GameState, room: RoomRnum) {
     let key = ScriptKey::Room(room);
-    if !dh::script_check(key, WTRIG_RANDOM) {
+    if !dh::script_check(g, key, WTRIG_RANDOM) {
         return;
     }
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, WTRIG_RANDOM) && pct(g) <= trig_narg(t) {
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, WTRIG_RANDOM) && pct(g) <= trig_narg(g, t) {
             drive_wld(g, room, t);
             break;
         }
@@ -877,15 +880,15 @@ pub fn random_wtrigger(g: &mut GameState, room: RoomRnum) {
 /// non-walk entry (teleport) and suppresses the %direction% var.
 pub fn enter_wtrigger(g: &mut GameState, room: RoomRnum, actor: CharId, dir: i32) -> bool {
     let key = ScriptKey::Room(room);
-    if !dh::script_check(key, WTRIG_ENTER) {
+    if !dh::script_check(g, key, WTRIG_ENTER) {
         return true;
     }
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, WTRIG_ENTER) && pct(g) <= trig_narg(t) {
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, WTRIG_ENTER) && pct(g) <= trig_narg(g, t) {
             if dir != -1 && (dir as usize) < NUM_OF_DIRS {
-                add_var(t, "direction", DIR_NAMES[REV_DIR[dir as usize]]);
+                add_var(g, t, "direction", DIR_NAMES[REV_DIR[dir as usize]]);
             }
-            add_uid_var_char(t, "actor", actor);
+            add_uid_var_char(g, t, "actor", actor);
             return drive_wld(g, room, t) != 0;
         }
     }
@@ -901,25 +904,25 @@ pub fn command_wtrigger(g: &mut GameState, actor: CharId, cmd: &str, argument: &
         None => return false,
     };
     let key = ScriptKey::Room(room);
-    if !dh::script_check(key, WTRIG_COMMAND) {
+    if !dh::script_check(g, key, WTRIG_COMMAND) {
         return false;
     }
-    for t in dh::trigger_ids(key) {
-        if !is_set(trig_type(t), WTRIG_COMMAND) || trig_depth(t) != 0 {
+    for t in dh::trigger_ids(g, key) {
+        if !is_set(trig_type(g, t), WTRIG_COMMAND) || trig_depth(g, t) != 0 {
             continue;
         }
-        let targ = trig_arg(t);
+        let targ = trig_arg(g, t);
         if targ.is_empty() {
             vm::script_log(&format!(
                 "SYSERR: W-Command Trigger #{} has no text argument!",
-                trig_vnum(t)
+                trig_vnum(g, t)
             ));
             continue;
         }
         if targ.starts_with('*') || cmd_prefix_match(&targ, cmd) {
-            add_uid_var_char(t, "actor", actor);
-            add_var(t, "arg", argument.trim_start());
-            add_var(t, "cmd", cmd.trim_start());
+            add_uid_var_char(g, t, "actor", actor);
+            add_var(g, t, "arg", argument.trim_start());
+            add_var(g, t, "cmd", cmd.trim_start());
             return drive_wld(g, room, t) != 0;
         }
     }
@@ -935,25 +938,25 @@ pub fn speech_wtrigger(g: &mut GameState, actor: CharId, str_: &str) {
         None => return,
     };
     let key = ScriptKey::Room(room);
-    if !dh::script_check(key, WTRIG_SPEECH) {
+    if !dh::script_check(g, key, WTRIG_SPEECH) {
         return;
     }
-    for t in dh::trigger_ids(key) {
-        if !is_set(trig_type(t), WTRIG_SPEECH) || trig_depth(t) != 0 {
+    for t in dh::trigger_ids(g, key) {
+        if !is_set(trig_type(g, t), WTRIG_SPEECH) || trig_depth(g, t) != 0 {
             continue;
         }
-        let targ = trig_arg(t);
+        let targ = trig_arg(g, t);
         if targ.is_empty() {
             vm::script_log(&format!(
                 "SYSERR: W-Speech Trigger #{} has no text argument!",
-                trig_vnum(t)
+                trig_vnum(g, t)
             ));
             continue;
         }
-        let narg = trig_narg(t);
+        let narg = trig_narg(g, t);
         if (narg != 0 && word_check(str_, &targ)) || (narg == 0 && is_substring(&targ, str_)) {
-            add_uid_var_char(t, "actor", actor);
-            add_var(t, "speech", str_);
+            add_uid_var_char(g, t, "actor", actor);
+            add_var(g, t, "speech", str_);
             drive_wld(g, room, t);
             break;
         }
@@ -969,13 +972,13 @@ pub fn drop_wtrigger(g: &mut GameState, obj: ObjId, actor: CharId) -> bool {
         None => return true,
     };
     let key = ScriptKey::Room(room);
-    if !dh::script_check(key, WTRIG_DROP) {
+    if !dh::script_check(g, key, WTRIG_DROP) {
         return true;
     }
-    for t in dh::trigger_ids(key) {
-        if trigger_check(t, WTRIG_DROP) && pct(g) <= trig_narg(t) {
-            add_uid_var_char(t, "actor", actor);
-            add_uid_var_obj(t, "object", obj);
+    for t in dh::trigger_ids(g, key) {
+        if trigger_check(g, t, WTRIG_DROP) && pct(g) <= trig_narg(g, t) {
+            add_uid_var_char(g, t, "actor", actor);
+            add_uid_var_obj(g, t, "object", obj);
             return drive_wld(g, room, t) != 0;
         }
     }
@@ -1075,48 +1078,59 @@ mod tests {
     use crate::room::Room;
     use std::collections::HashMap;
 
-    fn install_active_trigger(attach_type: i32, trigger_type: i64, narg: i32) -> TrigId {
-        dh::install_trig(TrigData {
-            nr: 0,
-            vnum: 9999,
-            attach_type,
-            name: "active reentry test".into(),
-            trigger_type,
-            narg,
-            arglist: "*".into(),
-            cmdlist: vec!["return 1".into()],
-            curr_line: 0,
-            depth: 1,
-            loops: 0,
-            wait_event: None,
-            var_list: Vec::new(),
-            purged: false,
-            loop_origin: HashMap::new(),
-        })
+    fn install_active_trigger(
+        g: &mut GameState,
+        attach_type: i32,
+        trigger_type: i64,
+        narg: i32,
+    ) -> TrigId {
+        dh::install_trig(
+            g,
+            TrigData {
+                nr: 0,
+                vnum: 9999,
+                attach_type,
+                name: "active reentry test".into(),
+                trigger_type,
+                narg,
+                arglist: "*".into(),
+                cmdlist: vec!["return 1".into()],
+                curr_line: 0,
+                depth: 1,
+                loops: 0,
+                wait_event: None,
+                var_list: Vec::new(),
+                purged: false,
+                loop_origin: HashMap::new(),
+            },
+        )
     }
 
-    fn install_command_trigger(name: &str, commands: &[&str]) -> TrigId {
-        dh::install_trig(TrigData {
-            nr: 0,
-            vnum: 10_001,
-            attach_type: MOB_TRIGGER,
-            name: name.into(),
-            trigger_type: MTRIG_COMMAND,
-            narg: 0,
-            arglist: "*".into(),
-            cmdlist: commands.iter().map(|command| (*command).into()).collect(),
-            curr_line: 0,
-            depth: 0,
-            loops: 0,
-            wait_event: None,
-            var_list: Vec::new(),
-            purged: false,
-            loop_origin: HashMap::new(),
-        })
+    fn install_command_trigger(g: &mut GameState, name: &str, commands: &[&str]) -> TrigId {
+        dh::install_trig(
+            g,
+            TrigData {
+                nr: 0,
+                vnum: 10_001,
+                attach_type: MOB_TRIGGER,
+                name: name.into(),
+                trigger_type: MTRIG_COMMAND,
+                narg: 0,
+                arglist: "*".into(),
+                cmdlist: commands.iter().map(|command| (*command).into()).collect(),
+                curr_line: 0,
+                depth: 0,
+                loops: 0,
+                wait_event: None,
+                var_list: Vec::new(),
+                purged: false,
+                loop_origin: HashMap::new(),
+            },
+        )
     }
 
-    fn assert_still_active(trigger: TrigId) {
-        assert_eq!(dh::with_trig(trigger, |t| t.depth), Some(1));
+    fn assert_still_active(g: &GameState, trigger: TrigId) {
+        assert_eq!(dh::with_trig(g, trigger, |t| t.depth), Some(1));
     }
 
     #[test]
@@ -1178,9 +1192,9 @@ mod tests {
     #[test]
     fn active_command_speech_and_act_triggers_do_not_reenter() {
         let _lock = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        dh::boot_handler();
-
         let mut g = GameState::new(Config::default());
+
+        dh::boot_handler(&mut g);
         let room = g.add_room(Room::new(
             3001,
             0,
@@ -1197,35 +1211,40 @@ mod tests {
         g.char_to_room(mob, room);
         let obj = g.create_obj(Object::new(4001, "token".into(), "a token".into()));
 
-        let mob_trigger =
-            install_active_trigger(MOB_TRIGGER, MTRIG_COMMAND | MTRIG_SPEECH | MTRIG_ACT, 1);
-        dh::add_trigger(ScriptKey::Mob(mob), mob_trigger, -1);
+        let mob_trigger = install_active_trigger(
+            &mut g,
+            MOB_TRIGGER,
+            MTRIG_COMMAND | MTRIG_SPEECH | MTRIG_ACT,
+            1,
+        );
+        dh::add_trigger(&mut g, ScriptKey::Mob(mob), mob_trigger, -1);
         assert!(!command_mtrigger(&mut g, actor, "look", ""));
-        assert_still_active(mob_trigger);
+        assert_still_active(&g, mob_trigger);
         speech_mtrigger(&mut g, actor, "hello");
-        assert_still_active(mob_trigger);
+        assert_still_active(&g, mob_trigger);
         act_mtrigger(&mut g, mob, "hello", Some(actor), None, None, None, None);
-        assert_still_active(mob_trigger);
+        assert_still_active(&g, mob_trigger);
 
-        let obj_trigger = install_active_trigger(OBJ_TRIGGER, OTRIG_COMMAND, OCMD_INVEN);
-        dh::add_trigger(ScriptKey::Obj(obj), obj_trigger, -1);
+        let obj_trigger = install_active_trigger(&mut g, OBJ_TRIGGER, OTRIG_COMMAND, OCMD_INVEN);
+        dh::add_trigger(&mut g, ScriptKey::Obj(obj), obj_trigger, -1);
         assert!(!cmd_otrig(&mut g, obj, actor, "look", "", OCMD_INVEN));
-        assert_still_active(obj_trigger);
+        assert_still_active(&g, obj_trigger);
 
-        let world_trigger = install_active_trigger(WLD_TRIGGER, WTRIG_COMMAND | WTRIG_SPEECH, 1);
-        dh::add_trigger(ScriptKey::Room(room), world_trigger, -1);
+        let world_trigger =
+            install_active_trigger(&mut g, WLD_TRIGGER, WTRIG_COMMAND | WTRIG_SPEECH, 1);
+        dh::add_trigger(&mut g, ScriptKey::Room(room), world_trigger, -1);
         assert!(!command_wtrigger(&mut g, actor, "look", ""));
-        assert_still_active(world_trigger);
+        assert_still_active(&g, world_trigger);
         speech_wtrigger(&mut g, actor, "hello");
-        assert_still_active(world_trigger);
+        assert_still_active(&g, world_trigger);
     }
 
     #[test]
     fn self_caused_command_runs_once_while_a_different_trigger_may_nest() {
         let _lock = DG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        dh::boot_handler();
-
         let mut g = GameState::new(Config::default());
+
+        dh::boot_handler(&mut g);
         let room = g.add_room(Room::new(
             3001,
             0,
@@ -1246,9 +1265,10 @@ mod tests {
         g.char_to_room(mob, room);
 
         let owner = ScriptKey::Mob(mob);
-        dh::add_global_var(owner, "outer_runs", "0", 0);
-        dh::add_global_var(owner, "nested_runs", "0", 0);
+        dh::add_global_var(&mut g, owner, "outer_runs", "0", 0);
+        dh::add_global_var(&mut g, owner, "nested_runs", "0", 0);
         let outer = install_command_trigger(
+            &mut g,
             "self-causing outer",
             &[
                 "eval outer_runs %outer_runs% + 1",
@@ -1258,6 +1278,7 @@ mod tests {
             ],
         );
         let nested = install_command_trigger(
+            &mut g,
             "independent nested",
             &[
                 "eval nested_runs %nested_runs% + 1",
@@ -1265,19 +1286,19 @@ mod tests {
                 "return 1",
             ],
         );
-        dh::add_trigger(owner, outer, -1);
-        dh::add_trigger(owner, nested, -1);
+        dh::add_trigger(&mut g, owner, outer, -1);
+        dh::add_trigger(&mut g, owner, nested, -1);
 
         assert!(command_mtrigger(&mut g, actor, "look", ""));
         assert_eq!(
-            dh::get_global_var(owner, "outer_runs").as_deref(),
+            dh::get_global_var(&g, owner, "outer_runs").as_deref(),
             Some("1")
         );
         assert_eq!(
-            dh::get_global_var(owner, "nested_runs").as_deref(),
+            dh::get_global_var(&g, owner, "nested_runs").as_deref(),
             Some("1")
         );
-        assert_eq!(dh::with_trig(outer, |trigger| trigger.depth), Some(0));
-        assert_eq!(dh::with_trig(nested, |trigger| trigger.depth), Some(0));
+        assert_eq!(dh::with_trig(&g, outer, |trigger| trigger.depth), Some(0));
+        assert_eq!(dh::with_trig(&g, nested, |trigger| trigger.depth), Some(0));
     }
 }
