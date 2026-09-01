@@ -1755,7 +1755,17 @@ fn shopping_sell(g: &mut GameState, arg: &str, ch: CharId, keeper: CharId, shop_
         let price = sell_price(g, ch, obj, &shop);
         goldamt += price;
         if let Some(k) = g.get_char_mut(keeper) {
-            k.points.gold -= price;
+            // Draw the shortfall from the shop's bank BEFORE debiting on-hand
+            // coin: the old order let keeper gold go negative (and stay there
+            // when the deficit exceeded the bank), bricking the shop -- the
+            // next sell's affordability check rejected everything.
+            let on_hand = k.points.gold;
+            if on_hand < price {
+                let shortfall = (price - on_hand).min(shop.bank_account.max(0));
+                shop.bank_account -= shortfall;
+                k.points.gold += shortfall;
+            }
+            k.points.gold = (k.points.gold - price).max(0);
         }
 
         let short = obj_short(g, obj);

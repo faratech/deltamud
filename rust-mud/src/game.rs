@@ -565,6 +565,13 @@ impl Game {
     }
 
 async fn handle_input(&mut self, conn_id: ConnId, input: String) {
+        // Any input proves the player is alive: reset the login-prompt idle
+        // counter (C clears it on entering each password state; the old
+        // one-way counter booted ACTIVE players after 30s of accumulated
+        // thinking time across creation states).
+        if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+            d.idle_tics = 0;
+        }
         let state = match self.state.descriptors.get(&conn_id) {
             Some(d) => d.state,
             None => return,
@@ -646,6 +653,15 @@ async fn handle_input(&mut self, conn_id: ConnId, input: String) {
                 // descriptor's WAIT_STATE lag (d.wait) expires, and sends the
                 // prompt after the command actually runs.
                 if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                    // C comm.c drops the CONNECTION when its input buffer
+                    // overflows; a hard cap here stops a flood client from
+                    // growing the queue unbounded (drain rate is 1/pulse).
+                    const MAX_QUEUED_COMMANDS: usize = 32;
+                    if d.input_queue.len() >= MAX_QUEUED_COMMANDS {
+                        d.write("\r\nInput queue full.\r\n");
+                        d.state = ConState::Close;
+                        return;
+                    }
                     d.input_queue.push_back(QueuedInput::raw(input));
                 }
                 return;
@@ -1684,6 +1700,26 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
     /// (#218). Returns true when THIS connection should go straight to
     /// Playing (dupe handled).
     async fn perform_dupe_check(&mut self, conn_id: ConnId, idnum: i64) -> bool {
+        // --- Pre-enter_game window (issue #396): a descriptor parked at the
+        // MOTD/menu holds its loaded Character in `pending_load` with
+        // character == None, so the body match below could not see it -- two
+        // logins of one account then both pressed 1 and created two playing
+        // bodies (and crash_load duplicated every rented item). Disconnect
+        // any OTHER pre-menu connection carrying the same idnum.
+        let stale_prelogin: Vec<ConnId> = self
+            .pending_load
+            .iter()
+            .filter(|(c, rec)| **c != conn_id && rec.idnum == idnum)
+            .map(|(&c, _)| c)
+            .collect();
+        for stale in stale_prelogin {
+            self.pending_load.remove(&stale);
+            if let Some(d) = self.state.descriptors.get_mut(&stale) {
+                d.write("\r\nYour body was taken over by a newer login.\r\n");
+                d.state = ConState::Close;
+            }
+        }
+
         let dupes: Vec<(ConnId, CharId, bool)> = self
             .state
             .descriptors
@@ -2069,6 +2105,17 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         // teardown; without this the per-conn state + vnum lock leak until the
         // next reboot — BUG #21). No-op if not editing.
         crate::olc::abort_editor(conn_id);
+        // String-editor + pager state for this connection must go too: ConnIds
+        // are never reused, so a pager holding a full paginated document (or an
+        // editor buffer) leaks forever (issue #397).
+        crate::modify::abort_conn(conn_id);
+        // Login-side per-conn state (issue #397): pending_load holds an entire
+        // 83-column Character clone, pending/just_created hold creation
+        // choices -- ConnIds are never reused, so anything left behind after
+        // this point leaks forever.
+        self.pending_load.remove(&conn_id);
+        self.pending.remove(&conn_id);
+        self.just_created.remove(&conn_id);
         let ch = self
             .state
             .descriptors
@@ -2076,6 +2123,11 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             .and_then(|d| d.character);
         if let Some(cid) = ch {
             let mut alias_id_to_clear = None;
+            // C comm.c:2010 — arena combatants get their backed-up affects,
+            // wimpy and recall restored BEFORE the save, or the zeroed values
+            // persist to SQL (issue #390).
+            crate::arena::on_link_lost(&mut self.state, cid);
+            // Persist then remove the character from the world.
             // Persist then remove the character from the world.
             if let Some(snapshot) = self.snapshot_online_player_for_save(cid) {
                 // Keep the index current with the saved record (level can
