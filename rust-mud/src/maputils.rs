@@ -2590,7 +2590,7 @@ pub fn move_char_fly(g: &mut GameState, ch: CharId, length: i32, dir: i32) {
                 g.send_to_room(nr, &flyby, None);
             }
             g.char_to_room(ch, nr);
-            crate::commands::look_at_room(g, ch, false);
+            crate::cmd_movement::look_at_room(g, ch, false);
             continue;
         }
 
@@ -2624,7 +2624,7 @@ pub fn move_char_fly(g: &mut GameState, ch: CharId, length: i32, dir: i32) {
             g.send_to_room(n2, &flyby, None);
         }
         g.char_to_room(ch, n2);
-        crate::commands::look_at_room(g, ch, false);
+        crate::cmd_movement::look_at_room(g, ch, false);
     }
 
     if !had_nomap {

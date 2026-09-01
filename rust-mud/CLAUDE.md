@@ -84,11 +84,22 @@ MUD_MOCK_DB=false DATABASE_URL="mysql://deltamud:<pw>@127.0.0.1/deltamud" \
 ### Testing against a running server
 Scripted Telnet with raw `nc` (it does not answer the server's initial `WILL GMCP`, so GMCP remains disabled; expect raw IAC bytes at the start of captured output):
 ```bash
-( printf 'Tester\r\ny\r\npass\r\npass\r\ny\r\nm\r\na\r\na\r\nc\r\ny\r\n'; sleep 1; printf 'score\r\n'; sleep 0.5; printf 'quit\r\n' ) | nc -q9 127.0.0.1 4000
+( printf 'n\r\nTester\r\ny\r\npass\r\npass\r\ny\r\nm\r\na\r\na\r\nc\r\ny\r\n\r\n1\r\n'; sleep 2; \
+  printf 'score\r\n'; sleep 0.5; printf 'quit y\r\n'; sleep 0.5 ) | nc -q9 127.0.0.1 4000
 ```
+The creation prompt **order** (each takes one line; a fixed-sleep pipe that drifts past
+the menu can be re-aligned with a prompt-reading Python socket loop):
+color Y/N (`n`/`y`) → name → "Did I get that right" → password → password retype →
+"completely new to MUDing" → sex (M/F) → race letter → deity letter → class letter →
+accept stat roll → MOTD RETURN → menu `[1]` enter game. Empty input never skips a prompt.
 Gotchas that waste time:
+- **The color question is asked FIRST, before the name prompt.** Answering it wrong
+  shifts every later input by one and the session derails with "Invalid name" loops.
 - **No character is implicitly privileged.** Even `idnum == 1` starts as a mortal; use the one-time offline bootstrap above for the initial Implementor, then authenticated in-game administration.
 - `valid_name` is **alpha-only** — names with digits ("Test2") are rejected at the name prompt.
+- `quit` from a character holding un-rented equipment asks for confirmation: send
+  `quit y` (without it the character sits down and idles instead).
+- Room renders have no `exits:` line; the playing prompt looks like `20hp 100mp 81mv (2999) >`.
 - Stop a development server by the exact PID captured when it was launched
   (`kill -TERM "$server_pid"; wait "$server_pid"`). Never use `pkill`: this host
   may have another DeltaMUD process whose lifecycle is outside your test.

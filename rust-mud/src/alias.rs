@@ -21,7 +21,6 @@
 use crate::state::GameState;
 use crate::types::*;
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -184,30 +183,35 @@ pub fn read_aliases(lib_path: &str, name: &str, idnum: i64) -> std::io::Result<(
 }
 
 /// C write_aliases(): rewrite the whole alias sidecar. Empty alias lists remove
-/// the old file and leave no replacement.
+/// the old file and leave no replacement (absence is the "no aliases"
+/// representation, and unlink is atomic). Non-empty lists are published by
+/// durable temp-plus-rename, so a crash mid-write can no longer destroy the
+/// previous sidecar (the old remove-then-create window is gone).
 pub fn write_aliases(lib_path: &str, name: &str, idnum: i64) -> std::io::Result<()> {
     let Some(path) = alias_filename(lib_path, name) else {
         return Ok(());
     };
     let aliases = get_aliases(idnum);
-    match std::fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => return Err(err),
-    }
     if aliases.is_empty() {
-        return Ok(());
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        };
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut file = std::fs::File::create(&path)?;
+    let mut bytes = String::new();
     for alias in aliases {
-        writeln!(file, "{}", alias.alias)?;
-        writeln!(file, "{}", alias.replacement)?;
-        writeln!(file, "{}", alias.atype)?;
+        bytes.push_str(&alias.alias);
+        bytes.push('\n');
+        bytes.push_str(&alias.replacement);
+        bytes.push('\n');
+        bytes.push_str(&alias.atype.to_string());
+        bytes.push('\n');
     }
-    Ok(())
+    crate::olc::atomic_replace(&path, bytes.as_bytes())
 }
 
 fn persist_aliases(g: &GameState, idnum: i64, name: &str) {
@@ -552,6 +556,56 @@ mod tests {
 
         assert!(!path.exists());
         assert!(get_aliases(idnum).is_empty());
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
+    /// Regression for the remove-then-create crash window: a rewrite must
+    /// publish through a unique sibling temp and leave no stray temporaries
+    /// behind, so a crash can never destroy the previous sidecar.
+    #[test]
+    fn rewrites_publish_atomically_without_stray_temporaries() {
+        let lib = temp_lib("atomic_rewrite");
+        let idnum = 44;
+        let bucket_dir = lib.join("plralias").join("P-T");
+
+        set_aliases(
+            idnum,
+            vec![AliasEntry {
+                alias: "old".to_string(),
+                replacement: "say first".to_string(),
+                atype: ALIAS_SIMPLE,
+            }],
+        );
+        write_aliases(lib.to_str().unwrap(), "Tester", idnum).unwrap();
+        let path = alias_filename(lib.to_str().unwrap(), "Tester").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "old\nsay first\n0\n"
+        );
+
+        set_aliases(
+            idnum,
+            vec![AliasEntry {
+                alias: "new".to_string(),
+                replacement: "say second".to_string(),
+                atype: ALIAS_SIMPLE,
+            }],
+        );
+        write_aliases(lib.to_str().unwrap(), "Tester", idnum).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "new\nsay second\n0\n"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&bucket_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "tester.alias")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "stray temporary files left behind: {leftovers:?}"
+        );
         let _ = std::fs::remove_dir_all(lib);
     }
 }

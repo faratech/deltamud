@@ -246,6 +246,16 @@ pub const PASSES_PER_SEC: u64 = 10;
 pub const PULSE_VIOLENCE: u64 = 2 * PASSES_PER_SEC; // every 2s
 pub const PULSE_MOBILE: u64 = 10 * PASSES_PER_SEC; // every 10s
 pub const PULSE_ZONE: u64 = 10 * PASSES_PER_SEC; // every 10s
+/// dg_scripts.h PULSE_DG_SCRIPT: random/idle trigger scan (every 13s).
+pub const PULSE_DG_SCRIPT: u64 = 13 * PASSES_PER_SEC;
+/// Login-prompt reaper + auction tick (comm.c idle handling; every 15s).
+pub const PULSE_IDLE_PASSWORD: u64 = 15 * PASSES_PER_SEC;
+/// Live surface-weather activity: storm spawn/move/collide/expire (every 30s).
+pub const PULSE_WEATHER_ACTIVITY: u64 = 30 * PASSES_PER_SEC;
+/// Minute-sized stages: quest update, blood decay, autoreboot, autosave gate.
+pub const PULSE_MINUTE: u64 = 60 * PASSES_PER_SEC;
+/// SECS_PER_MUD_HOUR (75) * PASSES_PER_SEC: calendar/sky, affect aging, regen.
+pub const PULSE_MUD_HOUR: u64 = 75 * PASSES_PER_SEC;
 
 /// Direction names for output (CircleMUD `dirs[]`).
 pub const DIR_NAMES: [&str; NUM_OF_DIRS] = ["north", "east", "south", "west", "up", "down"];

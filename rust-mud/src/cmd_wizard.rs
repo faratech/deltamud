@@ -7398,8 +7398,13 @@ fn resolve_copyover_executable_from(
 /// Production copyover must execute an explicitly configured, trusted release
 /// path. Only mock-DB development/test runs may fall back to the current test
 /// or development binary.
-fn resolve_copyover_executable(use_mock_db: bool) -> anyhow::Result<std::path::PathBuf> {
-    resolve_copyover_executable_from(std::env::var_os("MUD_EXEC_PATH"), use_mock_db)
+fn resolve_copyover_executable(
+    config: &crate::config::Config,
+) -> anyhow::Result<std::path::PathBuf> {
+    resolve_copyover_executable_from(
+        config.exec_path.as_ref().map(std::ffi::OsString::from),
+        config.use_mock_db,
+    )
 }
 
 /// Execute the filesystem/socket half only after the async Game shell has
@@ -7431,7 +7436,7 @@ pub fn perform_copyover(g: &mut GameState, ch: CharId) {
     // newly activated release instead of re-executing the old process image.
     // Only explicit mock/development runs retain current_exe() as a fallback;
     // a real-DB service fails closed when MUD_EXEC_PATH is absent.
-    let exe = match resolve_copyover_executable(g.config.use_mock_db) {
+    let exe = match resolve_copyover_executable(&g.config) {
         Ok(p) => p,
         Err(error) => {
             log::warn!("copyover executable validation failed: {error:#}");

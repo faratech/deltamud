@@ -4780,17 +4780,17 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         // game_loop's job and stays above.
         crate::dg_event::process_events(&mut self.state);
         // PULSE_DG_SCRIPT (dg_scripts.h): random/idle trigger scan.
-        if pulse % 130 == 0 {
+        if pulse % PULSE_DG_SCRIPT == 0 {
             crate::dg_scripts::script_trigger_check(&mut self.state);
         }
         if pulse % PULSE_ZONE == 0 {
             self.zone_update();
         }
-        // 15 seconds: reap sockets sitting at login prompts, then auctions.
-        if pulse % (15 * PASSES_PER_SEC) == 0 {
+        // PULSE_IDLE_PASSWORD: reap sockets sitting at login prompts, auctions.
+        if pulse % PULSE_IDLE_PASSWORD == 0 {
             self.check_idle_passwords();
         }
-        if pulse % (15 * PASSES_PER_SEC) == 0 {
+        if pulse % PULSE_IDLE_PASSWORD == 0 {
             crate::auction::auction_update(&mut self.state);
         }
         if pulse % PULSE_MOBILE == 0 {
@@ -4801,19 +4801,18 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         }
         // Live surface weather (storms spawn/move/collide/expire) every 30
         // RL-seconds.
-        if pulse % (30 * PASSES_PER_SEC) == 0 {
+        if pulse % PULSE_WEATHER_ACTIVITY == 0 {
             crate::maputils::weather_activity(&mut self.state);
         }
         // Autoquest update + room blood decay, every minute.
-        if pulse % (60 * PASSES_PER_SEC) == 0 {
+        if pulse % PULSE_MINUTE == 0 {
             crate::quest::quest_update(&mut self.state);
             crate::maputils::blood_update(&mut self.state);
             self.autoreboot_check();
         }
-        // Mud-hour block (SECS_PER_MUD_HOUR * PASSES_PER_SEC = 750 pulses):
+        // Mud-hour block (PULSE_MUD_HOUR = SECS_PER_MUD_HOUR * PASSES_PER_SEC):
         // calendar/sky, affect aging (comm.c:1038, #96), then regen/conditions.
-        if pulse % 750 == 0 {
-            // SECS_PER_MUD_HOUR(75) * PASSES_PER_SEC(10)
+        if pulse % PULSE_MUD_HOUR == 0 {
             crate::weather::weather_and_time(&mut self.state);
             crate::magic::affect_update(&mut self.state);
             crate::limits::point_update(&mut self.state);
@@ -4822,7 +4821,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         // autosave_time (config.c:174 = 5) minute gate: Crash_save_all +
         // House_save_all (#192; the old 75-second crash-save tick was 4x
         // C's cadence and houses were never saved at all).
-        if pulse % (60 * PASSES_PER_SEC) == 0 {
+        if pulse % PULSE_MINUTE == 0 {
             self.mins_since_crashsave += 1;
             if self.mins_since_crashsave >= crate::config::AUTOSAVE_TIME {
                 self.mins_since_crashsave = 0;
@@ -5508,12 +5507,9 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             .values()
             .filter(|d| d.state == ConState::Playing && d.character.is_some())
             .count();
-        // Listen port: read MUD_PORT exactly as config.rs does (the Game isn't
-        // handed the Config), defaulting to the CircleMUD default 4000.
-        let port: u16 = std::env::var("MUD_PORT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(4000);
+        // Listen port from the boot configuration (no environment reads on
+        // the presentation path).
+        let port: u16 = self.state.config.port;
 
         let mut payload: Vec<u8> = Vec::with_capacity(128);
         let mut add = |name: &str, value: &str| {

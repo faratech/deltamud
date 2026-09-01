@@ -4,7 +4,7 @@
 // the sleep/rest/sit/stand/wake/meditate position commands, follow, and the
 // mount family (mount/dismount/buck/tame).
 //
-// Borrow discipline matches commands.rs: copy needed values into locals first,
+// Borrow discipline: copy needed values into locals first,
 // then mutate; never hold a &Character/&Object across a send/act. Entities are
 // looked up by id every time.
 //
@@ -632,7 +632,7 @@ pub(crate) fn do_simple_move(
 
     // Show the destination to the mover.
     if g.get_char(ch).and_then(|c| c.desc).is_some() {
-        crate::commands::look_at_room(g, ch, false);
+        look_at_room(g, ch, false);
     }
 
     if death_trap_effect(g, ch) {
@@ -657,7 +657,7 @@ pub(crate) fn do_simple_move(
         g.char_from_room(ch);
         g.char_to_room(ch, was_in);
         if g.get_char(ch).and_then(|c| c.desc).is_some() {
-            crate::commands::look_at_room(g, ch, false);
+            look_at_room(g, ch, false);
         }
     } else {
         crate::dg_triggers::greet_memory_mtrigger(g, ch);
@@ -1274,7 +1274,7 @@ pub fn do_enter(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     g.char_to_room(ch, toroom);
     act(g, "$n has arrived.", true, ch, None, ActArg::None, To::Room);
     if g.get_char(ch).and_then(|c| c.desc).is_some() {
-        crate::commands::look_at_room(g, ch, false);
+        look_at_room(g, ch, false);
     }
 }
 
@@ -1304,7 +1304,7 @@ pub fn do_leave(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     g.char_to_room(ch, toroom);
     act(g, "$n has arrived.", true, ch, None, ActArg::None, To::Room);
     if g.get_char(ch).and_then(|c| c.desc).is_some() {
-        crate::commands::look_at_room(g, ch, false);
+        look_at_room(g, ch, false);
     }
 }
 
@@ -1581,7 +1581,7 @@ fn do_special_move(g: &mut GameState, ch: CharId) -> bool {
         act(g, "$n has arrived.", true, ch, None, ActArg::None, To::Room);
     }
     if g.get_char(ch).and_then(|c| c.desc).is_some() {
-        crate::commands::look_at_room(g, ch, false);
+        look_at_room(g, ch, false);
     }
     true
 }
@@ -2816,6 +2816,72 @@ const SKILL_TAME: u16 = 523;
 // MOB_MOUNTABLE is bit 20 in DeltaMUD's action_bits (constants::ACTION_BITS
 // index 20). Not a named const in flags.rs.
 const MOB_MOUNTABLE: i64 = 1 << 20;
+
+/// Render a room to a character (CircleMUD look_at_room). Moved here from the
+/// retired Tier-0 commands.rs; this is its only production home (perform_move
+/// shows the destination room, and `look` routes through cmd_informative).
+pub fn look_at_room(g: &mut GameState, ch: CharId, _ignore_brief: bool) {
+    let rnum = match g.get_char(ch).and_then(|c| c.in_room) {
+        Some(r) => r,
+        None => {
+            g.send_to_char(ch, "You see nothing but infinite darkness...\r\n");
+            return;
+        }
+    };
+
+    // Room name.
+    let name = g.room(rnum).name.clone();
+    let is_imm = g.get_char(ch).map(|c| c.is_immortal()).unwrap_or(false);
+    if is_imm {
+        let vnum = g.room(rnum).number;
+        g.send_to_char(ch, &format!("&c[{}] {}&n\r\n", vnum, name));
+    } else {
+        g.send_to_char(ch, &format!("&c{}&n\r\n", name));
+    }
+
+    // Description.
+    let desc = g.room(rnum).description.clone();
+    let desc = normalize_lines(&desc);
+    g.send_to_char(ch, &desc);
+    if !desc.ends_with("\r\n") {
+        g.send_to_char(ch, "\r\n");
+    }
+
+    // Ground objects (their room description line).
+    let contents = g.room(rnum).contents.clone();
+    for oid in contents {
+        if let Some(obj) = g.get_obj(oid) {
+            if !obj.description.is_empty() {
+                let line = format!("{}\r\n", obj.description);
+                g.send_to_char(ch, &line);
+            }
+        }
+    }
+
+    // Other people / mobs.
+    let people = g.room(rnum).people.clone();
+    for pid in people {
+        if pid == ch {
+            continue;
+        }
+        if !g.can_see(ch, pid) {
+            continue;
+        }
+        let line = g
+            .get_char(pid)
+            .map(|p| p.display_in_room())
+            .unwrap_or_default();
+        if !line.is_empty() {
+            g.send_to_char(ch, &format!("{}\r\n", line));
+        }
+    }
+}
+
+/// Normalise bare \n to \r\n for telnet output (world files use \n).
+fn normalize_lines(s: &str) -> String {
+    let unified = s.replace("\r\n", "\n");
+    unified.replace('\n', "\r\n")
+}
 
 #[cfg(test)]
 mod tests {

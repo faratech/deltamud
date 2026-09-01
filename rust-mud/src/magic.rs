@@ -168,12 +168,8 @@ fn update_pos(g: &mut GameState, victim: CharId) {
     }
 }
 
-/// Compatibility shim for the existing `commands::do_cast` wrapper, which
-/// calls `magic::do_cast(g, ch, arg)`. The real pipeline lives in
-/// spell_parser::do_cast (contract owner). Forwarding here keeps the existing
-/// interpreter dispatch (`commands::do_cast`) working without editing those
-/// modules; the recommended rewire points the interpreter straight at
-/// `spell_parser::do_cast`.
+/// Thin alias so callers can spell the cast entry point `magic::do_cast`.
+/// The real pipeline lives in spell_parser::do_cast (contract owner).
 pub fn do_cast(g: &mut GameState, ch: CharId, arg: &str) {
     crate::spell_parser::do_cast(g, ch, arg, 0);
 }

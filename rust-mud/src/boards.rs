@@ -214,6 +214,12 @@ struct BoardRuntime {
     /// like C's `msg_index[board][0..num_of_msgs]`.
     boards: Vec<Vec<BoardMsg>>,
     formats: Vec<crate::cformat::PersistenceFormat>,
+    /// Boards whose on-disk file failed to parse at boot. Unlike C — which
+    /// "resets" a corrupt board and lets the next save destroy it — a
+    /// quarantined board refuses every save (including the empty-board unlink)
+    /// so the unreadable file is preserved for operator recovery. New posts
+    /// stay in memory only and are lost at reboot; the error log says so.
+    quarantined: Vec<bool>,
     /// Pending bodies being composed, keyed by the writer's ConnId. Maps to
     /// (board_type, message_index) so the editor-completion hook knows where
     /// to drop the finished text.
@@ -236,6 +242,7 @@ fn boards() -> &'static Mutex<BoardRuntime> {
         Mutex::new(BoardRuntime {
             boards: vec![Vec::new(); NUM_OF_BOARDS],
             formats: vec![crate::cformat::default_persistence_format(); NUM_OF_BOARDS],
+            quarantined: vec![false; NUM_OF_BOARDS],
             pending: HashMap::new(),
             lib_path: "./lib".to_string(),
         })
@@ -258,20 +265,33 @@ pub fn boot_boards(lib_path: &str) {
     for b in 0..NUM_OF_BOARDS {
         guard.boards[b].clear();
         guard.formats[b] = crate::cformat::default_persistence_format();
+        guard.quarantined[b] = false;
     }
     // Load each board file from disk.
     for b in 0..NUM_OF_BOARDS {
         let path = board_file_path(&guard.lib_path, b);
         match load_board_file(&path) {
-            Ok(Some((msgs, format))) => {
+            Ok(BoardLoad::Loaded(msgs, format)) => {
                 guard.boards[b] = msgs;
                 guard.formats[b] = format;
             }
-            Ok(None) => {} // missing file == empty board (C: ENOENT is silent)
+            Ok(BoardLoad::Missing) => {} // missing file == empty board (C: ENOENT is silent)
+            Ok(BoardLoad::Corrupt) => {
+                // Fail closed: the unreadable file must survive until an
+                // operator recovers it, so refuse all saves for this board.
+                guard.quarantined[b] = true;
+                log::error!(
+                    "SYSERR: Board file '{}' is corrupt; board quarantined — saves are \
+                     refused to preserve the file for recovery. Posts made now are lost \
+                     at reboot. Move or repair the file, then reboot.",
+                    path
+                );
+            }
             Err(e) => {
-                eprintln!(
+                log::error!(
                     "SYSERR: Error reading board '{}': {}",
-                    BOARD_INFO[b].filename, e
+                    BOARD_INFO[b].filename,
+                    e
                 );
             }
         }
@@ -546,7 +566,16 @@ pub fn board_finish_write(
     let path = board_file_path(&guard.lib_path, board_type);
     let msgs = guard.boards[board_type].clone();
     let format = guard.formats[board_type];
+    let quarantined = guard.quarantined[board_type];
     drop(guard);
+    if quarantined {
+        log::error!(
+            "SYSERR: Board '{}' is quarantined (corrupt save file); write refused to \
+             preserve the file for recovery.",
+            BOARD_INFO[board_type].filename
+        );
+        return BoardFinishOutcome::Finished;
+    }
     if let Err(e) = save_board_file(&path, &msgs, format) {
         eprintln!(
             "SYSERR: Error writing board '{}': {}",
@@ -554,6 +583,15 @@ pub fn board_finish_write(
         );
     }
     BoardFinishOutcome::Finished
+}
+
+#[cfg(test)]
+/// Serialize tests that re-boot the process-global board runtime: parallel
+/// `boot_boards` callers interleave mid-reset and see each other's boards.
+/// (Goes away when the runtime becomes GameState-owned.)
+pub(crate) fn test_board_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
 }
 
 #[cfg(test)]
@@ -842,8 +880,15 @@ pub fn board_remove(g: &mut GameState, board_type: usize, ch: CharId, arg: &str)
         let path = board_file_path(&guard.lib_path, board_type);
         let snapshot = guard.boards[board_type].clone();
         let format = guard.formats[board_type];
+        let quarantined = guard.quarantined[board_type];
         drop(guard);
-        if let Err(e) = save_board_file(&path, &snapshot, format) {
+        if quarantined {
+            log::error!(
+                "SYSERR: Board '{}' is quarantined (corrupt save file); write refused to \
+                 preserve the file for recovery.",
+                BOARD_INFO[board_type].filename
+            );
+        } else if let Err(e) = save_board_file(&path, &snapshot, format) {
             eprintln!(
                 "SYSERR: Error writing board '{}': {}",
                 BOARD_INFO[board_type].filename, e
@@ -927,17 +972,24 @@ fn write_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
-/// Board_load_board(): read a board file. Returns `Ok(None)` if the file does
-/// not exist (empty board), `Ok(Some(msgs))` on success. A corrupt/foreign
-/// file (bad magic, truncated, absurd counts) is treated like C's
-/// "Board file corrupt. Resetting." — we log and return an empty board so the
-/// stale file is overwritten on the next save.
-fn load_board_file(
-    path: &str,
-) -> std::io::Result<Option<(Vec<BoardMsg>, crate::cformat::PersistenceFormat)>> {
+/// Outcome of reading one board file.
+enum BoardLoad {
+    /// File absent: an empty board (C: silent ENOENT).
+    Missing,
+    /// Parsed cleanly.
+    Loaded(Vec<BoardMsg>, crate::cformat::PersistenceFormat),
+    /// Present but unparseable (bad magic, truncated, absurd counts). The
+    /// caller must quarantine the board instead of fabricating an empty one.
+    Corrupt,
+}
+
+/// Board_load_board(): read a board file. Unlike C — which resets a corrupt
+/// board and lets the next save destroy it — corruption is reported to the
+/// caller so the file can be preserved (fail closed).
+fn load_board_file(path: &str) -> std::io::Result<BoardLoad> {
     let mut f = match std::fs::File::open(path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BoardLoad::Missing),
         Err(e) => return Err(e),
     };
     let mut data = Vec::new();
@@ -966,18 +1018,10 @@ fn load_board_file(
             (msgs, crate::cformat::PersistenceFormat::C)
         })
     };
-    match decoded {
-        Some(result) => Ok(Some(result)),
-        None => {
-            eprintln!("SYSERR: Board file '{}' corrupt. Resetting.", path);
-            let format = if data.starts_with(BOARD_FILE_MAGIC) {
-                crate::cformat::PersistenceFormat::Rust
-            } else {
-                crate::cformat::PersistenceFormat::C
-            };
-            Ok(Some((Vec::new(), format)))
-        }
-    }
+    Ok(match decoded {
+        Some(result) => BoardLoad::Loaded(result.0, result.1),
+        None => BoardLoad::Corrupt,
+    })
 }
 
 fn parse_board_blob(data: &[u8]) -> Option<Vec<BoardMsg>> {
@@ -1191,7 +1235,9 @@ mod persistence_tests {
         )
         .unwrap();
 
-        let (messages, format) = load_board_file(&path).unwrap().unwrap();
+        let BoardLoad::Loaded(messages, format) = load_board_file(&path).unwrap() else {
+            panic!("valid C board file failed to load");
+        };
         assert_eq!(format, crate::cformat::PersistenceFormat::C);
         assert_eq!(messages[0].heading, vec![b'(', 0xff, b')']);
         assert_eq!(messages[0].message, vec![b'A', 0xfe, b'B']);
@@ -1215,15 +1261,72 @@ mod persistence_tests {
         }];
         save_board_file(&path, &messages, crate::cformat::PersistenceFormat::Rust).unwrap();
 
-        let (loaded, format) = load_board_file(&path).unwrap().unwrap();
+        let BoardLoad::Loaded(loaded, format) = load_board_file(&path).unwrap() else {
+            panic!("valid board file failed to load");
+        };
         assert_eq!(format, crate::cformat::PersistenceFormat::Rust);
         save_board_file(&path, &loaded, format).unwrap();
         assert!(std::fs::read(&path).unwrap().starts_with(BOARD_FILE_MAGIC));
         let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
     }
 
+    /// A corrupt board file must be quarantined, never silently replaced:
+    /// boot reports it, leaves the bytes untouched, and the runtime refuses
+    /// saves for that board (C "Resetting." would destroy it on next save).
+    #[test]
+    fn corrupt_board_file_is_quarantined_and_preserved() {
+        let _guard = test_board_guard();
+        let lib = std::path::PathBuf::from(temp_file("corrupt-quarantine"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let path = lib.join("etc/board/mortal/general");
+        let corrupt: &[u8] = b"DBRD\xff\xff\xff\xffnot really a board";
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, corrupt).unwrap();
+
+        boot_boards(lib.to_str().unwrap());
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            corrupt,
+            "boot must not modify a corrupt board file"
+        );
+        {
+            let guard = crate::lock_ok::lock(&boards());
+            assert!(guard.quarantined[0], "corrupt board must be quarantined");
+            assert!(guard.boards[0].is_empty());
+        }
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
+    /// A truncated-but-magic-tagged Rust board (crash mid-write) is corrupt
+    /// input for the same purpose: quarantined, bytes preserved.
+    #[test]
+    fn truncated_rust_board_file_is_quarantined_and_preserved() {
+        let _guard = test_board_guard();
+        let lib = std::path::PathBuf::from(temp_file("truncated-quarantine"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let path = lib.join("etc/board/mortal/general");
+        let truncated: &[u8] = b"DBRD\x03\x00\x00\x00head";
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, truncated).unwrap();
+
+        boot_boards(lib.to_str().unwrap());
+
+        assert_eq!(std::fs::read(&path).unwrap(), truncated);
+        {
+            let guard = crate::lock_ok::lock(&boards());
+            assert!(guard.quarantined[0]);
+        }
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
     #[test]
     fn board_read_write_and_remove_levels_use_persisted_trust() {
+        let _guard = test_board_guard();
         const IMPLEMENTOR_BOARD: usize = 3;
         let root = std::path::PathBuf::from(temp_file("authority"))
             .parent()
@@ -1323,6 +1426,7 @@ mod persistence_tests {
         .into_iter()
         .enumerate()
         {
+            let _guard = test_board_guard();
             let root = std::path::PathBuf::from(temp_file(&format!("write-revalidate-{index}")))
                 .parent()
                 .unwrap()

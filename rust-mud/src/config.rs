@@ -84,6 +84,14 @@ pub struct Config {
     /// Rust port has no argv parser by default, so this is also readable from the
     /// `MUD_NO_SPECIALS` env var; main.rs additionally honours the `-s` argv flag.
     pub no_specials: bool,
+    /// Activate the C `check_multiplaying` same-host link counting (comm.c:2749).
+    /// The shipped oracle dead-codes the check behind an early `return 1`; the
+    /// full logic stays C-accurate and is opt-in via `MUD_ENFORCE_MULTIPLAY`.
+    pub enforce_multiplay: bool,
+    /// Explicit copyover target (`MUD_EXEC_PATH`). `None` means development
+    /// fallback: mock-DB runs re-exec the current test binary; real-database
+    /// runs refuse to copyover rather than guess an executable.
+    pub exec_path: Option<String>,
 }
 
 impl Config {
@@ -136,6 +144,10 @@ impl Config {
             no_specials: env::var("MUD_NO_SPECIALS")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
+            enforce_multiplay: env::var("MUD_ENFORCE_MULTIPLAY")
+                .map(|v| v != "0" && !v.is_empty())
+                .unwrap_or(false),
+            exec_path: env::var("MUD_EXEC_PATH").ok(),
         })
     }
 }
@@ -204,6 +216,8 @@ impl Default for Config {
             use_mock_db: true,
             rng_seed: None,
             no_specials: false,
+            enforce_multiplay: false,
+            exec_path: None,
         }
     }
 }

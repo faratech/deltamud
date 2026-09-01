@@ -12,6 +12,7 @@
 use crate::character::Character;
 use crate::state::GameState;
 use crate::types::*;
+use std::path::Path;
 
 /// C comm.c WizLevels[] labels for L101..L105.
 const WIZ_LEVELS: [&str; 5] = ["Immortal", "Sage", "Seer", "Prophet", "Implementor"];
@@ -143,14 +144,12 @@ pub fn make_who2html(g: &mut GameState) -> Result<(), String> {
     html.push_str("<CENTER><small>Auto-updated every 5 minutes.</small></CENTER>\n");
     html.push_str("</body></html>\n");
 
-    // Atomic write: who.tmp then rename (C shelled out to mv; we rename).
+    // Durable atomic publish: unique sibling temp, checked write/flush/sync,
+    // rename, parent-directory sync (C shelled out to mv; we rename).
     let dir = g.config.www_who_dir.clone();
-    let tmp = format!("{}/who.tmp", dir);
     let dst = format!("{}/who.html", dir);
-    if std::fs::write(&tmp, html.as_bytes()).is_err() {
-        return Err(format!("could not create {} for who2html", tmp));
-    }
-    std::fs::rename(&tmp, &dst).map_err(|e| format!("rename failed: {}", e))?;
+    crate::olc::atomic_replace(Path::new(&dst), html.as_bytes())
+        .map_err(|e| format!("who.html publish failed: {}", e))?;
     Ok(())
 }
 

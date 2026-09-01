@@ -1454,10 +1454,7 @@ fn cap_first(s: &mut String) {
 /// here behind the same early-out, gated by MUD_ENFORCE_MULTIPLAY for
 /// operators who want the C logic live (default: C behavior).
 pub fn check_multiplaying(g: &GameState, hostname: &str) -> bool {
-    if std::env::var("MUD_ENFORCE_MULTIPLAY")
-        .map(|v| v != "0" && !v.is_empty())
-        .unwrap_or(false)
-    {
+    if g.config.enforce_multiplay {
         return check_multiplaying_enforced(g, hostname);
     }
     // C: `return 1; // While in development mode we wanna give our builders freedom...`
