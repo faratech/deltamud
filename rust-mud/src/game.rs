@@ -222,6 +222,15 @@ fn panic_payload_str(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+/// Outcome of the shutdown save pass (W6): reported to the log and asserted
+/// by the shutdown round-trip test.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct ShutdownReport {
+    pub players_saved: u32,
+    pub aliases_written: u32,
+    pub save_errors: u32,
+}
+
 pub struct Game {
     state: GameState,
     db: Arc<dyn DatabaseInterface>,
@@ -407,15 +416,22 @@ impl Game {
     /// log the count, and return so `run` exits cleanly instead of being killed
     /// with unsaved state.
     async fn shutdown(&mut self) {
+        let report = self.shutdown_save().await;
+        info!(
+            "Shutting down, saved {} player(s) ({} alias files, {} save errors).",
+            report.players_saved, report.aliases_written, report.save_errors
+        );
+    }
+
+    /// The save-and-flush half of shutdown, extracted (W6 live-ops) so the
+    /// persistence contract is callable and testable independently of the
+    /// signal path: OLC save-list flush, crash-save rent files, mud calendar,
+    /// per-player SQL rows + alias sidecars, then a bounded drain of every
+    /// output channel so the shutdown notice actually reaches the sockets.
+    /// Returns a report for the shutdown log / tests.
+    async fn shutdown_save(&mut self) -> ShutdownReport {
         // C comm.c:458-510: flush the OLC save list before stopping (#262).
         crate::olc::flush_save_list_to_disk(&mut self.state);
-        // Count online players (those with a character attached) before saving.
-        let n_players = self
-            .state
-            .descriptors
-            .values()
-            .filter(|d| d.character.is_some())
-            .count();
 
         // Notify everyone still connected.
         let conn_ids: Vec<ConnId> = self.state.descriptors.keys().copied().collect();
@@ -426,22 +442,26 @@ impl Game {
             );
         }
 
+        let mut report = ShutdownReport::default();
+
         // Crash-save all rent/inventory + persist every online player file.
         crate::objsave::crash_save_all(&mut self.state);
         crate::weather::write_mud_date_to_file(&self.state);
         for cid in &conn_ids {
             if let Some(ch) = self.state.descriptors.get(cid).and_then(|d| d.character) {
+                report.players_saved += 1;
                 if let Some(snapshot) = self.snapshot_online_player_for_save(ch) {
-                    if let Err(e) = crate::alias::write_aliases(
-                        &self.lib_path,
-                        snapshot.get_name(),
-                        snapshot.idnum,
-                    ) {
+                    if let Err(e) =
+                        crate::alias::write_aliases(&self.lib_path, snapshot.get_name(), snapshot.idnum)
+                    {
                         warn!(
                             "shutdown write_aliases({}) failed: {}",
                             snapshot.get_name(),
                             e
                         );
+                        report.save_errors += 1;
+                    } else {
+                        report.aliases_written += 1;
                     }
                     let host = self
                         .state
@@ -455,6 +475,7 @@ impl Game {
                             snapshot.get_name(),
                             e
                         );
+                        report.save_errors += 1;
                     }
                 }
             }
@@ -462,11 +483,18 @@ impl Game {
 
         // Flush all buffered output (the shutdown notice) to the writer tasks.
         self.flush_all().await;
-        // Give the per-connection writer tasks a moment to drain to the socket
-        // before the process exits and their channels are dropped.
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        info!("Shutting down, saved {} player(s).", n_players);
+        // Deterministic drain: wait until the per-connection writer tasks have
+        // consumed their queues (len() == 0), bounded at 2s so a dead socket
+        // cannot stall shutdown. Replaces the old fixed 200ms sleep.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let any_pending = self.outputs.values().any(|tx| tx.capacity() < tx.max_capacity());
+            if any_pending == false || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        report
     }
 
     async fn handle_message(&mut self, msg: GameMessage) {
@@ -4028,5 +4056,134 @@ mod gmcp_tests {
             c.desc = Some(conn);
         }
         cid
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::tests::test_game;
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::mock_database::MockDatabase;
+    use crate::room::Room;
+    use crate::types::{Class, Race};
+    use std::sync::Arc;
+
+    /// W6: the extracted shutdown_save must persist a playing character
+    /// (SQL row + alias sidecar + rent file) and report what it did, so a
+    /// real SIGTERM shutdown is a verified path, not a hope.
+    #[tokio::test]
+    async fn shutdown_save_persists_player_inventory_and_reports() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        // test_game points lib_path at a fresh temp dir; plrobjs lives under it.
+        let plrobjs = format!("{}/plrobjs", game.state.config.lib_path);
+        std::fs::create_dir_all(&plrobjs).unwrap();
+
+        let room = game.state.add_room(Room::new(3001, 30, "Save Room".into(), String::new()));
+        let conn = ConnId(70);
+        game.state
+            .descriptors
+            .insert(conn, Descriptor::new(conn, "saver.example.test".into()));
+
+        let mut ch = Character::new_player("Shutdownee".to_string(), Class::Warrior, Race::Human);
+        ch.player.level = 22;
+        ch.points.gold = 4321;
+        ch.player.title = Some("the Persisted".to_string());
+        // A playing character carries a persistent idnum (create_player row);
+        // save_player_with_host UPDATEs by it.
+        ch.idnum = db.create_player(&ch, "pw").await.expect("create row");
+        // enter_game sets PLR_CRASH on login: it is the crash_save trigger.
+        ch.act_flags |= crate::objsave::PLR_CRASH;
+        let cid = game.state.create_char(ch);
+        game.state.char_to_room(cid, room);
+
+        // Inventory: a real loaded object so crash_save has something to write.
+        game.state.obj_protos.insert(
+            9010,
+            crate::world::ObjectProto {
+                vnum: 9010,
+                name: "brick gold".into(),
+                short_desc: "a gold brick".into(),
+                description: "A gold brick sits here.".into(),
+                obj_type: crate::object::ObjectType::Armor,
+                wear_flags: crate::object::WearFlags::TAKE,
+                extra_flags: crate::object::ExtraFlags::empty(),
+                weight: 20,
+                cost: 50000,
+                rent: 5000,
+                values: [0; 4],
+                curr_slots: 0,
+                total_slots: 0,
+                obj_class: 0,
+                min_level: 0,
+                bitvector: 0,
+                action_description: String::new(),
+                affects: Vec::new(),
+                ex_descriptions: Vec::new(),
+            },
+        );
+        let obj = game.state.load_object(9010).expect("brick loads");
+        game.state.obj_to_char(obj, cid);
+
+        // Attach as Playing.
+        {
+            let d = game.state.descriptors.get_mut(&conn).unwrap();
+            d.state = ConState::Playing;
+            d.character = Some(cid);
+        }
+        if let Some(c) = game.state.get_char_mut(cid) {
+            c.desc = Some(conn);
+        }
+        // Register an output channel so flush_all has something to drain.
+        let (tx, mut rx) = mpsc::channel(256);
+        game.outputs.insert(conn, tx);
+
+        let report = game.shutdown_save().await;
+
+        assert_eq!(report.players_saved, 1);
+        assert_eq!(report.save_errors, 0);
+        // The shutdown notice + prompt went through the output channel.
+        let drained = rx.recv().await.expect("shutdown notice flushed");
+        assert!(drained.contains("shutting down"), "notice must be flushed");
+
+        // SQL row: reload through the db and check the core fields survived.
+        let loaded = db.load_player("Shutdownee").await.expect("player persisted");
+        assert_eq!(loaded.player.level, 22);
+        assert_eq!(loaded.points.gold, 4321);
+        assert_eq!(loaded.player.title.as_deref(), Some("the Persisted"));
+
+        // Rent file for the inventory: plrobjs/<bucket>/<name>.objs (the
+        // bucket is the name's first-letter range, e.g. A-E / U-Z).
+        let mut found = false;
+        for entry in std::fs::read_dir(&plrobjs).unwrap().filter_map(|e| e.ok()) {
+            let p = entry.path();
+            if p.is_dir() {
+                if let Ok(files) = std::fs::read_dir(&p) {
+                    for f in files.filter_map(|f| f.ok()) {
+                        if f.file_name()
+                            .to_string_lossy()
+                            .to_ascii_lowercase()
+                            .contains("shutdownee")
+                        {
+                            found = true;
+                        }
+                    }
+                }
+            }
+        }
+        fn walk(dir: &std::path::Path, depth: usize) {
+            if depth > 3 { return; }
+            for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let p = e.path();
+                eprintln!("TREE: {}", p.display());
+                if p.is_dir() { walk(&p, depth + 1); }
+            }
+        }
+        if !found {
+            walk(std::path::Path::new(&plrobjs), 0);
+        }
+        assert!(found, "rent file must exist for the saved player");
     }
 }
