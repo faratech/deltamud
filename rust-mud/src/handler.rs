@@ -45,9 +45,34 @@ pub fn get_number(arg: &str) -> (i32, String) {
 }
 
 impl GameState {
+    // ---- GMCP dirty tracking (Deltania Breathes W5) --------------------
+    /// Mark a character's connection as having stale GMCP state. No-op for
+    /// npcs and characters without a descriptor.
+    pub fn note_gmcp(&mut self, cid: CharId) {
+        if let Some(conn) = self.chars.get(&cid).and_then(|c| c.desc) {
+            self.gmcp_dirty.insert(conn);
+        }
+    }
+
+    /// Mark every character in a room (room-transfers make the bystanders'
+    /// Room.Info / occupancy stale too).
+    pub fn note_gmcp_room(&mut self, rnum: RoomRnum) {
+        let people = match self.rooms.get(rnum) {
+            Some(r) => r.people.clone(),
+            None => return,
+        };
+        for cid in people {
+            self.note_gmcp(cid);
+        }
+    }
+
     // ---- Character placement -------------------------------------------
     /// CircleMUD char_to_room: prepend to room.people (newest first).
     pub fn char_to_room(&mut self, cid: CharId, rnum: RoomRnum) {
+        // Everyone in the destination sees an arrival; the mover's Room.Info
+        // goes stale (W5 event-driven GMCP).
+        self.note_gmcp_room(rnum);
+        self.note_gmcp(cid);
         if rnum >= self.rooms.len() {
             return;
         }
@@ -72,6 +97,8 @@ impl GameState {
             Some(r) => r,
             None => return,
         };
+        // Departures are visible to the room left behind (W5 event-driven GMCP).
+        self.note_gmcp_room(rnum);
         self.adjust_room_light_for_char(cid, rnum, -1);
         if let Some(room) = self.rooms.get_mut(rnum) {
             room.people.retain(|&c| c != cid);

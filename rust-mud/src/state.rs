@@ -100,6 +100,11 @@ pub struct GameState {
     // Connections (the Descriptor lives here; the async output channel lives
     // in the Game wrapper keyed by the same ConnId).
     pub descriptors: HashMap<ConnId, Descriptor>,
+    /// Deltania Breathes (W5): connections whose GMCP snapshot is stale and
+    /// needs re-pushing at the next drain (prompt time / heartbeat end).
+    /// Marked by state mutations (movement, combat damage) rather than pushed
+    /// blindly after every command.
+    pub gmcp_dirty: std::collections::HashSet<ConnId>,
     pub players_by_name: HashMap<String, CharId>,
 
     // In-memory player name<->idnum index (C `player_table`, built by
@@ -191,6 +196,7 @@ impl GameState {
             chars: IndexMap::new(),
             objs: IndexMap::new(),
             descriptors: HashMap::new(),
+            gmcp_dirty: std::collections::HashSet::new(),
             players_by_name: HashMap::new(),
             player_table: Vec::new(),
             offline_ops: Vec::new(),

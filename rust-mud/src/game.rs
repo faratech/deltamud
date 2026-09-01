@@ -105,27 +105,31 @@ fn telnet_subneg(opt: u8, payload: &[u8]) -> Vec<u8> {
     v
 }
 
-/// Minimal JSON string escaper for hand-rolled GMCP payloads: escapes the two
-/// characters that would break a JSON string literal (`"` and `\`) and strips
-/// control bytes (newlines, the lone IAC) that have no place in a one-line
-/// GMCP message. Room/zone names can carry color codes (`&x`) or quotes; this
-/// keeps the emitted JSON valid without pulling in serde.
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            // Drop other control chars (incl. a stray 0xFF) and the color-code
-            // introducer so the JSON stays clean for the client/mapper.
-            c if (c as u32) < 0x20 => {}
-            c => out.push(c),
+/// Pre-escape GMCP payloads: drop control bytes (newlines, a lone IAC) and
+/// strip the `&x` color-code introducers room/zone names carry, so the value
+/// is clean text for the client's mapper. The JSON encoding itself is done by
+/// serde_json (hostile names with quotes/backslashes/non-ASCII stay valid).
+fn gmcp_clean(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '&' {
+            // COLOURLIST codes are one letter/char after the & — drop both.
+            chars.next();
+            continue;
         }
+        if (c as u32) < 0x20 || c as u32 == 0x7f {
+            continue;
+        }
+        out.push(c);
     }
     out
+}
+
+/// Encode one GMCP message: "<name> {json}" with serde_json handling the
+/// escaping of every string value.
+fn gmcp_message(name: &str, value: &serde_json::Value) -> String {
+    format!("{name} {value}")
 }
 
 /// True if `s` is one of the password-entry connection states (the only states
@@ -2346,6 +2350,18 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                 crate::house::house_save_all(&mut self.state);
             }
         }
+
+        // GMCP drain (W5): mob pulses, combat rounds and regen all ran above
+        // and marked stale connections; push fresh snapshots so a client's
+        // gauges track mob-initiated damage without waiting for a command.
+        let stale: Vec<ConnId> = self.state.gmcp_dirty.drain().collect();
+        for conn_id in stale {
+            if let Some(d) = self.state.descriptors.get(&conn_id) {
+                if d.gmcp && d.state == ConState::Playing {
+                    self.push_gmcp_update(conn_id);
+                }
+            }
+        }
     }
 
     /// C comm.c:2049-2069 check_idle_passwords(): a descriptor sitting at a
@@ -2726,10 +2742,12 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             }
         }
 
-        // Out-of-band GMCP push: after the prompt (i.e. after every command, so
-        // the state is fresh) send Char.Vitals + Room.Info to a GMCP-enabled,
-        // in-world descriptor. Mudlet's gauges + the GMCP mapper feed off these.
-        if state == ConState::Playing {
+        // Out-of-band GMCP push: after the prompt, but only when something
+        // actually made this connection's state stale since the last push
+        // (W5 event-driven GMCP: idle players no longer get a per-command
+        // re-send of identical JSON; players in combat DO get fresh vitals
+        // from mob pulses via the heartbeat drain below).
+        if state == ConState::Playing && self.state.gmcp_dirty.remove(&conn_id) {
             self.push_gmcp_update(conn_id);
         }
     }
@@ -2791,29 +2809,49 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
     /// (no serde dep): small, one-line, with `"`/`\` escaped in names. Bytes go
     /// down the raw-bytes channel verbatim, never through render_color.
     fn push_gmcp_update(&self, conn_id: ConnId) {
+        for message in self.gmcp_snapshots(conn_id) {
+            self.send_raw_bytes(conn_id, &telnet_subneg(TELOPT_GMCP, message.as_bytes()));
+        }
+    }
+
+    /// Pure snapshot builder: the GMCP messages (names + JSON payloads) for a
+    /// connection, or empty when the connection is not GMCP-enabled/playing.
+    /// Split from push_gmcp_update so tests can assert on payloads without a
+    /// live output channel.
+    fn gmcp_snapshots(&self, conn_id: ConnId) -> Vec<String> {
         let d = match self.state.descriptors.get(&conn_id) {
             Some(d) if d.gmcp => d,
-            _ => return,
+            _ => return Vec::new(),
         };
         let ch = match d.character {
             Some(c) => c,
-            None => return,
+            None => return Vec::new(),
         };
         let c = match self.state.get_char(ch) {
             Some(c) => c,
-            None => return,
+            None => return Vec::new(),
         };
+        let mut messages = Vec::with_capacity(2);
 
         // Char.Vitals — current/max HP, mana, move.
         let p = &c.points;
-        let vitals = format!(
-            "Char.Vitals {{\"hp\":{},\"maxhp\":{},\"mana\":{},\"maxmana\":{},\"move\":{},\"maxmove\":{}}}",
-            p.hit, p.max_hit, p.mana, p.max_mana, p.move_points, p.max_move
+        let vitals = gmcp_message(
+            "Char.Vitals",
+            &serde_json::json!({
+                "hp": p.hit,
+                "maxhp": p.max_hit,
+                "mana": p.mana,
+                "maxmana": p.max_mana,
+                "move": p.move_points,
+                "maxmove": p.max_move,
+                "level": c.player.level,
+            }),
         );
-        self.send_raw_bytes(conn_id, &telnet_subneg(TELOPT_GMCP, vitals.as_bytes()));
+        messages.push(vitals);
 
-        // Room.Info — vnum, name, zone, and the open cardinal exits as
-        // {dir: dest-vnum}. Only emitted when the char is in a real room.
+        // Room.Info — vnum, name, zone, exits as {dir: dest-vnum}, plus the
+        // closed/locked door lists the mapper needs (W5). Occupancy lists the
+        // other characters in the room so GUIs can draw fellow players.
         if let Some(rnum) = c.in_room {
             if let Some(room) = self.state.room_opt(rnum) {
                 let zone_name = self
@@ -2823,27 +2861,48 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                     .map(|z| z.name.as_str())
                     .unwrap_or("");
                 let dir_keys = ["n", "e", "s", "w", "u", "d"];
-                let mut exits = String::new();
-                let mut first = true;
+                let mut exits = serde_json::Map::new();
+                let mut doors: Vec<&str> = Vec::new();
+                let mut locked: Vec<&str> = Vec::new();
                 for (i, key) in dir_keys.iter().enumerate() {
                     if let Some(ex) = room.exits.get(i).and_then(|e| e.as_ref()) {
-                        if !first {
-                            exits.push(',');
+                        exits.insert(key.to_string(), serde_json::json!(ex.to_room));
+                        if ex.exit_info & crate::room::EX_CLOSED != 0 {
+                            doors.push(key);
+                            if ex.exit_info & crate::room::EX_LOCKED != 0 {
+                                locked.push(key);
+                            }
                         }
-                        first = false;
-                        exits.push_str(&format!("\"{}\":{}", key, ex.to_room));
                     }
                 }
-                let room_info = format!(
-                    "Room.Info {{\"num\":{},\"name\":\"{}\",\"zone\":\"{}\",\"exits\":{{{}}}}}",
-                    room.number,
-                    json_escape(&room.name),
-                    json_escape(zone_name),
-                    exits
+                let occupants: Vec<String> = room
+                    .people
+                    .iter()
+                    .filter(|&&other| other != ch)
+                    .filter_map(|&other| self.state.get_char(other))
+                    .filter(|other| !other.is_npc)
+                    .map(|other| other.get_name().to_string())
+                    .collect();
+                let room_info = gmcp_message(
+                    "Room.Info",
+                    &serde_json::json!({
+                        "num": room.number,
+                        "name": gmcp_clean(&room.name),
+                        "zone": gmcp_clean(zone_name),
+                        "exits": exits,
+                        "doors": doors,
+                        "locked": locked,
+                        "players": occupants,
+                        "map": {
+                            "x": room.map_x.unwrap_or(0),
+                            "y": room.map_y.unwrap_or(0),
+                        },
+                    }),
                 );
-                self.send_raw_bytes(conn_id, &telnet_subneg(TELOPT_GMCP, room_info.as_bytes()));
+                messages.push(room_info);
             }
         }
+        messages
     }
 
     // ---- MSSP (Mud Server Status Protocol) -----------------------------
@@ -2959,7 +3018,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::{Mutex, OnceLock};
 
-    fn test_game(db: Arc<MockDatabase>) -> Game {
+    pub(super) fn test_game(db: Arc<MockDatabase>) -> Game {
         let db_trait: Arc<dyn DatabaseInterface> = db;
         let mut cfg = Config::default();
         // Keep the user_cntr USRCNT write (lib/../USRCNT) out of the repo.
@@ -2975,7 +3034,7 @@ mod tests {
         attach_descriptor_host(game, conn, "example.test");
     }
 
-    fn attach_descriptor_host(game: &mut Game, conn: ConnId, host: &str) {
+    pub(super) fn attach_descriptor_host(game: &mut Game, conn: ConnId, host: &str) {
         game.state
             .descriptors
             .insert(conn, Descriptor::new(conn, host.to_string()));
@@ -3780,5 +3839,145 @@ mod tests {
             .outbuf
             .contains("That is not a sex..\r\nWhat IS your sex? "));
         assert_eq!(descriptor_state(&game, conn), ConState::GetSex);
+    }
+}
+
+#[cfg(test)]
+mod gmcp_tests {
+    use super::tests::{attach_descriptor_host, test_game};
+    use super::*;
+    use crate::character::Character;
+    use crate::config::Config;
+    use crate::mock_database::MockDatabase;
+    use crate::room::{Exit, Room};
+    use crate::types::{Class, Race};
+    use std::sync::Arc;
+
+    #[test]
+    fn movement_marks_gmcp_dirty_and_heartbeat_drains_it() {
+        let mut game = test_game(Arc::new(MockDatabase::new()));
+        let a = game.state.add_room(Room::new(100, 1, "A".into(), String::new()));
+        let b = game.state.add_room(Room::new(101, 1, "B".into(), String::new()));
+        let conn = ConnId(60);
+        game.state
+            .descriptors
+            .insert(conn, Descriptor::new(conn, "t".into()));
+        let ch = playing_char(&mut game, conn, "Gmcp", a);
+
+        // A room transfer marks the mover and the bystanders stale.
+        game.state.char_from_room(ch);
+        game.state.char_to_room(ch, b);
+        assert!(
+            game.state.gmcp_dirty.contains(&conn),
+            "transfer must mark the mover's connection dirty"
+        );
+
+        // The heartbeat drain pushes a snapshot and empties the set.
+        game.heartbeat_inner();
+        assert!(game.state.gmcp_dirty.is_empty(), "drain must clear the set");
+    }
+
+    #[test]
+    fn gmcp_room_info_carries_doors_and_valid_json_names() {
+        let mut game = test_game(Arc::new(MockDatabase::new()));
+        let a = game.state.add_room(Room::new(
+            100,
+            1,
+            "The \"Quoted\" &RRoom".into(),
+            String::new(),
+        ));
+        let b = game.state.add_room(Room::new(101, 1, "B".into(), String::new()));
+        game.state.rooms[a].exits[EAST] = Some(Exit {
+            description: None,
+            keyword: None,
+            exit_info: crate::room::EX_CLOSED | crate::room::EX_LOCKED,
+            key: -1,
+            to_room: 101,
+        });
+        game.state.rooms[b].exits[WEST] = Some(Exit {
+            description: None,
+            keyword: None,
+            exit_info: 0,
+            key: -1,
+            to_room: 100,
+        });
+        let conn = ConnId(61);
+        game.state
+            .descriptors
+            .insert(conn, Descriptor::new(conn, "t".into()));
+        playing_char(&mut game, conn, "Doors", a);
+
+        let messages = game.gmcp_snapshots(conn);
+        let room_info = messages
+            .iter()
+            .find(|m| m.starts_with("Room.Info "))
+            .expect("Room.Info must be part of the snapshot");
+        let json = room_info.split_once(' ').unwrap().1;
+        let value: serde_json::Value =
+            serde_json::from_str(json).expect("Room.Info must be valid JSON");
+        assert_eq!(value["num"], 100);
+        assert_eq!(value["name"], "The \"Quoted\" Room", "&R color code stripped");
+        assert_eq!(value["exits"]["e"], 101);
+        assert_eq!(value["doors"][0], "e");
+        assert_eq!(value["locked"][0], "e");
+    }
+
+    #[test]
+    fn combat_damage_marks_both_sides_dirty() {
+        let mut game = test_game(Arc::new(MockDatabase::new()));
+        let a = game.state.add_room(Room::new(100, 1, "A".into(), String::new()));
+        let conn = ConnId(63);
+        game.state
+            .descriptors
+            .insert(conn, Descriptor::new(conn, "t".into()));
+        let ch = playing_char(&mut game, conn, "Punched", a);
+        let mut npc = Character::new_npc(500);
+        npc.position = crate::types::Position::Standing;
+        let npc = game.state.create_char(npc);
+        game.state.char_to_room(npc, a);
+
+        game.state.gmcp_dirty.clear();
+        crate::combat::damage(&mut game.state, npc, ch, 5);
+        assert!(
+            game.state.gmcp_dirty.contains(&conn),
+            "damage must stale the victim's vitals"
+        );
+
+        // Snapshot contains fresh vitals.
+        let messages = game.gmcp_snapshots(conn);
+        assert!(messages.iter().any(|m| m.starts_with("Char.Vitals ")));
+    }
+
+    #[test]
+    fn non_gmcp_descriptors_get_no_snapshots() {
+        let mut game = test_game(Arc::new(MockDatabase::new()));
+        let a = game.state.add_room(Room::new(100, 1, "A".into(), String::new()));
+        let conn = ConnId(64);
+        game.state
+            .descriptors
+            .insert(conn, Descriptor::new(conn, "t".into()));
+        playing_char(&mut game, conn, "Plain", a);
+        game.state.descriptors.get_mut(&conn).unwrap().gmcp = false;
+
+        assert!(game.gmcp_snapshots(conn).is_empty());
+        // Marking still happens (cheap) but the drain filters by d.gmcp.
+        game.state.note_gmcp_room(a);
+        game.heartbeat_inner();
+        assert!(game.state.gmcp_dirty.is_empty(), "drain clears everything");
+    }
+
+    fn playing_char(game: &mut Game, conn: ConnId, name: &str, room: usize) -> CharId {
+        let mut ch = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        ch.player.level = 10;
+        let cid = game.state.create_char(ch);
+        game.state.char_to_room(cid, room);
+        let d = game.state.descriptors.get_mut(&conn).unwrap();
+        d.gmcp = true;
+        d.state = ConState::Playing;
+        d.character = Some(cid);
+        if let Some(c) = game.state.get_char_mut(cid) {
+            c.desc = Some(conn);
+        }
+        cid
     }
 }

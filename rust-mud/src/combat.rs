@@ -912,6 +912,9 @@ fn do_actual_damage(
     attacktype: i32,
     deathblow: bool,
 ) {
+    // HP is about to change: both sides' GMCP Char.Vitals go stale (W5).
+    g.note_gmcp(ch);
+    g.note_gmcp(victim);
     // Attempt to damage a corpse -> resolve its death and bail (fight.c ~806).
     if g.get_char(victim)
         .map(|c| c.position <= Position::Dead)

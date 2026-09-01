@@ -15,11 +15,12 @@ bitflags = "2.13"
 async-trait = "0.1"
 libc = "0.2"
 indexmap = "2"
+serde_json = "1"
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
-strip = true
+strip = false
 # MUST stay "unwind": game.rs's catch_unwind crash-isolation (a panic in one
 # command must not kill the whole server) depends on stack unwinding. Do NOT
 # set panic = "abort".
