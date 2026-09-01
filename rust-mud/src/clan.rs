@@ -67,7 +67,7 @@ const NOCLAN: &str = "You don't even belong to a clan!\r\n";
 // for rank (i+1), so rank 1 == rank_name[0]. Empty string == C's "N/A"/unset.
 // ---------------------------------------------------------------------------
 #[derive(Debug, Clone)]
-struct ClanInfo {
+pub(crate) struct ClanInfo {
     number: i32,
     members: i32,
     ranks: i32,

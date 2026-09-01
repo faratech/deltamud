@@ -356,7 +356,7 @@ fn house_save_control(g: &GameState) {
             out.into_bytes()
         }
     };
-    drop(table);
+    let _ = &table; // end the shared borrow before the atomic publish
     if crate::cformat::atomic_write(&path, &bytes).is_err() {
         eprintln!("SYSERR: Unable to open house control file");
     }
