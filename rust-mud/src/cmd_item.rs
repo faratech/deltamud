@@ -1985,6 +1985,13 @@ pub fn do_eat(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
 }
 
 pub fn do_pour(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
+    // The unwraps below are safe because the command table only ever calls
+    // this with SCMD_POUR(0) or SCMD_FILL(1); any other subcmd leaves
+    // from_obj/to_obj unset. Guard the contract explicitly so a future
+    // caller (DG force, wand) can't panic the Game task.
+    if subcmd != SCMD_POUR && subcmd != SCMD_FILL {
+        return;
+    }
     let (arg1, arg2) = two_arguments(argument);
     let mut from_obj: Option<ObjId> = None;
     let mut to_obj: Option<ObjId> = None;

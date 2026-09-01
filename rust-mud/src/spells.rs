@@ -340,8 +340,11 @@ pub fn spell_teleport(
     if real_top == 0 {
         return;
     }
-    let mut to_room;
-    loop {
+    // Bounded lottery: a world where every room were PRIVATE/DEATH would spin
+    // here forever inside the single Game task. 1000 tries, then accept the
+    // last roll (C's infinite loop repaired as a registered robustness fix).
+    let mut to_room = g.rng.number(0, (real_top - 1) as i32) as usize;
+    for _ in 0..1000 {
         to_room = g.rng.number(0, (real_top - 1) as i32) as usize;
         let flags = g.room(to_room).room_flags;
         if !flags.intersects(RoomFlags::PRIVATE | RoomFlags::DEATH) {

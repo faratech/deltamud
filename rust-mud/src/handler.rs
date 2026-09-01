@@ -463,9 +463,13 @@ impl GameState {
                 }
             }
         }
-        // swap_remove: O(1) removal of the dead/extracted character from the
+        // shift_remove (NOT swap_remove): swap_remove re-keys the last-inserted
+        // character into the vacated slot while its .id keeps the OLD value —
+        // a stale CharId held across an extraction would then resolve to a
+        // DIFFERENT character (the extraction-race class). Extraction is
+        // rare; the O(n) shift is fine.
         // ordered arena (replaces the old char_list.retain + chars.remove pair).
-        self.chars.swap_remove(&cid);
+        self.chars.shift_remove(&cid);
     }
 
     // ---- Visibility -----------------------------------------------------
@@ -691,14 +695,19 @@ pub fn check_perm_duration(g: &GameState, ch: CharId, bitvector: i64) -> bool {
 /// here — affect_total recomputes those from real_points so they can't balloon
 /// across repeated equip/unequip/login (see apply_location for the full table).
 pub fn apply_ability(ch: &mut Character, location: i32, modifier: i32) {
-    let m = modifier as i8;
+    // Abilities are i8 but equipment/affect modifiers are i32: accumulate in
+    // i16 and clamp, so multiple large applies can neither overflow (debug
+    // panic) nor silently wrap into negative scores (release).
+    let apply = |field: &mut i8| {
+        *field = ((*field as i16) + (modifier as i16)).clamp(-100, 125) as i8;
+    };
     match location {
-        APPLY_STR => ch.aff_abils.str += m,
-        APPLY_DEX => ch.aff_abils.dex += m,
-        APPLY_INT => ch.aff_abils.intel += m,
-        APPLY_WIS => ch.aff_abils.wis += m,
-        APPLY_CON => ch.aff_abils.con += m,
-        APPLY_CHA => ch.aff_abils.cha += m,
+        APPLY_STR => apply(&mut ch.aff_abils.str),
+        APPLY_DEX => apply(&mut ch.aff_abils.dex),
+        APPLY_INT => apply(&mut ch.aff_abils.intel),
+        APPLY_WIS => apply(&mut ch.aff_abils.wis),
+        APPLY_CON => apply(&mut ch.aff_abils.con),
+        APPLY_CHA => apply(&mut ch.aff_abils.cha),
         _ => {}
     }
 }
@@ -711,14 +720,16 @@ pub fn apply_ability(ch: &mut Character, location: i32, modifier: i32) {
 /// function remains the faithful 1:1 transcription of apply_location for any
 /// one-shot caller.
 pub fn apply_location(ch: &mut Character, location: i32, modifier: i32) {
-    let m = modifier as i8;
+    let apply = |field: &mut i8| {
+        *field = ((*field as i16) + (modifier as i16)).clamp(-100, 125) as i8;
+    };
     match location {
-        APPLY_STR => ch.aff_abils.str += m,
-        APPLY_DEX => ch.aff_abils.dex += m,
-        APPLY_INT => ch.aff_abils.intel += m,
-        APPLY_WIS => ch.aff_abils.wis += m,
-        APPLY_CON => ch.aff_abils.con += m,
-        APPLY_CHA => ch.aff_abils.cha += m,
+        APPLY_STR => apply(&mut ch.aff_abils.str),
+        APPLY_DEX => apply(&mut ch.aff_abils.dex),
+        APPLY_INT => apply(&mut ch.aff_abils.intel),
+        APPLY_WIS => apply(&mut ch.aff_abils.wis),
+        APPLY_CON => apply(&mut ch.aff_abils.con),
+        APPLY_CHA => apply(&mut ch.aff_abils.cha),
         APPLY_AGE => ch.player.time_birth -= modifier as i64 * SECS_PER_MUD_YEAR,
         APPLY_CHAR_WEIGHT => {
             ch.player.weight = (ch.player.weight as i32 + modifier).clamp(0, u8::MAX as i32) as u8;

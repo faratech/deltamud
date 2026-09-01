@@ -331,7 +331,13 @@ pub fn set_title(g: &mut GameState, ch: CharId, title: Option<&str>) {
         }
     };
     if t.len() > MAX_TITLE_LENGTH {
-        t.truncate(MAX_TITLE_LENGTH);
+        // Truncate on a char boundary (a raw truncate(40) panics when byte 40
+        // splits a multi-byte character).
+        let mut n = MAX_TITLE_LENGTH.min(t.len());
+        while n > 0 && !t.is_char_boundary(n) {
+            n -= 1;
+        }
+        t.truncate(n);
     }
     if let Some(c) = g.get_char_mut(ch) {
         c.player.title = Some(t);

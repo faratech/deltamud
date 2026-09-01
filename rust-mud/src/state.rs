@@ -495,9 +495,11 @@ impl GameState {
         for c in contents {
             self.extract_obj(c);
         }
-        // swap_remove: O(1) removal from the ordered arena (reorders the tail,
-        // which is fine — iteration order is internal-only).
-        self.objs.swap_remove(&id);
+        // shift_remove (NOT swap_remove): swap_remove moves the last-inserted
+        // entry into the vacated slot while its .id keeps the OLD value, so a
+        // stale id held across an extraction would resolve to a DIFFERENT
+        // object instead of None. Extraction is rare; O(n) is fine.
+        self.objs.shift_remove(&id);
     }
 
     /// WAIT_STATE(ch, cycles) (utils.h): impose `cycles` pulses of command lag.
