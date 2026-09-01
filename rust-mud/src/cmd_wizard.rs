@@ -6164,10 +6164,16 @@ pub fn do_rename(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "The new name is invalid.\r\n");
         return;
     }
-    // Uniqueness: the MySQL player table isn't surfaced; check live players.
+    // Uniqueness: live players AND the offline player index. Without the
+    // offline check, the next REPLACE INTO player_main (keyed unique on name)
+    // silently DELETES the offline player's entire row (issue #384).
     if g.find_player_by_name(&tmp)
         .map(|id| id != victim)
         .unwrap_or(false)
+        || g.player_table.iter().any(|p| {
+            p.name.eq_ignore_ascii_case(&tmp)
+                && p.idnum != g.get_char(victim).map(|c| c.idnum).unwrap_or(-1)
+        })
     {
         g.send_to_char(ch, "There is already a player with that name.\r\n");
         return;
@@ -6183,10 +6189,34 @@ pub fn do_rename(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     );
     // Re-key the players_by_name index and update the name.
     g.players_by_name.remove(&oldname.to_lowercase());
+    let victim_idnum = g.get_char(victim).map(|c| c.idnum).unwrap_or(-1);
     if let Some(v) = g.get_char_mut(victim) {
         v.player.name = tmp.clone();
     }
     g.players_by_name.insert(tmp.to_lowercase(), victim);
+
+    // Move the rent/alias sidecars so the OLD name cannot be re-created and
+    // crash-load the victim's whole inventory (issue #385). Keep the DB row
+    // save (which rewrites the name column) queued.
+    let lib = g.config.lib_path.clone();
+    if let (Some(from), Some(to)) = (
+        crate::objsave::crash_filename(&lib, &oldname),
+        crate::objsave::crash_filename(&lib, &tmp),
+    ) {
+        let _ = std::fs::rename(&from, &to);
+    }
+    if let (Some(from), Some(to)) = (
+        crate::alias::alias_filename(&lib, &oldname),
+        crate::alias::alias_filename(&lib, &tmp),
+    ) {
+        let _ = std::fs::rename(&from, &to);
+    }
+    for p in g.player_table.iter_mut() {
+        if p.idnum == victim_idnum {
+            p.name = tmp.clone();
+        }
+    }
+    g.request_player_save(victim);
     g.send_to_char(
         victim,
         &format!("&GYou have been renamed to {} by the gods.&n\r\n", tmp),

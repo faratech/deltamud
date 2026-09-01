@@ -104,7 +104,7 @@ fn alias_bucket(name: &str) -> &'static str {
     }
 }
 
-fn alias_filename(lib_path: &str, name: &str) -> Option<PathBuf> {
+pub(crate) fn alias_filename(lib_path: &str, name: &str) -> Option<PathBuf> {
     if name.is_empty() {
         return None;
     }

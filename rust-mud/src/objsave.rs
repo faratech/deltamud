@@ -110,7 +110,7 @@ impl Default for RentInfo {
 /// Port of get_filename() for CRASH_FILE: "plrobjs/<MIDDLE>/<name>.objs" under
 /// the lib path. The MIDDLE bucket groups first-letters a-e/f-j/k-o/p-t/u-z.
 /// Returns None for an empty name (C returns 0).
-fn crash_filename(lib: &str, name: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn crash_filename(lib: &str, name: &str) -> Option<std::path::PathBuf> {
     if name.is_empty() {
         return None;
     }
@@ -214,7 +214,9 @@ fn obj_to_store(g: &GameState, oid: ObjId, locate: i32, out: &mut String) {
         o.cost,
         o.rent,
         o.timer,
-        o.level,            // min_level
+        o.min_level,        // min_level: the EQUIP GATE (C stores obj->min_level
+                            // here; writing o.level silently erased the gate on
+                            // every rent/crash cycle -- issue #383)
         o.bitvector,        // affect bitvector
         o.curr_slots,       // durability counters
         o.total_slots,
@@ -305,6 +307,7 @@ fn obj_from_store(g: &mut GameState, line: &str) -> Option<(ObjId, i32)> {
     obj.cost = cost;
     obj.rent = rent;
     obj.timer = timer;
+    obj.min_level = min_level;
     obj.level = min_level.clamp(0, u8::MAX as i32) as u8;
     obj.values = [v0, v1, v2, v3];
     obj.affects = affects;
@@ -679,6 +682,11 @@ fn write_crash_file(g: &GameState, ch: CharId, rent: &RentInfo) -> bool {
     }
     // Issue #95: with MUD_CFORMAT_FILES=true the rent file is written as
     // C's raw rent_info + obj_file_elem stream so the C binary can read it.
+    // Atomic replacement (issue #386): the old truncate-then-write left an
+    // empty/truncated file after any mid-write kill, and the caller then
+    // extracts all carried objects -- permanent total inventory loss. Write
+    // to <name>.objs.tmp and rename (atomic on the same filesystem).
+    let tmp = path.with_extension("objs.tmp");
     if std::env::var("MUD_CFORMAT_FILES").map(|v| v == "true").unwrap_or(false) {
         let rent_c = crate::cformat::CRentInfo {
             time: rent.time as i32,
@@ -690,11 +698,16 @@ fn write_crash_file(g: &GameState, ch: CharId, rent: &RentInfo) -> bool {
         };
         let elems: Vec<crate::cformat::CObjFileElem> = cformat_elems(g, ch);
         let bytes = crate::cformat::encode_rent_file(&rent_c, &elems);
-        return std::fs::write(&path, bytes).is_ok();
+        let ok = std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, &path).is_ok();
+        return ok;
     }
     let mut body = write_rent_header(rent);
     body.push_str(&serialize_objects(g, ch));
-    std::fs::write(&path, body).is_ok()
+    let ok = std::fs::write(&tmp, body).is_ok() && std::fs::rename(&tmp, &path).is_ok();
+    if !ok {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    ok
 }
 
 /// Count carried+worn items for the C nitems field (rent_info).

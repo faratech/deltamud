@@ -557,7 +557,7 @@ fn serialize_obj_line(g: &GameState, oid: ObjId, depth: usize, out: &mut String)
         o.values[1],
         o.values[2],
         o.values[3],
-        o.level,       // min_level
+        o.min_level,    // min_level: the equip gate (see objsave.rs #383)
         o.bitvector,   // affect bitvector
         o.curr_slots,  // durability counters (#233)
         o.total_slots,
@@ -747,6 +747,7 @@ fn parse_obj_line(g: &mut GameState, line: &str) -> Option<(ObjId, usize, bool)>
     obj.timer = timer;
     obj.values = [v0, v1, v2, v3];
     obj.affects = affects;
+    obj.min_level = level;
     obj.level = level.clamp(0, u8::MAX as i32) as u8;
     obj.bitvector = bitvector;
     obj.curr_slots = curr_slots;

@@ -281,6 +281,16 @@ impl Database {
                 (ch.idnum,),
             )
             .await?;
+        // Issue #388: a MISSING row plus no pending hash would write pwd=''
+        // -- check_password('') never verifies, so the name stays taken and
+        // unloggable forever. Refuse the save instead (the caller logs).
+        let row_exists = existing.is_some();
+        if !row_exists && ch.pending_password_hash.is_none() {
+            anyhow::bail!(
+                "save_player_with_host: no row for idnum {} and no password hash; refusing to create an unloggable row",
+                ch.idnum
+            );
+        }
         let existing_pwd = existing
             .as_ref()
             .map(|(pwd, _)| pwd.clone())
