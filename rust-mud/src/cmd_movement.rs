@@ -2893,8 +2893,6 @@ mod tests {
     use crate::room::{Exit, Room, SpecialExit};
 
     fn arena_exit_game() -> (GameState, CharId, CharId, RoomRnum, RoomRnum, RoomRnum) {
-        crate::arena::reset_for_tests();
-
         let mut g = GameState::new(Config::default());
         let entrance = g.add_room(Room::new(
             4800,
@@ -2956,7 +2954,6 @@ mod tests {
 
     #[test]
     fn arena_combatant_exit_runs_prep_room_cleanup() {
-        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
         let (mut g, ch, master, entrance, prep, _observer) = arena_exit_game();
 
         assert!(crate::arena::arenaentrancemaster(
@@ -2967,13 +2964,16 @@ mod tests {
             "combatant",
         ));
         assert_eq!(g.get_char(ch).unwrap().in_room, Some(prep));
-        assert_eq!(crate::arena::arena_stat(ch), crate::arena::ARENA_COMBATANT1);
+        assert_eq!(
+            crate::arena::arena_stat(&g, ch),
+            crate::arena::ARENA_COMBATANT1
+        );
 
         assert!(perform_move(&mut g, ch, NORTH as i32, false));
 
         let c = g.get_char(ch).unwrap();
         assert_eq!(c.in_room, Some(entrance));
-        assert_eq!(crate::arena::arena_stat(ch), crate::arena::ARENA_NOT);
+        assert_eq!(crate::arena::arena_stat(&g, ch), crate::arena::ARENA_NOT);
         assert_eq!(c.points.mana, 1);
         assert_eq!(c.points.move_points, 1);
         assert_eq!(c.points.gold, 9_000);
@@ -2985,12 +2985,10 @@ mod tests {
 
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
         assert!(out.contains("There's a penalty for leaving the arena"));
-        crate::arena::reset_for_tests();
     }
 
     #[test]
     fn arena_observer_exit_detaches_observer_state() {
-        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
         let (mut g, combatant, master, entrance, _prep, observer_room) = arena_exit_game();
         assert!(crate::arena::arenaentrancemaster(
             &mut g,
@@ -3017,23 +3015,24 @@ mod tests {
         ));
         assert_eq!(g.get_char(observer).unwrap().in_room, Some(observer_room));
         assert_eq!(
-            crate::arena::arena_stat(observer),
+            crate::arena::arena_stat(&g, observer),
             crate::arena::ARENA_OBSERVER
         );
-        assert_eq!(crate::arena::arena_observing(observer), Some(combatant));
+        assert_eq!(crate::arena::arena_observing(&g, observer), Some(combatant));
 
         assert!(perform_move(&mut g, observer, NORTH as i32, false));
 
         assert_eq!(g.get_char(observer).unwrap().in_room, Some(entrance));
-        assert_eq!(crate::arena::arena_stat(observer), crate::arena::ARENA_NOT);
-        assert_eq!(crate::arena::arena_observing(observer), None);
+        assert_eq!(
+            crate::arena::arena_stat(&g, observer),
+            crate::arena::ARENA_NOT
+        );
+        assert_eq!(crate::arena::arena_observing(&g, observer), None);
         assert_eq!(g.player_save_requests, vec![observer]);
-        crate::arena::reset_for_tests();
     }
 
     #[test]
     fn forced_arena_relocation_restores_once_without_exit_penalty() {
-        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
         let (mut g, ch, master, _entrance, _prep, _observer) = arena_exit_game();
         let outside = g.add_room(Room::new(
             3001,
@@ -3070,7 +3069,7 @@ mod tests {
         );
         assert_eq!(c.points.mana, 77);
         assert_eq!(c.points.move_points, 77);
-        assert_eq!(crate::arena::arena_stat(ch), crate::arena::ARENA_NOT);
+        assert_eq!(crate::arena::arena_stat(&g, ch), crate::arena::ARENA_NOT);
         assert_eq!(g.player_save_requests, vec![ch]);
 
         // A duplicate cleanup must not consume the restored state or erase
@@ -3087,12 +3086,10 @@ mod tests {
         assert_eq!(c.wimp_level, 55);
         assert_eq!(c.recall_level, 66);
         assert_eq!(g.player_save_requests, vec![ch]);
-        crate::arena::reset_for_tests();
     }
 
     #[test]
     fn forced_departure_detaches_observers_and_clears_default() {
-        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
         let (mut g, combatant, master, entrance, _prep, observer_room) = arena_exit_game();
         let outside = g.add_room(Room::new(
             3001,
@@ -3107,7 +3104,7 @@ mod tests {
             "arena",
             "combatant",
         ));
-        assert_eq!(crate::arena::default_observe_for_test(), Some(combatant));
+        assert_eq!(crate::arena::default_observe_for_test(&g), Some(combatant));
 
         let mut watcher = Character::new_player("Watcher".to_string(), Class::Warrior, Race::Human);
         watcher.idnum = 2;
@@ -3118,21 +3115,26 @@ mod tests {
             &mut g, watcher, master, "arena", "observer",
         ));
         assert_eq!(g.get_char(watcher).unwrap().in_room, Some(observer_room));
-        assert_eq!(crate::arena::arena_observing(watcher), Some(combatant));
+        assert_eq!(crate::arena::arena_observing(&g, watcher), Some(combatant));
 
         g.char_from_room(combatant);
         g.char_to_room(combatant, outside);
-        assert_eq!(crate::arena::arena_stat(combatant), crate::arena::ARENA_NOT);
-        assert_eq!(crate::arena::arena_observing(watcher), None);
-        assert_eq!(crate::arena::default_observe_for_test(), None);
+        assert_eq!(
+            crate::arena::arena_stat(&g, combatant),
+            crate::arena::ARENA_NOT
+        );
+        assert_eq!(crate::arena::arena_observing(&g, watcher), None);
+        assert_eq!(crate::arena::default_observe_for_test(&g), None);
 
         g.char_from_room(watcher);
         g.char_to_room(watcher, outside);
-        assert_eq!(crate::arena::arena_stat(watcher), crate::arena::ARENA_NOT);
-        assert_eq!(crate::arena::arena_observing(watcher), None);
+        assert_eq!(
+            crate::arena::arena_stat(&g, watcher),
+            crate::arena::ARENA_NOT
+        );
+        assert_eq!(crate::arena::arena_observing(&g, watcher), None);
         assert!(g.player_save_requests.contains(&combatant));
         assert!(g.player_save_requests.contains(&watcher));
-        crate::arena::reset_for_tests();
     }
 
     fn movement_game() -> (GameState, CharId, RoomRnum, RoomRnum) {

@@ -556,7 +556,7 @@ impl GameState {
         // Arena bookkeeping: clear ARENA_COMBATANT* / observer references so a
         // dead or purged combatant no longer satisfies is_arena_combatant
         // (issue #392 -- observers otherwise attach to ghosts forever).
-        crate::arena::forget_char(cid);
+        crate::arena::forget_char(self, cid);
 
         // Stop anyone targeting this character.
         let attackers: Vec<CharId> = self
@@ -1773,8 +1773,6 @@ mod tests {
 
     #[test]
     fn extract_char_tears_down_arena_state_before_removal() {
-        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
-        crate::arena::reset_for_tests();
         let mut g = fresh_game();
         let arena_room = g.add_room(crate::room::Room::new(
             4801,
@@ -1789,14 +1787,16 @@ mod tests {
         player.affect_flags = AFF_INVISIBLE;
         let player = g.create_char(player);
         g.char_to_room(player, arena_room);
-        crate::arena::set_stat_for_test(player, crate::arena::ARENA_COMBATANT1);
+        crate::arena::set_stat_for_test(&mut g, player, crate::arena::ARENA_COMBATANT1);
         crate::arena::bup_affects(&mut g, player);
 
         g.extract_char(player);
 
         assert!(!g.char_exists(player));
-        assert_eq!(crate::arena::arena_stat(player), crate::arena::ARENA_NOT);
+        assert_eq!(
+            crate::arena::arena_stat(&g, player),
+            crate::arena::ARENA_NOT
+        );
         assert_eq!(g.player_save_requests, vec![player]);
-        crate::arena::reset_for_tests();
     }
 }

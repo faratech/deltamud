@@ -1960,7 +1960,7 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
     }
     if !npc {
         // Arena status block (GET_ARENASTAT), matching act.wizard.c do_stat_character.
-        let stat = crate::arena::arena_stat(k);
+        let stat = crate::arena::arena_stat(&g, k);
         buf.push_str("\r\nArena: ");
         match stat {
             crate::arena::ARENA_NOT => buf.push_str("[NO]"),
@@ -1971,7 +1971,7 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
             crate::arena::ARENA_COMBATANTZ => buf.push_str("[COMBATZ]"),
             crate::arena::ARENA_OBSERVER => {
                 buf.push_str("[OBSERV]");
-                match crate::arena::arena_observing(k) {
+                match crate::arena::arena_observing(g, k) {
                     Some(t) => buf.push_str(&format!(", Observing: [{}]", name_of(g, t))),
                     None => buf.push_str(", Observing: [NOBODY]"),
                 }
@@ -1981,9 +1981,9 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
         buf.push_str(&format!(", Wins: [{}]", wins));
         buf.push_str(&format!(", Losses: [{}]", losses));
         if connected {
-            let ft = crate::arena::arena_flee_timer(k);
+            let ft = crate::arena::arena_flee_timer(g, k);
             if ft > 0 {
-                let lf = match crate::arena::arena_last_fighting(k) {
+                let lf = match crate::arena::arena_last_fighting(g, k) {
                     Some(o) => name_of(g, o),
                     None => String::new(),
                 };
@@ -7483,7 +7483,7 @@ pub fn perform_copyover(g: &mut GameState, ch: CharId) {
                         process_exit.mapy = -1;
                     }
                 }
-                crate::arena::apply_process_exit_state_to_snapshot(cid, &mut process_exit);
+                crate::arena::apply_process_exit_state_to_snapshot(g, cid, &mut process_exit);
                 (
                     character.get_name().to_string(),
                     character.idnum,
@@ -8218,8 +8218,6 @@ mod tests {
 
     #[test]
     fn admin_teleport_uses_forced_arena_departure_without_penalty() {
-        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
-        crate::arena::reset_for_tests();
         let mut g = GameState::new(Config::default());
         let arena_room = g.add_room(Room::new(4801, 48, "Arena".into(), String::new()));
         let outside = g.add_room(Room::new(3001, 30, "Temple".into(), String::new()));
@@ -8233,7 +8231,7 @@ mod tests {
             c.affect_flags = crate::flags::AFF_INVISIBLE;
             crate::gold::set(c, crate::gold::Account::Carried, 9_999);
         }
-        crate::arena::set_stat_for_test(victim, crate::arena::ARENA_COMBATANT1);
+        crate::arena::set_stat_for_test(&mut g, victim, crate::arena::ARENA_COMBATANT1);
         crate::arena::bup_affects(&mut g, victim);
         g.get_char_mut(victim).unwrap().affect_flags = crate::flags::AFF_BLIND;
 
@@ -8245,15 +8243,15 @@ mod tests {
         assert_eq!(victim_state.wimp_level, 12);
         assert_eq!(victim_state.recall_level, 34);
         assert_eq!(victim_state.points.gold, 9_999);
-        assert_eq!(crate::arena::arena_stat(victim), crate::arena::ARENA_NOT);
+        assert_eq!(
+            crate::arena::arena_stat(&g, victim),
+            crate::arena::ARENA_NOT
+        );
         assert_eq!(g.player_save_requests, vec![victim]);
-        crate::arena::reset_for_tests();
     }
 
     #[test]
     fn admin_transfer_uses_forced_arena_departure_without_penalty() {
-        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
-        crate::arena::reset_for_tests();
         let mut g = GameState::new(Config::default());
         let arena_room = g.add_room(Room::new(4801, 48, "Arena".into(), String::new()));
         let outside = g.add_room(Room::new(3001, 30, "Temple".into(), String::new()));
@@ -8267,7 +8265,7 @@ mod tests {
             c.affect_flags = crate::flags::AFF_INVISIBLE;
             crate::gold::set(c, crate::gold::Account::Carried, 9_999);
         }
-        crate::arena::set_stat_for_test(victim, crate::arena::ARENA_COMBATANT1);
+        crate::arena::set_stat_for_test(&mut g, victim, crate::arena::ARENA_COMBATANT1);
         crate::arena::bup_affects(&mut g, victim);
         g.get_char_mut(victim).unwrap().affect_flags = crate::flags::AFF_BLIND;
 
@@ -8279,9 +8277,11 @@ mod tests {
         assert_eq!(victim_state.wimp_level, 12);
         assert_eq!(victim_state.recall_level, 34);
         assert_eq!(victim_state.points.gold, 9_999);
-        assert_eq!(crate::arena::arena_stat(victim), crate::arena::ARENA_NOT);
+        assert_eq!(
+            crate::arena::arena_stat(&g, victim),
+            crate::arena::ARENA_NOT
+        );
         assert_eq!(g.player_save_requests, vec![victim]);
-        crate::arena::reset_for_tests();
     }
 
     fn object_proto(vnum: ObjVnum, obj_type: ObjectType, short: &str) -> ObjectProto {

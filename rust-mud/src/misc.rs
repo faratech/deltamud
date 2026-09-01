@@ -526,10 +526,10 @@ pub fn do_detach(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         if !dg_handler::has_script(key) {
             g.send_to_char(ch, "This room does not have any triggers.\r\n");
         } else if arg2 == "all" {
-            extract_script(key);
+            extract_script(g, key);
             persist_proto_clear(g, key);
             g.send_to_char(ch, "All triggers removed from room.\r\n");
-        } else if remove_trigger(key, &arg2) {
+        } else if remove_trigger(g, key, &arg2) {
             persist_proto_remove(g, key, &arg2);
             g.send_to_char(ch, "Trigger removed.\r\n");
             // remove_trigger already drops the script container if it emptied
@@ -600,11 +600,11 @@ pub fn do_detach(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         } else if !dg_handler::has_script(key) {
             g.send_to_char(ch, "That mob doesn't have any triggers.\r\n");
         } else if trigger_all {
-            extract_script(key);
+            extract_script(g, key);
             persist_proto_clear(g, key);
             let short = char_short(g, v);
             g.send_to_char(ch, &format!("All triggers removed from {}.\r\n", short));
-        } else if matches!(&trigger, Some(t) if remove_trigger(key, t)) {
+        } else if matches!(&trigger, Some(t) if remove_trigger(g, key, t)) {
             if let Some(t) = &trigger {
                 persist_proto_remove(g, key, t);
             }
@@ -618,11 +618,11 @@ pub fn do_detach(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         if !dg_handler::has_script(key) {
             g.send_to_char(ch, "That object doesn't have any triggers.\r\n");
         } else if trigger_all {
-            extract_script(key);
+            extract_script(g, key);
             persist_proto_clear(g, key);
             let short = obj_short(g, o);
             g.send_to_char(ch, &format!("All triggers removed from {}.\r\n", short));
-        } else if matches!(&trigger, Some(t) if remove_trigger(key, t)) {
+        } else if matches!(&trigger, Some(t) if remove_trigger(g, key, t)) {
             if let Some(t) = &trigger {
                 persist_proto_remove(g, key, t);
             }

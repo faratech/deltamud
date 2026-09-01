@@ -1499,6 +1499,7 @@ fn process_wait(g: &mut GameState, go: GoRef, trig: TrigId, cmd: &str, cur_line:
     };
 
     let ev = add_event(
+        g,
         time,
         WaitEvent {
             go,
@@ -1513,7 +1514,7 @@ fn process_wait(g: &mut GameState, go: GoRef, trig: TrigId, cmd: &str, cur_line:
 }
 
 fn wait_until_delay(g: &GameState, hr: i64, min: i64) -> i64 {
-    wait_until_delay_from(g.pulse, crate::weather::mud_minute_of_day(), hr, min)
+    wait_until_delay_from(g.pulse, crate::weather::mud_minute_of_day(g), hr, min)
 }
 
 fn wait_until_delay_from(pulse: u64, current_mud_min: i64, hr: i64, min: i64) -> i64 {
@@ -1937,7 +1938,7 @@ fn zone_empty_for_room(g: &GameState, r: RoomRnum) -> bool {
 // boot — load prototypes, assign room triggers, clear runtime state.
 // ---------------------------------------------------------------------------
 pub fn boot_dg_scripts(g: &mut GameState, lib_path: &str) {
-    crate::dg_event::boot_events();
+    crate::dg_event::boot_events(g);
     dg_handler::boot_handler();
     crate::dg_db_scripts::boot_triggers(g, lib_path);
 }

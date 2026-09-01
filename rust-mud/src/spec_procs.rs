@@ -980,19 +980,21 @@ pub fn cityguard(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &s
 // module-level cell guarded by a Mutex (there is exactly one mayor).
 // ===========================================================================
 
-use std::sync::Mutex;
-
-struct MayorState {
-    moving: bool,
-    open: bool, // true => open_path, false => close_path
-    index: usize,
+pub struct MayorState {
+    pub moving: bool,
+    pub open: bool, // true => open_path, false => close_path (default true)
+    pub index: usize,
 }
 
-static MAYOR: Mutex<MayorState> = Mutex::new(MayorState {
-    moving: false,
-    open: true,
-    index: 0,
-});
+impl Default for MayorState {
+    fn default() -> Self {
+        MayorState {
+            moving: false,
+            open: true,
+            index: 0,
+        }
+    }
+}
 
 const OPEN_PATH: &[u8] = b"W3a3003b33000c111d0d111Oe333333Oe22c222112212111a1S.";
 const CLOSE_PATH: &[u8] = b"W3a3003b33000c111d0d111CE333333CE22c222112212111a1S.";
@@ -1005,11 +1007,11 @@ pub fn mayor(g: &mut GameState, _actor: CharId, me: CharId, cmd: &str, _arg: &st
     // patrol step re-entered special() -> mayor() on the mover).
     let ch = me;
     // Decide whether to (re)start a patrol based on the mud clock.
-    let hour = crate::weather::time_now().0;
+    let hour = crate::weather::time_now(g).0;
 
-    // Snapshot + update the static patrol state.
+    // Snapshot + advance the owned patrol state.
     let (moving, open, mut index) = {
-        let mut st = crate::lock_ok::lock(&MAYOR);
+        let st = &mut g.world.mayor;
         if !st.moving {
             if hour == 6 {
                 st.moving = true;
@@ -1039,7 +1041,7 @@ pub fn mayor(g: &mut GameState, _actor: CharId, me: CharId, cmd: &str, _arg: &st
         Some(&b) => b,
         None => {
             // Off the end (shouldn't happen — '.' terminates) — stop patrolling.
-            crate::lock_ok::lock(&MAYOR).moving = false;
+            g.world.mayor.moving = false;
             return false;
         }
     };
@@ -1153,14 +1155,14 @@ pub fn mayor(g: &mut GameState, _actor: CharId, me: CharId, cmd: &str, _arg: &st
             crate::cmd_movement::do_gen_door(g, ch, "gate", SCMD_LOCK);
         }
         b'.' => {
-            crate::lock_ok::lock(&MAYOR).moving = false;
+            g.world.mayor.moving = false;
         }
         _ => {}
     }
 
     index += 1;
     {
-        let mut st = crate::lock_ok::lock(&MAYOR);
+        let st = &mut g.world.mayor;
         // Only advance if we're still on the same patrol (a '.' may have cleared
         // moving; the index still advances in C, harmlessly, since the next tick
         // re-checks `move`).
@@ -1605,7 +1607,7 @@ pub fn temple_healer(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg
         return false;
     }
     // if (time_info.hours != 0)
-    if crate::weather::time_now().0 == 0 {
+    if crate::weather::time_now(g).0 == 0 {
         return false;
     }
     let rnum = match in_room(g, ch) {
@@ -1697,7 +1699,7 @@ pub fn temple_mana_regenerator(
     if !cmd.is_empty() {
         return false;
     }
-    if crate::weather::time_now().0 == 0 {
+    if crate::weather::time_now(g).0 == 0 {
         return false;
     }
     let rnum = match in_room(g, ch) {

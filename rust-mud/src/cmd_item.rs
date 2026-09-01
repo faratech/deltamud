@@ -3455,6 +3455,10 @@ mod tests {
         // Remove the veto: the script store is process-global and obj ids are
         // per-GameState, so a leftover veto would zap another test's armor.
         // isname matches the whole query against ONE name token, so search "veto".
-        assert!(dg_handler::remove_trigger(ScriptKey::Obj(obj), "veto"));
+        assert!(dg_handler::remove_trigger(
+            &mut g,
+            ScriptKey::Obj(obj),
+            "veto"
+        ));
     }
 }

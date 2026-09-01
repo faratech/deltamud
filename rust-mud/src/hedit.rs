@@ -48,71 +48,50 @@ const HEDIT_GLOBAL_SAVE_KEY: &str = "<all help>";
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
-struct HelpEntry {
-    keywords: String,
+pub struct HelpEntry {
+    pub keywords: String,
     /// Entry body as held in memory: every line terminated by "\r\n", exactly
     /// like load_help builds it (so the menu renders identically and the save
     /// path strips the '\r' back out).
-    entry: String,
-    min_level: i32,
+    pub entry: String,
+    pub min_level: i32,
 }
 
 /// The canonical help table, lazily loaded from disk on first use. Mirrors the
 /// C global `help_table` (+ top_of_helpt as the Vec length).
-static HELP_TABLE: OnceLock<Mutex<Vec<HelpEntry>>> = OnceLock::new();
-
-fn help_table() -> &'static Mutex<Vec<HelpEntry>> {
-    HELP_TABLE.get_or_init(|| Mutex::new(Vec::new()))
-}
-
-/// True once the table has been populated from disk this run.
-static HELP_LOADED: OnceLock<Mutex<bool>> = OnceLock::new();
 
 /// Boot the help table for the live `help` command (db.c:299-300
 /// index_boot(DB_BOOT_HLP)); the hedit editor loaded lazily before, but
 /// nothing booted the table for the command path (#232).
-pub fn boot_help_table(lib_path: &str) -> std::io::Result<()> {
-    ensure_loaded(lib_path)
+pub fn boot_help_table(g: &mut GameState) -> std::io::Result<()> {
+    ensure_loaded(g)
 }
 
 /// The general page: C's `help` global is the FIRST entry's body (the
 /// 'help' keywords record at the top of help.hlp).
-pub fn general_help_page() -> Option<String> {
-    let guard = match help_table().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.first().map(|e| e.entry.clone())
+pub fn general_help_page(g: &GameState) -> Option<String> {
+    g.social.help_table.first().map(|e| e.entry.clone())
 }
 
 /// find_help + min-level gate; returns the formatted page
 /// "keywords\r\nentry" (act.informative.c:1620-1654).
-pub fn lookup_help(lib_path: &str, keyword: &str, level: i32) -> Option<String> {
-    ensure_loaded(lib_path).ok()?;
-    if crate::hedit::find_help_rnum(keyword).is_none() {
-        return None;
-    }
-    let guard = match help_table().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    let rnum = crate::hedit::find_help_rnum(keyword)?;
-    let e = guard.get(rnum)?;
+pub fn lookup_help(g: &mut GameState, keyword: &str, level: i32) -> Option<String> {
+    ensure_loaded(g).ok()?;
+    let rnum = find_help_rnum(g, keyword)?;
+    let e = g.social.help_table.get(rnum)?;
     if e.min_level > level {
         return None;
     }
     Some(format!("{}\r\n{}", e.keywords, e.entry))
 }
 
-fn ensure_loaded(lib_path: &str) -> std::io::Result<()> {
-    let flag = HELP_LOADED.get_or_init(|| Mutex::new(false));
-    let mut loaded = crate::lock_ok::lock(flag);
-    if *loaded {
+fn ensure_loaded(g: &mut GameState) -> std::io::Result<()> {
+    if g.social.help_loaded {
         return Ok(());
     }
-    let table = load_help_file(lib_path)?;
-    *crate::lock_ok::lock(help_table()) = table;
-    *loaded = true;
+    let table = load_help_file(&g.config.lib_path)?;
+    g.social.help_table = table;
+    g.social.help_loaded = true;
     Ok(())
 }
 
@@ -267,11 +246,8 @@ fn set_state(conn: ConnId, st: HeditState) {
 // isname (db.c): whole-keyword match, case-insensitive. Used by find_help_rnum.
 // ---------------------------------------------------------------------------
 
-fn find_help_rnum(keyword: &str) -> Option<usize> {
-    let guard = match help_table().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
+fn find_help_rnum(g: &GameState, keyword: &str) -> Option<usize> {
+    let guard = &g.social.help_table;
     // C find_help_rnum loops `i < top_of_helpt`, excluding the last slot because
     // C's table always carries a trailing calloc-zeroed UNDEFINED sentinel. This
     // port's loader does NOT synthesize that sentinel and its save writes only
@@ -307,8 +283,7 @@ pub fn do_hedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     };
 
-    let lib_path = g.config.lib_path.clone();
-    if let Err(error) = ensure_loaded(&lib_path) {
+    if let Err(error) = ensure_loaded(g) {
         log::warn!("SYSERR: OLC: cannot load help table: {}", error);
         send(
             g,
@@ -376,17 +351,11 @@ pub fn do_hedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         );
         return;
     }
-    let rnum = find_help_rnum(&buf1);
+    let rnum = find_help_rnum(g, &buf1);
 
     // Set up the scratch entry: existing or new.
     let help = match rnum {
-        Some(r) => {
-            let guard = match help_table().lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            guard[r].clone()
-        }
+        Some(r) => g.social.help_table[r].clone(),
         None => HelpEntry {
             keywords: buf1.clone(),
             entry: "This is an unfinished help entry.\r\n".to_string(),
@@ -683,7 +652,7 @@ where
         };
     olc::revalidate_olc_authorization(g, authorization, true, None)?;
     let unresolved_key = help.keywords.to_ascii_lowercase();
-    let mut entries = crate::lock_ok::lock(&help_table()).clone();
+    let mut entries = g.social.help_table.clone();
     let inserted = match rnum {
         // C: rnum > 0 ⇒ replace existing. (rnum 0, the first slot, is also a
         // real entry in our Vec model; we replace whenever we have an index.)
@@ -700,7 +669,7 @@ where
     let lib_path = g.config.lib_path.clone();
     match hedit_save_to_disk_with(&lib_path, &entries, replace) {
         Ok(()) => {
-            *crate::lock_ok::lock(&help_table()) = entries;
+            g.social.help_table = entries;
             crate::olc::olc_remove_from_save_list(0, crate::olc::OLC_SAVE_HELP);
             crate::olc::clear_unresolved_named_save(EditorKind::Hedit, &unresolved_key);
             crate::olc::clear_unresolved_named_save(EditorKind::Hedit, HEDIT_GLOBAL_SAVE_KEY);
@@ -708,7 +677,7 @@ where
             Ok(())
         }
         Err(error) if crate::olc::replacement_was_published(&error) => {
-            *crate::lock_ok::lock(&help_table()) = entries;
+            g.social.help_table = entries;
             if inserted {
                 // The candidate is already live at index zero. Retrying the
                 // still-open editor must replace that entry, not insert a
@@ -739,8 +708,8 @@ where
 pub fn save_all_help(g: &mut GameState) -> std::io::Result<()> {
     let result = (|| {
         let lib = g.config.lib_path.clone();
-        ensure_loaded(&lib)?;
-        let entries = crate::lock_ok::lock(&help_table()).clone();
+        ensure_loaded(g)?;
+        let entries = g.social.help_table.clone();
         hedit_save_to_disk(&lib, &entries)
     })();
     match &result {
@@ -855,11 +824,8 @@ mod tests {
             .get_or_init(|| std::sync::Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *HELP_LOADED
-            .get_or_init(|| Mutex::new(false))
-            .lock()
-            .unwrap() = false;
-        crate::lock_ok::lock(&help_table()).clear();
+        // Help state is per-GameState now: a fresh GameState starts unloaded,
+        // so no global reset is needed here any more.
         crate::lock_ok::lock(&states()).clear();
         let lib =
             std::env::temp_dir().join(format!("deltamud-hedit-{label}-{}", std::process::id()));
@@ -1029,11 +995,11 @@ mod tests {
         .unwrap_err();
 
         assert!(crate::olc::replacement_was_published(&error));
-        assert_eq!(crate::lock_ok::lock(&help_table()).len(), 1);
+        assert_eq!(g.social.help_table.len(), 1);
         assert_eq!(with_state(conn, |state| state.rnum), Some(Some(0)));
 
         hedit_save_internally(&mut g, conn).unwrap();
-        assert_eq!(crate::lock_ok::lock(&help_table()).len(), 1);
+        assert_eq!(g.social.help_table.len(), 1);
         let saved = std::fs::read_to_string(lib.join(HLP_REL_DIR).join(HELP_FILE)).unwrap();
         assert_eq!(saved.lines().filter(|line| *line == "gamma").count(), 1);
 

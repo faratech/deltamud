@@ -330,7 +330,8 @@ pub fn do_hit(g: &mut GameState, ch: CharId, argument: &str, mut subcmd: i32) {
         if !is_npc(g, vict) && !is_npc(g, ch) {
             // C act.offensive.c:106-113: two arena combatants may 'hit' each
             // other - the command is rewritten to SCMD_MURDER (#126).
-            if crate::arena::is_arena_combatant(ch) && crate::arena::is_arena_combatant(vict) {
+            if crate::arena::is_arena_combatant(g, ch) && crate::arena::is_arena_combatant(g, vict)
+            {
                 subcmd = SCMD_MURDER;
             }
             if subcmd != SCMD_MURDER && subcmd != SCMD_DEATHBLOW {
@@ -745,7 +746,7 @@ pub fn do_flee(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
 
     let was_fighting = fighting(g, ch);
     // IS_ARENACOMBATANT(ch) ? minlevel = 1 : minlevel = 15 (act.offensive.c).
-    let minlevel: Level = if crate::arena::is_arena_combatant(ch) {
+    let minlevel: Level = if crate::arena::is_arena_combatant(g, ch) {
         1
     } else {
         15

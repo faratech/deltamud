@@ -506,6 +506,14 @@ pub struct DgState {
     /// dg_db_scripts.rs proto_script: (kind, entity vnum) -> bound trigger
     /// vnums in load order.
     pub proto_scripts: HashMap<(i32, i32), Vec<i32>>,
+    /// dg_event.rs: the pulse-ticked wait-event queue (sorted by fire time).
+    pub events: Vec<crate::dg_event::EventInfo>,
+    /// dg_event.rs: monotonically increasing wait-event id source.
+    pub next_event_id: u64,
+    /// mobact.rs: mob remembered-attacker lists (C mob_specials.memory).
+    pub mob_memory: HashMap<CharId, Vec<i64>>,
+    /// dg_mobcmd.rs: mob script memory (mremember/mforget, MEMORY triggers).
+    pub script_memory: HashMap<CharId, Vec<crate::dg_mobcmd::ScriptMemory>>,
 }
 
 /// Social/economy-adjacent player-facing stores that used to live in module
@@ -514,6 +522,10 @@ pub struct DgState {
 pub struct SocialState {
     /// cmd_social.rs: the live social table.
     pub socials: crate::cmd_social::SocialTable,
+    /// hedit.rs: the help table (C help_table[] + top_of_helpt).
+    pub help_table: Vec<crate::hedit::HelpEntry>,
+    /// hedit.rs: true once the help table has been loaded this run.
+    pub help_loaded: bool,
 }
 
 #[derive(Default)]
@@ -526,6 +538,22 @@ pub struct WorldState {
     /// spec_assign.rs: ROOM_DEATH vnums captured before assign_specs builds
     /// the room table (dts_are_dumps dump registration).
     pub death_trap_rooms: Vec<RoomVnum>,
+    /// spec_procs.rs: the mayor's patrol state (castle.c SPECIAL(mayor)).
+    pub mayor: crate::spec_procs::MayorState,
+    /// town_life.rs: computed caravan routes keyed by mob vnum.
+    pub routes: HashMap<MobVnum, Vec<RoomRnum>>,
+    /// maputils.rs: parsed worldmap grids keyed by their source file name.
+    pub maps: HashMap<String, crate::maputils::MapData>,
+}
+
+/// Economy-side stores that used to live in module statics (phase 1).
+#[derive(Default)]
+pub struct EconomyState {
+    /// quest.rs: questgiver side-table (C ch->questgiver pointer).
+    pub quest_givers: HashMap<CharId, CharId>,
+    /// arena.rs: live arena side-state (per-char arena status, arenamaster,
+    /// observer links).
+    pub arena: crate::arena::ArenaWorld,
 }
 
 pub struct GameState {
@@ -669,6 +697,11 @@ pub struct GameState {
     pub social: SocialState,
     /// DG script VM state (prototype tables; live arenas as families migrate).
     pub dg: DgState,
+    /// The mud calendar + sun state (weather.rs TimeWeather).
+    pub clock: crate::weather::MudClock,
+    /// Economy stores (quest givers; shops/clans/houses/auction as families
+    /// migrate).
+    pub econ: EconomyState,
 
     // Surface ("outside") world-map splice (maputils.c read_map). The 99x99
     // grid of map cells is appended to `rooms` *after* the real-room block, so
@@ -718,6 +751,8 @@ impl GameState {
             world: WorldState::default(),
             social: SocialState::default(),
             dg: DgState::default(),
+            clock: crate::weather::MudClock::default(),
+            econ: EconomyState::default(),
             credits: String::new(),
             news: String::new(),
             info: String::new(),
@@ -787,7 +822,7 @@ impl GameState {
         if room.room_flags.contains(crate::room::RoomFlags::DARK) {
             return true;
         }
-        let sun = crate::weather::sunlight();
+        let sun = crate::weather::sunlight(self);
         let outdoors = !matches!(
             room.sector_type,
             crate::room::SectorType::Inside | crate::room::SectorType::City

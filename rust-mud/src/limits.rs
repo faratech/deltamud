@@ -536,7 +536,7 @@ pub fn gain_exp(g: &mut GameState, ch: CharId, gain: i64) {
     }
     // IS_ARENACOMBATANT(ch): arena combatants neither gain nor lose XP (their
     // wins/losses are tracked instead). arena.rs owns the status side table.
-    if crate::arena::is_arena_combatant(ch) {
+    if crate::arena::is_arena_combatant(g, ch) {
         return;
     }
 

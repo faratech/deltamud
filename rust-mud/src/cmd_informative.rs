@@ -2221,7 +2221,7 @@ pub fn do_equipment(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
 pub fn do_time(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     // The canonical mud clock (weather.rs TimeWeather: etc/date_record override
     // + real-time advance), the same clock the shops/guards/sunlight use.
-    let (hours, day, month, year) = crate::weather::time_now();
+    let (hours, day, month, year) = crate::weather::time_now(g);
 
     let hour12 = if hours % 12 == 0 { 12 } else { hours % 12 };
     let ampm = if hours >= 12 { "pm" } else { "am" };
@@ -2274,7 +2274,7 @@ pub fn do_help(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     // C act.informative.c:1627-1630: an empty argument pages the general
     // help page (the `help` global - the first entry in help.hlp).
     if arg.is_empty() {
-        match crate::hedit::general_help_page() {
+        match crate::hedit::general_help_page(g) {
             Some(page) if !page.is_empty() => {
                 let conn = g.get_char(ch).and_then(|c| c.desc).unwrap();
                 crate::modify::page_string(g, conn, &page);
@@ -2286,11 +2286,8 @@ pub fn do_help(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     // C act.informative.c:1636-1654: find_help with a min-level gate; a
     // miss (or a too-high min_level) reports 'There is no help on that
     // word.' and logs the lookup.
-    let (level, lib) = (
-        g.get_char(ch).map(|c| c.player.level).unwrap_or(0),
-        g.config.lib_path.clone(),
-    );
-    match crate::hedit::lookup_help(&lib, arg, level as i32) {
+    let level = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
+    match crate::hedit::lookup_help(g, arg, level as i32) {
         Some(page) => {
             let conn = g.get_char(ch).and_then(|c| c.desc).unwrap();
             crate::modify::page_string(g, conn, &page);
@@ -2506,7 +2503,7 @@ pub fn do_who(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         if who_room && c.in_room != ch_room {
             continue;
         }
-        if who_arena && !crate::arena::is_arena_combatant(wch) {
+        if who_arena && !crate::arena::is_arena_combatant(g, wch) {
             continue;
         }
         if showclass != 0 && (showclass & (1 << (c.player.class as i64))) == 0 {

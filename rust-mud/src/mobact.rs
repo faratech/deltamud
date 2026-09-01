@@ -38,8 +38,6 @@ use crate::flags::*;
 use crate::room::{EX_CLOSED, RoomFlags};
 use crate::state::GameState;
 use crate::types::*;
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 
 // Hunting (graph.c) lives in graph.rs; re-export so the `mobact::hunt_victim`
 // name resolves to that single canonical implementation rather than a divergent
@@ -77,12 +75,6 @@ const PLR_THIEF: i64 = 1 << 1;
 // Mob memory side-state: mob CharId -> remembered player idnums (newest first,
 // matching the C list which prepends). Mirrors `mob_specials.memory`.
 // ---------------------------------------------------------------------------
-static MEMORY: OnceLock<Mutex<HashMap<CharId, Vec<i64>>>> = OnceLock::new();
-
-fn memory() -> &'static Mutex<HashMap<CharId, Vec<i64>>> {
-    MEMORY.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 // ---------------------------------------------------------------------------
 // Small predicate helpers (local copies of the utils.h macros, kept private to
 // this module exactly like cmd_offensive.rs / shop.rs do).
@@ -351,7 +343,7 @@ pub fn mobile_activity(g: &mut GameState) {
         }
 
         // ---- 5. Mob memory ---------------------------------------------
-        if mob_flagged(g, ch, MOB_MEMORY) && has_memory(ch) {
+        if mob_flagged(g, ch, MOB_MEMORY) && has_memory(g, ch) {
             memory_attack(g, ch);
         }
 
@@ -551,7 +543,7 @@ fn memory_attack(g: &mut GameState, ch: CharId) {
             continue;
         }
         let vid = idnum(g, vict);
-        if !remembers(ch, vid) {
+        if !remembers(g, ch, vid) {
             continue;
         }
         // Found a remembered foe.
@@ -858,28 +850,26 @@ pub fn combat_mob_spec_pulse(g: &mut GameState, ch: CharId) {
 // Mob memory routines (mobact.c remember / forget / clearMemory).
 // ---------------------------------------------------------------------------
 
-fn has_memory(ch: CharId) -> bool {
-    memory()
-        .lock()
-        .ok()
-        .map(|m| m.get(&ch).map(|v| !v.is_empty()).unwrap_or(false))
+fn has_memory(g: &GameState, ch: CharId) -> bool {
+    g.dg.mob_memory
+        .get(&ch)
+        .map(|v| !v.is_empty())
         .unwrap_or(false)
 }
 
-fn remembers(ch: CharId, id: i64) -> bool {
+fn remembers(g: &GameState, ch: CharId, id: i64) -> bool {
     if id < 0 {
         return false;
     }
-    memory()
-        .lock()
-        .ok()
-        .map(|m| m.get(&ch).map(|v| v.contains(&id)).unwrap_or(false))
+    g.dg.mob_memory
+        .get(&ch)
+        .map(|v| v.contains(&id))
         .unwrap_or(false)
 }
 
 /// `remember(ch, victim)` — make `ch` remember `victim` (mobact.c remember).
 /// No-op unless `ch` is a mob and `victim` is a mortal PC; duplicates ignored.
-pub fn remember(g: &GameState, ch: CharId, victim: CharId) {
+pub fn remember(g: &mut GameState, ch: CharId, victim: CharId) {
     if !is_npc(g, ch) {
         return;
     }
@@ -898,37 +888,31 @@ pub fn remember(g: &GameState, ch: CharId, victim: CharId) {
     if id < 0 {
         return;
     }
-    if let Ok(mut m) = memory().lock() {
-        let entry = m.entry(ch).or_default();
-        if !entry.contains(&id) {
-            // C prepends (newest first).
-            entry.insert(0, id);
-        }
+    let entry = g.dg.mob_memory.entry(ch).or_default();
+    if !entry.contains(&id) {
+        // C prepends (newest first).
+        entry.insert(0, id);
     }
 }
 
 /// `forget(ch, victim)` — drop `victim` from `ch`'s memory (mobact.c forget).
-pub fn forget(g: &GameState, ch: CharId, victim: CharId) {
+pub fn forget(g: &mut GameState, ch: CharId, victim: CharId) {
     let id = idnum(g, victim);
     if id < 0 {
         return;
     }
-    if let Ok(mut m) = memory().lock() {
-        if let Some(entry) = m.get_mut(&ch) {
-            entry.retain(|&x| x != id);
-            if entry.is_empty() {
-                m.remove(&ch);
-            }
+    if let Some(entry) = g.dg.mob_memory.get_mut(&ch) {
+        entry.retain(|&x| x != id);
+        if entry.is_empty() {
+            g.dg.mob_memory.remove(&ch);
         }
     }
 }
 
 /// `clear_memory(ch)` — erase all of `ch`'s memory (mobact.c clearMemory).
 /// Call this when a mob is extracted to reap its side-state entry.
-pub fn clear_memory(ch: CharId) {
-    if let Ok(mut m) = memory().lock() {
-        m.remove(&ch);
-    }
+pub fn clear_memory(g: &mut GameState, ch: CharId) {
+    g.dg.mob_memory.remove(&ch);
 }
 
 // ---------------------------------------------------------------------------

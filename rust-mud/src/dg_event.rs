@@ -22,8 +22,6 @@
 use crate::dg_handler::TrigId;
 use crate::dg_scripts::{self, GoRef};
 use crate::state::GameState;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 /// Opaque handle to a scheduled wait event. Stored on a trigger's runtime
 /// state (TRIG_WAIT in C) so it can be cancelled when the trigger is extracted.
@@ -39,23 +37,16 @@ pub struct WaitEvent {
     pub trig_type: i32,
 }
 
-struct EventInfo {
-    id: EventId,
-    time_remaining: i64,
-    payload: WaitEvent,
-}
-
-static EVENT_LIST: OnceLock<Mutex<Vec<EventInfo>>> = OnceLock::new();
-static NEXT_EVENT_ID: AtomicU64 = AtomicU64::new(1);
-
-fn event_list() -> &'static Mutex<Vec<EventInfo>> {
-    EVENT_LIST.get_or_init(|| Mutex::new(Vec::new()))
+pub struct EventInfo {
+    pub id: EventId,
+    pub time_remaining: i64,
+    pub payload: WaitEvent,
 }
 
 /// Clear the event queue (called from boot to drop any stale events across a
 /// world reload / copyover, paralleling a fresh `event_list = NULL`).
-pub fn boot_events() {
-    crate::lock_ok::lock(&event_list()).clear();
+pub fn boot_events(g: &mut GameState) {
+    g.dg.events.clear();
 }
 
 /// add_event(time, func, info): schedule `payload` to fire in `time` pulses.
@@ -64,8 +55,9 @@ pub fn boot_events() {
 /// stop early — though for correctness we simply scan, exactly like C does on
 /// each pulse. `time` <= 0 is clamped to 1 so the event still fires next pulse
 /// (C's `--time_remaining == 0` would otherwise wrap negative and never fire).
-pub fn add_event(time: i64, payload: WaitEvent) -> EventId {
-    let id = EventId(NEXT_EVENT_ID.fetch_add(1, Ordering::Relaxed));
+pub fn add_event(g: &mut GameState, time: i64, payload: WaitEvent) -> EventId {
+    let id = EventId(g.dg.next_event_id);
+    g.dg.next_event_id += 1;
     let time_remaining = if time < 1 { 1 } else { time };
     let info = EventInfo {
         id,
@@ -73,7 +65,7 @@ pub fn add_event(time: i64, payload: WaitEvent) -> EventId {
         payload,
     };
 
-    let mut list = crate::lock_ok::lock(&event_list());
+    let list = &mut g.dg.events;
     // Sorted insert in next-to-fire order (C add_event).
     let pos = list
         .iter()
@@ -84,9 +76,8 @@ pub fn add_event(time: i64, payload: WaitEvent) -> EventId {
 }
 
 /// remove_event(event): cancel a scheduled event by id. Safe if absent.
-pub fn remove_event(id: EventId) {
-    let mut list = crate::lock_ok::lock(&event_list());
-    list.retain(|e| e.id != id);
+pub fn remove_event(g: &mut GameState, id: EventId) {
+    g.dg.events.retain(|e| e.id != id);
 }
 
 /// process_events(): called once per pulse. Decrement every event's counter;
@@ -95,7 +86,7 @@ pub fn remove_event(id: EventId) {
 /// schedule new waits without deadlocking on the same mutex.
 pub fn process_events(g: &mut GameState) {
     let due: Vec<WaitEvent> = {
-        let mut list = crate::lock_ok::lock(&event_list());
+        let list = &mut g.dg.events;
         let mut fired = Vec::new();
         // Decrement counters; gather the ones that hit zero.
         for e in list.iter_mut() {
@@ -119,8 +110,8 @@ pub fn process_events(g: &mut GameState) {
 
 /// Cancel the wait event (if any) currently parked on a trigger's runtime
 /// state. Used by extract_trigger so a purged trigger never resumes.
-pub fn cancel_for_trigger(maybe: Option<EventId>) {
+pub fn cancel_for_trigger(g: &mut GameState, maybe: Option<EventId>) {
     if let Some(id) = maybe {
-        remove_event(id);
+        remove_event(g, id);
     }
 }

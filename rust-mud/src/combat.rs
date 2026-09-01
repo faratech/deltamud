@@ -1201,7 +1201,7 @@ fn do_actual_damage(
     if v_dead {
         // Arena fatalities settled in send_position_feedback's Dead arm
         // (fight.c: match_over then return) - do not run die().
-        if !crate::arena::is_arena_combatant(victim) {
+        if !crate::arena::is_arena_combatant(g, victim) {
             die(g, Some(ch), victim);
         }
     }
@@ -1331,7 +1331,7 @@ fn send_position_feedback(g: &mut GameState, ch: CharId, victim: CharId, dmg: i3
             // C fight.c:1056-1064: arena fatalities settle via match_over and
             // return - die() is never reached; everyone else gets R.I.P.
             // (die() itself prints nothing in C - the port printed both, #104).
-            if crate::arena::is_arena_combatant(victim) {
+            if crate::arena::is_arena_combatant(g, victim) {
                 crate::arena::match_over(g, Some(ch), Some(victim), "(Fatality)", true);
             } else {
                 act(
@@ -1531,7 +1531,7 @@ fn update_position(g: &mut GameState, ch: CharId) {
 fn newbie_pvp_block_message(g: &GameState, ch: CharId, victim: CharId) -> Option<&'static str> {
     if g.pk_allowed
         || ch == victim
-        || (crate::arena::is_arena_combatant(ch) && crate::arena::is_arena_combatant(victim))
+        || (crate::arena::is_arena_combatant(g, ch) && crate::arena::is_arena_combatant(g, victim))
     {
         return None;
     }
@@ -1628,8 +1628,8 @@ pub fn raw_kill(g: &mut GameState, victim: CharId, killer: Option<CharId>) {
 
     let is_npc = g.get_char(victim).map(|c| c.is_npc).unwrap_or(false);
     if is_npc {
-        crate::mobact::clear_memory(victim);
-        crate::arena::forget_char(victim);
+        crate::mobact::clear_memory(g, victim);
+        crate::arena::forget_char(g, victim);
         g.extract_char(victim);
     } else {
         let level = g.get_char(victim).map(|c| c.player.level).unwrap_or(0);
@@ -1702,8 +1702,8 @@ pub(crate) fn die(g: &mut GameState, killer: Option<CharId>, victim: CharId) {
     make_corpse_for_victim(g, victim);
 
     if is_npc {
-        crate::mobact::clear_memory(victim);
-        crate::arena::forget_char(victim);
+        crate::mobact::clear_memory(g, victim);
+        crate::arena::forget_char(g, victim);
         g.extract_char(victim);
     } else {
         let level = g.get_char(victim).map(|c| c.player.level).unwrap_or(0);
@@ -2491,8 +2491,6 @@ mod tests {
 
     #[test]
     fn raw_kill_departure_restores_arena_state_before_respawn() {
-        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
-        crate::arena::reset_for_tests();
         let mut g = GameState::new(Config::default());
         let home = g.add_room(Room::new(
             3001,
@@ -2510,7 +2508,7 @@ mod tests {
         victim.affect_flags = AFF_INVISIBLE;
         let victim = g.create_char(victim);
         g.char_to_room(victim, arena_room);
-        crate::arena::set_stat_for_test(victim, crate::arena::ARENA_COMBATANT1);
+        crate::arena::set_stat_for_test(&mut g, victim, crate::arena::ARENA_COMBATANT1);
         crate::arena::bup_affects(&mut g, victim);
         g.get_char_mut(victim).unwrap().affect_flags = AFF_SLEEP;
 
@@ -2521,15 +2519,15 @@ mod tests {
         assert_eq!(state.affect_flags, AFF_INVISIBLE);
         assert_eq!(state.wimp_level, 12);
         assert_eq!(state.recall_level, 34);
-        assert_eq!(crate::arena::arena_stat(victim), crate::arena::ARENA_NOT);
+        assert_eq!(
+            crate::arena::arena_stat(&g, victim),
+            crate::arena::ARENA_NOT
+        );
         assert_eq!(g.player_save_requests, vec![victim]);
-        crate::arena::reset_for_tests();
     }
 
     #[test]
     fn raw_kill_departure_restores_arena_state_before_ghosting() {
-        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
-        crate::arena::reset_for_tests();
         let mut g = GameState::new(Config::default());
         let limbo = g.add_room(Room::new(99, 0, "Ghost Limbo".to_string(), String::new()));
         let arena_room = g.add_room(Room::new(4801, 48, "Arena Prep".to_string(), String::new()));
@@ -2541,7 +2539,7 @@ mod tests {
         victim.affect_flags = AFF_INVISIBLE;
         let victim = g.create_char(victim);
         g.char_to_room(victim, arena_room);
-        crate::arena::set_stat_for_test(victim, crate::arena::ARENA_COMBATANT1);
+        crate::arena::set_stat_for_test(&mut g, victim, crate::arena::ARENA_COMBATANT1);
         crate::arena::bup_affects(&mut g, victim);
         g.get_char_mut(victim).unwrap().affect_flags = AFF_SLEEP;
 
@@ -2553,9 +2551,11 @@ mod tests {
         assert_eq!(state.wimp_level, 12);
         assert_eq!(state.recall_level, 34);
         assert_ne!(state.prf2_flags & PRF2_INTANGIBLE, 0);
-        assert_eq!(crate::arena::arena_stat(victim), crate::arena::ARENA_NOT);
+        assert_eq!(
+            crate::arena::arena_stat(&g, victim),
+            crate::arena::ARENA_NOT
+        );
         assert_eq!(g.player_save_requests, vec![victim]);
-        crate::arena::reset_for_tests();
     }
 
     #[test]

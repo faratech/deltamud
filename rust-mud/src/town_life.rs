@@ -28,7 +28,6 @@ use crate::act::{ActArg, To, act};
 use crate::state::GameState;
 use crate::types::*;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Mutex, OnceLock};
 
 /// Mud hours with daylight (weather.rs SUN_LIGHT 6..=20).
 const DAY_START: i32 = 6;
@@ -140,17 +139,11 @@ static CARAVANS: &[CaravanEntry] = &[
 // Route table (computed at boot, keyed by the caravan's mob vnum).
 // ---------------------------------------------------------------------------
 
-fn routes() -> &'static Mutex<HashMap<MobVnum, Vec<RoomRnum>>> {
-    static ROUTES: OnceLock<Mutex<HashMap<MobVnum, Vec<RoomRnum>>>> = OnceLock::new();
-    ROUTES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 /// Compute every caravan route. Called from main.rs AFTER integrate_map_rooms
 /// (the map cells must exist for the mixed-graph BFS). Idempotent: a second
 /// call (copyover recovery) simply recomputes the same routes.
-pub fn boot_town_life(g: &GameState) {
-    let mut table = crate::lock_ok::lock(&routes());
-    table.clear();
+pub fn boot_town_life(g: &mut GameState) {
+    g.world.routes.clear();
     for car in CARAVANS {
         let (Some(src), Some(dst)) = (g.real_room(car.home), g.real_room(car.far)) else {
             log::warn!(
@@ -163,7 +156,7 @@ pub fn boot_town_life(g: &GameState) {
         };
         match route_bfs(g, src, dst) {
             Some(path) => {
-                table.insert(car.mob_vnum, path);
+                g.world.routes.insert(car.mob_vnum, path);
             }
             None => log::warn!(
                 "SYSERR: town_life caravan {} has no walkable route {} -> {}",
@@ -302,7 +295,7 @@ fn in_room_vnum(g: &GameState, ch: CharId) -> Option<RoomVnum> {
 
 /// Walk toward the day/night post; bark while standing at it.
 fn drive_commuter(g: &mut GameState, ch: CharId, entry: &'static ScheduleEntry) {
-    let hours = crate::weather::time_now().0;
+    let hours = crate::weather::time_now(g).0;
     let post = if (DAY_START..=DAY_END).contains(&hours) {
         entry.day_post
     } else {
@@ -322,13 +315,13 @@ fn drive_caravan(g: &mut GameState, ch: CharId, nr: MobVnum) {
     let Some(entry) = lookup_caravan(nr) else {
         return;
     };
-    let path = crate::lock_ok::lock(&routes()).get(&nr).cloned();
+    let path = g.world.routes.get(&nr).cloned();
     let Some(path) = path else { return };
     if path.len() < 2 {
         return;
     }
 
-    let hours = crate::weather::time_now().0;
+    let hours = crate::weather::time_now(g).0;
     let away = (CARAVAN_DEPART_HOUR..CARAVAN_RETURN_HOUR).contains(&hours);
     let target_rnum = if away { path[path.len() - 1] } else { path[0] };
 
@@ -436,8 +429,8 @@ mod tests {
     #[test]
     fn commuter_walks_to_day_post_and_home_at_night() {
         let _guard = clock_lock();
-        crate::weather::test_clock::set_hour(12); // day
         let mut g = GameState::new(Config::default());
+        crate::weather::test_clock::set_hour(&mut g, 12); // day
         let square = g.add_room(Room::new(210, 2, "Square".into(), String::new()));
         let hall = g.add_room(Room::new(201, 2, "Hall".into(), String::new()));
         // One-step commute each way.
@@ -468,7 +461,7 @@ mod tests {
         );
 
         // Night falls: the next drive steps back toward the night post.
-        crate::weather::test_clock::set_hour(23);
+        crate::weather::test_clock::set_hour(&mut g, 23);
         drive(&mut g, teacher);
         assert_eq!(g.get_char(teacher).unwrap().in_room, Some(square));
     }
@@ -494,9 +487,9 @@ mod tests {
             .await
             .unwrap();
         crate::maputils::integrate_map_rooms(&mut g);
-        boot_town_life(&g);
+        boot_town_life(&mut g);
 
-        let table = crate::lock_ok::lock(&routes());
+        let table = &g.world.routes;
         for car in CARAVANS {
             let path = table
                 .get(&car.mob_vnum)
@@ -528,16 +521,16 @@ mod tests {
         if !std::path::Path::new(&format!("{}/world/worldmap", lib)).exists() {
             return;
         }
-        crate::weather::test_clock::set_hour(12); // away hours
         let mut g = crate::state::GameState::new(Config::default());
+        crate::weather::test_clock::set_hour(&mut g, 12); // away hours
         g.config.lib_path = lib.to_string();
         crate::file_loader::FileLoader::load_world(&mut g, lib)
             .await
             .unwrap();
         crate::maputils::integrate_map_rooms(&mut g);
-        boot_town_life(&g);
+        boot_town_life(&mut g);
 
-        let path = crate::lock_ok::lock(&routes()).get(&304).cloned().unwrap();
+        let path = g.world.routes.get(&304).cloned().unwrap();
         let home = path[0];
         let courier = npc(&mut g, 304, home);
 
@@ -550,7 +543,7 @@ mod tests {
         );
 
         // After the return hour, the same courier heads home.
-        crate::weather::test_clock::set_hour(17);
+        crate::weather::test_clock::set_hour(&mut g, 17);
         drive(&mut g, courier);
         assert_eq!(g.get_char(courier).unwrap().in_room, Some(home));
     }

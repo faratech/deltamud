@@ -37,8 +37,6 @@
 use crate::act::{ActArg, To, act};
 use crate::state::GameState;
 use crate::types::*;
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
 // Flag / vnum constants mirroring quest.c's #defines and structs.h.
@@ -89,32 +87,26 @@ const QUEST_TRASH_ROOM: RoomVnum = 1204;
 // Runtime questgiver table (substitute for ch->questgiver pointer).
 // ---------------------------------------------------------------------------
 
-static QUEST_GIVERS: OnceLock<Mutex<HashMap<CharId, CharId>>> = OnceLock::new();
-
-fn givers() -> &'static Mutex<HashMap<CharId, CharId>> {
-    QUEST_GIVERS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn set_questgiver(ch: CharId, questman: Option<CharId>) {
-    let mut g = crate::lock_ok::lock(&givers());
+fn set_questgiver(g: &mut GameState, ch: CharId, questman: Option<CharId>) {
+    let table = &mut g.econ.quest_givers;
     match questman {
         Some(q) => {
-            g.insert(ch, q);
+            table.insert(ch, q);
         }
         None => {
-            g.remove(&ch);
+            table.remove(&ch);
         }
     }
 }
 
-fn get_questgiver(ch: CharId) -> Option<CharId> {
-    crate::lock_ok::lock(&givers()).get(&ch).copied()
+fn get_questgiver(g: &GameState, ch: CharId) -> Option<CharId> {
+    g.econ.quest_givers.get(&ch).copied()
 }
 
 /// Integrator boot hook. No data file (quest state is per-player); just clears
 /// the runtime questgiver bindings so a fresh boot starts clean.
-pub fn boot_quest(_lib_path: &str) {
-    crate::lock_ok::lock(&givers()).clear();
+pub fn boot_quest(g: &mut GameState, _lib_path: &str) {
+    g.econ.quest_givers.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -217,7 +209,7 @@ pub fn do_autoquest(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32)
                 None => return,
             };
             if qmob < 0 {
-                if let Some(questman) = get_questgiver(ch) {
+                if let Some(questman) = get_questgiver(g, ch) {
                     let qname = g
                         .get_char(questman)
                         .map(|c| c.display_for_others())
@@ -321,7 +313,7 @@ pub fn do_autoquest(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32)
     }
 
     // GET_QUESTGIVER(ch) = questman;
-    set_questgiver(ch, Some(questman));
+    set_questgiver(g, ch, Some(questman));
 
     match arg1.as_str() {
         "list" => do_quest_list(g, ch, questman),
@@ -659,7 +651,7 @@ fn do_quest_complete(g: &mut GameState, ch: CharId, questman: CharId) {
     );
 
     // GET_QUESTGIVER(ch) != questman ?
-    if get_questgiver(ch) != Some(questman) {
+    if get_questgiver(g, ch) != Some(questman) {
         questman_tell(
             g,
             questman,
@@ -862,7 +854,7 @@ fn do_quest_complete(g: &mut GameState, ch: CharId, questman: CharId) {
 /// Reset the per-player quest state after a successful turn-in. `next_quest`
 /// is the cooldown the C assigns (15 for mob quests, 30 for object quests).
 fn clear_quest(g: &mut GameState, ch: CharId, next_quest: i32) {
-    set_questgiver(ch, None);
+    set_questgiver(g, ch, None);
     if let Some(c) = g.get_char_mut(ch) {
         c.act_flags &= !PLR_QUESTOR;
         c.quest_countdown = 0;
@@ -1083,7 +1075,7 @@ fn deny_quest(g: &mut GameState, ch: CharId, questman: CharId) {
         ch,
         "Sorry, but I don't have any quests for you now. Try again later",
     );
-    set_questgiver(ch, None);
+    set_questgiver(g, ch, None);
     if let Some(c) = g.get_char_mut(ch) {
         c.next_quest = 1;
         c.quest_mob = 0;
@@ -1358,7 +1350,7 @@ pub fn quest_update(g: &mut GameState) {
                 c.quest_countdown = cd;
             }
             if cd <= 0 {
-                set_questgiver(ch, None);
+                set_questgiver(g, ch, None);
                 if let Some(c) = g.get_char_mut(ch) {
                     c.next_quest = 30;
                     c.act_flags &= !PLR_QUESTOR;
@@ -1502,7 +1494,7 @@ mod deliver_tests {
     }
 
     fn assign_deliver(g: &mut GameState, ch: CharId, qm: CharId) -> bool {
-        set_questgiver(ch, Some(qm));
+        set_questgiver(g, ch, Some(qm));
         let ok = generate_deliver_quest(g, ch, qm);
         if ok {
             // Mirror what do_quest_request does after a successful generate:

@@ -558,7 +558,7 @@ pub fn king_welmar(g: &mut GameState, _ch: CharId, me: CharId, cmd: &str, _arg: 
         }
     };
 
-    let hours = crate::weather::time_now().0;
+    let hours = crate::weather::time_now(g).0;
     let here = in_room(g, ch);
 
     if !moving {

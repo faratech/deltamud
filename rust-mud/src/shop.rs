@@ -842,7 +842,7 @@ fn plr_killer(g: &GameState, ch: CharId) -> bool {
 
 /// Current mud-clock hour (0..23) for the shop open/close gate. This mirrors
 /// weather.rs's reset_time()/mud_time_passed() exactly. We compute it locally
-/// instead of calling `crate::weather::time_now()` so the shop module does not
+/// instead of calling `crate::weather::time_now(g)` so the shop module does not
 /// hard-depend on a sibling module that may not be wired yet — once weather is
 /// integrated the value is identical (both seed from `now - YEARS*1000`, which
 /// always yields hour/day/month = 0 plus the live fractional hour of `now`).
@@ -852,11 +852,11 @@ fn plr_killer(g: &GameState, ch: CharId) -> bool {
 /// value over a long uptime. The shop only consults the hour to gate
 /// open/close; every shipped DeltaMUD shop uses open=0 close>=24 (always open),
 /// so the gate is a no-op in practice and this local computation matches.
-fn mud_hour() -> i32 {
+fn mud_hour(g: &GameState) -> i32 {
     // C shop.c:126-133 compares SHOP_OPEN against time_info.hours - the
     // advanced MUD clock (weather.rs frozen clock), not the wall clock,
     // so shop hours track the game day (#172).
-    crate::weather::time_now().0
+    crate::weather::time_now(g).0
 }
 
 /// Translate the Rust ObjectType enum back to the raw structs.h ITEM_* integer
@@ -1077,7 +1077,7 @@ fn is_ok_char(g: &mut GameState, keeper: CharId, ch: CharId, shop: &ShopData) ->
 }
 
 fn is_open(g: &mut GameState, keeper: CharId, shop: &ShopData, msg: bool) -> bool {
-    let hours = mud_hour();
+    let hours = mud_hour(g);
     let mut buf = String::new();
 
     if shop.open1 > hours {
@@ -2991,7 +2991,7 @@ mod shop_hours_tests {
             (18, Some(MSG_CLOSED_FOR_DAY)),
             (23, Some(MSG_CLOSED_FOR_DAY)),
         ] {
-            crate::weather::test_clock::set_hour(hour);
+            crate::weather::test_clock::set_hour(&mut g, hour);
             g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
             let open = is_open(&mut g, keeper, &shop, true);
             let out = g.descriptors.get(&conn).unwrap().outbuf.clone();
@@ -3019,7 +3019,7 @@ mod shop_hours_tests {
             (14, None),                     // reopened
             (21, Some(MSG_CLOSED_FOR_DAY)),
         ] {
-            crate::weather::test_clock::set_hour(hour);
+            crate::weather::test_clock::set_hour(&mut g, hour);
             g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
             let open = is_open(&mut g, keeper, &shop, true);
             let out = g.descriptors.get(&conn).unwrap().outbuf.clone();

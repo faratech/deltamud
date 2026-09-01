@@ -1100,8 +1100,8 @@ fn script_die(g: &mut GameState, ch: CharId, killer: Option<CharId>) {
 
     if is_npc {
         crate::dg_handler::on_char_extracted(g, ch);
-        crate::mobact::clear_memory(ch);
-        crate::arena::forget_char(ch);
+        crate::mobact::clear_memory(g, ch);
+        crate::arena::forget_char(g, ch);
         g.extract_char(ch);
     } else {
         respawn_pc(g, ch);

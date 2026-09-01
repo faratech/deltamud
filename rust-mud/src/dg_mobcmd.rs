@@ -1412,7 +1412,7 @@ fn do_mremember(g: &mut GameState, ch: CharId, argument: &str) {
     } else {
         Some(cmd.to_string())
     };
-    script_mem_add(ch, victim, cmd_opt);
+    script_mem_add(g, ch, victim, cmd_opt);
 }
 
 /// do_mforget — remove a victim from the mob's script-memory list.
@@ -1453,7 +1453,7 @@ fn do_mforget(g: &mut GameState, ch: CharId, argument: &str) {
             }
         }
     };
-    script_mem_forget(ch, victim);
+    script_mem_forget(g, ch, victim);
 }
 
 /// do_mtransform — morph the mob into a different mob prototype, preserving its
@@ -1642,8 +1642,6 @@ fn display_arg(arg: &str) -> String {
 // next sees them (the MEMORY trigger consumes this). Exposed read API lets the
 // memory-trigger fire-point (in the VM) walk a mob's remembered victims.
 // ---------------------------------------------------------------------------
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone)]
 pub struct ScriptMemory {
@@ -1651,44 +1649,32 @@ pub struct ScriptMemory {
     pub cmd: Option<String>, // optional command to mforce on the mob when seen
 }
 
-static SCRIPT_MEM: OnceLock<Mutex<HashMap<CharId, Vec<ScriptMemory>>>> = OnceLock::new();
-
-fn script_mem() -> &'static Mutex<HashMap<CharId, Vec<ScriptMemory>>> {
-    SCRIPT_MEM.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn script_mem_add(mob: CharId, victim: CharId, cmd: Option<String>) {
-    let mut m = crate::lock_ok::lock(&script_mem());
-    m.entry(mob)
+fn script_mem_add(g: &mut GameState, mob: CharId, victim: CharId, cmd: Option<String>) {
+    g.dg.script_memory
+        .entry(mob)
         .or_default()
         .push(ScriptMemory { id: victim, cmd });
 }
 
-fn script_mem_forget(mob: CharId, victim: CharId) {
-    let mut m = crate::lock_ok::lock(&script_mem());
-    if let Some(list) = m.get_mut(&mob) {
+fn script_mem_forget(g: &mut GameState, mob: CharId, victim: CharId) {
+    if let Some(list) = g.dg.script_memory.get_mut(&mob) {
         list.retain(|e| e.id != victim);
         if list.is_empty() {
-            m.remove(&mob);
+            g.dg.script_memory.remove(&mob);
         }
     }
 }
 
 /// VM read API: snapshot a mob's remembered victims (for the MEMORY trigger).
-pub fn script_mem_list(mob: CharId) -> Vec<ScriptMemory> {
-    script_mem()
-        .lock()
-        .unwrap()
-        .get(&mob)
-        .cloned()
-        .unwrap_or_default()
+pub fn script_mem_list(g: &GameState, mob: CharId) -> Vec<ScriptMemory> {
+    g.dg.script_memory.get(&mob).cloned().unwrap_or_default()
 }
 
 /// Drop all script memory for a mob (call when the mob is extracted, so a
 /// recycled CharId never inherits stale memory — C frees SCRIPT_MEM in
 /// free_char).
-pub fn script_mem_clear(mob: CharId) {
-    crate::lock_ok::lock(&script_mem()).remove(&mob);
+pub fn script_mem_clear(g: &mut GameState, mob: CharId) {
+    g.dg.script_memory.remove(&mob);
 }
 
 // ---------------------------------------------------------------------------

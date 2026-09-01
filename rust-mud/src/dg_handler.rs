@@ -367,18 +367,18 @@ pub fn add_trigger(key: ScriptKey, t: TrigId, loc: i32) {
 
 /// extract_trigger(trig): cancel any wait event, drop from the arena. Caller
 /// has already unlinked it from the owning ScriptData (remove_trigger does).
-pub fn extract_trigger(id: TrigId) {
+pub fn extract_trigger(g: &mut GameState, id: TrigId) {
     let ev = with_trig(id, |t| t.wait_event).flatten();
-    dg_event::cancel_for_trigger(ev);
+    dg_event::cancel_for_trigger(g, ev);
     crate::lock_ok::lock(&trigs()).remove(&id);
 }
 
 /// extract_script(sc): remove every trigger on `key`, then drop the script
 /// container. (C frees the script struct; we just remove the table entry.)
-pub fn extract_script(key: ScriptKey) {
+pub fn extract_script(g: &mut GameState, key: ScriptKey) {
     let ids = trigger_ids(key);
     for id in ids {
-        extract_trigger(id);
+        extract_trigger(g, id);
     }
     crate::lock_ok::lock(&scripts()).remove(&key);
 }
@@ -386,7 +386,7 @@ pub fn extract_script(key: ScriptKey) {
 /// remove_trigger(sc, name): name may be "N.keyword", a bare number, or a
 /// keyword; mirrors C exactly. Returns true if a trigger was removed. Also
 /// recomputes SCRIPT_TYPES and drops the script container if empty.
-pub fn remove_trigger(key: ScriptKey, name: &str) -> bool {
+pub fn remove_trigger(g: &mut GameState, key: ScriptKey, name: &str) -> bool {
     // Parse the C "num . name" form.
     let (mut num, search_name, by_string): (i32, String, bool) = if let Some(dot) = name.find('.') {
         let (n, rest) = name.split_at(dot);
@@ -449,7 +449,7 @@ pub fn remove_trigger(key: ScriptKey, name: &str) -> bool {
             sc.trig_list.retain(|&t| t != tid);
         }
     }
-    extract_trigger(tid);
+    extract_trigger(g, tid);
 
     // Recompute SCRIPT_TYPES; drop empty script.
     let remaining = trigger_ids(key);
@@ -498,17 +498,15 @@ pub fn extract_script_mem(ch: CharId) {
 /// Called when a char/obj is extracted from the world so its attached script
 /// state does not leak (mirrors free_char/free_obj clearing ->script).
 pub fn on_char_extracted(g: &mut GameState, ch: CharId) {
-    let _ = g;
-    extract_script(ScriptKey::Mob(ch));
+    extract_script(g, ScriptKey::Mob(ch));
     extract_script_mem(ch);
     // The mob memory used by the MEMORY trigger lives in dg_mobcmd's table
     // (mremember/mforget write there); clear it too so a recycled CharId can't
     // inherit stale remembered victims.
-    crate::dg_mobcmd::script_mem_clear(ch);
+    crate::dg_mobcmd::script_mem_clear(g, ch);
 }
 pub fn on_obj_extracted(g: &mut GameState, obj: ObjId) {
-    let _ = g;
-    extract_script(ScriptKey::Obj(obj));
+    extract_script(g, ScriptKey::Obj(obj));
 }
 
 // Test-only: a process-wide lock serialising access to the DG module-static
@@ -544,7 +542,7 @@ mod tests {
 
     #[test]
     fn overflowing_detach_ordinal_cannot_remove_the_first_trigger() {
-        let _guard = crate::lock_ok::lock(&DG_TEST_LOCK);
+        let mut g = crate::state::GameState::new(crate::config::Config::default());
         boot_handler();
         let key = ScriptKey::Room(987_654);
         let first = install_trig(trigger("first"));
@@ -552,10 +550,10 @@ mod tests {
         add_trigger(key, first, -1);
         add_trigger(key, second, -1);
 
-        assert!(!remove_trigger(key, "2147483648"));
-        assert!(!remove_trigger(key, "2147483648.first"));
+        assert!(!remove_trigger(&mut g, key, "2147483648"));
+        assert!(!remove_trigger(&mut g, key, "2147483648.first"));
         assert_eq!(trigger_ids(key), vec![first, second]);
 
-        extract_script(key);
+        extract_script(&mut g, key);
     }
 }

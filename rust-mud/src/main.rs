@@ -682,10 +682,6 @@ async fn run_server() -> Result<state::ProcessDisposition> {
         None
     };
 
-    // Seed the mud clock from the effective lib path before any world/helper
-    // can call time_now()/sunlight() and lock in Config::default().lib_path.
-    weather::initialize_clock(&config.lib_path);
-
     let mut runtime_lease = None;
     let raw_db: Arc<dyn DatabaseInterface> = if config.use_mock_db {
         info!("Using in-memory mock database");
@@ -743,6 +739,10 @@ async fn run_server() -> Result<state::ProcessDisposition> {
 
     // Build the world.
     let mut state = state::GameState::new(config.clone());
+    // Seed the mud clock from the effective lib path before any world/helper
+    // reads time_now()/sunlight() (the old static had to self-initialize; the
+    // owned clock is seeded explicitly here).
+    weather::initialize_clock(&mut state, &config.lib_path);
 
     // Seed the PRNG (pinned for golden tests, else from the clock).
     let seed = config.rng_seed.unwrap_or_else(|| {
@@ -785,7 +785,7 @@ async fn run_server() -> Result<state::ProcessDisposition> {
 
     // Deltania Breathes: precompute the cross-town caravan routes over the
     // (now spliced) surface map. Must run after integrate_map_rooms.
-    town_life::boot_town_life(&state);
+    town_life::boot_town_life(&mut state);
 
     // Load socials (CircleMUD boot_social_messages); spliced into command
     // lookup as a fallback since they are not in the static command table.
@@ -796,7 +796,7 @@ async fn run_server() -> Result<state::ProcessDisposition> {
     .context("load mandatory social command table")?;
     // db.c:299-300 index_boot(DB_BOOT_HLP) - serve the 73k-line help index
     // to the live `help` command (#232).
-    hedit::boot_help_table(&config.lib_path).context("load mandatory help table")?;
+    hedit::boot_help_table(&mut state).context("load mandatory help table")?;
 
     // Load the combat hit-messages (fight.c load_messages, lib/misc/messages):
     // flavourful per-skill / per-weapon death/hit/miss/god messages.
@@ -816,7 +816,7 @@ async fn run_server() -> Result<state::ProcessDisposition> {
     boards::boot_boards(&config.lib_path);
     ban::boot_ban(&config.lib_path);
     mail::boot_mail(&config.lib_path);
-    quest::boot_quest(&config.lib_path);
+    quest::boot_quest(&mut state, &config.lib_path);
     auction::boot_auction(&config.lib_path);
     // C boot_db order (db.c:358-365 vs 369-373): the initial zone reset
     // (world population) runs BEFORE House_boot, so stored house objects are

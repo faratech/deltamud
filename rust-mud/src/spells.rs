@@ -409,8 +409,8 @@ pub fn spell_summon(
 
     // Arena gates (spells.c): summon may not bridge the arena boundary — block
     // if exactly one of caster/victim is currently in the arena.
-    let v_in_arena = crate::arena::arena_stat(victim) != crate::arena::ARENA_NOT;
-    let ch_in_arena = crate::arena::arena_stat(ch) != crate::arena::ARENA_NOT;
+    let v_in_arena = crate::arena::arena_stat(&g, victim) != crate::arena::ARENA_NOT;
+    let ch_in_arena = crate::arena::arena_stat(&g, ch) != crate::arena::ARENA_NOT;
     if v_in_arena && !ch_in_arena {
         g.send_to_char(
             ch,
@@ -1346,8 +1346,8 @@ pub fn spell_portal(
         return;
     }
     // Arena gates (spells.c): a portal may not bridge the arena boundary.
-    let v_in_arena = crate::arena::arena_stat(victim) != crate::arena::ARENA_NOT;
-    let ch_in_arena = crate::arena::arena_stat(ch) != crate::arena::ARENA_NOT;
+    let v_in_arena = crate::arena::arena_stat(&g, victim) != crate::arena::ARENA_NOT;
+    let ch_in_arena = crate::arena::arena_stat(&g, ch) != crate::arena::ARENA_NOT;
     if v_in_arena && !ch_in_arena {
         g.send_to_char(
             ch,
@@ -1823,8 +1823,6 @@ mod tests {
 
     #[test]
     fn spell_teleport_forced_arena_departure_restores_without_penalty() {
-        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
-        crate::arena::reset_for_tests();
         let mut g = GameState::new(Config::default());
         let mut arena = Room::new(4801, 48, "Arena".into(), String::new());
         // Leave exactly one eligible teleport destination.
@@ -1838,7 +1836,7 @@ mod tests {
         crate::gold::set(&mut victim, crate::gold::Account::Carried, 4_321);
         let victim = g.create_char(victim);
         g.char_to_room(victim, arena);
-        crate::arena::set_stat_for_test(victim, crate::arena::ARENA_COMBATANT1);
+        crate::arena::set_stat_for_test(&mut g, victim, crate::arena::ARENA_COMBATANT1);
         crate::arena::bup_affects(&mut g, victim);
         g.get_char_mut(victim).unwrap().affect_flags = crate::flags::AFF_BLIND;
 
@@ -1850,15 +1848,15 @@ mod tests {
         assert_eq!(state.wimp_level, 12);
         assert_eq!(state.recall_level, 34);
         assert_eq!(state.points.gold, 4_321);
-        assert_eq!(crate::arena::arena_stat(victim), crate::arena::ARENA_NOT);
+        assert_eq!(
+            crate::arena::arena_stat(&g, victim),
+            crate::arena::ARENA_NOT
+        );
         assert_eq!(g.player_save_requests, vec![victim]);
-        crate::arena::reset_for_tests();
     }
 
     #[test]
     fn arena_recall_within_arena_does_not_consume_the_backup() {
-        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
-        crate::arena::reset_for_tests();
         let mut g = GameState::new(Config::default());
         let prep = g.add_room(Room::new(4801, 48, "Arena Prep".into(), String::new()));
         let pit = g.add_room(Room::new(4899, 48, "Arena Pit".into(), String::new()));
@@ -1868,7 +1866,7 @@ mod tests {
         victim.affect_flags = crate::flags::AFF_INVISIBLE;
         let victim = g.create_char(victim);
         g.char_to_room(victim, pit);
-        crate::arena::set_stat_for_test(victim, crate::arena::ARENA_COMBATANT1);
+        crate::arena::set_stat_for_test(&mut g, victim, crate::arena::ARENA_COMBATANT1);
         crate::arena::bup_affects(&mut g, victim);
 
         spell_recall(&mut g, 20, victim, Some(victim), None);
@@ -1878,11 +1876,10 @@ mod tests {
         assert_eq!(state.wimp_level, 0);
         assert_eq!(state.recall_level, 0);
         assert_eq!(
-            crate::arena::arena_stat(victim),
+            crate::arena::arena_stat(&g, victim),
             crate::arena::ARENA_COMBATANT1
         );
         assert!(g.player_save_requests.is_empty());
-        crate::arena::reset_for_tests();
     }
 
     #[test]

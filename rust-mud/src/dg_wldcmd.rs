@@ -876,8 +876,6 @@ mod tests {
 
     #[test]
     fn wteleport_uses_forced_arena_departure_cleanup() {
-        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
-        crate::arena::reset_for_tests();
         let mut g = GameState::new(Config::default());
         let arena_room = g.add_room(Room::new(4801, 48, "Arena".into(), String::new()));
         let outside = g.add_room(Room::new(3001, 30, "Temple".into(), String::new()));
@@ -888,7 +886,7 @@ mod tests {
         crate::gold::set(&mut player, crate::gold::Account::Carried, 8_765);
         let player = g.create_char(player);
         g.char_to_room(player, arena_room);
-        crate::arena::set_stat_for_test(player, crate::arena::ARENA_COMBATANT1);
+        crate::arena::set_stat_for_test(&mut g, player, crate::arena::ARENA_COMBATANT1);
         crate::arena::bup_affects(&mut g, player);
         g.get_char_mut(player).unwrap().affect_flags = crate::flags::AFF_BLIND;
 
@@ -900,8 +898,10 @@ mod tests {
         assert_eq!(state.wimp_level, 12);
         assert_eq!(state.recall_level, 34);
         assert_eq!(state.points.gold, 8_765);
-        assert_eq!(crate::arena::arena_stat(player), crate::arena::ARENA_NOT);
+        assert_eq!(
+            crate::arena::arena_stat(&g, player),
+            crate::arena::ARENA_NOT
+        );
         assert_eq!(g.player_save_requests, vec![player]);
-        crate::arena::reset_for_tests();
     }
 }

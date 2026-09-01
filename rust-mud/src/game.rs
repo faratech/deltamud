@@ -2735,7 +2735,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         let elapsed = (now - snapshot.last_logon).num_seconds().max(0);
         snapshot.player.time_played = snapshot.player.time_played.saturating_add(elapsed);
         snapshot.last_logon = now;
-        crate::arena::apply_process_exit_state_to_snapshot(ch, &mut snapshot);
+        crate::arena::apply_process_exit_state_to_snapshot(&self.state, ch, &mut snapshot);
         Some(snapshot)
     }
 
@@ -6201,8 +6201,6 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn disconnect_persists_restored_arena_state_before_extracting() {
-        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
-        crate::arena::reset_for_tests();
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db.clone());
         let arena_room = game.state.add_room(crate::room::Room::new(
@@ -6228,7 +6226,7 @@ mod tests {
         let cid = game.state.create_char(ch);
         game.state.char_to_room(cid, arena_room);
         game.state.descriptors.get_mut(&conn).unwrap().character = Some(cid);
-        crate::arena::set_stat_for_test(cid, crate::arena::ARENA_COMBATANT1);
+        crate::arena::set_stat_for_test(&mut game.state, cid, crate::arena::ARENA_COMBATANT1);
         crate::arena::bup_affects(&mut game.state, cid);
         game.state.get_char_mut(cid).unwrap().affect_flags = crate::flags::AFF_BLIND;
 
@@ -6240,9 +6238,11 @@ mod tests {
         assert_eq!(saved.wimp_level, 12);
         assert_eq!(saved.recall_level, 34);
         assert_eq!(saved.points.gold, 7_777);
-        assert_eq!(crate::arena::arena_stat(cid), crate::arena::ARENA_NOT);
+        assert_eq!(
+            crate::arena::arena_stat(&game.state, cid),
+            crate::arena::ARENA_NOT
+        );
         assert!(!game.state.char_exists(cid));
-        crate::arena::reset_for_tests();
     }
 
     fn ban_test_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -9178,9 +9178,7 @@ mod shutdown_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn failed_shutdown_preserves_switched_connection_and_arena_then_retry_commits() {
-        let _arena_guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
         let _olc_guard = crate::olc::test_save_list_guard();
-        crate::arena::reset_for_tests();
 
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db.clone());
@@ -9207,7 +9205,7 @@ mod shutdown_tests {
             });
             character.act_flags |= crate::objsave::PLR_CRASH;
         }
-        crate::arena::set_stat_for_test(player, crate::arena::ARENA_COMBATANT1);
+        crate::arena::set_stat_for_test(&mut game.state, player, crate::arena::ARENA_COMBATANT1);
         crate::arena::bup_affects(&mut game.state, player);
         {
             let character = game.state.get_char_mut(player).unwrap();
@@ -9248,7 +9246,7 @@ mod shutdown_tests {
         assert_eq!(game.state.descriptors[&conn].original, Some(player));
         assert_eq!(game.state.descriptors[&conn].character, Some(npc));
         assert_eq!(
-            crate::arena::arena_stat(player),
+            crate::arena::arena_stat(&game.state, player),
             crate::arena::ARENA_COMBATANT1
         );
         let live = game.state.get_char(player).unwrap();
@@ -9279,7 +9277,10 @@ mod shutdown_tests {
 
         assert!(game.shutdown().await);
         assert!(!game.outputs.contains_key(&conn));
-        assert_eq!(crate::arena::arena_stat(player), crate::arena::ARENA_NOT);
+        assert_eq!(
+            crate::arena::arena_stat(&game.state, player),
+            crate::arena::ARENA_NOT
+        );
         let restored = game.state.get_char(player).unwrap();
         assert_eq!(restored.wimp_level, 12);
         assert_eq!(restored.recall_level, 34);
@@ -9294,7 +9295,6 @@ mod shutdown_tests {
         assert_eq!(durable.affect_flags, AFF_INVISIBLE);
         assert_eq!(durable.affected[0].spell_type, 7);
 
-        crate::arena::reset_for_tests();
         std::fs::remove_dir_all(lib).unwrap();
     }
 
@@ -9713,9 +9713,7 @@ mod ordered_player_save_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn copyover_database_failure_preserves_live_arena_and_session_state() {
-        let _arena_guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
         let _olc_guard = crate::olc::test_save_list_guard();
-        crate::arena::reset_for_tests();
 
         let db = Arc::new(MockDatabase::new());
         let seed = Character::new_player("Copyfail".into(), Class::Warrior, Race::Human);
@@ -9753,7 +9751,7 @@ mod ordered_player_save_tests {
             descriptor.state = ConState::Playing;
             descriptor.character = Some(player_id);
         }
-        crate::arena::set_stat_for_test(player_id, crate::arena::ARENA_COMBATANT1);
+        crate::arena::set_stat_for_test(&mut game.state, player_id, crate::arena::ARENA_COMBATANT1);
         crate::arena::bup_affects(&mut game.state, player_id);
         {
             let player = game.state.get_char_mut(player_id).unwrap();
@@ -9777,7 +9775,7 @@ mod ordered_player_save_tests {
         assert_eq!(game.state.descriptors[&conn].state, ConState::Playing);
         assert_eq!(game.state.descriptors[&conn].character, Some(player_id));
         assert_eq!(
-            crate::arena::arena_stat(player_id),
+            crate::arena::arena_stat(&game.state, player_id),
             crate::arena::ARENA_COMBATANT1
         );
         let live_after = game.state.get_char(player_id).unwrap();
@@ -9794,15 +9792,11 @@ mod ordered_player_save_tests {
                 .outbuf
                 .contains("Copyover database save failed")
         );
-
-        crate::arena::reset_for_tests();
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn copyover_output_failure_keeps_sessions_and_persists_exit_safe_clone() {
-        let _arena_guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
         let _olc_guard = crate::olc::test_save_list_guard();
-        crate::arena::reset_for_tests();
 
         let db = Arc::new(MockDatabase::new());
         let mut seed = Character::new_player("Copyflush".into(), Class::Warrior, Race::Human);
@@ -9847,7 +9841,7 @@ mod ordered_player_save_tests {
         descriptor.state = ConState::Playing;
         descriptor.character = Some(player_id);
         game.state.descriptors.insert(conn, descriptor);
-        crate::arena::set_stat_for_test(player_id, crate::arena::ARENA_COMBATANT1);
+        crate::arena::set_stat_for_test(&mut game.state, player_id, crate::arena::ARENA_COMBATANT1);
         crate::arena::bup_affects(&mut game.state, player_id);
         {
             let player = game.state.get_char_mut(player_id).unwrap();
@@ -9883,7 +9877,7 @@ mod ordered_player_save_tests {
         assert_eq!(game.state.descriptors[&conn].original, Some(player_id));
         assert_eq!(game.state.descriptors[&conn].character, Some(npc));
         assert_eq!(
-            crate::arena::arena_stat(player_id),
+            crate::arena::arena_stat(&game.state, player_id),
             crate::arena::ARENA_COMBATANT1
         );
         let live_after = game.state.get_char(player_id).unwrap();
@@ -9909,7 +9903,6 @@ mod ordered_player_save_tests {
         assert_eq!(durable.affected[0].spell_type, 7);
         assert!(!lib.join("copyover.dat").exists());
 
-        crate::arena::reset_for_tests();
         std::fs::remove_dir_all(lib).unwrap();
     }
 

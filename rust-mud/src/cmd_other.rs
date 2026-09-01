@@ -2840,7 +2840,7 @@ pub fn do_observe(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     const ARENA_OBSERVEROOM: RoomVnum = 4899;
 
     let in_room = g.get_char(ch).and_then(|c| c.in_room);
-    let stat = crate::arena::arena_stat(ch);
+    let stat = crate::arena::arena_stat(&g, ch);
     let observatory = g.real_room(ARENA_OBSERVEROOM);
 
     // C act.other.c:1801-1805: an observer must be standing in the observatory.
@@ -2853,7 +2853,7 @@ pub fn do_observe(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
 
     // No argument: report who is currently being watched.
     if arg.is_empty() {
-        let who = crate::arena::arena_observing(ch)
+        let who = crate::arena::arena_observing(&g, ch)
             .map(|v| {
                 g.get_char(v)
                     .map(|c| c.player.name.clone())
@@ -2884,16 +2884,16 @@ pub fn do_observe(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     }
 
     if victim == ch {
-        crate::arena::deobserve(ch);
+        crate::arena::deobserve(g, ch);
         g.send_to_char(ch, "Ok. You're observing nobody now.\r\n");
         return;
     }
 
-    if !crate::arena::is_arena_combatant(victim) {
+    if !crate::arena::is_arena_combatant(g, victim) {
         g.send_to_char(ch, "Hey! That person's not an arena combatant!\r\n");
     } else {
-        crate::arena::deobserve(ch);
-        crate::arena::linkobserve(ch, victim);
+        crate::arena::deobserve(g, ch);
+        crate::arena::linkobserve(g, ch, victim);
         let vname = g
             .get_char(victim)
             .map(|c| c.player.name.clone())
@@ -4941,8 +4941,6 @@ mod tests {
     #[test]
     fn observe_reports_and_retargets_from_the_observatory_311() {
         use crate::arena::{ARENA_COMBATANT1, ARENA_OBSERVER, set_stat_for_test};
-        let _guard = crate::lock_ok::lock(&crate::arena::ARENA_TEST_LOCK);
-        crate::arena::reset_for_tests();
         let mut g = GameState::new(Config::default());
         let conn = ConnId(1);
 
@@ -4960,7 +4958,7 @@ mod tests {
         let ch = connected_player(&mut g, conn, "Watcher", 10);
         let obs = add_test_room(&mut g, 4899);
         g.char_to_room(ch, obs);
-        set_stat_for_test(ch, ARENA_OBSERVER);
+        set_stat_for_test(&mut g, ch, ARENA_OBSERVER);
 
         // An arena combatant somewhere else in the world.
         let mut foe = Character::new_player("Gladiatr".to_string(), Class::Warrior, Race::Human);
@@ -4968,7 +4966,7 @@ mod tests {
         let foe = g.create_char(foe);
         let pit = add_test_room(&mut g, 3005);
         g.char_to_room(foe, pit);
-        set_stat_for_test(foe, ARENA_COMBATANT1);
+        set_stat_for_test(&mut g, foe, ARENA_COMBATANT1);
 
         // No argument: "nobody" initially.
         do_observe(&mut g, ch, "", 0);
@@ -4991,18 +4989,17 @@ mod tests {
             output(&g, conn),
             "You're now observing the actions of Gladiatr.\r\n"
         );
-        assert_eq!(crate::arena::arena_observing(ch), Some(foe));
+        assert_eq!(crate::arena::arena_observing(&g, ch), Some(foe));
 
         // Observing yourself by name detaches (C act.other.c:1826-1830).
         g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
         do_observe(&mut g, ch, "watcher", 0);
         assert_eq!(output(&g, conn), "Ok. You're observing nobody now.\r\n");
-        assert_eq!(crate::arena::arena_observing(ch), None);
+        assert_eq!(crate::arena::arena_observing(&g, ch), None);
 
         // Drop our entries so the shared table stays clean.
-        crate::arena::forget_char(ch);
-        crate::arena::forget_char(foe);
-        crate::arena::forget_char(god);
-        crate::arena::reset_for_tests();
+        crate::arena::forget_char(&mut g, ch);
+        crate::arena::forget_char(&mut g, foe);
+        crate::arena::forget_char(&mut g, god);
     }
 }

@@ -307,7 +307,7 @@ pub fn act_sleep(
             let observer_line_for = |g: &mut GameState, viewer: CharId| -> String {
                 perform_act(g, msg, ch, obj, &vict_obj, viewer)
             };
-            if crate::arena::arena_stat(ch) != crate::arena::ARENA_NOT {
+            if crate::arena::arena_stat(&g, ch) != crate::arena::ARENA_NOT {
                 crate::arena::send_to_observers_rendered(
                     g,
                     ch,
@@ -315,7 +315,7 @@ pub fn act_sleep(
                 );
             }
             if let Some(v) = vict {
-                if crate::arena::arena_stat(v) != crate::arena::ARENA_NOT {
+                if crate::arena::arena_stat(&g, v) != crate::arena::ARENA_NOT {
                     crate::arena::send_to_observers_rendered(
                         g,
                         v,
