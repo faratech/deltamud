@@ -237,7 +237,10 @@ pub struct Game {
     /// also runs the C `do_start` branch: START_MESSG + do_newbie).
     just_created: std::collections::HashSet<ConnId>,
     lib_path: String,
-    /// Lock-free observability counters, shared with the metrics HTTP task.
+    /// Who-list JSON snapshot (Deltania Breathes W5), shared with the metrics
+    /// HTTP task's /api/who route. Written by the Game once a second; readers
+    /// take a short read-lock. Empty string = nothing published yet.
+    who_snapshot: Arc<std::sync::RwLock<String>>,
     /// Updated on the heartbeat hot path (atomics, no mutex).
     metrics: Arc<Metrics>,
     /// Unix timestamp the Game task started, for the MSSP UPTIME datum (which
@@ -264,6 +267,7 @@ impl Game {
             just_created: std::collections::HashSet::new(),
             lib_path: "./lib".to_string(),
             metrics: Arc::new(Metrics::new()),
+            who_snapshot: Arc::new(std::sync::RwLock::new(String::new())),
             started_at: chrono::Utc::now().timestamp(),
             zone_minute_timer: 0,
             zone_reset_queue: Vec::new(),
@@ -275,6 +279,12 @@ impl Game {
     /// Install the shared metrics handle (main.rs creates one Arc and shares it
     /// with both the Game and the HTTP task). Defaults to a private Metrics so
     /// the Game is usable without one (e.g. in tests).
+    /// Share the who-list snapshot with the metrics HTTP task (main.rs creates
+    /// the Arc; /api/who reads it).
+    pub fn set_who_snapshot(&mut self, snapshot: Arc<std::sync::RwLock<String>>) {
+        self.who_snapshot = snapshot;
+    }
+
     pub fn set_metrics(&mut self, metrics: Arc<Metrics>) {
         self.metrics = metrics;
     }
@@ -2266,6 +2276,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         // keep the per-pulse cost negligible. players = playing descriptors;
         // mobs = NPC characters; objs = world objects.
         if self.state.pulse % 10 == 0 {
+            self.refresh_who_snapshot();
             let players = self
                 .state
                 .descriptors
@@ -2903,6 +2914,44 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             }
         }
         messages
+    }
+
+    /// Rebuild the /api/who JSON snapshot (same visibility rules as the
+    /// who2html walk: playing, non-npc, no invis level, not AFF_INVISIBLE).
+    fn refresh_who_snapshot(&mut self) {
+        use serde_json::json;
+        let mut entries: Vec<(u8, serde_json::Value)> = Vec::new();
+        let ids: Vec<CharId> = self.state.players_by_name.values().copied().collect();
+        for cid in ids {
+            let Some(c) = self.state.get_char(cid) else { continue };
+            if c.is_npc {
+                continue;
+            }
+            if c.invis_level > 0 || c.affect_flags & crate::flags::AFF_INVISIBLE != 0 {
+                continue;
+            }
+            entries.push((
+                c.player.level,
+                json!({
+                    "name": c.get_name(),
+                    "level": c.player.level,
+                    "race": crate::whohtml::race_name(&self.state, cid),
+                    "class": crate::whohtml::class_name(&self.state, cid),
+                    "immortal": c.player.level >= LVL_IMMORT,
+                    "title": c.player.title.clone().unwrap_or_default(),
+                }),
+            ));
+        }
+        entries.sort_by(|a, b| b.0.cmp(&a.0));
+        let names: Vec<serde_json::Value> = entries.into_iter().map(|(_, v)| v).collect();
+        let doc = json!({
+            "count": names.len(),
+            "players": names,
+            "generated_at": self.started_at,
+        });
+        if let Ok(mut slot) = self.who_snapshot.write() {
+            *slot = doc.to_string();
+        }
     }
 
     // ---- MSSP (Mud Server Status Protocol) -----------------------------

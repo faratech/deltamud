@@ -272,7 +272,11 @@ fn apply_cli_flags(config: &mut Config, args: impl IntoIterator<Item = String>) 
 /// at the path, and write a fixed HTTP/1.1 response, one request per connection
 /// (Connection: close). This keeps the dependency surface at zero new crates and
 /// is plenty for a Prometheus scrape / liveness probe.
-async fn serve_metrics(listener: TcpListener, metrics: Arc<metrics::Metrics>) {
+async fn serve_metrics(
+    listener: TcpListener,
+    metrics: Arc<metrics::Metrics>,
+    who_snapshot: Arc<std::sync::RwLock<String>>,
+) {
     loop {
         let (mut sock, _peer) = match listener.accept().await {
             Ok(p) => p,
@@ -282,6 +286,7 @@ async fn serve_metrics(listener: TcpListener, metrics: Arc<metrics::Metrics>) {
             }
         };
         let metrics = metrics.clone();
+        let who_snapshot = who_snapshot.clone();
         tokio::spawn(async move {
             // Read just enough to see the request line. A real scrape sends a
             // short request; cap the read so a slow/hostile client can't pin us.
@@ -297,17 +302,28 @@ async fn serve_metrics(listener: TcpListener, metrics: Arc<metrics::Metrics>) {
                 .nth(1) // METHOD <path> HTTP/1.1
                 .unwrap_or("/");
 
-            let (status, body) = if path == "/metrics" || path.starts_with("/metrics?") {
-                ("200 OK", metrics.render_prometheus())
-            } else if path == "/health" || path.starts_with("/health?") {
-                ("200 OK", format!("ok\nplayers {}\n", metrics.players_now()))
-            } else {
-                ("404 Not Found", "not found\n".to_string())
-            };
+            let (status, ctype, body) =
+                if path == "/metrics" || path.starts_with("/metrics?") {
+                    ("200 OK", "text/plain; version=0.0.4", metrics.render_prometheus())
+                } else if path == "/health" || path.starts_with("/health?") {
+                    (
+                        "200 OK",
+                        "text/plain; version=0.0.4",
+                        format!("ok\nplayers {}\n", metrics.players_now()),
+                    )
+                } else if path == "/api/who" || path.starts_with("/api/who?") {
+                    let snapshot = who_snapshot.read().map(|s| s.clone()).unwrap_or_default();
+                    let body =
+                        if snapshot.is_empty() { "{\"count\":0,\"players\":[]}".to_string() } else { snapshot };
+                    ("200 OK", "application/json", body)
+                } else {
+                    ("404 Not Found", "text/plain; version=0.0.4", "not found\n".to_string())
+                };
 
             let resp = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
                 status = status,
+                ctype = ctype,
                 len = body.len(),
                 body = body
             );
@@ -563,6 +579,10 @@ async fn main() -> Result<()> {
     // the heartbeat hot path) and the optional metrics HTTP task (reader).
     let metrics = Arc::new(metrics::Metrics::new());
 
+    // Who-list JSON snapshot for /api/who (W5): written once a second by the
+    // Game task, served read-only here.
+    let who_snapshot = Arc::new(std::sync::RwLock::new(String::new()));
+
     // Optional metrics/health HTTP endpoint. Disabled unless MUD_METRICS_PORT is
     // set (no extra listening socket in the default config). Raw-TCP responder —
     // no web framework, no new crates.
@@ -574,7 +594,9 @@ async fn main() -> Result<()> {
                     Ok(mlistener) => {
                         info!("Metrics endpoint listening on {} (/metrics, /health)", addr);
                         let m = metrics.clone();
-                        tokio::spawn(async move { serve_metrics(mlistener, m).await });
+                        let who = who_snapshot.clone();
+                        info!("  (also serving /api/who)");
+                        tokio::spawn(async move { serve_metrics(mlistener, m, who).await });
                     }
                     Err(e) => warn!("Could not bind metrics port {}: {}", port, e),
                 }
@@ -591,9 +613,11 @@ async fn main() -> Result<()> {
     let db_for_recovery = db.clone();
 
     let game_metrics = metrics.clone();
+    let game_who = who_snapshot.clone();
     let game_handle = tokio::spawn(async move {
         let mut game = game::Game::new(state, db);
         game.set_metrics(game_metrics);
+        game.set_who_snapshot(game_who);
         game.load_text_files(&lib_path).await;
         game.prime_zones();
         if let Err(e) = game.run(game_rx).await {

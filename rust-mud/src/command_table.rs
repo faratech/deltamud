@@ -910,3 +910,47 @@ pub static CMD_INFO: &[CommandDef] = &[
     // terminator — must be last
     c("\n", Dead, DoNotImplemented, 0, 0),
 ];
+
+#[cfg(test)]
+mod help_coverage_tests {
+    /// Anti-gap test (Deltania Breathes W5): every CMD_INFO row must have a
+    /// help topic in the shipped help.hlp. scripts/gen_help.py generated the
+    /// initial sweep; this keeps new commands honest.
+    #[test]
+    fn every_command_has_a_help_topic() {
+        let hlp = concat!(env!("CARGO_MANIFEST_DIR"), "/../lib/text/help/help.hlp");
+        let Ok(text) = std::fs::read_to_string(hlp) else {
+            return; // exotic checkout without the shipped lib
+        };
+        let mut topics = std::collections::HashSet::new();
+        let mut lines = text.lines().peekable();
+        while let Some(key) = lines.next() {
+            if key.starts_with('$') {
+                break;
+            }
+            // Keyword line: space-separated, leading '-' marks a doc topic.
+            for kw in key.split_whitespace() {
+                topics.insert(kw.trim_start_matches('*').to_ascii_lowercase());
+            }
+            while let Some(l) = lines.next() {
+                if l.starts_with('#') {
+                    break;
+                }
+            }
+        }
+        let missing: Vec<&str> = super::CMD_INFO
+            .iter()
+            .map(|c| c.name)
+            // Skip non-command rows: the RESERVED slot, the "." debug entry
+            // and the trailing "\n" sentinel (all faithful to C cmd_info[]).
+            .filter(|n| n.chars().any(|c| c.is_ascii_alphanumeric()))
+            .filter(|n| *n != "RESERVED")  // the C reserved slot, not a command
+            .filter(|n| !topics.contains(&n.to_ascii_lowercase()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "commands without help topics: {:?} (run scripts/gen_help.py)",
+            missing
+        );
+    }
+}

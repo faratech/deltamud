@@ -24,7 +24,7 @@ const WIZ_LEVELS: [&str; 5] = [
 
 /// race_name (C act.informative.c race_name()): the full race name for the
 /// who-list line.
-fn race_name(g: &GameState, ch: CharId) -> &'static str {
+pub(crate) fn race_name(g: &GameState, ch: CharId) -> &'static str {
     const RACES: [&str; 14] = [
         "Human", "Elf", "Gnome", "Dwarf", "Troll", "Goblin", "Drow", "Orc",
         "Minotaur", "Half-Elf", "Half-Orc", "Half-Giant", "Kender", "Unknown",
@@ -38,7 +38,7 @@ fn race_name(g: &GameState, ch: CharId) -> &'static str {
 }
 
 /// class_name (C act.informative.c): full class name.
-fn class_name(g: &GameState, ch: CharId) -> &'static str {
+pub(crate) fn class_name(g: &GameState, ch: CharId) -> &'static str {
     const CLASSES: [&str; 5] = ["Magic User", "Cleric", "Thief", "Warrior", "Artisan"];
     g.get_char(ch)
         .map(|c| {
@@ -48,7 +48,7 @@ fn class_name(g: &GameState, ch: CharId) -> &'static str {
         .unwrap_or("Unknown")
 }
 
-fn status_suffixes(c: &Character) -> String {
+pub(crate) fn status_suffixes(c: &Character) -> String {
     // C: (mailing) (writing) (away) (deaf) (notell) (quest) (killer) (thief)
     const PLR_MAILING: i64 = 1 << 5;
     const PLR_WRITING: i64 = 1 << 4;
