@@ -804,7 +804,7 @@ fn pchelper_evil(g: &mut GameState, ch: CharId) {
 /// do not keep retrying it.
 fn call_mob_spec(g: &mut GameState, ch: CharId) -> bool {
     let vnum = g.get_char(ch).map(|c| c.nr).unwrap_or(NOBODY);
-    if let Some(func) = crate::spec_assign::get_mob_spec(vnum) {
+    if let Some(func) = crate::spec_assign::get_mob_spec(g, vnum) {
         if func(g, ch, ch, "", "") {
             return true;
         }
@@ -847,7 +847,7 @@ pub fn combat_mob_spec_pulse(g: &mut GameState, ch: CharId) {
     }
     let vnum = c.nr;
     if c.act_flags & MOB_CASTER != 0
-        || crate::spec_assign::get_mob_spec(vnum).is_some()
+        || crate::spec_assign::get_mob_spec(g, vnum).is_some()
         || crate::shop::is_shop_keeper_vnum(vnum)
     {
         let _ = call_mob_spec(g, ch);
@@ -981,6 +981,7 @@ mod tests {
     #[test]
     fn mobile_activity_preserves_registered_mob_spec_flag() {
         let mut g = GameState::new(Config::default());
+        crate::spec_assign::assign_specs(&mut g);
         let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
         let mob = npc_with_spec(&mut g, 1, room);
 

@@ -465,9 +465,9 @@ enum AttachDesc {
 /// Shared body of the three attach branches: real_trigger -> read_trigger ->
 /// add_trigger, then print the C success / "trigger does not exist" message.
 fn attach_to(g: &mut GameState, ch: CharId, key: ScriptKey, tn: i32, loc: i32, desc: AttachDesc) {
-    let rn = real_trigger(tn);
+    let rn = real_trigger(g, tn);
     let tid = if rn >= 0 {
-        read_trigger(rn as usize)
+        read_trigger(g, rn as usize)
     } else {
         None
     };
@@ -637,7 +637,7 @@ fn persist_proto_attach(g: &mut GameState, key: ScriptKey, trig_vnum: i32) {
     let Some((kind, entity_vnum, save_kind)) = proto_target(g, key) else {
         return;
     };
-    if add_proto_trigger(kind, entity_vnum, trig_vnum) {
+    if add_proto_trigger(g, kind, entity_vnum, trig_vnum) {
         mark_proto_script_dirty(g, entity_vnum, save_kind);
     }
 }
@@ -646,7 +646,7 @@ fn persist_proto_remove(g: &mut GameState, key: ScriptKey, trigger: &str) {
     let Some((kind, entity_vnum, save_kind)) = proto_target(g, key) else {
         return;
     };
-    if remove_proto_trigger(kind, entity_vnum, trigger) {
+    if remove_proto_trigger(g, kind, entity_vnum, trigger) {
         mark_proto_script_dirty(g, entity_vnum, save_kind);
     }
 }
@@ -655,7 +655,7 @@ fn persist_proto_clear(g: &mut GameState, key: ScriptKey) {
     let Some((kind, entity_vnum, save_kind)) = proto_target(g, key) else {
         return;
     };
-    if clear_proto_triggers(kind, entity_vnum) {
+    if clear_proto_triggers(g, kind, entity_vnum) {
         mark_proto_script_dirty(g, entity_vnum, save_kind);
     }
 }
@@ -808,8 +808,8 @@ pub fn do_tlist(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
     let mut found = 0;
     let mut out = String::new();
-    for nr in 0..crate::dg_db_scripts::top_of_trigt() {
-        if let Some(tp) = crate::dg_db_scripts::trig_proto(nr) {
+    for nr in 0..crate::dg_db_scripts::top_of_trigt(g) {
+        if let Some(tp) = crate::dg_db_scripts::trig_proto(g, nr) {
             if tp.vnum > last {
                 break;
             }
@@ -842,12 +842,12 @@ pub fn do_tstat(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     let Some(vnum) = command_atoi(g, ch, &s) else {
         return;
     };
-    let rnum = crate::dg_db_scripts::real_trigger(vnum);
+    let rnum = crate::dg_db_scripts::real_trigger(g, vnum);
     if rnum < 0 {
         g.send_to_char(ch, "That vnum does not exist.\r\n");
         return;
     }
-    if let Some(tp) = crate::dg_db_scripts::trig_proto(rnum as usize) {
+    if let Some(tp) = crate::dg_db_scripts::trig_proto(g, rnum as usize) {
         let kind = match tp.attach_type {
             0 => "Mobiles",
             1 => "Objects",

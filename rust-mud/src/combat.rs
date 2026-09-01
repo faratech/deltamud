@@ -2982,6 +2982,7 @@ mod tests {
     #[test]
     fn perform_violence_calls_registered_mob_combat_spec() {
         let mut g = GameState::new(Config::default());
+        crate::spec_assign::assign_specs(&mut g);
         let room = g.add_room(Room::new(
             100,
             0,

@@ -184,7 +184,7 @@ pub const NUM_CLASSES: usize = 5;
 const AFF_AUTUS: i64 = 1 << 20;
 
 // ===========================================================================
-// spell_info[] — built once by mag_assign_spells (lazily via OnceLock).
+// spell_info[] — built once by mag_assign_spells (GameState.spells).
 // ===========================================================================
 #[derive(Clone, Copy)]
 pub struct SpellInfoType {
@@ -214,12 +214,24 @@ impl SpellInfoType {
     }
 }
 
-use std::sync::OnceLock;
-static SPELL_INFO: OnceLock<Vec<SpellInfoType>> = OnceLock::new();
+/// The spell_info[] table (mana cost, position, targets, violent, routines),
+/// built once by build_spell_info (mag_assign_spells) and immutable after
+/// boot. Lives on GameState as `spells` so the world thread owns it.
+pub struct SpellTables {
+    pub info: Vec<SpellInfoType>,
+}
+
+impl Default for SpellTables {
+    fn default() -> Self {
+        SpellTables {
+            info: build_spell_info(),
+        }
+    }
+}
 
 /// Access spell_info[spellnum]; out-of-range yields the unused() sentinel.
-pub fn spell_info(spellnum: i32) -> SpellInfoType {
-    let table = SPELL_INFO.get_or_init(build_spell_info);
+pub fn spell_info(g: &GameState, spellnum: i32) -> SpellInfoType {
+    let table = &g.spells.info;
     if spellnum < 0 || spellnum as usize >= table.len() {
         SpellInfoType::unused()
     } else {
@@ -1294,7 +1306,7 @@ fn garble_spell(spellnum: i32) -> String {
 
 /// mag_manacost(ch, spellnum) (spell_parser.c).
 pub fn mag_manacost(g: &GameState, ch: CharId, spellnum: i32) -> i32 {
-    let si = spell_info(spellnum);
+    let si = spell_info(g, spellnum);
     let (level, class, autus) = match g.get_char(ch) {
         Some(c) => (
             c.player.level as i32,
@@ -1571,7 +1583,7 @@ pub fn cast_spell(
     if !(0..=TOP_SPELL_DEFINE).contains(&spellnum) {
         return 0;
     }
-    let si = spell_info(spellnum);
+    let si = spell_info(g, spellnum);
 
     let pos = g
         .get_char(ch)
@@ -1674,7 +1686,7 @@ pub fn do_cast(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "Cast what?!?\r\n");
         return;
     }
-    let si = spell_info(spellnum);
+    let si = spell_info(g, spellnum);
 
     // Class min-level gate.
     let (level, class) = g
@@ -1901,11 +1913,11 @@ mod tests {
 
     #[test]
     fn spell_levels_are_assigned_for_mortal_spellcasters() {
-        let armor = spell_info(SPELL_ARMOR);
+        let armor = SpellTables::default().info[SPELL_ARMOR as usize];
         assert_eq!(armor.min_level[Class::MagicUser as usize], 10);
         assert_eq!(armor.min_level[Class::Cleric as usize], 3);
 
-        let cure_light = spell_info(SPELL_CURE_LIGHT);
+        let cure_light = SpellTables::default().info[SPELL_CURE_LIGHT as usize];
         assert_eq!(cure_light.min_level[Class::Cleric as usize], 1);
         assert_eq!(
             cure_light.min_level[Class::MagicUser as usize],
@@ -1915,13 +1927,13 @@ mod tests {
 
     #[test]
     fn skill_levels_are_assigned_for_mortal_classes() {
-        let kick = spell_info(SKILL_KICK);
+        let kick = SpellTables::default().info[SKILL_KICK as usize];
         assert_eq!(kick.min_level[Class::Warrior as usize], 1);
 
-        let sneak = spell_info(SKILL_SNEAK);
+        let sneak = SpellTables::default().info[SKILL_SNEAK as usize];
         assert_eq!(sneak.min_level[Class::Thief as usize], 1);
 
-        let scribe = spell_info(SKILL_SCRIBE);
+        let scribe = SpellTables::default().info[SKILL_SCRIBE as usize];
         assert_eq!(scribe.min_level[Class::Artisan as usize], 5);
     }
 }

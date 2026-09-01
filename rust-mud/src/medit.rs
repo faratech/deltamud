@@ -537,14 +537,17 @@ fn disp_menu(g: &mut GameState, conn: ConnId) {
         atk = attack_name(m.attack_type),
         npc = npc_flags,
         aff = aff_flags,
-        script =
-            if crate::dg_db_scripts::proto_trigger_vnums(crate::dg_handler::MOB_TRIGGER, st.vnum)
-                .is_empty()
-            {
-                "Not Set."
-            } else {
-                "Set."
-            },
+        script = if crate::dg_db_scripts::proto_trigger_vnums(
+            g,
+            crate::dg_handler::MOB_TRIGGER,
+            st.vnum
+        )
+        .is_empty()
+        {
+            "Not Set."
+        } else {
+            "Set."
+        },
     );
     send(g, conn, &buf2);
 
@@ -1387,7 +1390,7 @@ where
             // state carries no trigger field, so without this the edited mob's
             // `T` lines are dropped on save while every unedited mob keeps its
             // (preserved verbatim from disk below).
-            for tv in crate::dg_db_scripts::proto_trigger_vnums(0, st.vnum) {
+            for tv in crate::dg_db_scripts::proto_trigger_vnums(g, 0, st.vnum) {
                 out.push_str(&format!("T {}\n", tv));
             }
         } else if let Some(block) = disk_blocks.get(&v) {
@@ -1441,7 +1444,7 @@ pub fn medit_save_to_disk(g: &mut GameState, zone_rnum: usize) -> std::io::Resul
             let mob = seed_from_proto(g, proto, v)?;
             out.push_str(&format!("#{}\n", v));
             out.push_str(&render_mob_block(&mob));
-            for tv in crate::dg_db_scripts::proto_trigger_vnums(0, v) {
+            for tv in crate::dg_db_scripts::proto_trigger_vnums(g, 0, v) {
                 out.push_str(&format!("T {}\n", tv));
             }
         }

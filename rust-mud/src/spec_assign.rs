@@ -43,7 +43,6 @@
 use crate::state::GameState;
 use crate::types::*;
 use std::collections::HashMap;
-use std::sync::OnceLock;
 
 /// A *mobile* special procedure: `(game, actor, me, cmd, arg) -> consumed`.
 /// `me` is the mob running the proc (CircleMUD's `me`, a `char_data*`).
@@ -69,13 +68,16 @@ pub type ObjSpecFn = fn(&mut GameState, CharId, ObjId, &str, &str) -> bool;
 pub type RoomSpecFn = fn(&mut GameState, CharId, RoomRnum, &str, &str) -> bool;
 
 /// The three side tables, mirroring C's `*_index[rnum].func` / `world[rnum].func`.
-struct SpecTables {
-    mobs: HashMap<MobVnum, SpecFn>,
-    objs: HashMap<ObjVnum, ObjSpecFn>,
-    rooms: HashMap<RoomVnum, RoomSpecFn>,
+// Owned by GameState as `world.specs` (phase 1 migration from a module static).
+#[derive(Default)]
+pub struct SpecTables {
+    pub mobs: HashMap<MobVnum, SpecFn>,
+    pub objs: HashMap<ObjVnum, ObjSpecFn>,
+    pub rooms: HashMap<RoomVnum, RoomSpecFn>,
+    /// Set by `assign_specs()`; distinguishes "not built yet" from a build
+    /// that legitimately assigned nothing.
+    built: bool,
 }
-
-static SPECS: OnceLock<SpecTables> = OnceLock::new();
 
 /// ROOM_DEATH room vnums, captured from the loaded world before `assign_specs()`
 /// builds the room table. C's assign_rooms() reads `world[i]` directly inside
@@ -84,17 +86,11 @@ static SPECS: OnceLock<SpecTables> = OnceLock::new();
 /// vnums here for `assign_rooms()` to consume. Empty if never set (dts_are_dumps
 /// off, or no world) -> no death-trap dumps, exactly as the C loop is a no-op
 /// when dts_are_dumps is NO.
-static DEATH_TRAP_ROOMS: OnceLock<Vec<RoomVnum>> = OnceLock::new();
-
 /// Record the ROOM_DEATH room vnums for the dts_are_dumps dump registration.
 /// Call once, after the world loads and before `assign_specs()`. Idempotent
-/// (later calls are ignored) since the spec tables are built exactly once.
-pub fn set_death_trap_rooms(vnums: Vec<RoomVnum>) {
-    let _ = DEATH_TRAP_ROOMS.set(vnums);
-}
-
-fn death_trap_rooms() -> Vec<RoomVnum> {
-    DEATH_TRAP_ROOMS.get().cloned().unwrap_or_default()
+/// (later calls overwrite) since the spec tables are built exactly once.
+pub fn set_death_trap_rooms(g: &mut GameState, vnums: Vec<RoomVnum>) {
+    g.world.death_trap_rooms = vnums;
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +199,7 @@ fn assign_objects(objs: &mut HashMap<ObjVnum, ObjSpecFn>) {
     // mob flag path (act.other.c), not an object spec. Left intentionally absent.
 }
 
-fn assign_rooms(rooms: &mut HashMap<RoomVnum, RoomSpecFn>) {
+fn assign_rooms(rooms: &mut HashMap<RoomVnum, RoomSpecFn>, death_rooms: &[RoomVnum]) {
     // SPECIAL(dump); SPECIAL(pet_shops); SPECIAL(pray_for_items);
     //
     // C assign_rooms() does two things: (1) the dts_are_dumps loop sets
@@ -213,14 +209,13 @@ fn assign_rooms(rooms: &mut HashMap<RoomVnum, RoomSpecFn>) {
     //
     // spec_procs.rs owns the dump / pet_shops procs and registers them through
     // this closure. The ROOM_DEATH set is world-dependent, so it is supplied by
-    // assign_specs's caller (main.rs) via DEATH_TRAP_ROOMS, populated right
-    // after the world loads; pet_shops is static and always registered.
-    let death_rooms = death_trap_rooms();
+    // main.rs via g.world.death_trap_rooms, populated right after the world
+    // loads; pet_shops is static and always registered.
     crate::spec_procs::register_room_specs(
         |vnum, func| {
             rooms.insert(vnum, func);
         },
-        &death_rooms,
+        death_rooms,
     );
 }
 
@@ -250,50 +245,44 @@ fn ASSIGNOBJ(objs: &mut HashMap<ObjVnum, ObjSpecFn>, vnum: ObjVnum, func: ObjSpe
 // ---------------------------------------------------------------------------
 
 /// Build the special-procedure tables. Call once at boot (after the world,
-/// shops, mail and boards have loaded). Idempotent: the OnceLock guarantees the
-/// tables are built exactly once even if called twice.
-pub fn assign_specs() {
-    SPECS.get_or_init(|| {
-        let mut mobs = HashMap::new();
-        let mut objs = HashMap::new();
-        let mut rooms = HashMap::new();
-        assign_mobiles(&mut mobs);
-        assign_objects(&mut objs);
-        assign_rooms(&mut rooms);
-        SpecTables { mobs, objs, rooms }
-    });
-}
-
-/// Lazy accessor: build-on-first-use so callers (and `special()`) work even if
-/// `assign_specs()` was never explicitly called at boot.
-fn tables() -> &'static SpecTables {
-    SPECS.get_or_init(|| {
-        let mut mobs = HashMap::new();
-        let mut objs = HashMap::new();
-        let mut rooms = HashMap::new();
-        assign_mobiles(&mut mobs);
-        assign_objects(&mut objs);
-        assign_rooms(&mut rooms);
-        SpecTables { mobs, objs, rooms }
-    })
+/// shops, mail and boards have loaded). Idempotent: later calls are no-ops
+/// (the tables are built exactly once), as with the old OnceLock.
+pub fn assign_specs(g: &mut GameState) {
+    if g.world.specs.built {
+        return;
+    }
+    let mut mobs = HashMap::new();
+    let mut objs = HashMap::new();
+    let mut rooms = HashMap::new();
+    assign_mobiles(&mut mobs);
+    assign_objects(&mut objs);
+    let death_rooms = std::mem::take(&mut g.world.death_trap_rooms);
+    assign_rooms(&mut rooms, &death_rooms);
+    g.world.death_trap_rooms = death_rooms;
+    g.world.specs = SpecTables {
+        mobs,
+        objs,
+        rooms,
+        built: true,
+    };
 }
 
 /// Look up the special procedure for a mobile prototype vnum (C
 /// GET_MOB_SPEC). Returns None if the mob has no statically-assigned spec.
 /// Note: shop keepers are NOT in this table (they resolve dynamically via
 /// shop_keeper in `special()`), so a None here does not mean "no behaviour".
-pub fn get_mob_spec(vnum: MobVnum) -> Option<SpecFn> {
-    tables().mobs.get(&vnum).copied()
+pub fn get_mob_spec(g: &GameState, vnum: MobVnum) -> Option<SpecFn> {
+    g.world.specs.mobs.get(&vnum).copied()
 }
 
 /// Look up the special procedure for an object prototype vnum (C GET_OBJ_SPEC).
-pub fn get_obj_spec(vnum: ObjVnum) -> Option<ObjSpecFn> {
-    tables().objs.get(&vnum).copied()
+pub fn get_obj_spec(g: &GameState, vnum: ObjVnum) -> Option<ObjSpecFn> {
+    g.world.specs.objs.get(&vnum).copied()
 }
 
 /// Look up the special procedure for a room vnum (C GET_ROOM_SPEC).
-pub fn get_room_spec(vnum: RoomVnum) -> Option<RoomSpecFn> {
-    tables().rooms.get(&vnum).copied()
+pub fn get_room_spec(g: &GameState, vnum: RoomVnum) -> Option<RoomSpecFn> {
+    g.world.specs.rooms.get(&vnum).copied()
 }
 
 // ---------------------------------------------------------------------------
@@ -372,7 +361,7 @@ fn special_inner(g: &mut GameState, ch: CharId, cmd: &str, arg: &str) -> bool {
 
     // ---- 1. room spec ---------------------------------------------------
     if let Some(room_vnum) = g.room_opt(rnum).map(|r| r.number) {
-        if let Some(func) = get_room_spec(room_vnum) {
+        if let Some(func) = get_room_spec(g, room_vnum) {
             if func(g, ch, rnum, cmd, arg) {
                 return true;
             }
@@ -396,7 +385,7 @@ fn special_inner(g: &mut GameState, ch: CharId, cmd: &str, arg: &str) -> bool {
         if vnum == NOTHING {
             continue;
         }
-        if let Some(func) = get_obj_spec(vnum) {
+        if let Some(func) = get_obj_spec(g, vnum) {
             if func(g, ch, oid, cmd, arg) {
                 return true;
             }
@@ -416,7 +405,7 @@ fn special_inner(g: &mut GameState, ch: CharId, cmd: &str, arg: &str) -> bool {
         if vnum == NOTHING {
             continue;
         }
-        if let Some(func) = get_obj_spec(vnum) {
+        if let Some(func) = get_obj_spec(g, vnum) {
             if func(g, ch, oid, cmd, arg) {
                 return true;
             }
@@ -441,7 +430,7 @@ fn special_inner(g: &mut GameState, ch: CharId, cmd: &str, arg: &str) -> bool {
             continue;
         }
         // Statically-assigned mob spec first (postmaster, etc.).
-        if let Some(func) = get_mob_spec(vnum) {
+        if let Some(func) = get_mob_spec(g, vnum) {
             if func(g, ch, k, cmd, arg) {
                 return true;
             }
@@ -470,7 +459,7 @@ fn special_inner(g: &mut GameState, ch: CharId, cmd: &str, arg: &str) -> bool {
         if vnum == NOTHING {
             continue;
         }
-        if let Some(func) = get_obj_spec(vnum) {
+        if let Some(func) = get_obj_spec(g, vnum) {
             if func(g, ch, oid, cmd, arg) {
                 return true;
             }
@@ -491,6 +480,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.no_specials = no_specials;
         let mut g = GameState::new(cfg);
+        assign_specs(&mut g);
         // Production no longer assigns pet_shops to 3031 (zone 30 collision,
         // COMPATIBILITY.md); tests register the proc on their own room vnum.
         let shop = g.add_room(Room::new(

@@ -329,7 +329,7 @@ fn invalidate_shop_funcs() {
 /// SHOP_FUNC(shop_nr) lookup, keyed by the shop's keeper mob vnum. Returns the
 /// captured secondary spec, or None when the keeper had no prior spec (the
 /// common case — equivalent to C's SHOP_FUNC == 0).
-fn shop_func(keeper_vnum: MobVnum) -> Option<ShopFn> {
+fn shop_func(g: &crate::state::GameState, keeper_vnum: MobVnum) -> Option<ShopFn> {
     {
         let cache = crate::lock_ok::lock(shop_funcs());
         if let Some(map) = cache.as_ref() {
@@ -344,7 +344,7 @@ fn shop_func(keeper_vnum: MobVnum) -> Option<ShopFn> {
         .collect();
     let map: HashMap<MobVnum, ShopFn> = keepers
         .into_iter()
-        .filter_map(|keeper| crate::spec_assign::get_mob_spec(keeper).map(|func| (keeper, func)))
+        .filter_map(|keeper| crate::spec_assign::get_mob_spec(g, keeper).map(|func| (keeper, func)))
         .collect();
     let found = map.get(&keeper_vnum).copied();
     *crate::lock_ok::lock(shop_funcs()) = Some(map);
@@ -2168,7 +2168,7 @@ pub fn shop_keeper(g: &mut GameState, ch: CharId, me: CharId, cmd: &str, arg: &s
     // the default keeper handling runs.
     //   if (SHOP_FUNC(shop_nr))
     //     if ((SHOP_FUNC(shop_nr)) (ch, me, cmd, arg)) return (TRUE);
-    if let Some(func) = shop_func(keeper_vnum) {
+    if let Some(func) = shop_func(g, keeper_vnum) {
         if func(g, ch, keeper, cmd, arg) {
             return true;
         }
@@ -2495,7 +2495,7 @@ fn list_detailed_shop(g: &mut GameState, ch: CharId, shop: &ShopData, shop_idx: 
                 "Shopkeeper: {} (#{}) Special Function: {}\r\n",
                 kname,
                 shop.keeper,
-                if shop_func(shop.keeper).is_some() {
+                if shop_func(g, shop.keeper).is_some() {
                     "Yes"
                 } else {
                     "No"
@@ -2832,6 +2832,7 @@ mod tests {
             .insert(5100, object_proto(5100, "triggered amulet", 10));
 
         crate::dg_db_scripts::set_test_proto_trigger(
+            &mut g,
             OBJ_TRIGGER,
             5100,
             TrigProto {

@@ -283,13 +283,14 @@ fn disp_menu(g: &mut GameState, conn: ConnId) {
         w = w,
         u = u,
         d = d,
-        script = if crate::dg_db_scripts::proto_trigger_vnums(crate::dg_handler::WLD_TRIGGER, vnum)
-            .is_empty()
-        {
-            "Not Set."
-        } else {
-            "Set."
-        },
+        script =
+            if crate::dg_db_scripts::proto_trigger_vnums(g, crate::dg_handler::WLD_TRIGGER, vnum)
+                .is_empty()
+            {
+                "Not Set."
+            } else {
+                "Set."
+            },
     );
     send(g, conn, &body);
     let _ = with_state(conn, |s| s.mode = ReditMode::MainMenu);
@@ -1592,7 +1593,7 @@ pub fn redit_save_to_disk(g: &mut GameState, zone_rnum: usize) -> std::io::Resul
         }
 
         out.push_str("S\n");
-        for tv in crate::dg_db_scripts::proto_trigger_vnums(2, vnum) {
+        for tv in crate::dg_db_scripts::proto_trigger_vnums(g, 2, vnum) {
             out.push_str(&format!("T {}\n", tv));
         }
     }

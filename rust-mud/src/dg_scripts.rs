@@ -1936,10 +1936,10 @@ fn zone_empty_for_room(g: &GameState, r: RoomRnum) -> bool {
 // ---------------------------------------------------------------------------
 // boot — load prototypes, assign room triggers, clear runtime state.
 // ---------------------------------------------------------------------------
-pub fn boot_dg_scripts(lib_path: &str) {
+pub fn boot_dg_scripts(g: &mut GameState, lib_path: &str) {
     crate::dg_event::boot_events();
     dg_handler::boot_handler();
-    crate::dg_db_scripts::boot_triggers(lib_path);
+    crate::dg_db_scripts::boot_triggers(g, lib_path);
 }
 
 // ---------------------------------------------------------------------------

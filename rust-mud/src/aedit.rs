@@ -1044,7 +1044,7 @@ fn aedit_save_internally(g: &mut GameState, conn: ConnId) -> std::io::Result<()>
         }
     }
     let lib_path = g.config.lib_path.clone();
-    let result = publish_actions(&lib_path, &actions);
+    let result = publish_actions(g, &lib_path, &actions);
     match &result {
         Ok(()) => {
             *crate::lock_ok::lock(&soc_list()) = actions;
@@ -1078,7 +1078,7 @@ pub fn save_all_actions(g: &mut GameState) -> std::io::Result<()> {
         let lib = g.config.lib_path.clone();
         ensure_loaded(&lib)?;
         let actions = crate::lock_ok::lock(&soc_list()).clone();
-        publish_actions(&lib, &actions)
+        publish_actions(g, &lib, &actions)
     })();
     match &result {
         Ok(()) => {
@@ -1095,13 +1095,18 @@ pub fn save_all_actions(g: &mut GameState) -> std::io::Result<()> {
     result
 }
 
-fn publish_actions(lib_path: &str, actions: &[SocialAction]) -> std::io::Result<()> {
+fn publish_actions(
+    g: &mut GameState,
+    lib_path: &str,
+    actions: &[SocialAction],
+) -> std::io::Result<()> {
     let result = aedit_save_to_disk(lib_path, actions);
     if match &result {
         Ok(()) => true,
         Err(error) => crate::olc::replacement_was_published(error),
     } {
         crate::cmd_social::install_social_messages(
+            g,
             actions.iter().map(SocialAction::to_live).collect(),
         );
     }

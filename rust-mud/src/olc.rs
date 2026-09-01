@@ -1400,17 +1400,17 @@ pub(crate) fn name_reserved_by_zone_acl(g: &GameState, player_name: &str) -> boo
 /// trigger vnum list.
 pub fn dg_script_menu(g: &mut GameState, conn: ConnId, kind: i32, entity_vnum: i32) {
     let mut out = String::from("     Script Editor\r\n\r\n     Trigger List:\r\n");
-    let triggers = crate::dg_db_scripts::proto_trigger_vnums(kind, entity_vnum);
+    let triggers = crate::dg_db_scripts::proto_trigger_vnums(g, kind, entity_vnum);
     if triggers.is_empty() {
         out.push_str("     <none>\r\n");
     } else {
         for (idx, trig_vnum) in triggers.iter().enumerate() {
             let (name, mismatch) = {
-                let rnum = crate::dg_db_scripts::real_trigger(*trig_vnum);
+                let rnum = crate::dg_db_scripts::real_trigger(g, *trig_vnum);
                 if rnum < 0 {
                     ("unknown trigger".to_string(), true)
                 } else {
-                    match crate::dg_db_scripts::trig_proto(rnum as usize) {
+                    match crate::dg_db_scripts::trig_proto(g, rnum as usize) {
                         Some(proto) => (proto.name, proto.attach_type != kind),
                         None => ("unknown trigger".to_string(), true),
                     }
@@ -1485,7 +1485,7 @@ pub fn dg_script_edit_parse(
                 Ok(None)
                 | Err(crate::text::ParseIntError::Empty | crate::text::ParseIntError::Invalid) => {
                     // C dg_olc.c:766-783: an unparseable line leaves vnum at -1 →
-                    // real_trigger() < 0 → "Invalid Trigger VNUM!" re-prompt (#304).
+                    // real_trigger(g, ) < 0 → "Invalid Trigger VNUM!" re-prompt (#304).
                     send_to_conn(
                         g,
                         conn,
@@ -1499,7 +1499,7 @@ pub fn dg_script_edit_parse(
                 *mode = DgScriptEditMode::Main;
                 return true;
             }
-            if crate::dg_db_scripts::real_trigger(trig_vnum) < 0 {
+            if crate::dg_db_scripts::real_trigger(g, trig_vnum) < 0 {
                 send_to_conn(
                     g,
                     conn,
@@ -1515,7 +1515,7 @@ pub fn dg_script_edit_parse(
                 );
                 return true;
             }
-            if crate::dg_db_scripts::insert_proto_trigger(kind, entity_vnum, trig_vnum, pos) {
+            if crate::dg_db_scripts::insert_proto_trigger(g, kind, entity_vnum, trig_vnum, pos) {
                 mark_dg_script_dirty(g, kind, entity_vnum);
             }
             *mode = DgScriptEditMode::Main;
@@ -1535,7 +1535,8 @@ pub fn dg_script_edit_parse(
                     return true;
                 }
             };
-            if pos != 0 && crate::dg_db_scripts::remove_proto_trigger_at(kind, entity_vnum, pos) {
+            if pos != 0 && crate::dg_db_scripts::remove_proto_trigger_at(g, kind, entity_vnum, pos)
+            {
                 mark_dg_script_dirty(g, kind, entity_vnum);
             }
             *mode = DgScriptEditMode::Main;
@@ -3018,6 +3019,7 @@ mod tests {
         g.descriptors.insert(conn, d);
 
         crate::dg_db_scripts::set_test_proto_trigger(
+            &mut g,
             crate::dg_handler::WLD_TRIGGER,
             999_001,
             TrigProto {
@@ -3031,6 +3033,7 @@ mod tests {
             },
         );
         crate::dg_db_scripts::set_test_proto_trigger(
+            &mut g,
             crate::dg_handler::WLD_TRIGGER,
             999_002,
             TrigProto {
@@ -3063,7 +3066,7 @@ mod tests {
             "1, 4205",
         ));
         assert_eq!(
-            crate::dg_db_scripts::proto_trigger_vnums(crate::dg_handler::WLD_TRIGGER, 4201),
+            crate::dg_db_scripts::proto_trigger_vnums(&g, crate::dg_handler::WLD_TRIGGER, 4201),
             vec![4205]
         );
 
@@ -3084,7 +3087,7 @@ mod tests {
             "4206",
         ));
         assert_eq!(
-            crate::dg_db_scripts::proto_trigger_vnums(crate::dg_handler::WLD_TRIGGER, 4201),
+            crate::dg_db_scripts::proto_trigger_vnums(&g, crate::dg_handler::WLD_TRIGGER, 4201),
             vec![4205, 4206]
         );
 
@@ -3106,7 +3109,7 @@ mod tests {
             "1",
         ));
         assert_eq!(
-            crate::dg_db_scripts::proto_trigger_vnums(crate::dg_handler::WLD_TRIGGER, 4201),
+            crate::dg_db_scripts::proto_trigger_vnums(&g, crate::dg_handler::WLD_TRIGGER, 4201),
             vec![4206]
         );
 
@@ -3114,7 +3117,7 @@ mod tests {
         let out = &g.descriptors.get(&conn).unwrap().outbuf;
         assert!(out.contains("Rooms for zone 42"));
         olc_remove_from_save_list(42, OLC_SAVE_ROOM);
-        crate::dg_db_scripts::clear_proto_triggers(crate::dg_handler::WLD_TRIGGER, 4201);
+        crate::dg_db_scripts::clear_proto_triggers(&mut g, crate::dg_handler::WLD_TRIGGER, 4201);
     }
 
     #[test]

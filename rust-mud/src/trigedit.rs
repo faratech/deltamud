@@ -315,9 +315,9 @@ pub fn do_trigedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
     // Set up the scratch trigger (existing prototype or a fresh one).
     let zone_number = g.zones[znum].number;
-    let state = match dg_db_scripts::real_trigger(number) {
+    let state = match dg_db_scripts::real_trigger(g, number) {
         rnum if rnum >= 0 => {
-            setup_existing(rnum as usize, number, znum, zone_number, authorization)
+            setup_existing(g, rnum as usize, number, znum, zone_number, authorization)
         }
         _ => setup_new(number, znum, zone_number, authorization),
     };
@@ -329,13 +329,14 @@ pub fn do_trigedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
 /// trigedit_setup_existing: snapshot an existing prototype into edit state.
 fn setup_existing(
+    g: &GameState,
     rnum: usize,
     vnum: i32,
     znum: usize,
     zone_number: i32,
     authorization: olc::OlcAuthorization,
 ) -> TrigEditState {
-    let proto = dg_db_scripts::trig_proto(rnum).unwrap_or(TrigProto {
+    let proto = dg_db_scripts::trig_proto(g, rnum).unwrap_or(TrigProto {
         vnum,
         attach_type: MOB_TRIGGER,
         name: "undefined".to_string(),
@@ -869,9 +870,9 @@ where
             inserted = true;
             continue;
         }
-        let rnum = dg_db_scripts::real_trigger(i);
+        let rnum = dg_db_scripts::real_trigger(g, i);
         if rnum >= 0 {
-            if let Some(p) = dg_db_scripts::trig_proto(rnum as usize) {
+            if let Some(p) = dg_db_scripts::trig_proto(g, rnum as usize) {
                 zone_protos.push(p);
             }
         }
@@ -916,7 +917,7 @@ where
         Ok(()) => {
             // Publish the edited prototype only after its durable
             // representation is in place.
-            dg_db_scripts::upsert_proto_trigger(edited);
+            dg_db_scripts::upsert_proto_trigger(g, edited);
             olc::clear_unresolved_publication(EditorKind::Trigedit, vnum);
             Ok(())
         }
@@ -925,7 +926,7 @@ where
                 // rename already exposed the candidate. Reconcile runtime
                 // while returning the typed error so the editor remains open
                 // for a durability-confirming retry.
-                dg_db_scripts::upsert_proto_trigger(edited);
+                dg_db_scripts::upsert_proto_trigger(g, edited);
             }
             olc::mark_unresolved_save_failure(EditorKind::Trigedit, vnum, &error);
             Err(error)
@@ -1242,7 +1243,7 @@ mod tests {
         g.config.lib_path = lib.to_string_lossy().into_owned();
 
         do_trigedit(&mut g, ch, &vnum.to_string(), 0);
-        assert_eq!(crate::dg_db_scripts::real_trigger(vnum), -1);
+        assert_eq!(crate::dg_db_scripts::real_trigger(&g, vnum), -1);
 
         let error = save_with(&mut g, conn, |path, bytes| {
             crate::olc::atomic_replace_with_hooks(
@@ -1255,7 +1256,7 @@ mod tests {
         .unwrap_err();
 
         assert!(crate::olc::replacement_was_published(&error));
-        assert!(crate::dg_db_scripts::real_trigger(vnum) >= 0);
+        assert!(crate::dg_db_scripts::real_trigger(&g, vnum) >= 0);
         assert!(crate::olc::in_olc(conn));
         assert!(crate::olc::test_unresolved_publication(
             EditorKind::Trigedit,

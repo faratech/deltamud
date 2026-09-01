@@ -271,7 +271,7 @@ fn list_skills(g: &mut GameState, ch: CharId) {
         if name == "!UNUSED!" || name == "UNUSED" || name == "UNDEFINED" {
             continue;
         }
-        let si = spell_info(i);
+        let si = spell_info(g, i);
         let cls = (class as usize).min(crate::spell_parser::NUM_CLASSES - 1);
         if level >= si.min_level[cls] {
             rows.push((name, i));
@@ -315,7 +315,7 @@ pub fn guild(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, arg: &str) -
 
     let skill_num = find_skill_num(argument);
 
-    if skill_num < 1 || level < spell_info(skill_num).min_level[cls] {
+    if skill_num < 1 || level < spell_info(g, skill_num).min_level[cls] {
         g.send_to_char(
             ch,
             &format!("You do not know of that {}.\r\n", splskl(class)),
@@ -2112,6 +2112,7 @@ mod tests {
         g.mob_protos.insert(6200, mobile_proto(6200, "puppy"));
 
         crate::dg_db_scripts::set_test_proto_trigger(
+            &mut g,
             MOB_TRIGGER,
             6200,
             TrigProto {

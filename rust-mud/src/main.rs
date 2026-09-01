@@ -769,7 +769,7 @@ async fn run_server() -> Result<state::ProcessDisposition> {
             zone_number, zone_number
         );
     }
-    dg_scripts::boot_dg_scripts(&config.lib_path);
+    dg_scripts::boot_dg_scripts(&mut state, &config.lib_path);
 
     file_loader::FileLoader::load_world(&mut state, &config.lib_path)
         .await
@@ -789,15 +789,18 @@ async fn run_server() -> Result<state::ProcessDisposition> {
 
     // Load socials (CircleMUD boot_social_messages); spliced into command
     // lookup as a fallback since they are not in the static command table.
-    cmd_social::boot_socials(Some(&format!("{}/misc/socials", config.lib_path)))
-        .context("load mandatory social command table")?;
+    cmd_social::boot_socials(
+        &mut state,
+        Some(&format!("{}/misc/socials", config.lib_path)),
+    )
+    .context("load mandatory social command table")?;
     // db.c:299-300 index_boot(DB_BOOT_HLP) - serve the 73k-line help index
     // to the live `help` command (#232).
     hedit::boot_help_table(&config.lib_path).context("load mandatory help table")?;
 
     // Load the combat hit-messages (fight.c load_messages, lib/misc/messages):
     // flavourful per-skill / per-weapon death/hit/miss/god messages.
-    fight_messages::load_messages(&config.lib_path);
+    fight_messages::load_messages(&mut state, &config.lib_path);
 
     // Content/economy subsystem boot (Batch 11). Shop data load mirrors C's
     // DB_BOOT_SHP, which boot_world() skips under no_specials (db.c:261
@@ -841,7 +844,7 @@ async fn run_server() -> Result<state::ProcessDisposition> {
         .filter(|r| r.room_flags.contains(room::RoomFlags::DEATH) && r.map_x.is_none())
         .map(|r| r.number)
         .collect();
-    spec_assign::set_death_trap_rooms(death_rooms);
+    spec_assign::set_death_trap_rooms(&mut state, death_rooms);
 
     // Build the vnum->special-procedure tables (spec_assign.c assign_*). Must
     // come after shops/boards/mail so their data is available to the procs.
@@ -850,7 +853,7 @@ async fn run_server() -> Result<state::ProcessDisposition> {
     // spec table empty, so the interpreter's special() walk and the MOB_SPEC
     // pulse both find nothing to dispatch — exactly the C behaviour.
     if !config.no_specials {
-        spec_assign::assign_specs();
+        spec_assign::assign_specs(&mut state);
     }
 
     // Build the in-memory player name<->idnum index (C build_player_index,

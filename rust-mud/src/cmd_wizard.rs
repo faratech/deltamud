@@ -1234,7 +1234,7 @@ fn do_stat_room(g: &mut GameState, ch: CharId) {
     );
     let flagstr = sprintbit(flags, constants::ROOM_BITS);
     // C act.wizard.c:473-474: (rm->func == NULL) ? "None" : "Exists".
-    let room_spec = crate::spec_assign::get_room_spec(room_vnum).is_some();
+    let room_spec = crate::spec_assign::get_room_spec(g, room_vnum).is_some();
     g.send_to_char(
         ch,
         &format!(
@@ -1464,7 +1464,7 @@ fn do_stat_object(g: &mut GameState, ch: CharId, j: ObjId) {
     );
     let typestr = sprinttype(otype, constants::ITEM_TYPES);
     // C act.wizard.c:605-610: obj_index[GET_OBJ_RNUM(j)].func ? "Exists" : "None".
-    let obj_spec = crate::spec_assign::get_obj_spec(vnum).is_some();
+    let obj_spec = crate::spec_assign::get_obj_spec(g, vnum).is_some();
     let rnum = if obj_spec { "Exists" } else { "None" };
     g.send_to_char(
         ch,
@@ -1749,7 +1749,7 @@ fn do_stat_character(g: &mut GameState, ch: CharId, k: CharId) {
         .map(|m| m.damsizedice)
         .unwrap_or(0);
     // C act.wizard.c:1000-1002: mob_index[GET_MOB_RNUM(k)].func ? "Exists" : "None".
-    let mob_spec = crate::spec_assign::get_mob_spec(mob_vnum).is_some();
+    let mob_spec = crate::spec_assign::get_mob_spec(g, mob_vnum).is_some();
     // C act.wizard.c:908: attack_hit_text[k->mob_specials.attack_type].singular.
     let attack_type = g
         .mob_protos
@@ -6215,7 +6215,7 @@ pub fn do_mcasters(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
         .values()
         .filter(|proto| {
             proto.act_flags & MOB_CASTER != 0
-                || crate::spec_assign::get_mob_spec(proto.vnum)
+                || crate::spec_assign::get_mob_spec(g, proto.vnum)
                     .is_some_and(|func| std::ptr::fn_addr_eq(func, magic_user))
         })
         .collect();
@@ -7047,7 +7047,7 @@ pub fn do_respec(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
     // table (spec_assign) is built once and resolved per-mob on demand via
     // special(), so the binding is always live; assign_specs() just asserts the
     // table exists (idempotent OnceLock) — no per-mob pointer to refresh.
-    crate::spec_assign::assign_specs();
+    crate::spec_assign::assign_specs(g);
 }
 
 pub fn do_questmobs(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
@@ -8923,6 +8923,7 @@ WorldMap:\n",
     #[test]
     fn do_stat_character_reports_mob_spec_proc_attack_type_and_connection() {
         let mut g = GameState::new(Config::default());
+        crate::spec_assign::assign_specs(&mut g);
         let room = g.add_room(Room::new(100, 0, "Room".to_string(), "A room.".to_string()));
         let imm = connected_player(&mut g, ConnId(1), "Imm", LVL_IMPL);
         g.char_to_room(imm, room);
@@ -8960,6 +8961,7 @@ WorldMap:\n",
     #[test]
     fn stat_reports_room_and_object_spec_procs() {
         let mut g = GameState::new(Config::default());
+        crate::spec_assign::assign_specs(&mut g);
         // vnum 34000 is the (production-inert) pet-shop registration; 3031 is
         // now zone 30's Tower Magazine (COMPATIBILITY.md collisions table).
         let plain = g.add_room(Room::new(100, 0, "Plain".to_string(), "Plain.".to_string()));

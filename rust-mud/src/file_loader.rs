@@ -383,6 +383,7 @@ impl FileLoader {
                                         "room trigger vnum",
                                     )?;
                                     crate::dg_db_scripts::parse_trigger_line(
+                                        world,
                                         2,
                                         vnum,
                                         &format!("T {trigger_vnum}"),
@@ -590,7 +591,7 @@ impl FileLoader {
             };
             i += 1;
             let start = i;
-            match Self::parse_single_mob(vnum, &lines, &mut i) {
+            match Self::parse_single_mob(world, vnum, &lines, &mut i) {
                 Ok(proto) => {
                     // C real_mobile keeps the FIRST duplicate vnum (#241).
                     world.mob_protos.entry(vnum).or_insert(proto);
@@ -650,7 +651,12 @@ impl FileLoader {
         }
     }
 
-    fn parse_single_mob(vnum: MobVnum, lines: &[&str], i: &mut usize) -> Result<MobileProto> {
+    fn parse_single_mob(
+        world: &mut GameState,
+        vnum: MobVnum,
+        lines: &[&str],
+        i: &mut usize,
+    ) -> Result<MobileProto> {
         let name = Self::read_tilde_string(lines, i)?;
         let mut short_desc = Self::read_tilde_string(lines, i)?;
         let long_desc = Self::read_tilde_string(lines, i)?;
@@ -767,7 +773,7 @@ impl FileLoader {
             }
             let trigger_vnum: i32 =
                 Self::numeric_field(Some(t[1..].trim()), 0, "mobile trigger vnum")?;
-            crate::dg_db_scripts::parse_trigger_line(0, vnum, &format!("T {trigger_vnum}"));
+            crate::dg_db_scripts::parse_trigger_line(world, 0, vnum, &format!("T {trigger_vnum}"));
             *i += 1;
         }
 
@@ -1218,6 +1224,7 @@ impl FileLoader {
                         let trigger_vnum: i32 =
                             Self::numeric_field(Some(lt[1..].trim()), 0, "object trigger vnum")?;
                         crate::dg_db_scripts::parse_trigger_line(
+                            world,
                             1,
                             vnum,
                             &format!("T {trigger_vnum}"),

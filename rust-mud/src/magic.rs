@@ -188,7 +188,7 @@ pub fn call_magic(
     if spellnum < 1 || spellnum > TOP_SPELL_DEFINE {
         return 0;
     }
-    let si = spell_info(spellnum);
+    let si = spell_info(g, spellnum);
 
     let rnum = g.get_char(caster).and_then(|c| c.in_room);
     let administrative_override = has_direct_implementor_authority(g, caster);

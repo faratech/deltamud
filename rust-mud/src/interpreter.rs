@@ -365,8 +365,8 @@ fn run_command_body(g: &mut GameState, ch: CharId, input: &str) {
             // complete_cmd_info[] entry, so the build-mode gate below runs on
             // it before the command executes — apply it here for the same
             // ordering (interpreter.c:800-804).
-            if let Some(name) = crate::cmd_social::find_social(&arg) {
-                let allowed = crate::cmd_social::social_min_level(&name)
+            if let Some(name) = crate::cmd_social::find_social(g, &arg) {
+                let allowed = crate::cmd_social::social_min_level(g, &name)
                     .map(|min| trust >= min)
                     .unwrap_or(false);
                 if !allowed {
@@ -386,15 +386,15 @@ fn run_command_body(g: &mut GameState, ch: CharId, input: &str) {
                     && prf2_flags & PRF2_MBUILDING == 0
                     && !crate::handler::isname(&name, CMDS_DEAD_CAN_USE);
                 let prev_hide = if ghost_social {
-                    let prev = crate::cmd_social::social_hide(&name);
-                    crate::cmd_social::set_social_hide(&name, true);
+                    let prev = crate::cmd_social::social_hide(g, &name);
+                    crate::cmd_social::set_social_hide(g, &name, true);
                     prev
                 } else {
                     None
                 };
                 crate::cmd_social::do_action_named(g, ch, &name, line);
                 if let Some(prev) = prev_hide {
-                    crate::cmd_social::set_social_hide(&name, prev);
+                    crate::cmd_social::set_social_hide(g, &name, prev);
                 }
             } else {
                 g.send_to_char(ch, "Huh?!?\r\n");
@@ -1038,10 +1038,10 @@ mod tests {
             None => real.clone(),
         };
         std::fs::write(&path, format!("{}{}\n$\n", body, extra)).unwrap();
-        crate::cmd_social::boot_socials(Some(path.to_str().unwrap())).unwrap();
 
         let (mut g, ch, conn) = test_game_with_player();
         g.get_char_mut(ch).unwrap().prf2_flags |= PRF2_MBUILDING;
+        crate::cmd_social::boot_socials(&mut g, Some(path.to_str().unwrap())).unwrap();
 
         command_interpreter(&mut g, ch, "sacrafice salmon");
 
@@ -1053,7 +1053,7 @@ mod tests {
         assert!(outbuf(&g, conn).contains("You smile happily."));
 
         // Restore the shipped socials table for the remaining tests.
-        crate::cmd_social::boot_socials(Some("../lib/misc/socials")).unwrap();
+        crate::cmd_social::boot_socials(&mut g, Some("../lib/misc/socials")).unwrap();
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1085,15 +1085,15 @@ mod tests {
             None => real.clone(),
         };
         std::fs::write(&path, format!("{}{}\n$\n", body, extra)).unwrap();
-        crate::cmd_social::boot_socials(Some(path.to_str().unwrap())).unwrap();
 
         let (mut g, ch, conn) = test_game_with_player();
+        crate::cmd_social::boot_socials(&mut g, Some(path.to_str().unwrap())).unwrap();
 
         command_interpreter(&mut g, ch, "sacrafice salmon");
 
         assert_eq!(outbuf(&g, conn), "You sacrafice a fish.\r\n");
 
-        crate::cmd_social::boot_socials(Some("../lib/misc/socials")).unwrap();
+        crate::cmd_social::boot_socials(&mut g, Some("../lib/misc/socials")).unwrap();
         let _ = std::fs::remove_file(&path);
     }
 }

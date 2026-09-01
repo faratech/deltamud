@@ -3490,7 +3490,7 @@ pub fn do_commands(g: &mut GameState, ch: CharId, argument: &str, subcmd: i32) {
         // C's socials share the command loop's level gate, so a god sees them
         // all: request the list at the top level instead of the char's own.
         let social_level = if vict_is_god { LVL_IMPL } else { vict_level };
-        let mut names = crate::cmd_social::social_commands_for_level(social_level);
+        let mut names = crate::cmd_social::social_commands_for_level(g, social_level);
         // C marks the static `insult` command as TYPE_SOCIAL after building the
         // merged command list, so it appears under `socials` and not `commands`.
         names.push("insult".to_string());
@@ -4125,8 +4125,8 @@ mod tests {
 
     #[test]
     fn do_commands_lists_loaded_socials() {
-        crate::cmd_social::boot_socials(Some("../lib/misc/socials")).unwrap();
         let mut g = GameState::new(Config::default());
+        crate::cmd_social::boot_socials(&mut g, Some("../lib/misc/socials")).unwrap();
         let ch = connected_player(&mut g, ConnId(1), "Reader", 1);
 
         do_commands(&mut g, ch, "", 1);
@@ -4141,8 +4141,8 @@ mod tests {
 
     #[test]
     fn social_min_level_is_enforced_at_dispatch() {
-        crate::cmd_social::boot_socials(Some("../lib/misc/socials")).unwrap();
         let mut g = GameState::new(Config::default());
+        crate::cmd_social::boot_socials(&mut g, Some("../lib/misc/socials")).unwrap();
         let ch = connected_player(&mut g, ConnId(1), "Reader", 1);
 
         crate::interpreter::run_command(&mut g, ch, "snowball");
@@ -4617,8 +4617,8 @@ mod tests {
     /// while a plain mortal does not.
     #[test]
     fn do_commands_god_bits_bypass_the_level_gate() {
-        crate::cmd_social::boot_socials(Some("../lib/misc/socials")).unwrap();
         let mut g = GameState::new(Config::default());
+        crate::cmd_social::boot_socials(&mut g, Some("../lib/misc/socials")).unwrap();
         let mortal = connected_player(&mut g, ConnId(1), "Plain", 5);
         let favoured = connected_player(&mut g, ConnId(2), "Favoured", 5);
         g.get_char_mut(favoured).unwrap().godcmds1 |= 1;

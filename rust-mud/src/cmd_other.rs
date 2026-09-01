@@ -917,7 +917,7 @@ fn list_skills(g: &mut GameState, ch: CharId) {
             buf2.push_str("**OVERFLOW**\r\n");
             break;
         }
-        if level as i32 >= spell_info(i).min_level[class as usize] {
+        if level as i32 >= spell_info(g, i).min_level[class as usize] {
             let prof = g.get_char(ch).map(|c| c.skill(i as u16)).unwrap_or(0);
             buf2.push_str(&format!(
                 "{:<20} {}\r\n",
@@ -3834,7 +3834,7 @@ pub fn do_slist(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
     for level in 1..LVL_IMMORT as i32 {
         let mut row = String::new();
         for spellnum in 0..=TOP_SPELL_DEFINE {
-            let si = spell_info(spellnum);
+            let si = spell_info(g, spellnum);
             if si.min_level[class_idx] == level {
                 let pct = skills.get(&(spellnum as u16)).copied().unwrap_or(0);
                 if row.is_empty() {

@@ -263,7 +263,7 @@ impl GameState {
         mob.long_desc = Some(proto.long_desc);
         mob.npc_description = Some(proto.description);
         let id = self.create_char(mob);
-        crate::dg_db_scripts::assign_triggers(crate::dg_handler::ScriptKey::Mob(id), vnum);
+        crate::dg_db_scripts::assign_triggers(self, crate::dg_handler::ScriptKey::Mob(id), vnum);
         Some(id)
     }
 
@@ -288,7 +288,7 @@ impl GameState {
         obj.affects = proto.affects.clone();
         obj.ex_descriptions = proto.ex_descriptions.clone();
         let id = self.create_obj(obj);
-        crate::dg_db_scripts::assign_triggers(crate::dg_handler::ScriptKey::Obj(id), vnum);
+        crate::dg_db_scripts::assign_triggers(self, crate::dg_handler::ScriptKey::Obj(id), vnum);
         Some(id)
     }
 

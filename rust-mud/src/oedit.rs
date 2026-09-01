@@ -375,7 +375,7 @@ fn disp_menu(g: &mut GameState, conn: ConnId) {
         weight = o.weight, cost = o.cost, rent = o.rent, timer = o.timer,
         v0 = o.values[0], v1 = o.values[1], v2 = o.values[2], v3 = o.values[3],
         cslots = o.cslots, tslots = o.tslots, aff = aff_str, class = class_str, level = o.level,
-        script = if crate::dg_db_scripts::proto_trigger_vnums(crate::dg_handler::OBJ_TRIGGER, o.vnum).is_empty() {
+        script = if crate::dg_db_scripts::proto_trigger_vnums(g, crate::dg_handler::OBJ_TRIGGER, o.vnum).is_empty() {
             "Not Set."
         } else {
             "Set."
@@ -1575,7 +1575,7 @@ pub fn oedit_save_to_disk(g: &mut GameState, zone_rnum: usize) -> std::io::Resul
         // script_save_to_disk(fp, obj, OBJ_TRIGGER), after BV). The bindings
         // live in the dg proto-script map keyed (OBJ_TRIGGER, vnum); without
         // re-emitting them, any zone save strips every object's triggers.
-        for tv in crate::dg_db_scripts::proto_trigger_vnums(1, vnum) {
+        for tv in crate::dg_db_scripts::proto_trigger_vnums(g, 1, vnum) {
             out.push_str(&format!("T {}\n", tv));
         }
 

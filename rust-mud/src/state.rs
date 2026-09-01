@@ -493,6 +493,41 @@ pub enum DeferredDbOp {
     /// clan.c:388-405: lower every member of the clan to rank 1.
     ClanLowerRanks(i32),
 }
+/// World-side boot tables and runtime state that used to live in module
+/// statics (phase 1 migration). Grows as families migrate off globals.
+/// The DG script VM's boot tables (phase 1 migration; the live script/trigger
+/// arenas join here in the DG family step).
+#[derive(Default)]
+pub struct DgState {
+    /// dg_db_scripts.rs trig_index: rnum-ordered trigger prototypes.
+    pub proto_trigs: Vec<crate::dg_db_scripts::TrigProto>,
+    /// dg_db_scripts.rs: trigger vnum -> proto rnum.
+    pub trig_rnum_map: HashMap<i32, usize>,
+    /// dg_db_scripts.rs proto_script: (kind, entity vnum) -> bound trigger
+    /// vnums in load order.
+    pub proto_scripts: HashMap<(i32, i32), Vec<i32>>,
+}
+
+/// Social/economy-adjacent player-facing stores that used to live in module
+/// statics (phase 1 migration). Grows as families migrate off globals.
+#[derive(Default)]
+pub struct SocialState {
+    /// cmd_social.rs: the live social table.
+    pub socials: crate::cmd_social::SocialTable,
+}
+
+#[derive(Default)]
+pub struct WorldState {
+    /// fight_messages.rs: combat hit-message sets from `<lib>/misc/messages`.
+    pub fight_messages: Vec<crate::fight_messages::MessageList>,
+    /// spec_assign.rs: the vnum -> special-procedure tables (assign_mobiles/
+    /// objects/rooms), built once at boot.
+    pub specs: crate::spec_assign::SpecTables,
+    /// spec_assign.rs: ROOM_DEATH vnums captured before assign_specs builds
+    /// the room table (dts_are_dumps dump registration).
+    pub death_trap_rooms: Vec<RoomVnum>,
+}
+
 pub struct GameState {
     // Static world (loaded at boot; mutated by resets / OLC).
     pub rooms: Vec<Room>,
@@ -619,6 +654,22 @@ pub struct GameState {
     /// resolver itself is not modelled, only the reported state.
     pub nameserver_is_slow: bool,
 
+    // --- Owned subsystem state (phase 1 architecture migration) ------------
+    // Each sub-struct below replaces a module-static global; the world thread
+    // is the single owner. See docs/MODERNIZATION.md and the phase-1 roadmap.
+    /// The spell/skill info table (spell_parser.c spell_info[]), immutable
+    /// after boot.
+    pub spells: crate::spell_parser::SpellTables,
+    /// Boot-populated world tables and runtime world-side state that used to
+    /// live in module statics (spec assignments, fight messages, surface map,
+    /// town routes, special-proc scratch state).
+    pub world: WorldState,
+    /// Player-facing social stores (socials table; boards/mail/aliases/ban as
+    /// families migrate).
+    pub social: SocialState,
+    /// DG script VM state (prototype tables; live arenas as families migrate).
+    pub dg: DgState,
+
     // Surface ("outside") world-map splice (maputils.c read_map). The 99x99
     // grid of map cells is appended to `rooms` *after* the real-room block, so
     // real-room rnums (and real_room(vnum)) are untouched. `map_start_rnum` is
@@ -663,6 +714,10 @@ impl GameState {
             pk_allowed: false,
             // config.c:254 `int nameserver_is_slow = YES;`
             nameserver_is_slow: true,
+            spells: crate::spell_parser::SpellTables::default(),
+            world: WorldState::default(),
+            social: SocialState::default(),
+            dg: DgState::default(),
             credits: String::new(),
             news: String::new(),
             info: String::new(),

@@ -10,39 +10,36 @@
 use crate::act::{ActArg, To, act};
 use crate::state::GameState;
 use crate::types::*;
-use std::sync::OnceLock;
 
 /// One directed message triple (to attacker / victim / onlookers). A field is
 /// None when the messages file had `#` for that line (act() then prints nothing).
 #[derive(Clone)]
-struct MsgType {
-    attacker: Option<String>,
-    victim: Option<String>,
-    room: Option<String>,
+pub(crate) struct MsgType {
+    pub(crate) attacker: Option<String>,
+    pub(crate) victim: Option<String>,
+    pub(crate) room: Option<String>,
 }
 
 /// The four situations a single record covers (structs.h message_type).
 #[derive(Clone)]
-struct MessageSet {
-    die: MsgType,
-    miss: MsgType,
-    hit: MsgType,
-    god: MsgType,
+pub(crate) struct MessageSet {
+    pub(crate) die: MsgType,
+    pub(crate) miss: MsgType,
+    pub(crate) hit: MsgType,
+    pub(crate) god: MsgType,
 }
 
 /// All message sets registered for one attack type (structs.h message_list);
 /// `messages.len()` is C's `number_of_attacks`.
-struct MessageList {
-    a_type: i32,
-    messages: Vec<MessageSet>,
+pub(crate) struct MessageList {
+    pub(crate) a_type: i32,
+    pub(crate) messages: Vec<MessageSet>,
 }
-
-static FIGHT_MESSAGES: OnceLock<Vec<MessageList>> = OnceLock::new();
 
 /// load_messages (fight.c): parse `<lib>/misc/messages` into the fight-message
 /// table. Unlike C (which exit(1)s on a missing/short file) this logs and
 /// disables skill messages so the server still boots without the data file.
-pub fn load_messages(lib_path: &str) {
+pub fn load_messages(g: &mut GameState, lib_path: &str) {
     let path = format!("{}/misc/messages", lib_path);
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
@@ -52,7 +49,7 @@ pub fn load_messages(lib_path: &str) {
                 path,
                 e
             );
-            let _ = FIGHT_MESSAGES.set(Vec::new());
+            g.world.fight_messages = Vec::new();
             return;
         }
     };
@@ -127,7 +124,7 @@ pub fn load_messages(lib_path: &str) {
 
     let types = table.len();
     let total: usize = table.iter().map(|m| m.messages.len()).sum();
-    let _ = FIGHT_MESSAGES.set(table);
+    g.world.fight_messages = table;
     log::info!(
         "   {} attack-message type(s), {} message(s) loaded.",
         types,
@@ -164,9 +161,11 @@ pub fn skill_message(
     vict: CharId,
     attacktype: i32,
 ) -> bool {
-    let nmsgs = match FIGHT_MESSAGES
-        .get()
-        .and_then(|t| t.iter().find(|m| m.a_type == attacktype))
+    let nmsgs = match g
+        .world
+        .fight_messages
+        .iter()
+        .find(|m| m.a_type == attacktype)
     {
         Some(ml) if !ml.messages.is_empty() => ml.messages.len(),
         _ => return false,
@@ -175,9 +174,9 @@ pub fn skill_message(
     // hold no borrow of the table across the act() calls.
     let nr = g.rng.dice(1, nmsgs as i32);
     let set = {
-        let ml = FIGHT_MESSAGES
-            .get()
-            .unwrap()
+        let ml = g
+            .world
+            .fight_messages
             .iter()
             .find(|m| m.a_type == attacktype)
             .unwrap();

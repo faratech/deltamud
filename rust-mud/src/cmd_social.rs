@@ -15,7 +15,6 @@ use crate::act::{ActArg, To, act_sleep};
 use crate::state::GameState;
 use crate::types::*;
 use std::collections::HashMap;
-use std::sync::{OnceLock, RwLock};
 
 // PRF_NOGOSS (structs.h: 1 << 19) — not yet present in flags.rs; defined here
 // privately so the gemote/gossip gate matches C exactly.
@@ -69,15 +68,14 @@ pub struct SocialMessg {
     pub others_obj_found: Option<String>,
 }
 
-/// Loaded social table, sorted by `sort_as` (C create_command_list() resort)
-/// and indexed by `command` for O(1) lookup from the interpreter.
+/// The live social table (C boot_social_messages + create_command_list()
+/// resort, indexed by `command`), owned by GameState (`social.socials`) as of
+/// the phase-1 statics migration.
 #[derive(Default)]
-struct SocialTable {
-    list: Vec<SocialMessg>,
-    by_command: HashMap<String, usize>,
+pub struct SocialTable {
+    pub(crate) list: Vec<SocialMessg>,
+    pub(crate) by_command: HashMap<String, usize>,
 }
-
-static SOCIALS: OnceLock<RwLock<SocialTable>> = OnceLock::new();
 
 /// CircleMUD SOCMESS_FILE (db.h): "misc/socials" relative to the lib dir.
 const SOCMESS_FILE: &str = "lib/misc/socials";
@@ -90,40 +88,26 @@ const SOCMESS_FILE: &str = "lib/misc/socials";
 /// before the interpreter dispatches any commands. `lib_path` is the path to
 /// the `socials` file; pass `None` to use the default `lib/misc/socials`
 /// (relative to the process CWD, matching the C server which chdirs to lib).
-pub fn boot_socials(lib_path: Option<&str>) -> std::io::Result<()> {
+pub fn boot_socials(g: &mut GameState, lib_path: Option<&str>) -> std::io::Result<()> {
     let path = lib_path.unwrap_or(SOCMESS_FILE);
     let table = load_socials(path)?;
-    install_socials(table);
+    g.social.socials = table;
     Ok(())
 }
 
 /// Reload the live social table from disk after OLC writes `misc/socials`.
-pub fn reload_socials(lib_path: Option<&str>) -> std::io::Result<()> {
+pub fn reload_socials(g: &mut GameState, lib_path: Option<&str>) -> std::io::Result<()> {
     let path = lib_path.unwrap_or(SOCMESS_FILE);
     let table = load_socials(path)?;
-    install_socials(table);
+    g.social.socials = table;
     Ok(())
-}
-
-fn install_socials(table: SocialTable) {
-    if let Some(lock) = SOCIALS.get() {
-        match lock.write() {
-            Ok(mut guard) => *guard = table,
-            Err(poisoned) => {
-                let mut guard = poisoned.into_inner();
-                *guard = table;
-            }
-        }
-    } else {
-        let _ = SOCIALS.set(RwLock::new(table));
-    }
 }
 
 /// Install an already validated OLC candidate without re-reading the file that
 /// was just published.  This keeps the durable editor table and live command
 /// lookup in one explicit success path; parsing remains a boot/import concern.
-pub(crate) fn install_social_messages(list: Vec<SocialMessg>) {
-    install_socials(finalize(list));
+pub(crate) fn install_social_messages(g: &mut GameState, list: Vec<SocialMessg>) {
+    g.social.socials = finalize(list);
 }
 
 fn load_socials(path: &str) -> std::io::Result<SocialTable> {
@@ -266,12 +250,12 @@ fn finalize(mut list: Vec<SocialMessg>) -> SocialTable {
 /// interpreter walking cmd_info[]: the socials are sorted by `sort_as`, and
 /// the first whose name is prefixed by `arg` wins. Returns the canonical
 /// command name to pass to do_action_named().
-pub fn find_social(arg: &str) -> Option<String> {
+pub fn find_social(g: &GameState, arg: &str) -> Option<String> {
     let arg = arg.to_lowercase();
     if arg.is_empty() {
         return None;
     }
-    let table = SOCIALS.get()?.read().ok()?;
+    let table = &g.social.socials;
     table
         .list
         .iter()
@@ -280,19 +264,14 @@ pub fn find_social(arg: &str) -> Option<String> {
 }
 
 /// Minimum character level for an exact social command.
-pub fn social_min_level(command: &str) -> Option<i32> {
-    let table = SOCIALS.get()?.read().ok()?;
-    lookup(&table, command).map(|s| s.min_level_char)
+pub fn social_min_level(g: &GameState, command: &str) -> Option<i32> {
+    let table = &g.social.socials;
+    lookup(table, command).map(|s| s.min_level_char)
 }
 
 /// Commands visible in the `socials` listing for a character level.
-pub fn social_commands_for_level(level: Level) -> Vec<String> {
-    let Some(lock) = SOCIALS.get() else {
-        return Vec::new();
-    };
-    let Ok(table) = lock.read() else {
-        return Vec::new();
-    };
+pub fn social_commands_for_level(g: &GameState, level: Level) -> Vec<String> {
+    let table = &g.social.socials;
     table
         .list
         .iter()
@@ -325,11 +304,7 @@ pub fn do_action(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
 pub fn do_action_named(g: &mut GameState, ch: CharId, command: &str, argument: &str) {
     // Snapshot the social (clone out of the static so we hold no borrow on the
     // table while mutating GameState).
-    let action = match SOCIALS.get().and_then(|lock| {
-        lock.read()
-            .ok()
-            .and_then(|table| lookup(&table, command).cloned())
-    }) {
+    let action = match lookup(&g.social.socials, command).cloned() {
         Some(a) => a.clone(),
         None => {
             g.send_to_char(ch, "That action is not supported.\r\n");
@@ -822,11 +797,7 @@ pub fn do_gmote_named(g: &mut GameState, ch: CharId, command: &str, argument: &s
         return;
     }
 
-    let action = match SOCIALS.get().and_then(|lock| {
-        lock.read()
-            .ok()
-            .and_then(|table| lookup(&table, command).cloned())
-    }) {
+    let action = match lookup(&g.social.socials, command).cloned() {
         Some(a) => a.clone(),
         None => {
             g.send_to_char(ch, "That's not a social!\r\n");
@@ -920,7 +891,7 @@ pub fn do_gmote(g: &mut GameState, ch: CharId, argument: &str, _subcmd: i32) {
         g.send_to_char(ch, "That's not a social!\r\n");
         return;
     }
-    let resolved = match find_social(&command) {
+    let resolved = match find_social(g, &command) {
         Some(c) => c,
         None => {
             g.send_to_char(ch, "That's not a social!\r\n");
@@ -1139,30 +1110,19 @@ fn cap_first(s: &mut String) {
 
 /// The social's permanent hide bit (C soc_mess_list[].hide), for the
 /// intangible-player forced-hide run (#229).
-pub fn social_hide(command: &str) -> Option<bool> {
-    SOCIALS
-        .get_or_init(|| RwLock::new(SocialTable::default()))
-        .read()
-        .unwrap()
+pub fn social_hide(g: &GameState, command: &str) -> Option<bool> {
+    let table = &g.social.socials;
+    table
         .by_command
         .get(&command.to_lowercase())
-        .and_then(|&i| {
-            SOCIALS
-                .get_or_init(|| RwLock::new(SocialTable::default()))
-                .read()
-                .unwrap()
-                .list
-                .get(i)
-                .map(|s| s.hide)
-        })
+        .and_then(|&i| table.list.get(i).map(|s| s.hide))
 }
 
 /// Temporarily override a social's hide bit (intangible-player run).
-pub fn set_social_hide(command: &str, hide: bool) {
-    let table = SOCIALS.get_or_init(|| RwLock::new(SocialTable::default()));
-    let mut guard = crate::lock_ok::write(&table);
-    if let Some(&i) = guard.by_command.get(&command.to_lowercase()) {
-        if let Some(s) = guard.list.get_mut(i) {
+pub fn set_social_hide(g: &mut GameState, command: &str, hide: bool) {
+    let table = &mut g.social.socials;
+    if let Some(&i) = table.by_command.get(&command.to_lowercase()) {
+        if let Some(s) = table.list.get_mut(i) {
             s.hide = hide;
         }
     }
@@ -1252,8 +1212,8 @@ mod tests {
     /// player's no-argument socials (act.social.c:96).
     #[test]
     fn no_arg_social_skips_a_public_ignorer_324() {
-        boot_socials(Some("../lib/misc/socials")).unwrap();
         let mut g = GameState::new(Config::default());
+        boot_socials(&mut g, Some("../lib/misc/socials")).unwrap();
         let a = connected_player(&mut g, ConnId(1), "Screamer", 10);
         let b = connected_player(&mut g, ConnId(2), "Deafer", 10);
         shared_room(&mut g, &[a, b]);
@@ -1280,8 +1240,8 @@ mod tests {
     /// socials (act.social.c:97).
     #[test]
     fn no_arg_social_skips_a_writing_player_324() {
-        boot_socials(Some("../lib/misc/socials")).unwrap();
         let mut g = GameState::new(Config::default());
+        boot_socials(&mut g, Some("../lib/misc/socials")).unwrap();
         let a = connected_player(&mut g, ConnId(1), "Waver", 10);
         let b = connected_player(&mut g, ConnId(2), "Writer", 10);
         shared_room(&mut g, &[a, b]);
@@ -1300,8 +1260,8 @@ mod tests {
     /// Sanity for the same path: an uninvolved room-mate still sees it.
     #[test]
     fn no_arg_social_reaches_an_ordinary_room_mate() {
-        boot_socials(Some("../lib/misc/socials")).unwrap();
         let mut g = GameState::new(Config::default());
+        boot_socials(&mut g, Some("../lib/misc/socials")).unwrap();
         let a = connected_player(&mut g, ConnId(1), "Waver", 10);
         let b = connected_player(&mut g, ConnId(2), "Watcher", 10);
         shared_room(&mut g, &[a, b]);
@@ -1315,8 +1275,8 @@ mod tests {
     /// the per-viewer colour level (comm.c:2469-2483).
     #[test]
     fn gmote_skips_writers_and_ignorers_and_forces_no_colour_325() {
-        boot_socials(Some("../lib/misc/socials")).unwrap();
         let mut g = GameState::new(Config::default());
+        boot_socials(&mut g, Some("../lib/misc/socials")).unwrap();
         let a = connected_player(&mut g, ConnId(1), "Gossiper", 10);
         let b = connected_player(&mut g, ConnId(2), "Writer", 10);
         let c = connected_player(&mut g, ConnId(3), "Deafer", 10);
@@ -1365,8 +1325,8 @@ mod tests {
     /// #325 sanity: a colour-enabled viewer still gets the yellow framing.
     #[test]
     fn gmote_frames_colour_viewers_in_yellow_325() {
-        boot_socials(Some("../lib/misc/socials")).unwrap();
         let mut g = GameState::new(Config::default());
+        boot_socials(&mut g, Some("../lib/misc/socials")).unwrap();
         let a = connected_player(&mut g, ConnId(1), "Gossiper", 10);
         let d = connected_player(&mut g, ConnId(4), "Colour", 10);
         shared_room(&mut g, &[a, d]);
