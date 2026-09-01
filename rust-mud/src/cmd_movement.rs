@@ -244,8 +244,14 @@ pub fn perform_move(g: &mut GameState, ch: CharId, dir: i32, need_specials_check
 pub(crate) fn do_simple_move(g: &mut GameState, ch: CharId, dir: usize, need_specials_check: bool) -> bool {
     // C act.movement.c:151: `if (need_specials_check && special(ch, dir + 1,
     // "")) return 0;` - a room spec proc can veto the move (followers path).
-    // The port accepted the flag but ignored it (#133).
-    if need_specials_check && crate::spec_assign::special(g, ch, "", "") {
+    // C passes the REAL command number (dir+1), which is non-zero: specs that
+    // act only on the mobile-activity pulse (`if (cmd) return 0;`) therefore
+    // bail here. The port passed "" -- empty -- which DEFEATS every cmd gate
+    // and let pulse-style specs (mayor/cityguard/king) fire on every NPC
+    // move/flee, recursing through perform_move -> do_simple_move -> special
+    // for the length of a patrol path (the stack overflow of 2026-09-01).
+    // Pass a non-empty marker: same "a real command is running" signal as C.
+    if need_specials_check && crate::spec_assign::special(g, ch, "move", "") {
         return false;
     }
     let rnum = match g.get_char(ch).and_then(|c| c.in_room) {

@@ -487,6 +487,23 @@ impl GameState {
     /// Remove an object from the world entirely (recursively extracts any
     /// contents). Caller must have already detached it from its location.
     pub fn extract_obj(&mut self, id: ObjId) {
+        // Depth guard: extraction recurses over the containment graph. The
+        // only C-parity cycle guard lives in do_put, so any OTHER path that
+        // ever double-parents a container (DG oput, corpse sweeps) would
+        // recurse unboundedly on the Game task. Cap and log instead.
+        thread_local! {
+            static EXTRACT_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        const MAX_EXTRACT_DEPTH: u32 = 32;
+        if EXTRACT_DEPTH.with(|d| d.get()) >= MAX_EXTRACT_DEPTH {
+            log::warn!(
+                "SYSERR: extract_obj nesting exceeded {} (obj {}); aborting nested sweep",
+                MAX_EXTRACT_DEPTH,
+                self.objs.get(&id).map(|o| o.item_number).unwrap_or(-1)
+            );
+            return;
+        }
+        EXTRACT_DEPTH.with(|d| d.set(d.get() + 1));
         let contents = self
             .objs
             .get(&id)
@@ -495,6 +512,7 @@ impl GameState {
         for c in contents {
             self.extract_obj(c);
         }
+        EXTRACT_DEPTH.with(|d| d.set(d.get() - 1));
         // shift_remove (NOT swap_remove): swap_remove moves the last-inserted
         // entry into the vacated slot while its .id keeps the OLD value, so a
         // stale id held across an extraction would resolve to a DIFFERENT

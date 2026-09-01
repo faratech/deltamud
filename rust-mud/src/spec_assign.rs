@@ -326,6 +326,40 @@ pub fn special(g: &mut GameState, ch: CharId, cmd: &str, arg: &str) -> bool {
         return false;
     }
 
+    // Re-entry guard: a spec that moves its owner (mayor/king patrols, DG
+    // forces) re-enters special() through perform_move -> do_simple_move.
+    // Each individual hop is legal; unbounded nesting is a stack overflow on
+    // the single Game task. Cap the nesting; the outermost call wins.
+    thread_local! {
+        static SPEC_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+    const MAX_SPEC_DEPTH: u32 = 8;
+    let depth_ok = SPEC_DEPTH.with(|d| {
+        let n = d.get();
+        if n >= MAX_SPEC_DEPTH {
+            false
+        } else {
+            d.set(n + 1);
+            true
+        }
+    });
+    if !depth_ok {
+        if cmd.is_empty() {
+            log::warn!(
+                "SYSERR: spec proc re-entry exceeded depth {} (mob in room {}); skipping nested dispatch",
+                MAX_SPEC_DEPTH,
+                g.get_char(ch).and_then(|c| c.in_room).map(|r| g.rooms[r].number).unwrap_or(-1)
+            );
+        }
+        return false;
+    }
+    let result = special_inner(g, ch, cmd, arg);
+    SPEC_DEPTH.with(|d| d.set(d.get() - 1));
+    result
+}
+
+fn special_inner(g: &mut GameState, ch: CharId, cmd: &str, arg: &str) -> bool {
+
     // The actor's room. If the actor is nowhere (just extracted / between
     // rooms) there is nothing to dispatch against — C dereferences
     // ch->in_room unconditionally, but our arena guards it.

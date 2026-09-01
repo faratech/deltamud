@@ -2049,13 +2049,20 @@ fn mag_objectmagic(g: &mut GameState, ch: CharId, obj: ObjId, argument: &str) {
                 .get_obj(obj)
                 .map(|o| (o.values[0], o.values[1], o.values[2], o.values[3]))
                 .unwrap_or((0, 0, 0, 0));
+
+            // Consume the scroll BEFORE casting: a cast can damage the target
+            // (mag_damage), trip the auto-retreat/auto-recall thresholds, and
+            // recite THIS SAME still-unextracted scroll again -> unbounded
+            // recursion through call_magic -> damage -> do_recite. (C reads
+            // the spells first and lets the object linger, which is safe only
+            // because its recite path cannot re-enter; ours can.)
+            extract_obj_from_world(g, obj);
+
             for spellnum in [v1, v2, v3] {
                 if crate::magic::call_magic(g, ch, target, tobj, spellnum, v0) == 0 {
                     break;
                 }
             }
-
-            extract_obj_from_world(g, obj);
         }
         Some(ObjectType::Potion) => {
             act(

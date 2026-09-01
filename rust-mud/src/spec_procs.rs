@@ -438,34 +438,18 @@ pub fn guild_guard(g: &mut GameState, ch: CharId, me: CharId, cmd: &str, _arg: &
 /// dts_are_dumps), so `me` is the room rnum (unused — dump operates on the
 /// actor's room directly), matching spec_assign::RoomSpecFn.
 pub fn dump(g: &mut GameState, ch: CharId, _me: RoomRnum, cmd: &str, arg: &str) -> bool {
+    // Room specs fire on EVERY dispatch, including the movement specials check
+    // (cmd "move") and any pulse-style re-entry with an empty cmd: gate the
+    // whole proc on the actual drop command so mere movement through a death
+    // trap does not vaporise the room's contents.
+    if !cmd_is(cmd, "drop") {
+        return false;
+    }
+
     let rnum = match in_room(g, ch) {
         Some(r) => r,
         None => return false,
     };
-
-    // First sweep: vaporise everything already on the ground.
-    loop {
-        let k = g.room_opt(rnum).and_then(|r| r.contents.first().copied());
-        let k = match k {
-            Some(o) => o,
-            None => break,
-        };
-        act(
-            g,
-            "$p vanishes in a puff of smoke!",
-            false,
-            ch,
-            Some(k),
-            ActArg::None,
-            To::Room,
-        );
-        g.obj_from_anywhere(k);
-        g.extract_obj(k);
-    }
-
-    if !cmd_is(cmd, "drop") {
-        return false;
-    }
 
     // Let the normal drop run (drops onto the floor of this room).
     crate::cmd_item::do_drop(g, ch, arg, SCMD_DROP);
@@ -1014,7 +998,12 @@ const OPEN_PATH: &[u8] = b"W3a3003b33000c111d0d111Oe333333Oe22c222112212111a1S."
 const CLOSE_PATH: &[u8] = b"W3a3003b33000c111d0d111CE333333CE22c222112212111a1S.";
 
 /// SPECIAL(mayor). Periodic-pulse only.
-pub fn mayor(g: &mut GameState, ch: CharId, _me: CharId, cmd: &str, _arg: &str) -> bool {
+pub fn mayor(g: &mut GameState, actor: CharId, me: CharId, cmd: &str, _arg: &str) -> bool {
+    // C castle.c convention: the spec's `ch` is the MOB THAT OWNS the spec,
+    // never the caller who happened to trigger dispatch. Without this rebinding
+    // the mayor drove its patrol ON whoever walked through the room (and every
+    // patrol step re-entered special() -> mayor() on the mover).
+    let ch = me;
     // Decide whether to (re)start a patrol based on the mud clock.
     let hour = crate::weather::time_now().0;
 
