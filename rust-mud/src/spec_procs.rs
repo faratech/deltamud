@@ -2000,8 +2000,10 @@ pub fn register_mob_specs(mut assign: impl FnMut(MobVnum, crate::spec_assign::Sp
     for &v in &[3060, 3067] {
         assign(v, cityguard as crate::spec_assign::SpecFn);
     }
-    // --- The mayor (stock Midgaard vnum). ---
-    assign(3105, mayor as crate::spec_assign::SpecFn);
+    // --- The mayor (stock Midgaard vnum 3105). NOT assigned: our world has
+    // no Midgaard, and zone 31 now owns vnum 3105 (drowned templar) -- the
+    // patrol would walk Cloister mobs through another zone's path script.
+    // Registered in COMPATIBILITY.md (spec-assignment collisions).
     // --- Scavenger fido (stock Midgaard vnum). ---
     assign(3062, fido as crate::spec_assign::SpecFn);
     // --- Finish-the-game activations (Itrius): the authored guildmasters,
@@ -2039,8 +2041,10 @@ pub fn register_room_specs(
     for &rv in death_rooms {
         assign(rv, dump as crate::spec_assign::RoomSpecFn);
     }
-    // Pet shops (ASSIGNROOM 3031 pet_shops in stock CircleMUD/DeltaMUD).
-    assign(3031, pet_shops as crate::spec_assign::RoomSpecFn);
+    // Pet shops (ASSIGNROOM 3031 in stock CircleMUD/DeltaMUD). NOT assigned:
+    // zone 30 now owns room 3031 (The Tower Magazine), and the pet-shop proc's
+    // pet_room = in_room + 1 arithmetic assumed Midgaard's room layout.
+    // Registered in COMPATIBILITY.md (spec-assignment collisions).
 }
 
 #[cfg(test)]
