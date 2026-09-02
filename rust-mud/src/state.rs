@@ -1908,6 +1908,7 @@ mod static_freedom_gate {
             "src/spells.rs",
             "src/mail.rs",
             "src/game.rs",
+            "src/game/mod.rs", // ban_test_lock (test-only guard)
             "src/clan.rs",
             "src/arena.rs",
             "src/dg_handler.rs",
