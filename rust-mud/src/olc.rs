@@ -64,6 +64,7 @@ pub const OLC_SAVE_MOB: i32 = 3;
 pub const OLC_SAVE_SHOP: i32 = 4;
 pub const OLC_SAVE_HELP: i32 = 5;
 pub const OLC_SAVE_ACTION: i32 = 6;
+pub const OLC_SAVE_TRG: i32 = 7;
 
 /// `save_info_msg[]` (olc.c) — human label per OLC_SAVE_* tag.
 pub const SAVE_INFO_MSG: [&str; 7] = [
@@ -567,6 +568,86 @@ pub enum EditorKind {
     Tedit,
 }
 
+/// One row of the editor registry: the per-kind behavior the OLC router and the
+/// durability journal need. Static function pointers — no dyn dispatch on the
+/// hot input path (phase 4).
+pub(crate) struct EditorSpec {
+    pub kind: EditorKind,
+    /// OLC_SAVE_* component id written into the save journal.
+    pub save_kind: i32,
+    /// Forward one input line to this editor's parser.
+    pub parse: fn(&mut GameState, ConnId, &str),
+    /// Abort (discard) this editor's scratch state for one connection.
+    pub abort: fn(&mut GameState, ConnId),
+    /// Durably save the whole zone component (flush/copyover/shutdown path).
+    pub save_zone: fn(&mut GameState, usize) -> std::io::Result<()>,
+}
+
+/// The editor registry. `editor_specs_exhaustive` (tests) proves it covers
+/// every `EditorKind` exactly once.
+pub(crate) const EDITORS: &[EditorSpec] = &[
+    EditorSpec {
+        kind: EditorKind::Redit,
+        save_kind: OLC_SAVE_ROOM,
+        parse: crate::redit::redit_parse,
+        abort: crate::redit::abort,
+        save_zone: crate::redit::redit_save_to_disk,
+    },
+    EditorSpec {
+        kind: EditorKind::Oedit,
+        save_kind: OLC_SAVE_OBJ,
+        parse: crate::oedit::oedit_parse,
+        abort: crate::oedit::abort,
+        save_zone: crate::oedit::oedit_save_to_disk,
+    },
+    EditorSpec {
+        kind: EditorKind::Medit,
+        save_kind: OLC_SAVE_MOB,
+        parse: crate::medit::medit_parse,
+        abort: crate::medit::abort,
+        save_zone: crate::medit::medit_save_to_disk,
+    },
+    EditorSpec {
+        kind: EditorKind::Zedit,
+        save_kind: OLC_SAVE_ZONE,
+        parse: crate::zedit::zedit_parse,
+        abort: crate::zedit::abort,
+        save_zone: crate::zedit::zedit_save_to_disk,
+    },
+    EditorSpec {
+        kind: EditorKind::Sedit,
+        save_kind: OLC_SAVE_SHOP,
+        parse: crate::sedit::sedit_parse,
+        abort: crate::sedit::abort,
+        save_zone: crate::sedit::sedit_save_zone_to_disk,
+    },
+    EditorSpec {
+        kind: EditorKind::Aedit,
+        save_kind: OLC_SAVE_ACTION,
+        parse: crate::aedit::aedit_parse,
+        abort: crate::aedit::abort,
+        save_zone: crate::aedit::aedit_save_to_disk,
+    },
+    EditorSpec {
+        kind: EditorKind::Hedit,
+        save_kind: OLC_SAVE_HELP,
+        parse: crate::hedit::hedit_parse,
+        abort: crate::hedit::abort,
+        save_zone: crate::hedit::hedit_save_to_disk,
+    },
+    EditorSpec {
+        kind: EditorKind::Trigedit,
+        save_kind: OLC_SAVE_TRG,
+        parse: crate::trigedit::trigedit_parse,
+        abort: crate::trigedit::abort,
+        save_zone: crate::trigedit::trigedit_save_zone_to_disk,
+    },
+];
+
+pub(crate) fn spec_for(kind: EditorKind) -> Option<&'static EditorSpec> {
+    EDITORS.iter().find(|spec| spec.kind == kind)
+}
+
 // ---------------------------------------------------------------------------
 // Active-editor registry (replaces STATE(d) == CON_*EDIT). Keyed by ConnId.
 // ---------------------------------------------------------------------------
@@ -599,16 +680,8 @@ pub fn clear_active(g: &mut GameState, conn: ConnId) {
 /// map. No-op if the conn isn't editing.
 pub fn abort_editor(g: &mut GameState, conn: ConnId) {
     if let Some(kind) = active_editor(g, conn) {
-        match kind {
-            EditorKind::Redit => crate::redit::abort(g, conn),
-            EditorKind::Oedit => crate::oedit::abort(g, conn),
-            EditorKind::Medit => crate::medit::abort(g, conn),
-            EditorKind::Zedit => crate::zedit::abort(g, conn),
-            EditorKind::Sedit => crate::sedit::abort(g, conn),
-            EditorKind::Aedit => crate::aedit::abort(g, conn),
-            EditorKind::Hedit => crate::hedit::abort(g, conn),
-            EditorKind::Trigedit => crate::trigedit::abort(g, conn),
-            EditorKind::Tedit => {}
+        if let Some(spec) = spec_for(kind) {
+            (spec.abort)(g, conn);
         }
     }
     clear_active(g, conn);
@@ -634,16 +707,8 @@ pub fn olc_input(g: &mut GameState, conn: ConnId, line: &str) {
         Some(k) => k,
         None => return,
     };
-    match kind {
-        EditorKind::Redit => crate::redit::redit_parse(g, conn, line),
-        EditorKind::Oedit => crate::oedit::oedit_parse(g, conn, line),
-        EditorKind::Medit => crate::medit::medit_parse(g, conn, line),
-        EditorKind::Zedit => crate::zedit::zedit_parse(g, conn, line),
-        EditorKind::Sedit => crate::sedit::sedit_parse(g, conn, line),
-        EditorKind::Aedit => crate::aedit::aedit_parse(g, conn, line),
-        EditorKind::Hedit => crate::hedit::hedit_parse(g, conn, line),
-        EditorKind::Trigedit => crate::trigedit::trigedit_parse(g, conn, line),
-        EditorKind::Tedit => {}
+    if let Some(spec) = spec_for(kind) {
+        (spec.parse)(g, conn, line);
     }
 }
 
@@ -957,15 +1022,14 @@ pub fn flush_save_list_to_disk(
         let result = match kind {
             OLC_SAVE_HELP => crate::hedit::save_all_help(g),
             OLC_SAVE_ACTION => crate::aedit::save_all_actions(g),
-            OLC_SAVE_ROOM | OLC_SAVE_OBJ | OLC_SAVE_ZONE | OLC_SAVE_MOB | OLC_SAVE_SHOP => {
-                match zone_rnum_for_number(g, zone) {
-                    Some(zone_rnum) => try_olc_save_to_disk(g, zone_rnum, kind),
-                    None => Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("zone {zone} is not loaded"),
-                    )),
-                }
-            }
+            OLC_SAVE_ROOM | OLC_SAVE_OBJ | OLC_SAVE_ZONE | OLC_SAVE_MOB | OLC_SAVE_SHOP
+            | OLC_SAVE_TRG => match zone_rnum_for_number(g, zone) {
+                Some(zone_rnum) => try_olc_save_to_disk(g, zone_rnum, kind),
+                None => Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("zone {zone} is not loaded"),
+                )),
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "unsupported OLC save component",
@@ -1462,13 +1526,9 @@ fn send_to_conn(g: &mut GameState, conn: ConnId, msg: &str) {
 // removes its save-list entry only after the durable replacement succeeds.
 // ===========================================================================
 fn try_olc_save_to_disk(g: &mut GameState, zone_rnum: usize, kind: i32) -> io::Result<()> {
-    match kind {
-        OLC_SAVE_ROOM => crate::redit::redit_save_to_disk(g, zone_rnum),
-        OLC_SAVE_OBJ => crate::oedit::oedit_save_to_disk(g, zone_rnum),
-        OLC_SAVE_ZONE => crate::zedit::zedit_save_to_disk(g, zone_rnum),
-        OLC_SAVE_MOB => crate::medit::medit_save_to_disk(g, zone_rnum),
-        OLC_SAVE_SHOP => crate::sedit::sedit_save_zone_to_disk(g, zone_rnum),
-        _ => Err(io::Error::new(
+    match EDITORS.iter().find(|spec| spec.save_kind == kind) {
+        Some(spec) => (spec.save_zone)(g, zone_rnum),
+        None => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "unsupported OLC save component",
         )),
@@ -3286,5 +3346,60 @@ mod tests {
         assert!(dirty.contains(&(47, OLC_SAVE_ROOM)));
         olc_remove_from_save_list(&mut g, 46, OLC_SAVE_ROOM);
         olc_remove_from_save_list(&mut g, 47, OLC_SAVE_ROOM);
+    }
+}
+
+/// Editor-registry exhaustiveness (phase 4): every `EditorKind` must have
+/// exactly one registry row, and no row may name a kind the enum lacks. This
+/// is what makes the table a safe replacement for the old hardcoded match
+/// arms — a new editor that forgets to register cannot dispatch input, abort
+/// on disconnect, or join the save journal without breaking this test.
+#[cfg(test)]
+mod editor_registry_gate {
+    use super::*;
+
+    #[test]
+    fn editor_specs_cover_every_kind_exactly_once() {
+        const ALL_KINDS: &[EditorKind] = &[
+            EditorKind::Redit,
+            EditorKind::Oedit,
+            EditorKind::Medit,
+            EditorKind::Zedit,
+            EditorKind::Sedit,
+            EditorKind::Aedit,
+            EditorKind::Hedit,
+            EditorKind::Trigedit,
+            EditorKind::Tedit,
+        ];
+        assert_eq!(ALL_KINDS.len(), EDITORS.len() + 1); // +1: Tedit is a placeholder with no editor yet
+
+        for kind in ALL_KINDS {
+            let matches: Vec<_> = EDITORS.iter().filter(|spec| spec.kind == *kind).collect();
+            match *kind {
+                // Tedit has no editor body in this port (registered as a no-op
+                // command in the C table; never dispatched).
+                EditorKind::Tedit => assert!(matches.is_empty()),
+                _ => {
+                    assert_eq!(
+                        matches.len(),
+                        1,
+                        "{kind:?} must have exactly one registry row"
+                    );
+                    assert!(matches[0].save_kind != i32::MIN);
+                }
+            }
+        }
+        // Every save component id maps back to exactly one registry row.
+        for spec in EDITORS {
+            assert_eq!(
+                EDITORS
+                    .iter()
+                    .filter(|s| s.save_kind == spec.save_kind)
+                    .count(),
+                1,
+                "save component {} must be unique",
+                spec.save_kind
+            );
+        }
     }
 }

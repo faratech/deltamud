@@ -748,6 +748,107 @@ fn save(g: &mut GameState, conn: ConnId) -> std::io::Result<()> {
     save_with(g, conn, olc::atomic_replace)
 }
 
+/// Every prototype to serialize for one zone: all live protos in
+/// [zone_start..=zone_top], with `edited` substituted for its own vnum (or
+/// appended, if its vnum somehow falls outside the range).
+fn zone_proto_set(
+    g: &GameState,
+    zone_start: i32,
+    zone_top: i32,
+    edited: Option<(i32, TrigProto)>,
+) -> Vec<TrigProto> {
+    let (edited_vnum, edited) = match edited {
+        Some((vnum, edited)) => (Some(vnum), Some(edited)),
+        None => (None, None),
+    };
+    let mut zone_protos: Vec<TrigProto> = Vec::new();
+    let mut inserted = false;
+    for i in zone_start..=zone_top {
+        if edited_vnum == Some(i) {
+            zone_protos.push(edited.clone().expect("edited vnum set"));
+            inserted = true;
+            continue;
+        }
+        let rnum = dg_db_scripts::real_trigger(g, i);
+        if rnum >= 0 {
+            if let Some(p) = dg_db_scripts::trig_proto(g, rnum as usize) {
+                zone_protos.push(p);
+            }
+        }
+    }
+    if let (Some(_), Some(edited)) = (edited_vnum, edited) {
+        if !inserted {
+            // vnum out of the iterated range (shouldn't happen since real_zone
+            // matched) — append it so the edit is never lost.
+            zone_protos.push(edited);
+            zone_protos.sort_by_key(|p| p.vnum);
+        }
+    }
+    zone_protos
+}
+
+/// Render one zone's .trg file bytes (C trig file format, `#vnum` blocks + `$~`).
+fn render_trg_file(zone_protos: &[TrigProto]) -> String {
+    let mut text = String::new();
+    for p in zone_protos {
+        text.push_str(&format!("#{}\n", p.vnum));
+        let bit_buf = sprintbits(p.trigger_type);
+        let pname = if p.name.is_empty() {
+            "unknown trigger"
+        } else {
+            &p.name
+        };
+        text.push_str(&format!(
+            "{}~\n{} {} {}\n{}~\n",
+            pname, p.attach_type, bit_buf, p.narg, p.arglist
+        ));
+        // The script body.
+        let mut body = String::new();
+        for c in &p.cmdlist {
+            body.push_str(c);
+            body.push_str("\r\n");
+        }
+        if body.is_empty() {
+            body.push_str("* Empty script");
+        }
+        text.push_str(&format!("{}~\n", body));
+    }
+    text.push_str("$~\n");
+    text
+}
+
+/// Save every trigger prototype of one zone (OLC_SAVE_TRG flush path). Rewrites
+/// the zone .trg file from the live prototype table via the durable publisher.
+pub(crate) fn trigedit_save_zone_to_disk(
+    g: &mut GameState,
+    zone_rnum: usize,
+) -> std::io::Result<()> {
+    let (zone_number, zone_start, zone_top) = match g.zones.get(zone_rnum) {
+        Some(z) => match z.vnum_start() {
+            Some(start) => (z.number, start, z.top),
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "trigger zone number is outside the supported range",
+                ));
+            }
+        },
+        None => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "trigger zone index is not loaded",
+            ));
+        }
+    };
+    let lib_path = g.config.lib_path.clone();
+    let trg_dir = std::path::Path::new(&lib_path).join("world").join("trg");
+    std::fs::create_dir_all(&trg_dir)?;
+    let zone_protos = zone_proto_set(g, zone_start, zone_top, None);
+    let text = render_trg_file(&zone_protos);
+    let final_path = trg_dir.join(format!("{}.trg", zone_number));
+    olc::atomic_replace(&final_path, text.as_bytes())
+}
+
 fn save_with<F>(g: &mut GameState, conn: ConnId, replace: F) -> std::io::Result<()>
 where
     F: FnOnce(&std::path::Path, &[u8]) -> std::io::Result<()>,
@@ -844,55 +945,10 @@ where
     // Build the full set of prototypes to write for this zone: every existing
     // prototype in [zone*100 .. top], with `edited` substituted/inserted for
     // its own vnum. We read existing protos from the live index (dg_db_scripts).
-    let mut zone_protos: Vec<TrigProto> = Vec::new();
-    let mut inserted = false;
-    for i in zone_start..=zone_top {
-        if i == vnum {
-            zone_protos.push(edited.clone());
-            inserted = true;
-            continue;
-        }
-        let rnum = dg_db_scripts::real_trigger(g, i);
-        if rnum >= 0 {
-            if let Some(p) = dg_db_scripts::trig_proto(g, rnum as usize) {
-                zone_protos.push(p);
-            }
-        }
-    }
-    if !inserted {
-        // vnum out of the iterated range (shouldn't happen since real_zone
-        // matched) — append it so the edit is never lost.
-        zone_protos.push(edited.clone());
-        zone_protos.sort_by_key(|p| p.vnum);
-    }
+    let zone_protos = zone_proto_set(g, zone_start, zone_top, Some((vnum, edited.clone())));
 
     let final_path = trg_dir.join(format!("{}.trg", zone_number));
-
-    let mut text = String::new();
-    for p in &zone_protos {
-        text.push_str(&format!("#{}\n", p.vnum));
-        let bit_buf = sprintbits(p.trigger_type);
-        let pname = if p.name.is_empty() {
-            "unknown trigger"
-        } else {
-            &p.name
-        };
-        text.push_str(&format!(
-            "{}~\n{} {} {}\n{}~\n",
-            pname, p.attach_type, bit_buf, p.narg, p.arglist
-        ));
-        // The script body.
-        let mut body = String::new();
-        for c in &p.cmdlist {
-            body.push_str(c);
-            body.push_str("\r\n");
-        }
-        if body.is_empty() {
-            body.push_str("* Empty script");
-        }
-        text.push_str(&format!("{}~\n", body));
-    }
-    text.push_str("$~\n");
+    let text = render_trg_file(&zone_protos);
 
     std::fs::create_dir_all(&trg_dir)?;
     match replace(&final_path, text.as_bytes()) {
@@ -900,6 +956,9 @@ where
             // Publish the edited prototype only after its durable
             // representation is in place.
             dg_db_scripts::upsert_proto_trigger(g, edited);
+            // Journal the save: the durable publication succeeded, so the
+            // trigger component is clean for shutdown/copyover gating.
+            olc::olc_remove_from_save_list(g, zone_number, olc::OLC_SAVE_TRG);
             olc::clear_unresolved_publication(g, EditorKind::Trigedit, vnum);
             Ok(())
         }
@@ -910,6 +969,9 @@ where
                 // for a durability-confirming retry.
                 dg_db_scripts::upsert_proto_trigger(g, edited);
             }
+            // Keep the journal dirty: the component on disk may or may not
+            // include this edit, so shutdown/copyover must retry the save.
+            olc::olc_add_to_save_list(g, zone_number, olc::OLC_SAVE_TRG);
             olc::mark_unresolved_save_failure(g, EditorKind::Trigedit, vnum, &error);
             Err(error)
         }

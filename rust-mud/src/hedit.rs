@@ -703,7 +703,7 @@ pub fn save_all_help(g: &mut GameState) -> std::io::Result<()> {
         let lib = g.config.lib_path.clone();
         ensure_loaded(g)?;
         let entries = g.social.help_table.clone();
-        hedit_save_to_disk(&lib, &entries)
+        hedit_save_to_disk_file(&lib, &entries)
     })();
     match &result {
         Ok(()) => {
@@ -721,7 +721,13 @@ pub fn save_all_help(g: &mut GameState) -> std::io::Result<()> {
     result
 }
 
-fn hedit_save_to_disk(lib_path: &str, entries: &[HelpEntry]) -> std::io::Result<()> {
+/// Save-zone adapter for the editor registry: the help table is global, so the
+/// zone rnum is ignored.
+pub(crate) fn hedit_save_to_disk(g: &mut GameState, _zone_rnum: usize) -> std::io::Result<()> {
+    save_all_help(g)
+}
+
+fn hedit_save_to_disk_file(lib_path: &str, entries: &[HelpEntry]) -> std::io::Result<()> {
     hedit_save_to_disk_with(lib_path, entries, crate::olc::atomic_replace)
 }
 
@@ -872,7 +878,7 @@ mod tests {
         assert_eq!(entries[0].keywords, "affected");
         assert_eq!(entries[0].min_level, 0);
 
-        hedit_save_to_disk(lib.to_str().unwrap(), &entries).unwrap();
+        hedit_save_to_disk_file(lib.to_str().unwrap(), &entries).unwrap();
         let rewritten = std::fs::read_to_string(&path).unwrap();
         assert!(rewritten.contains("\n#0\n"));
         assert!(!rewritten.contains("\n#\n"));

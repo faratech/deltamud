@@ -1056,6 +1056,12 @@ fn aedit_save_internally(g: &mut GameState, conn: ConnId) -> std::io::Result<()>
     result
 }
 
+/// Save-zone adapter for the editor registry: the socials table is global, so
+/// the zone rnum is ignored.
+pub(crate) fn aedit_save_to_disk(g: &mut GameState, _zone_rnum: usize) -> std::io::Result<()> {
+    save_all_actions(g)
+}
+
 /// Write the entire social table back to misc/socials (C aedit_save_to_disk).
 /// olc.rs 'olc aedit save' entry (#275).
 pub fn save_all_actions(g: &mut GameState) -> std::io::Result<()> {
@@ -1086,7 +1092,7 @@ fn publish_actions(
     lib_path: &str,
     actions: &[SocialAction],
 ) -> std::io::Result<()> {
-    let result = aedit_save_to_disk(lib_path, actions);
+    let result = aedit_write_file(lib_path, actions);
     if match &result {
         Ok(()) => true,
         Err(error) => crate::olc::replacement_was_published(error),
@@ -1125,7 +1131,7 @@ impl SocialAction {
     }
 }
 
-fn aedit_save_to_disk(lib_path: &str, actions: &[SocialAction]) -> std::io::Result<()> {
+fn aedit_write_file(lib_path: &str, actions: &[SocialAction]) -> std::io::Result<()> {
     let path = format!("{}/{}", lib_path.trim_end_matches('/'), SOCMESS_REL);
 
     let mut out = String::new();
