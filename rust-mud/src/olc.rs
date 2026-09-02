@@ -35,8 +35,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -86,9 +84,8 @@ static ATOMIC_REPLACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// Every in-process OLC file publication participates in one critical
 /// section. This lets compare-and-replace callers validate their exact source
 /// bytes without another OLC writer changing the target before rename.
-fn atomic_publication_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn atomic_publication_lock() -> std::sync::MutexGuard<'static, ()> {
+    crate::durable::lock_publication()
 }
 
 /// Marker carried inside an [`io::Error`] when the final rename succeeded but
@@ -96,65 +93,14 @@ fn atomic_publication_lock() -> &'static Mutex<()> {
 /// that the old file is still live: the replacement is already visible.  OLC
 /// editors use this distinction to reconcile their in-memory view while
 /// retaining the dirty marker so a later save can confirm crash durability.
-#[derive(Debug)]
-struct PublishedButDurabilityUnconfirmed {
-    source: io::Error,
-}
-
-#[derive(Debug)]
-struct PublishedButIncomplete {
-    context: String,
-    source: io::Error,
-}
-
-impl std::fmt::Display for PublishedButIncomplete {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}: {}", self.context, self.source)
-    }
-}
-
-impl std::error::Error for PublishedButIncomplete {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.source)
-    }
-}
-
 pub(crate) fn published_but_incomplete(context: impl Into<String>, source: io::Error) -> io::Error {
-    let kind = source.kind();
-    io::Error::new(
-        kind,
-        PublishedButIncomplete {
-            context: context.into(),
-            source,
-        },
-    )
-}
-
-impl std::fmt::Display for PublishedButDurabilityUnconfirmed {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "replacement was published, but parent-directory sync failed; crash durability is unconfirmed: {}",
-            self.source
-        )
-    }
-}
-
-impl std::error::Error for PublishedButDurabilityUnconfirmed {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.source)
-    }
+    crate::durable::published_but_incomplete(context, source)
 }
 
 /// True only for the post-rename failure state described above.  Ordinary
 /// errors mean publication never happened and the old durable bytes remain.
 pub(crate) fn replacement_was_published(error: &io::Error) -> bool {
-    error.get_ref().is_some_and(|inner| {
-        inner
-            .downcast_ref::<PublishedButDurabilityUnconfirmed>()
-            .is_some()
-            || inner.downcast_ref::<PublishedButIncomplete>().is_some()
-    })
+    crate::durable::replacement_was_published(error)
 }
 
 /// Durably replace `path` with `bytes` without first unlinking the live file.
@@ -168,7 +114,7 @@ pub(crate) fn replacement_was_published(error: &io::Error) -> bool {
 /// may already be visible, but crash durability is unconfirmed and the caller
 /// must retain any pending-save marker.
 pub(crate) fn atomic_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    atomic_replace_with(path, bytes, |_| Ok(()))
+    crate::durable::replace(path, bytes)
 }
 
 /// Replace `path` only when it still contains the exact bytes read during
@@ -179,24 +125,13 @@ pub(crate) fn atomic_replace_if_unchanged(
     expected: &[u8],
     replacement: &[u8],
 ) -> io::Result<()> {
-    let _publication_guard = crate::lock_ok::lock(atomic_publication_lock());
-    validate_exact_contents(path, expected)?;
-    atomic_replace_with_hooks_unlocked(path, replacement, |_| Ok(()), sync_parent_directory)
+    crate::durable::replace_if_unchanged(path, expected, replacement)
 }
 
 /// Revalidate and durably confirm an already-visible idempotent publication.
 /// This is deliberately in the same critical section as replacement.
 pub(crate) fn confirm_publication_unchanged(path: &Path, expected: &[u8]) -> io::Result<()> {
-    let _publication_guard = crate::lock_ok::lock(atomic_publication_lock());
-    validate_exact_contents(path, expected)?;
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "published path has no parent directory",
-        )
-    })?;
-    File::open(path)?.sync_all()?;
-    sync_parent_directory(parent)
+    crate::durable::confirm_publication_unchanged(path, expected)
 }
 
 fn validate_exact_contents(path: &Path, expected: &[u8]) -> io::Result<()> {
@@ -220,82 +155,14 @@ fn validate_exact_contents(path: &Path, expected: &[u8]) -> io::Result<()> {
 /// This is the no-clobber counterpart to [`atomic_replace`], used for new-zone
 /// component files whose pre-existing contents must never be overwritten.
 pub(crate) fn atomic_create(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let _publication_guard = crate::lock_ok::lock(atomic_publication_lock());
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "atomic creation target has no parent directory",
-        )
-    })?;
-    let file_name = path.file_name().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "atomic creation target has no file name",
-        )
-    })?;
-
-    let mut temp: Option<(PathBuf, File)> = None;
-    for _ in 0..100 {
-        let sequence = ATOMIC_REPLACE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let temp_path = parent.join(format!(
-            ".{}.tmp-{}-{}",
-            file_name.to_string_lossy(),
-            std::process::id(),
-            sequence
-        ));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-        {
-            Ok(file) => {
-                temp = Some((temp_path, file));
-                break;
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    let (temp_path, mut temp_file) = temp.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "could not allocate a unique atomic-creation temporary file",
-        )
-    })?;
-
-    let result = (|| {
-        temp_file.write_all(bytes)?;
-        temp_file.flush()?;
-        temp_file.sync_all()?;
-        drop(temp_file);
-
-        // hard_link is an atomic no-replace publication on the same filesystem:
-        // unlike rename, it cannot clobber a target created after preflight.
-        std::fs::hard_link(&temp_path, path)?;
-        std::fs::remove_file(&temp_path).map_err(|error| {
-            published_but_incomplete(
-                "new file was published but its sibling temporary link could not be removed",
-                error,
-            )
-        })?;
-        sync_parent_directory(parent).map_err(|error| {
-            let kind = error.kind();
-            io::Error::new(kind, PublishedButDurabilityUnconfirmed { source: error })
-        })?;
-        Ok(())
-    })();
-
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp_path);
-    }
-    result
+    crate::durable::create_no_clobber(path, bytes)
 }
 
 fn atomic_replace_with<F>(path: &Path, bytes: &[u8], before_rename: F) -> io::Result<()>
 where
     F: FnOnce(&Path) -> io::Result<()>,
 {
-    let _publication_guard = crate::lock_ok::lock(atomic_publication_lock());
+    let _publication_guard = atomic_publication_lock();
     atomic_replace_with_hooks_unlocked(path, bytes, before_rename, sync_parent_directory)
 }
 
@@ -309,7 +176,7 @@ where
     F: FnOnce(&Path) -> io::Result<()>,
     S: FnOnce(&Path) -> io::Result<()>,
 {
-    let _publication_guard = crate::lock_ok::lock(atomic_publication_lock());
+    let _publication_guard = atomic_publication_lock();
     atomic_replace_with_hooks_unlocked(path, bytes, before_rename, sync_parent)
 }
 
@@ -378,7 +245,10 @@ where
         std::fs::rename(&temp_path, path)?;
         sync_parent(parent).map_err(|error| {
             let kind = error.kind();
-            io::Error::new(kind, PublishedButDurabilityUnconfirmed { source: error })
+            io::Error::new(
+                kind,
+                crate::durable::PublishedButDurabilityUnconfirmed::new(error),
+            )
         })?;
 
         Ok(())
@@ -581,7 +451,7 @@ where
 pub(crate) fn complete_new_zone_publication(lib_path: &str, zone_number: i32) -> io::Result<()> {
     let marker = new_zone_transaction_marker(lib_path, zone_number);
     let expected = new_zone_transaction_bytes(zone_number);
-    let _publication_guard = crate::lock_ok::lock(atomic_publication_lock());
+    let _publication_guard = atomic_publication_lock();
     validate_exact_contents(&marker, &expected)?;
     std::fs::remove_file(&marker)?;
     let directory = marker.parent().ok_or_else(|| {
@@ -592,7 +462,10 @@ pub(crate) fn complete_new_zone_publication(lib_path: &str, zone_number: i32) ->
     })?;
     sync_parent_directory(directory).map_err(|error| {
         let kind = error.kind();
-        io::Error::new(kind, PublishedButDurabilityUnconfirmed { source: error })
+        io::Error::new(
+            kind,
+            crate::durable::PublishedButDurabilityUnconfirmed::new(error),
+        )
     })
 }
 

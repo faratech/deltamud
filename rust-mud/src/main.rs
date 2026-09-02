@@ -48,6 +48,7 @@ mod dg_objcmd;
 mod dg_scripts;
 mod dg_triggers;
 mod dg_wldcmd;
+mod durable;
 mod fight_messages;
 mod file_loader;
 mod flags;

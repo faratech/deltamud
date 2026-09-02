@@ -1899,6 +1899,7 @@ mod static_freedom_gate {
             // Cross-task infrastructure (async edges), not world state:
             "src/password.rs", // Argon2id semaphore shared with spawn_blocking
             "src/olc.rs",      // atomic-publication lock + temp-name sequence
+            "src/durable.rs",  // durable publication lock + temp-name sequence (phase 3)
             "src/state.rs",    // LISTENER_FD published by main before Game owns state
             // Recursion/re-entrancy latches (no game data, cleared per call):
             "src/spec_assign.rs",     // SPEC_DEPTH

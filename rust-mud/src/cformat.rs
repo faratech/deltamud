@@ -25,7 +25,6 @@
 // unsafe, no #[repr(C)].
 
 use crate::object::{ExtraFlags, ObjectAffect, ObjectType, WearFlags};
-use std::io::Write;
 use std::path::Path;
 
 pub const C_MAX_OBJ_AFFECT: usize = 6;
@@ -90,22 +89,10 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension(format!(
-        "{}.tmp",
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("new")
-    ));
-    let result = (|| {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&tmp, path)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    // Phase 3: route every C-format runtime-file save through the canonical
+    // durable publication layer (unique sibling temp, file fsync, rename,
+    // parent-directory fsync) instead of the old guessable `.tmp` + rename.
+    crate::durable::replace(path, bytes)
 }
 
 fn get_i32(src: &[u8], off: usize) -> Option<i32> {
