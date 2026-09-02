@@ -30,7 +30,6 @@ use crate::constants::POSITION_TYPES;
 use crate::olc::{self, EditorKind};
 use crate::state::GameState;
 use crate::types::*;
-use std::sync::{Mutex, OnceLock};
 
 // POS_STANDING (structs.h) — the aedit defaults.
 const POS_STANDING: i32 = 9;
@@ -44,7 +43,7 @@ const AEDIT_GLOBAL_SAVE_KEY: &str = "<all actions>";
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Default)]
-struct SocialAction {
+pub struct SocialAction {
     command: String,
     sort_as: String,
     hide: bool,
@@ -67,24 +66,24 @@ struct SocialAction {
     others_obj_found: Option<String>,
 }
 
-/// The canonical, editable social table (C soc_mess_list / top_of_socialt),
-/// lazily loaded from disk on first edit.
-static SOC_LIST: OnceLock<Mutex<Vec<SocialAction>>> = OnceLock::new();
-static SOC_LOADED: OnceLock<Mutex<bool>> = OnceLock::new();
+// The canonical, editable social table (C soc_mess_list / top_of_socialt) is
+// owned by GameState as `olc.aedit_soc_list` / `olc.aedit_soc_loaded`.
 
-fn soc_list() -> &'static Mutex<Vec<SocialAction>> {
-    SOC_LIST.get_or_init(|| Mutex::new(Vec::new()))
+fn soc_list(g: &GameState) -> &Vec<SocialAction> {
+    &g.olc.aedit_soc_list
 }
 
-fn ensure_loaded(lib_path: &str) -> std::io::Result<()> {
-    let flag = SOC_LOADED.get_or_init(|| Mutex::new(false));
-    let mut loaded = crate::lock_ok::lock(flag);
-    if *loaded {
+fn soc_list_mut(g: &mut GameState) -> &mut Vec<SocialAction> {
+    &mut g.olc.aedit_soc_list
+}
+
+fn ensure_loaded(g: &mut GameState) -> std::io::Result<()> {
+    if g.olc.aedit_soc_loaded {
         return Ok(());
     }
-    let list = load_socials_file(lib_path)?;
-    *crate::lock_ok::lock(soc_list()) = list;
-    *loaded = true;
+    let list = load_socials_file(&g.config.lib_path)?;
+    g.olc.aedit_soc_list = list;
+    g.olc.aedit_soc_loaded = true;
     Ok(())
 }
 
@@ -237,7 +236,7 @@ fn load_socials_file(lib_path: &str) -> std::io::Result<Vec<SocialAction>> {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
-struct AeditState {
+pub struct AeditState {
     ch: CharId,
     authorization: olc::OlcAuthorization,
     /// The scratch action (C OLC_ACTION).
@@ -279,45 +278,39 @@ enum AeditMode {
     ObjOthersFound,
 }
 
-static STATES: OnceLock<Mutex<std::collections::HashMap<ConnId, AeditState>>> = OnceLock::new();
-
-fn states() -> &'static Mutex<std::collections::HashMap<ConnId, AeditState>> {
-    STATES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+fn states(g: &GameState) -> &std::collections::HashMap<ConnId, AeditState> {
+    &g.olc.aedit_states
+}
+fn states_mut(g: &mut GameState) -> &mut std::collections::HashMap<ConnId, AeditState> {
+    &mut g.olc.aedit_states
 }
 
-fn with_state<R>(conn: ConnId, f: impl FnOnce(&mut AeditState) -> R) -> Option<R> {
-    let mut guard = match states().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.get_mut(&conn).map(f)
+fn with_state<R>(
+    g: &mut GameState,
+    conn: ConnId,
+    f: impl FnOnce(&mut AeditState) -> R,
+) -> Option<R> {
+    states_mut(g).get_mut(&conn).map(f)
 }
 
-fn take_state(conn: ConnId) -> Option<AeditState> {
-    let mut guard = match states().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.remove(&conn)
+fn take_state(g: &mut GameState, conn: ConnId) -> Option<AeditState> {
+    states_mut(g).remove(&conn)
 }
 
 /// abort: drop this conn's editor state without saving (player disconnected
 /// mid-edit). `olc::abort_editor` calls `olc::clear_active`.
-pub fn abort(conn: ConnId) {
-    if let Some(state) = take_state(conn) {
+pub fn abort(g: &mut GameState, conn: ConnId) {
+    if let Some(state) = take_state(g, conn) {
         olc::discard_unresolved_named_save(
+            g,
             EditorKind::Aedit,
             &state.action.command.to_ascii_lowercase(),
         );
     }
 }
 
-fn set_state(conn: ConnId, st: AeditState) {
-    let mut guard = match states().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.insert(conn, st);
+fn set_state(g: &mut GameState, conn: ConnId, st: AeditState) {
+    states_mut(g).insert(conn, st);
 }
 
 // ---------------------------------------------------------------------------
@@ -329,38 +322,23 @@ fn is_abbrev(part: &str, full: &str) -> bool {
 }
 
 /// First action whose command has `arg` as an abbreviation (C aedit walk).
-fn find_action_abbrev(arg: &str) -> Option<usize> {
-    let guard = match soc_list().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.iter().position(|a| is_abbrev(arg, &a.command))
+fn find_action_abbrev(g: &GameState, arg: &str) -> Option<usize> {
+    soc_list(g).iter().position(|a| is_abbrev(arg, &a.command))
 }
 
 /// Next abbreviation match strictly after `from` (the AEDIT 'n' rescan).
-fn find_action_abbrev_after(arg: &str, from: usize) -> Option<usize> {
-    let guard = match soc_list().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
+fn find_action_abbrev_after(g: &GameState, arg: &str, from: usize) -> Option<usize> {
+    let list = soc_list(g);
     let start = from + 1;
-    (start..guard.len()).find(|&i| is_abbrev(arg, &guard[i].command))
+    (start..list.len()).find(|&i| is_abbrev(arg, &list[i].command))
 }
 
-fn command_at(rnum: usize) -> Option<String> {
-    let guard = match soc_list().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.get(rnum).map(|a| a.command.clone())
+fn command_at(g: &GameState, rnum: usize) -> Option<String> {
+    soc_list(g).get(rnum).map(|a| a.command.clone())
 }
 
-fn action_at(rnum: usize) -> Option<SocialAction> {
-    let guard = match soc_list().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.get(rnum).cloned()
+fn action_at(g: &GameState, rnum: usize) -> Option<SocialAction> {
+    soc_list(g).get(rnum).cloned()
 }
 
 /// True if the typed word resolves to an existing hard command (C find_command
@@ -394,8 +372,7 @@ pub fn do_aedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     };
 
-    let lib_path = g.config.lib_path.clone();
-    if let Err(error) = ensure_loaded(&lib_path) {
+    if let Err(error) = ensure_loaded(g) {
         log::warn!("SYSERR: OLC: cannot load actions table: {}", error);
         send(
             g,
@@ -441,6 +418,7 @@ pub fn do_aedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
     // Set up base edit state (OLC_NUM=0, OLC_STORAGE=buf1) and walk for a match.
     set_state(
+        g,
         conn,
         AeditState {
             ch,
@@ -452,7 +430,7 @@ pub fn do_aedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             mode: AeditMode::MainMenu,
         },
     );
-    olc::set_active(conn, EditorKind::Aedit);
+    olc::set_active(g, conn, EditorKind::Aedit);
 
     crate::act::act(
         g,
@@ -464,13 +442,13 @@ pub fn do_aedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         crate::act::To::Room,
     );
 
-    match find_action_abbrev(&buf1) {
+    match find_action_abbrev(g, &buf1) {
         Some(r) => {
-            with_state(conn, |st| {
+            with_state(g, conn, |st| {
                 st.rnum = Some(r);
                 st.mode = AeditMode::ConfirmEdit;
             });
-            let cmd = command_at(r).unwrap_or_default();
+            let cmd = command_at(g, r).unwrap_or_default();
             send(
                 g,
                 ch,
@@ -479,11 +457,11 @@ pub fn do_aedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
         None => {
             if command_exists(&buf1) {
-                cleanup(conn);
+                cleanup(g, conn);
                 send(g, ch, "That command already exists.\r\n");
                 return;
             }
-            with_state(conn, |st| st.mode = AeditMode::ConfirmAdd);
+            with_state(g, conn, |st| st.mode = AeditMode::ConfirmAdd);
             send(
                 g,
                 ch,
@@ -498,8 +476,8 @@ pub fn do_aedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 // ---------------------------------------------------------------------------
 
 fn aedit_setup_new(g: &mut GameState, conn: ConnId) {
-    let storage = with_state(conn, |st| st.storage.clone()).unwrap_or_default();
-    with_state(conn, |st| {
+    let storage = with_state(g, conn, |st| st.storage.clone()).unwrap_or_default();
+    with_state(g, conn, |st| {
         st.action = SocialAction {
             command: storage.clone(),
             sort_as: storage.clone(),
@@ -518,8 +496,8 @@ fn aedit_setup_new(g: &mut GameState, conn: ConnId) {
 }
 
 fn aedit_setup_existing(g: &mut GameState, conn: ConnId, rnum: usize) {
-    if let Some(action) = action_at(rnum) {
-        with_state(conn, |st| {
+    if let Some(action) = action_at(g, rnum) {
+        with_state(g, conn, |st| {
             st.action = action;
             st.rnum = Some(rnum);
             st.changed = false;
@@ -545,7 +523,7 @@ fn fld(o: &Option<String>) -> &str {
 }
 
 fn aedit_disp_menu(g: &mut GameState, conn: ConnId) {
-    let a = match with_state(conn, |st| {
+    let a = match with_state(g, conn, |st| {
         st.mode = AeditMode::MainMenu;
         st.action.clone()
     }) {
@@ -613,10 +591,10 @@ fn trunc(s: &str, n: usize) -> String {
 // ---------------------------------------------------------------------------
 
 pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
-    let mode = match with_state(conn, |st| st.mode) {
+    let mode = match with_state(g, conn, |st| st.mode) {
         Some(m) => m,
         None => {
-            olc::clear_active(conn);
+            olc::clear_active(g, conn);
             return;
         }
     };
@@ -625,7 +603,7 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
     let ch = match conn_char(g, conn) {
         Some(c) => c,
         None => {
-            cleanup(conn);
+            cleanup(g, conn);
             return;
         }
     };
@@ -637,14 +615,14 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 Some('y') | Some('Y') => match aedit_save_internally(g, conn) {
                     Ok(()) => {
                         let cmd =
-                            with_state(conn, |st| st.action.command.clone()).unwrap_or_default();
+                            with_state(g, conn, |st| st.action.command.clone()).unwrap_or_default();
                         let name = g
                             .get_char(ch)
                             .map(|c| c.player.name.clone())
                             .unwrap_or_default();
                         log::info!("OLC: {} edits action {}", name, cmd);
                         send(g, ch, "Action saved to disk and memory.\r\n");
-                        cleanup(conn);
+                        cleanup(g, conn);
                     }
                     Err(err) => {
                         log::warn!("SYSERR: OLC: cannot save action: {}", err);
@@ -663,7 +641,7 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                         }
                     }
                 },
-                Some('n') | Some('N') => cleanup(conn),
+                Some('n') | Some('N') => cleanup(g, conn),
                 _ => g.send_to_char(
                     ch,
                     "Invalid choice!\r\nDo you wish to save this action internally? ",
@@ -675,22 +653,22 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         AeditMode::ConfirmEdit => {
             match trimmed.chars().next() {
                 Some('y') | Some('Y') => {
-                    let r = with_state(conn, |st| st.rnum).flatten().unwrap_or(0);
+                    let r = with_state(g, conn, |st| st.rnum).flatten().unwrap_or(0);
                     aedit_setup_existing(g, conn, r);
                 }
-                Some('q') | Some('Q') => cleanup(conn),
+                Some('q') | Some('Q') => cleanup(g, conn),
                 Some('n') | Some('N') => {
                     // Walk to the next abbreviation match.
                     let (storage, cur) =
-                        with_state(conn, |st| (st.storage.clone(), st.rnum.unwrap_or(0)))
+                        with_state(g, conn, |st| (st.storage.clone(), st.rnum.unwrap_or(0)))
                             .unwrap_or_default();
-                    match find_action_abbrev_after(&storage, cur) {
+                    match find_action_abbrev_after(g, &storage, cur) {
                         Some(next) => {
-                            with_state(conn, |st| {
+                            with_state(g, conn, |st| {
                                 st.rnum = Some(next);
                                 st.mode = AeditMode::ConfirmEdit;
                             });
-                            let cmd = command_at(next).unwrap_or_default();
+                            let cmd = command_at(g, next).unwrap_or_default();
                             g.send_to_char(
                                 ch,
                                 &format!("Do you wish to edit the '{}' action? ", cmd),
@@ -699,9 +677,9 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                         None => {
                             // Past the end: offer to add (unless a real command).
                             if command_exists(&storage) {
-                                cleanup(conn);
+                                cleanup(g, conn);
                             } else {
-                                with_state(conn, |st| st.mode = AeditMode::ConfirmAdd);
+                                with_state(g, conn, |st| st.mode = AeditMode::ConfirmAdd);
                                 g.send_to_char(
                                     ch,
                                     &format!("Do you wish to add the '{}' action? ", storage),
@@ -711,9 +689,9 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     }
                 }
                 _ => {
-                    let cmd = with_state(conn, |st| st.rnum)
+                    let cmd = with_state(g, conn, |st| st.rnum)
                         .flatten()
-                        .and_then(command_at)
+                        .and_then(|rnum| command_at(g, rnum))
                         .unwrap_or_default();
                     g.send_to_char(
                         ch,
@@ -730,9 +708,9 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         AeditMode::ConfirmAdd => {
             match trimmed.chars().next() {
                 Some('y') | Some('Y') => aedit_setup_new(g, conn),
-                Some('n') | Some('N') | Some('q') | Some('Q') => cleanup(conn),
+                Some('n') | Some('N') | Some('q') | Some('Q') => cleanup(g, conn),
                 _ => {
-                    let storage = with_state(conn, |st| st.storage.clone()).unwrap_or_default();
+                    let storage = with_state(g, conn, |st| st.storage.clone()).unwrap_or_default();
                     g.send_to_char(
                         ch,
                         &format!(
@@ -749,24 +727,24 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         AeditMode::MainMenu => {
             match trimmed.chars().next() {
                 Some('q') | Some('Q') => {
-                    let changed = with_state(conn, |st| st.changed).unwrap_or(false);
+                    let changed = with_state(g, conn, |st| st.changed).unwrap_or(false);
                     if changed {
                         send(g, ch, "Do you wish to save this action internally? ");
-                        with_state(conn, |st| st.mode = AeditMode::ConfirmSave);
+                        with_state(g, conn, |st| st.mode = AeditMode::ConfirmSave);
                     } else {
-                        cleanup(conn);
+                        cleanup(g, conn);
                     }
                 }
                 Some('n') => {
                     send(g, ch, "Enter action name: ");
-                    with_state(conn, |st| st.mode = AeditMode::ActionName);
+                    with_state(g, conn, |st| st.mode = AeditMode::ActionName);
                 }
                 Some('1') => {
                     g.send_to_char(
                         ch,
                         "Enter sort info for this action (for the command listing): ",
                     );
-                    with_state(conn, |st| st.mode = AeditMode::SortAs);
+                    with_state(g, conn, |st| st.mode = AeditMode::SortAs);
                 }
                 Some('2') => {
                     send(
@@ -774,7 +752,7 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                         ch,
                         "Enter the minimum position the Character has to be in to activate social [0 - 8]: ",
                     );
-                    with_state(conn, |st| st.mode = AeditMode::MinCharPos);
+                    with_state(g, conn, |st| st.mode = AeditMode::MinCharPos);
                 }
                 Some('3') => {
                     send(
@@ -782,14 +760,14 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                         ch,
                         "Enter the minimum position the Victim has to be in to activate social [0 - 8]: ",
                     );
-                    with_state(conn, |st| st.mode = AeditMode::MinVictPos);
+                    with_state(g, conn, |st| st.mode = AeditMode::MinVictPos);
                 }
                 Some('4') => {
                     send(g, ch, "Enter new minimum level for social: ");
-                    with_state(conn, |st| st.mode = AeditMode::MinCharLevel);
+                    with_state(g, conn, |st| st.mode = AeditMode::MinCharLevel);
                 }
                 Some('5') => {
-                    with_state(conn, |st| {
+                    with_state(g, conn, |st| {
                         st.action.hide = !st.action.hide;
                         st.changed = true;
                     });
@@ -911,7 +889,7 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     aedit_disp_menu(g, conn);
                     return;
                 }
-                with_state(conn, |st| st.action.command = trimmed.to_string());
+                with_state(g, conn, |st| st.action.command = trimmed.to_string());
             } else {
                 aedit_disp_menu(g, conn);
                 return;
@@ -923,7 +901,7 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     aedit_disp_menu(g, conn);
                     return;
                 }
-                with_state(conn, |st| st.action.sort_as = trimmed.to_string());
+                with_state(g, conn, |st| st.action.sort_as = trimmed.to_string());
             } else {
                 aedit_disp_menu(g, conn);
                 return;
@@ -940,7 +918,7 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 // true, so any parse passes through. We keep the practical clamp
                 // the data demands: 0..=POS_STANDING.
                 let v = i.clamp(0, POS_STANDING);
-                with_state(conn, |st| {
+                with_state(g, conn, |st| {
                     if mode == AeditMode::MinCharPos {
                         st.action.min_char_position = v;
                     } else {
@@ -958,7 +936,7 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     return;
                 };
                 let v = i.clamp(0, LVL_IMPL as i32);
-                with_state(conn, |st| st.action.min_level_char = v);
+                with_state(g, conn, |st| st.action.min_level_char = v);
             } else {
                 aedit_disp_menu(g, conn);
                 return;
@@ -966,23 +944,23 @@ pub fn aedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
 
         // ---- Message fields (delete_doubledollar, empty => NULL) --------
-        AeditMode::NovictChar => set_msg(conn, arg, |a, v| a.char_no_arg = v),
-        AeditMode::NovictOthers => set_msg(conn, arg, |a, v| a.others_no_arg = v),
-        AeditMode::VictCharFound => set_msg(conn, arg, |a, v| a.char_found = v),
-        AeditMode::VictOthersFound => set_msg(conn, arg, |a, v| a.others_found = v),
-        AeditMode::VictVictFound => set_msg(conn, arg, |a, v| a.vict_found = v),
-        AeditMode::VictNotFound => set_msg(conn, arg, |a, v| a.not_found = v),
-        AeditMode::SelfChar => set_msg(conn, arg, |a, v| a.char_auto = v),
-        AeditMode::SelfOthers => set_msg(conn, arg, |a, v| a.others_auto = v),
-        AeditMode::VictCharBodyFound => set_msg(conn, arg, |a, v| a.char_body_found = v),
-        AeditMode::VictOthersBodyFound => set_msg(conn, arg, |a, v| a.others_body_found = v),
-        AeditMode::VictVictBodyFound => set_msg(conn, arg, |a, v| a.vict_body_found = v),
-        AeditMode::ObjCharFound => set_msg(conn, arg, |a, v| a.char_obj_found = v),
-        AeditMode::ObjOthersFound => set_msg(conn, arg, |a, v| a.others_obj_found = v),
+        AeditMode::NovictChar => set_msg(g, conn, arg, |a, v| a.char_no_arg = v),
+        AeditMode::NovictOthers => set_msg(g, conn, arg, |a, v| a.others_no_arg = v),
+        AeditMode::VictCharFound => set_msg(g, conn, arg, |a, v| a.char_found = v),
+        AeditMode::VictOthersFound => set_msg(g, conn, arg, |a, v| a.others_found = v),
+        AeditMode::VictVictFound => set_msg(g, conn, arg, |a, v| a.vict_found = v),
+        AeditMode::VictNotFound => set_msg(g, conn, arg, |a, v| a.not_found = v),
+        AeditMode::SelfChar => set_msg(g, conn, arg, |a, v| a.char_auto = v),
+        AeditMode::SelfOthers => set_msg(g, conn, arg, |a, v| a.others_auto = v),
+        AeditMode::VictCharBodyFound => set_msg(g, conn, arg, |a, v| a.char_body_found = v),
+        AeditMode::VictOthersBodyFound => set_msg(g, conn, arg, |a, v| a.others_body_found = v),
+        AeditMode::VictVictBodyFound => set_msg(g, conn, arg, |a, v| a.vict_body_found = v),
+        AeditMode::ObjCharFound => set_msg(g, conn, arg, |a, v| a.char_obj_found = v),
+        AeditMode::ObjOthersFound => set_msg(g, conn, arg, |a, v| a.others_obj_found = v),
     }
 
     // END OF CASE: something changed; return to the main menu.
-    with_state(conn, |st| st.changed = true);
+    with_state(g, conn, |st| st.changed = true);
     aedit_disp_menu(g, conn);
 }
 
@@ -995,25 +973,30 @@ fn prompt_field(
     label: &str,
     get: impl Fn(&SocialAction) -> &Option<String>,
 ) {
-    let old = with_state(conn, |st| {
+    let old = with_state(g, conn, |st| {
         get(&st.action)
             .clone()
             .unwrap_or_else(|| "NULL".to_string())
     })
     .unwrap_or_else(|| "NULL".to_string());
     send(g, ch, &format!("{}\r\n[OLD]: {}\r\n[NEW]: ", label, old));
-    with_state(conn, |st| st.mode = next);
+    with_state(g, conn, |st| st.mode = next);
 }
 
 /// Set a message field from the typed line: delete_doubledollar, and an empty
 /// line stores NULL (None), matching the C field setters.
-fn set_msg(conn: ConnId, arg: &str, apply: impl FnOnce(&mut SocialAction, Option<String>)) {
+fn set_msg(
+    g: &mut GameState,
+    conn: ConnId,
+    arg: &str,
+    apply: impl FnOnce(&mut SocialAction, Option<String>),
+) {
     let val = if arg.is_empty() {
         None
     } else {
         Some(delete_doubledollar(arg))
     };
-    with_state(conn, |st| apply(&mut st.action, val));
+    with_state(g, conn, |st| apply(&mut st.action, val));
 }
 
 // ---------------------------------------------------------------------------
@@ -1022,7 +1005,7 @@ fn set_msg(conn: ConnId, arg: &str, apply: impl FnOnce(&mut SocialAction, Option
 
 fn aedit_save_internally(g: &mut GameState, conn: ConnId) -> std::io::Result<()> {
     let (action, rnum, authorization) =
-        match with_state(conn, |st| (st.action.clone(), st.rnum, st.authorization)) {
+        match with_state(g, conn, |st| (st.action.clone(), st.rnum, st.authorization)) {
             Some(v) => v,
             None => {
                 return Err(std::io::Error::new(
@@ -1033,7 +1016,7 @@ fn aedit_save_internally(g: &mut GameState, conn: ConnId) -> std::io::Result<()>
         };
     olc::revalidate_olc_authorization(g, authorization, true, None)?;
     let unresolved_key = action.command.to_ascii_lowercase();
-    let mut actions = crate::lock_ok::lock(&soc_list()).clone();
+    let mut actions = soc_list(g).clone();
     match rnum {
         Some(r) if r < actions.len() => {
             actions[r] = action;
@@ -1047,22 +1030,24 @@ fn aedit_save_internally(g: &mut GameState, conn: ConnId) -> std::io::Result<()>
     let result = publish_actions(g, &lib_path, &actions);
     match &result {
         Ok(()) => {
-            *crate::lock_ok::lock(&soc_list()) = actions;
-            crate::olc::olc_remove_from_save_list(0, crate::olc::OLC_SAVE_ACTION);
-            crate::olc::clear_unresolved_named_save(EditorKind::Aedit, &unresolved_key);
-            crate::olc::clear_unresolved_named_save(EditorKind::Aedit, AEDIT_GLOBAL_SAVE_KEY);
-            crate::olc::clear_published_unresolved_kind(EditorKind::Aedit);
+            *soc_list_mut(g) = actions;
+            crate::olc::olc_remove_from_save_list(g, 0, crate::olc::OLC_SAVE_ACTION);
+            crate::olc::clear_unresolved_named_save(g, EditorKind::Aedit, &unresolved_key);
+            crate::olc::clear_unresolved_named_save(g, EditorKind::Aedit, AEDIT_GLOBAL_SAVE_KEY);
+            crate::olc::clear_published_unresolved_kind(g, EditorKind::Aedit);
         }
         Err(error) if crate::olc::replacement_was_published(error) => {
-            *crate::lock_ok::lock(&soc_list()) = actions;
-            crate::olc::olc_add_to_save_list(0, crate::olc::OLC_SAVE_ACTION);
+            *soc_list_mut(g) = actions;
+            crate::olc::olc_add_to_save_list(g, 0, crate::olc::OLC_SAVE_ACTION);
             crate::olc::mark_unresolved_named_save_failure(
+                g,
                 EditorKind::Aedit,
                 &unresolved_key,
                 error,
             );
         }
         Err(error) => crate::olc::mark_unresolved_named_save_failure(
+            g,
             EditorKind::Aedit,
             &unresolved_key,
             error,
@@ -1075,18 +1060,19 @@ fn aedit_save_internally(g: &mut GameState, conn: ConnId) -> std::io::Result<()>
 /// olc.rs 'olc aedit save' entry (#275).
 pub fn save_all_actions(g: &mut GameState) -> std::io::Result<()> {
     let result = (|| {
+        ensure_loaded(g)?;
         let lib = g.config.lib_path.clone();
-        ensure_loaded(&lib)?;
-        let actions = crate::lock_ok::lock(&soc_list()).clone();
+        let actions = soc_list(g).clone();
         publish_actions(g, &lib, &actions)
     })();
     match &result {
         Ok(()) => {
-            crate::olc::olc_remove_from_save_list(0, crate::olc::OLC_SAVE_ACTION);
-            crate::olc::clear_unresolved_named_save(EditorKind::Aedit, AEDIT_GLOBAL_SAVE_KEY);
-            crate::olc::clear_published_unresolved_kind(EditorKind::Aedit);
+            crate::olc::olc_remove_from_save_list(g, 0, crate::olc::OLC_SAVE_ACTION);
+            crate::olc::clear_unresolved_named_save(g, EditorKind::Aedit, AEDIT_GLOBAL_SAVE_KEY);
+            crate::olc::clear_published_unresolved_kind(g, EditorKind::Aedit);
         }
         Err(error) => crate::olc::mark_unresolved_named_save_failure(
+            g,
             EditorKind::Aedit,
             AEDIT_GLOBAL_SAVE_KEY,
             error,
@@ -1205,14 +1191,15 @@ fn delete_doubledollar(s: &str) -> String {
 // Cleanup.
 // ---------------------------------------------------------------------------
 
-fn cleanup(conn: ConnId) {
-    if let Some(state) = take_state(conn) {
+fn cleanup(g: &mut GameState, conn: ConnId) {
+    if let Some(state) = take_state(g, conn) {
         olc::discard_unresolved_named_save(
+            g,
             EditorKind::Aedit,
             &state.action.command.to_ascii_lowercase(),
         );
     }
-    olc::clear_active(conn);
+    olc::clear_active(g, conn);
 }
 
 /// OLC output with C get_char_cols semantics: the &-codes in these menus are

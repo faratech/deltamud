@@ -17,7 +17,7 @@
 //     active StringEdit editor; returns `true` while still editing, `false`
 //     once the editor saved or aborted (so the caller pops the context and
 //     restores the normal prompt);
-//   * page_active(conn) / page_input(g, conn, line) — pager hooks.
+//   * page_active(&g, conn) / page_input(g, conn, line) — pager hooks.
 //
 // Per-edit state the Descriptor / Character lack (the edit's *purpose*, the
 // pager's page vector) lives in module statics keyed by ConnId, exactly as the
@@ -30,8 +30,6 @@ use crate::spell_parser::{TOP_SPELL_DEFINE, find_skill_num, skill_name};
 use crate::state::GameState;
 use crate::types::*;
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
 // Constants mirrored from structs.h / interpreter.h.
@@ -67,7 +65,7 @@ pub enum StrField {
 
 /// What a finished editor should do with its gathered buffer.
 #[derive(Clone)]
-enum EditTarget {
+pub(crate) enum EditTarget {
     /// A plain player message (no save hook); just drop it on finish.
     Plain,
     /// `write` — install the note text into an object's action_description.
@@ -94,19 +92,17 @@ enum EditTarget {
     },
 }
 
-struct EditState {
-    target: EditTarget,
-    max_len: usize,
+pub struct EditState {
+    pub target: EditTarget,
+    pub max_len: usize,
 }
 
 /// Release ALL per-connection string-editor and pager state (W6 crash
 /// hardening: ConnIds are never reused, so every leaked entry was permanent
 /// memory growth — a pager holds the entire paginated document).
 pub fn abort_conn(g: &mut GameState, conn_id: ConnId) {
-    let target = crate::lock_ok::lock(&edits())
-        .remove(&conn_id)
-        .map(|edit| edit.target);
-    crate::lock_ok::lock(&pagers()).remove(&conn_id);
+    let target = edits_mut(g).remove(&conn_id).map(|edit| edit.target);
+    pagers_mut(g).remove(&conn_id);
     match target {
         Some(EditTarget::Mail) => {
             crate::mail::abort_mail(g, conn_id);
@@ -116,6 +112,7 @@ pub fn abort_conn(g: &mut GameState, conn_id: ConnId) {
         }
         Some(EditTarget::TextFile { path, .. }) => {
             crate::olc::discard_unresolved_named_save(
+                g,
                 crate::olc::EditorKind::Tedit,
                 &path.to_string_lossy(),
             );
@@ -124,29 +121,22 @@ pub fn abort_conn(g: &mut GameState, conn_id: ConnId) {
     }
 }
 
-fn edits() -> &'static Mutex<HashMap<ConnId, EditState>> {
-    static EDITS: OnceLock<Mutex<HashMap<ConnId, EditState>>> = OnceLock::new();
-    EDITS.get_or_init(|| Mutex::new(HashMap::new()))
+fn edits(g: &GameState) -> &HashMap<ConnId, EditState> {
+    &g.olc.edits
+}
+fn edits_mut(g: &mut GameState) -> &mut HashMap<ConnId, EditState> {
+    &mut g.olc.edits
+}
+fn set_edit(g: &mut GameState, conn: ConnId, target: EditTarget, max_len: usize) {
+    edits_mut(g).insert(conn, EditState { target, max_len });
 }
 
-fn set_edit(conn: ConnId, target: EditTarget, max_len: usize) {
-    edits()
-        .lock()
-        .unwrap()
-        .insert(conn, EditState { target, max_len });
+fn take_edit(g: &mut GameState, conn: ConnId) -> Option<EditState> {
+    edits_mut(g).remove(&conn)
 }
 
-fn take_edit(conn: ConnId) -> Option<EditState> {
-    crate::lock_ok::lock(&edits()).remove(&conn)
-}
-
-fn edit_max_len(conn: ConnId) -> usize {
-    edits()
-        .lock()
-        .unwrap()
-        .get(&conn)
-        .map(|e| e.max_len)
-        .unwrap_or(0)
+fn edit_max_len(g: &GameState, conn: ConnId) -> usize {
+    edits(g).get(&conn).map(|e| e.max_len).unwrap_or(0)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,16 +151,17 @@ pub enum BufferEditorResult {
 // successive RETURN/B/R/<n> requests can walk them.
 // ---------------------------------------------------------------------------
 
-struct Pager {
-    pages: Vec<String>,
-    page: usize,
+pub struct Pager {
+    pub pages: Vec<String>,
+    pub page: usize,
 }
 
-fn pagers() -> &'static Mutex<HashMap<ConnId, Pager>> {
-    static PAGERS: OnceLock<Mutex<HashMap<ConnId, Pager>>> = OnceLock::new();
-    PAGERS.get_or_init(|| Mutex::new(HashMap::new()))
+fn pagers(g: &GameState) -> &HashMap<ConnId, Pager> {
+    &g.olc.pagers
 }
-
+fn pagers_mut(g: &mut GameState) -> &mut HashMap<ConnId, Pager> {
+    &mut g.olc.pagers
+}
 // ===========================================================================
 // Buffer access helpers — the editor buffer lives in the descriptor's top
 // StringEdit context (InputContext::StringEdit{buffer,max_len}). Mirrors C's
@@ -289,7 +280,7 @@ fn push_editor_with(
     target: EditTarget,
     initial: String,
 ) {
-    set_edit(conn, target, max_len);
+    set_edit(g, conn, target, max_len);
     if let Some(d) = g.descriptors.get_mut(&conn) {
         d.editors.push(InputContext::StringEdit {
             buffer: initial,
@@ -298,7 +289,7 @@ fn push_editor_with(
     }
     // Mark the character PLR_WRITING (and PLR_MAILING for mail).
     let mailing = matches!(
-        crate::lock_ok::lock(&edits()).get(&conn).map(|e| &e.target),
+        edits(g).get(&conn).map(|e| &e.target),
         Some(EditTarget::Mail)
     );
     if let Some(cid) = conn_char(g, conn) {
@@ -324,8 +315,8 @@ pub fn editing(g: &GameState, conn: ConnId) -> bool {
 /// TEDIT markers are keyed by their durable target path, so only one active
 /// scratch editor may own a path at a time. This also prevents last-writer-wins
 /// loss between two administrators editing the same static file.
-pub(crate) fn textfile_edit_busy(path: &std::path::Path, exclude: ConnId) -> bool {
-    crate::lock_ok::lock(&edits()).iter().any(|(conn, state)| {
+pub(crate) fn textfile_edit_busy(g: &GameState, path: &std::path::Path, exclude: ConnId) -> bool {
+    edits(g).iter().any(|(conn, state)| {
         *conn != exclude
             && matches!(&state.target, EditTarget::TextFile { path: active, .. } if active == path)
     })
@@ -338,7 +329,7 @@ pub(crate) fn textfile_edit_busy(path: &std::path::Path, exclude: ConnId) -> boo
 /// normal input). The StringEdit context itself is NOT popped here — the caller
 /// (game.rs) removes it when this returns false, mirroring the C state reset.
 pub fn editor_input(g: &mut GameState, conn: ConnId, line: &str) -> bool {
-    let max = edit_max_len(conn);
+    let max = edit_max_len(g, conn);
     let mut buf = read_buffer(g, conn).unwrap_or_default();
     let result = editor_buffer_input(g, conn, &mut buf, max, line);
     write_buffer(g, conn, buf);
@@ -461,7 +452,7 @@ pub fn editor_buffer_input(
     terminator
 }
 
-fn buffer_nonempty(g: &GameState, conn: ConnId) -> bool {
+fn buffer_nonempty(g: &mut GameState, conn: ConnId) -> bool {
     read_buffer(g, conn).map(|b| !b.is_empty()).unwrap_or(false)
 }
 
@@ -475,7 +466,7 @@ fn finish_editor(g: &mut GameState, conn: ConnId, terminator: i32) -> bool {
     // An all-empty saved buffer becomes "no string" (C NULLs it out).
     let body = buffer.trim_end_matches(['\r', '\n']);
 
-    let target = crate::lock_ok::lock(&edits())
+    let target = edits(g)
         .get(&conn)
         .map(|state| state.target.clone())
         .unwrap_or(EditTarget::Plain);
@@ -580,6 +571,7 @@ fn finish_editor(g: &mut GameState, conn: ConnId, terminator: i32) -> bool {
                 match crate::olc::atomic_replace(&path, stripped.as_bytes()) {
                     Ok(_) => {
                         crate::olc::clear_unresolved_named_save(
+                            g,
                             crate::olc::EditorKind::Tedit,
                             &path.to_string_lossy(),
                         );
@@ -597,6 +589,7 @@ fn finish_editor(g: &mut GameState, conn: ConnId, terminator: i32) -> bool {
                     }
                     Err(error) => {
                         crate::olc::mark_unresolved_named_save_failure(
+                            g,
                             crate::olc::EditorKind::Tedit,
                             &path.to_string_lossy(),
                             &error,
@@ -621,6 +614,7 @@ fn finish_editor(g: &mut GameState, conn: ConnId, terminator: i32) -> bool {
                 }
             } else {
                 crate::olc::discard_unresolved_named_save(
+                    g,
                     crate::olc::EditorKind::Tedit,
                     &path.to_string_lossy(),
                 );
@@ -662,7 +656,7 @@ fn finish_editor(g: &mut GameState, conn: ConnId, terminator: i32) -> bool {
     }
 
     if finished {
-        take_edit(conn);
+        take_edit(g, conn);
         // Clear PLR_WRITING | PLR_MAILING on the writer.
         if let Some(cid) = cid {
             if let Some(c) = g.get_char_mut(cid) {
@@ -1366,22 +1360,19 @@ pub fn page_string(g: &mut GameState, conn: ConnId, str: &str) {
         return;
     }
     let pages = paginate(str);
-    pagers()
-        .lock()
-        .unwrap()
-        .insert(conn, Pager { pages, page: 0 });
+    pagers_mut(g).insert(conn, Pager { pages, page: 0 });
     show_string(g, conn, "");
 }
 
 /// page_active: whether `conn` is mid-pagination (has pending pages).
-pub fn page_active(conn: ConnId) -> bool {
-    crate::lock_ok::lock(&pagers()).contains_key(&conn)
+pub fn page_active(g: &GameState, conn: ConnId) -> bool {
+    pagers(g).contains_key(&conn)
 }
 
 /// The 1-based (current, total) page position for the pager prompt
 /// (C make_prompt's d->showstr_page / d->showstr_count) (#229).
-pub fn page_position(conn: ConnId) -> (usize, usize) {
-    let guard = crate::lock_ok::lock(&pagers());
+pub fn page_position(g: &GameState, conn: ConnId) -> (usize, usize) {
+    let guard = pagers(g);
     // C prints the 0-based showstr_page (comm.c:1222), so the first page
     // reads "(0/N)".
     match guard.get(&conn) {
@@ -1392,14 +1383,14 @@ pub fn page_position(conn: ConnId) -> (usize, usize) {
 
 /// True when `conn` has any active string editor (C make_prompt's `d->str`)
 /// — the '] ' editor prompt (#229).
-pub fn editing_any(conn: ConnId) -> bool {
-    crate::lock_ok::lock(&edits()).contains_key(&conn)
+pub fn editing_any(g: &GameState, conn: ConnId) -> bool {
+    edits(g).contains_key(&conn)
 }
 
 /// page_input: feed a pager command line (RETURN/Q/R/B/<n>) for an active
 /// pager. Returns true if the connection was paging (input was consumed).
 pub fn page_input(g: &mut GameState, conn: ConnId, line: &str) -> bool {
-    if !page_active(conn) {
+    if !page_active(&g, conn) {
         return false;
     }
     show_string(g, conn, line);
@@ -1409,7 +1400,7 @@ pub fn page_input(g: &mut GameState, conn: ConnId, line: &str) -> bool {
 /// show_string (modify.c): display the next page (or honor Q/R/B/<n>).
 fn show_string(g: &mut GameState, conn: ConnId, input: &str) {
     let (cmd, count, total) = {
-        let guard = crate::lock_ok::lock(&pagers());
+        let guard = pagers(g);
         let p = match guard.get(&conn) {
             Some(p) => p,
             None => return,
@@ -1424,17 +1415,17 @@ fn show_string(g: &mut GameState, conn: ConnId, input: &str) {
 
     match cmd {
         Some('q') => {
-            crate::lock_ok::lock(&pagers()).remove(&conn);
+            pagers_mut(g).remove(&conn);
             return;
         }
         Some('r') => {
-            let mut guard = crate::lock_ok::lock(&pagers());
+            let guard = pagers_mut(g);
             if let Some(p) = guard.get_mut(&conn) {
                 p.page = p.page.saturating_sub(1);
             }
         }
         Some('b') => {
-            let mut guard = crate::lock_ok::lock(&pagers());
+            let guard = pagers_mut(g);
             if let Some(p) = guard.get_mut(&conn) {
                 p.page = p.page.saturating_sub(2);
             }
@@ -1449,7 +1440,7 @@ fn show_string(g: &mut GameState, conn: ConnId, input: &str) {
                 Err(_) => 1,
             };
             let new = (want - 1).clamp(0, total as i64 - 1) as usize;
-            let mut guard = crate::lock_ok::lock(&pagers());
+            let guard = pagers_mut(g);
             if let Some(p) = guard.get_mut(&conn) {
                 p.page = new;
             }
@@ -1468,7 +1459,7 @@ fn show_string(g: &mut GameState, conn: ConnId, input: &str) {
 
     // Emit the current page; if it was the last one, drop the pager.
     let (text, last) = {
-        let guard = crate::lock_ok::lock(&pagers());
+        let guard = pagers(g);
         let p = match guard.get(&conn) {
             Some(p) => p,
             None => return,
@@ -1478,9 +1469,9 @@ fn show_string(g: &mut GameState, conn: ConnId, input: &str) {
     };
     send_to_q(g, conn, &text);
     if last {
-        crate::lock_ok::lock(&pagers()).remove(&conn);
+        pagers_mut(g).remove(&conn);
     } else {
-        let mut guard = crate::lock_ok::lock(&pagers());
+        let guard = pagers_mut(g);
         if let Some(p) = guard.get_mut(&conn) {
             p.page += 1;
         }
@@ -1621,7 +1612,7 @@ fn open_field_editor(
     max_len: usize,
     seed: &str,
 ) {
-    set_edit(conn, target, max_len);
+    set_edit(g, conn, target, max_len);
     if let Some(d) = g.descriptors.get_mut(&conn) {
         d.editors.push(InputContext::StringEdit {
             buffer: seed.to_string(),
@@ -1904,7 +1895,6 @@ mod tests {
 
     #[test]
     fn tedit_failure_keeps_retryable_state_and_blocks_flush_until_resolved() {
-        let _save_guard = crate::olc::test_save_list_guard();
         let (mut g, conn, ch, _obj) = editor_game();
         let root = std::env::temp_dir().join(format!(
             "deltamud-tedit-retry-{}-{}",
@@ -1934,6 +1924,7 @@ mod tests {
         assert!(editing(&g, conn));
         assert_ne!(g.get_char(ch).unwrap().act_flags & PLR_WRITING, 0);
         assert!(crate::olc::test_unresolved_named_save(
+            &g,
             crate::olc::EditorKind::Tedit,
             &key
         ));
@@ -1945,6 +1936,7 @@ mod tests {
         g.descriptors.get_mut(&conn).unwrap().editors.pop();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
         assert!(!crate::olc::test_unresolved_named_save(
+            &g,
             crate::olc::EditorKind::Tedit,
             &key
         ));
@@ -1966,12 +1958,14 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         assert!(editor_input(&mut g, conn, "/s"));
         assert!(crate::olc::test_unresolved_named_save(
+            &g,
             crate::olc::EditorKind::Tedit,
             &key
         ));
         assert!(!editor_input(&mut g, conn, "/a"));
         g.descriptors.get_mut(&conn).unwrap().editors.pop();
         assert!(!crate::olc::test_unresolved_named_save(
+            &g,
             crate::olc::EditorKind::Tedit,
             &key
         ));
@@ -2192,13 +2186,13 @@ mod tests {
         start_string_editing(&mut g, conn, 1000);
         let long_page = "line\r\n".repeat((PAGE_LENGTH as usize * 2) + 2);
         page_string(&mut g, conn, &long_page);
-        assert!(editing_any(conn));
-        assert!(page_active(conn));
+        assert!(editing_any(&g, conn));
+        assert!(page_active(&g, conn));
 
         abort_conn(&mut g, conn);
 
-        assert!(!editing_any(conn));
-        assert!(!page_active(conn));
+        assert!(!editing_any(&g, conn));
+        assert!(!page_active(&g, conn));
     }
 
     #[test]
@@ -2206,12 +2200,12 @@ mod tests {
         let (mut g, conn, _ch, _obj) = editor_game();
         crate::mail::seed_pending_mail_for_test(&mut g, conn);
         start_mail_editing(&mut g, conn, 1000);
-        assert!(editing_any(conn));
+        assert!(editing_any(&g, conn));
         assert!(crate::mail::has_pending_mail(&g, conn));
 
         abort_conn(&mut g, conn);
 
-        assert!(!editing_any(conn));
+        assert!(!editing_any(&g, conn));
         assert!(!crate::mail::has_pending_mail(&g, conn));
     }
 
@@ -2220,12 +2214,12 @@ mod tests {
         let (mut g, conn, _ch, _obj) = editor_game();
         crate::boards::seed_pending_write_for_test(&mut g, conn);
         start_board_editing(&mut g, conn, 1000);
-        assert!(editing_any(conn));
+        assert!(editing_any(&g, conn));
         assert!(crate::boards::has_pending_write_for_test(&g, conn));
 
         abort_conn(&mut g, conn);
 
-        assert!(!editing_any(conn));
+        assert!(!editing_any(&g, conn));
         assert!(!crate::boards::has_pending_write_for_test(&g, conn));
     }
 }

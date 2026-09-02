@@ -6409,10 +6409,10 @@ pub fn do_copyto(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         .unwrap_or_default();
     if !desc.is_empty() {
         g.rooms[rroom].description = desc;
-        // olc_add_to_save_list(zone_table[real_zone(iroom)].number, OLC_SAVE_ROOM)
+        // olc_add_to_save_list(g, zone_table[real_zone(iroom)].number, OLC_SAVE_ROOM)
         let zr = real_zone(g, iroom);
         if let Some(znum) = g.zones.get(zr as usize).map(|z| z.number) {
-            crate::olc::olc_add_to_save_list(znum, crate::olc::OLC_SAVE_ROOM);
+            crate::olc::olc_add_to_save_list(g, znum, crate::olc::OLC_SAVE_ROOM);
         }
         g.send_to_char(
             ch,
@@ -6476,7 +6476,7 @@ pub fn do_dig(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         to_room: there_vnum,
     });
     if let Some(znum) = g.zones.get(zr as usize).map(|z| z.number) {
-        crate::olc::olc_add_to_save_list(znum, crate::olc::OLC_SAVE_ROOM);
+        crate::olc::olc_add_to_save_list(g, znum, crate::olc::OLC_SAVE_ROOM);
     }
     g.send_to_char(
         ch,
@@ -6750,7 +6750,7 @@ pub fn do_tedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 return;
             }
             let path = std::path::Path::new(&g.config.lib_path).join(rel);
-            if crate::modify::textfile_edit_busy(&path, conn) {
+            if crate::modify::textfile_edit_busy(g, &path, conn) {
                 g.send_to_char(ch, "That text file is currently being edited.\r\n");
                 return;
             }
@@ -7727,16 +7727,12 @@ mod tests {
     }
 
     use chrono::TimeZone;
-    fn lock_olc_save_list() -> crate::olc::TestSaveListGuard {
-        crate::olc::test_save_list_guard()
-    }
-
     #[test]
     fn low_level_copyover_aborts_before_listener_work_when_olc_flush_fails() {
-        let _guard = lock_olc_save_list();
         const MISSING_ZONE: i32 = 29_994;
-        crate::olc::olc_add_to_save_list(MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
+
         let mut g = GameState::new(Config::default());
+        crate::olc::olc_add_to_save_list(&mut g, MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
         let requester = connected_player(&mut g, ConnId(199), "Builder", LVL_IMPL);
 
         perform_copyover(&mut g, requester);
@@ -7746,7 +7742,7 @@ mod tests {
         assert!(!output.contains("Copyover unavailable"));
         assert!(crate::olc::flush_save_list_to_disk(&mut g).is_err());
 
-        crate::olc::olc_remove_from_save_list(MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
+        crate::olc::olc_remove_from_save_list(&mut g, MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
     }
 
     fn connected_player(g: &mut GameState, conn: ConnId, name: &str, level: Level) -> CharId {
@@ -8692,7 +8688,6 @@ mod tests {
 
     #[test]
     fn do_dig_denies_unowned_destination_zone() {
-        let _guard = lock_olc_save_list();
         let mut g = GameState::new(Config::default());
         g.zones.push(test_zone(1, 199, "Builder"));
         g.zones.push(test_zone(2, 299, "Other"));
@@ -8726,9 +8721,8 @@ mod tests {
 
     #[test]
     fn do_dig_marks_destination_zone_room_save() {
-        let _guard = lock_olc_save_list();
-        crate::olc::olc_remove_from_save_list(2, crate::olc::OLC_SAVE_ROOM);
         let mut g = GameState::new(Config::default());
+        crate::olc::olc_remove_from_save_list(&mut g, 2, crate::olc::OLC_SAVE_ROOM);
         g.zones.push(test_zone(1, 199, "Builder"));
         g.zones.push(test_zone(2, 299, "Builder"));
         let here = g.add_room(Room::new(
@@ -8764,7 +8758,7 @@ mod tests {
                 .outbuf
                 .contains("Rooms for zone 2")
         );
-        crate::olc::olc_remove_from_save_list(2, crate::olc::OLC_SAVE_ROOM);
+        crate::olc::olc_remove_from_save_list(&mut g, 2, crate::olc::OLC_SAVE_ROOM);
     }
 
     // ---- #195: sprintbit fidelity (utils.c:402-423) -----------------------

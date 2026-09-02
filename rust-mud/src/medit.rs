@@ -5,13 +5,13 @@
 // Architecture (the shared OLC contract):
 //   * `do_medit(g, ch, arg, subcmd)` starts the editor: it snapshots the target
 //     mob prototype into a per-connection `MeditState`, registers the editor
-//     with `olc::set_active(conn, EditorKind::Medit)`, and displays the main
+//     with `olc::set_active(g, conn, EditorKind::Medit)`, and displays the main
 //     menu.
 //   * `medit_parse(g, conn, line)` is the per-line input handler the OLC router
 //     (`olc::olc_input`) calls while this connection is in the mob editor.
 //   * On save/quit the editor writes the mob back into `GameState::mob_protos`
 //     and rewrites the on-disk `<zone>.mob` file byte-faithfully (CircleMUD
-//     extended `X`-format), then calls `olc::clear_active(conn)`.
+//     extended `X`-format), then calls `olc::clear_active(g, conn)`.
 //
 // The Rust `MobileProto` (world.rs, which this module must NOT modify) carries
 // only the subset of fields the live game needs. medit, however, edits the
@@ -30,8 +30,6 @@ use crate::state::GameState;
 use crate::types::*;
 use crate::world::{MobileProto, zone_vnum_bounds};
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
 // Constants mirrored from olc.h / structs.h / fight.c.
@@ -167,7 +165,7 @@ struct EditMob {
     cha: i32,
 }
 
-struct MeditState {
+pub struct MeditState {
     vnum: MobVnum,
     zone_number: i32,
     authorization: olc::OlcAuthorization,
@@ -177,17 +175,19 @@ struct MeditState {
     ddesc_buf: String, // accumulates the multi-line description
 }
 
-fn states() -> &'static Mutex<HashMap<ConnId, MeditState>> {
-    static S: OnceLock<Mutex<HashMap<ConnId, MeditState>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 /// abort: drop this conn's editor state without saving (player disconnected
 /// mid-edit). The MeditState (including its in-progress description buffer) is
 /// removed so nothing lingers until reboot. `olc::abort_editor` clears active.
-pub fn abort(conn: ConnId) {
-    if let Some(state) = crate::lock_ok::lock(&states()).remove(&conn) {
-        olc::discard_unresolved_save(EditorKind::Medit, state.vnum);
+fn states(g: &GameState) -> &HashMap<ConnId, MeditState> {
+    &g.olc.medit_states
+}
+fn states_mut(g: &mut GameState) -> &mut HashMap<ConnId, MeditState> {
+    &mut g.olc.medit_states
+}
+
+pub fn abort(g: &mut GameState, conn: ConnId) {
+    if let Some(state) = states_mut(g).remove(&conn) {
+        olc::discard_unresolved_save(g, EditorKind::Medit, state.vnum);
     }
 }
 
@@ -298,18 +298,15 @@ pub fn do_medit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     };
     // C olc.c:198-212: refuse when another descriptor is editing the same
     // entity (issue #272).
-    if crate::lock_ok::lock(&states())
-        .values()
-        .any(|s| s.vnum == st.vnum)
-    {
+    if states_mut(g).values().any(|s| s.vnum == st.vnum) {
         g.send_to_char(
             ch,
             "That mobile is currently being edited by someone else.\r\n",
         );
         return;
     }
-    crate::lock_ok::lock(&states()).insert(conn, st);
-    olc::set_active(conn, EditorKind::Medit);
+    states_mut(g).insert(conn, st);
+    olc::set_active(g, conn, EditorKind::Medit);
     // C olc.c:381-382: '$n starts using OLC.' + SET_BIT(PLR_WRITING) (#273).
     if let Some(c) = g.get_char_mut(ch) {
         c.act_flags |= crate::flags::PLR_WRITING;
@@ -477,7 +474,7 @@ fn mob_file_path(g: &GameState, zone_number: i32) -> std::path::PathBuf {
 // ===========================================================================
 
 fn disp_menu(g: &mut GameState, conn: ConnId) {
-    let st = match crate::lock_ok::lock(&states()).get(&conn).cloned_state() {
+    let st = match states_mut(g).get(&conn).cloned_state() {
         Some(s) => s,
         None => return,
     };
@@ -551,7 +548,7 @@ fn disp_menu(g: &mut GameState, conn: ConnId) {
     );
     send(g, conn, &buf2);
 
-    set_mode(conn, Mode::MainMenu);
+    set_mode(g, conn, Mode::MainMenu);
 }
 
 fn disp_positions(g: &mut GameState, conn: ConnId) {
@@ -585,7 +582,7 @@ fn disp_attack_types(g: &mut GameState, conn: ConnId) {
 }
 
 fn disp_mob_flags(g: &mut GameState, conn: ConnId) {
-    let st = match crate::lock_ok::lock(&states()).get(&conn).cloned_state() {
+    let st = match states_mut(g).get(&conn).cloned_state() {
         Some(s) => s,
         None => return,
     };
@@ -611,7 +608,7 @@ fn disp_mob_flags(g: &mut GameState, conn: ConnId) {
 }
 
 fn disp_aff_flags(g: &mut GameState, conn: ConnId) {
-    let st = match crate::lock_ok::lock(&states()).get(&conn).cloned_state() {
+    let st = match states_mut(g).get(&conn).cloned_state() {
         Some(s) => s,
         None => return,
     };
@@ -683,8 +680,8 @@ fn sprintbit(bits: i64, names: &[&str], out: &mut String) {
 // Per-connection mode/state helpers.
 // ===========================================================================
 
-fn set_mode(conn: ConnId, mode: Mode) {
-    if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+fn set_mode(g: &mut GameState, conn: ConnId, mode: Mode) {
+    if let Some(s) = states_mut(g).get_mut(&conn) {
         s.mode = mode;
     }
 }
@@ -712,11 +709,11 @@ impl ClonedState for Option<&MeditState> {
 // ===========================================================================
 
 pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
-    let mode = match crate::lock_ok::lock(&states()).get(&conn) {
+    let mode = match states_mut(g).get(&conn) {
         Some(s) => s.mode,
         None => {
             // Not actually editing — defensively clear and bail.
-            olc::clear_active(conn);
+            olc::clear_active(g, conn);
             return;
         }
     };
@@ -752,7 +749,7 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             } else {
                 line.trim().to_string()
             };
-            with_mob(conn, |m| m.alias = v);
+            with_mob(g, conn, |m| m.alias = v);
             after_edit(g, conn);
         }
         Mode::ShortDesc => {
@@ -761,7 +758,7 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             } else {
                 line.trim().to_string()
             };
-            with_mob(conn, |m| m.short_desc = v);
+            with_mob(g, conn, |m| m.short_desc = v);
             after_edit(g, conn);
         }
         Mode::LongDesc => {
@@ -774,7 +771,7 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 line.trim().to_string()
             };
             v.push_str("\r\n");
-            with_mob(conn, |m| m.long_desc = v);
+            with_mob(g, conn, |m| m.long_desc = v);
             after_edit(g, conn);
         }
         Mode::Sex => {
@@ -782,7 +779,7 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 return;
             };
             let n = n.clamp(0, (NUM_GENDERS - 1) as i32);
-            with_mob(conn, |m| m.sex = n);
+            with_mob(g, conn, |m| m.sex = n);
             after_edit(g, conn);
         }
         Mode::Position => {
@@ -790,7 +787,7 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 return;
             };
             let n = n.clamp(0, (NUM_POSITIONS - 1) as i32);
-            with_mob(conn, |m| m.position = n);
+            with_mob(g, conn, |m| m.position = n);
             after_edit(g, conn);
         }
         Mode::DefaultPos => {
@@ -798,7 +795,7 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 return;
             };
             let n = n.clamp(0, (NUM_POSITIONS - 1) as i32);
-            with_mob(conn, |m| m.default_pos = n);
+            with_mob(g, conn, |m| m.default_pos = n);
             after_edit(g, conn);
         }
         Mode::Attack => {
@@ -806,7 +803,7 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 return;
             };
             let n = n.clamp(0, (NUM_ATTACK_TYPES - 1) as i32);
-            with_mob(conn, |m| m.attack_type = n);
+            with_mob(g, conn, |m| m.attack_type = n);
             after_edit(g, conn);
         }
         Mode::NpcFlags => {
@@ -818,7 +815,7 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 return;
             }
             if i > 0 && i <= NUM_MOB_FLAGS as i32 {
-                with_mob(conn, |m| m.mob_flags ^= 1 << (i - 1));
+                with_mob(g, conn, |m| m.mob_flags ^= 1 << (i - 1));
             }
             disp_mob_flags(g, conn);
         }
@@ -831,17 +828,12 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 return;
             }
             if i > 0 && i <= NUM_AFF_FLAGS as i32 {
-                with_mob(conn, |m| m.aff_flags ^= 1 << (i - 1));
+                with_mob(g, conn, |m| m.aff_flags ^= 1 << (i - 1));
             }
             disp_aff_flags(g, conn);
         }
         Mode::Script(mut script_mode) => {
-            let vnum = states()
-                .lock()
-                .unwrap()
-                .get(&conn)
-                .map(|s| s.vnum)
-                .unwrap_or(0);
+            let vnum = states_mut(g).get(&conn).map(|s| s.vnum).unwrap_or(0);
             let keep = olc::dg_script_edit_parse(
                 g,
                 conn,
@@ -851,7 +843,7 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 line.trim(),
             );
             if keep {
-                if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+                if let Some(s) = states_mut(g).get_mut(&conn) {
                     s.mode = Mode::Script(script_mode);
                     s.changed = true;
                 }
@@ -865,7 +857,7 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 return;
             };
             let n = n.clamp(1, 100);
-            with_mob(conn, |m| {
+            with_mob(g, conn, |m| {
                 m.level = n;
                 set_mob_stats(m, n);
             });
@@ -889,7 +881,7 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 return;
             };
             let n = n.max(0).min(i32::MAX as i64);
-            with_mob(conn, |m| m.exp = n);
+            with_mob(g, conn, |m| m.exp = n);
             after_edit(g, conn);
         }
         Mode::Gold => {
@@ -897,7 +889,7 @@ pub fn medit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 return;
             };
             let n = n.clamp(0, crate::gold::GOLD_CAP);
-            with_mob(conn, |m| m.gold = n);
+            with_mob(g, conn, |m| m.gold = n);
             after_edit(g, conn);
         }
         // DDesc is consumed by the multi-line editor guard at the top of this fn;
@@ -919,20 +911,20 @@ fn num_set<F: FnOnce(&mut EditMob, i32)>(
         return;
     };
     let n = n.clamp(lo, hi);
-    with_mob(conn, |m| f(m, n));
+    with_mob(g, conn, |m| f(m, n));
     after_edit(g, conn);
 }
 
 /// Mark the edit changed and redisplay the menu (the C fall-through tail).
 fn after_edit(g: &mut GameState, conn: ConnId) {
-    if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+    if let Some(s) = states_mut(g).get_mut(&conn) {
         s.changed = true;
     }
     disp_menu(g, conn);
 }
 
-fn with_mob<F: FnOnce(&mut EditMob)>(conn: ConnId, f: F) {
-    if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+fn with_mob<F: FnOnce(&mut EditMob)>(g: &mut GameState, conn: ConnId, f: F) {
+    if let Some(s) = states_mut(g).get_mut(&conn) {
         f(&mut s.mob);
     }
 }
@@ -944,43 +936,38 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
     let c = line.trim().chars().next().unwrap_or('\0');
     match c {
         'q' | 'Q' => {
-            let changed = states()
-                .lock()
-                .unwrap()
-                .get(&conn)
-                .map(|s| s.changed)
-                .unwrap_or(false);
+            let changed = states_mut(g).get(&conn).map(|s| s.changed).unwrap_or(false);
             if changed {
                 send(
                     g,
                     conn,
                     "Do you wish to save the changes to the mobile? (y/n) : ",
                 );
-                set_mode(conn, Mode::ConfirmSave);
+                set_mode(g, conn, Mode::ConfirmSave);
             } else {
                 send(g, conn, "No changes made.\r\n");
                 finish(g, conn);
             }
         }
         '1' => {
-            set_mode(conn, Mode::Sex);
+            set_mode(g, conn, Mode::Sex);
             disp_sex(g, conn);
         }
         '2' => {
-            set_mode(conn, Mode::Alias);
+            set_mode(g, conn, Mode::Alias);
             send(g, conn, "\r\nEnter new text :\r\n] ");
         }
         '3' => {
-            set_mode(conn, Mode::ShortDesc);
+            set_mode(g, conn, Mode::ShortDesc);
             send(g, conn, "\r\nEnter new text :\r\n] ");
         }
         '4' => {
-            set_mode(conn, Mode::LongDesc);
+            set_mode(g, conn, Mode::LongDesc);
             send(g, conn, "\r\nEnter new text :\r\n] ");
         }
         '5' => {
-            set_mode(conn, Mode::DDesc);
-            if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+            set_mode(g, conn, Mode::DDesc);
+            if let Some(s) = states_mut(g).get_mut(&conn) {
                 s.ddesc_buf = s.mob.description.clone();
             }
             send(
@@ -988,9 +975,7 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
                 conn,
                 "Enter mob description: (/s saves /h for help)\r\n\r\n",
             );
-            let cur = states()
-                .lock()
-                .unwrap()
+            let cur = states_mut(g)
                 .get(&conn)
                 .map(|s| s.mob.description.clone())
                 .unwrap_or_default();
@@ -999,90 +984,85 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
             }
         }
         '6' => {
-            set_mode(conn, Mode::Level);
+            set_mode(g, conn, Mode::Level);
             send(g, conn, "\r\nEnter new value : ");
         }
         '7' => {
-            set_mode(conn, Mode::Alignment);
+            set_mode(g, conn, Mode::Alignment);
             send(g, conn, "\r\nEnter new value : ");
         }
         '8' => {
-            set_mode(conn, Mode::Defense);
+            set_mode(g, conn, Mode::Defense);
             send(g, conn, "\r\nEnter new value : ");
         }
         '9' => {
-            set_mode(conn, Mode::MDefense);
+            set_mode(g, conn, Mode::MDefense);
             send(g, conn, "\r\nEnter new value : ");
         }
         'a' | 'A' => {
-            set_mode(conn, Mode::Power);
+            set_mode(g, conn, Mode::Power);
             send(g, conn, "\r\nEnter new value : ");
         }
         'b' | 'B' => {
-            set_mode(conn, Mode::MPower);
+            set_mode(g, conn, Mode::MPower);
             send(g, conn, "\r\nEnter new value : ");
         }
         'c' | 'C' => {
-            set_mode(conn, Mode::Technique);
+            set_mode(g, conn, Mode::Technique);
             send(g, conn, "\r\nEnter new value : ");
         }
         'd' | 'D' => {
-            set_mode(conn, Mode::Exp);
+            set_mode(g, conn, Mode::Exp);
             send(g, conn, "\r\nEnter new value : ");
         }
         'e' | 'E' => {
-            set_mode(conn, Mode::NumDamDice);
+            set_mode(g, conn, Mode::NumDamDice);
             send(g, conn, "\r\nEnter new value : ");
         }
         'f' | 'F' => {
-            set_mode(conn, Mode::SizeDamDice);
+            set_mode(g, conn, Mode::SizeDamDice);
             send(g, conn, "\r\nEnter new value : ");
         }
         'g' | 'G' => {
-            set_mode(conn, Mode::NumHpDice);
+            set_mode(g, conn, Mode::NumHpDice);
             send(g, conn, "\r\nEnter new value : ");
         }
         'h' | 'H' => {
-            set_mode(conn, Mode::SizeHpDice);
+            set_mode(g, conn, Mode::SizeHpDice);
             send(g, conn, "\r\nEnter new value : ");
         }
         'i' | 'I' => {
-            set_mode(conn, Mode::AddHp);
+            set_mode(g, conn, Mode::AddHp);
             send(g, conn, "\r\nEnter new value : ");
         }
         'j' | 'J' => {
-            set_mode(conn, Mode::Gold);
+            set_mode(g, conn, Mode::Gold);
             send(g, conn, "\r\nEnter new value : ");
         }
         'k' | 'K' => {
-            set_mode(conn, Mode::Position);
+            set_mode(g, conn, Mode::Position);
             disp_positions(g, conn);
         }
         'l' | 'L' => {
-            set_mode(conn, Mode::DefaultPos);
+            set_mode(g, conn, Mode::DefaultPos);
             disp_positions(g, conn);
         }
         'm' | 'M' => {
-            set_mode(conn, Mode::Attack);
+            set_mode(g, conn, Mode::Attack);
             disp_attack_types(g, conn);
         }
         'n' | 'N' => {
-            set_mode(conn, Mode::NpcFlags);
+            set_mode(g, conn, Mode::NpcFlags);
             disp_mob_flags(g, conn);
         }
         'o' | 'O' => {
-            set_mode(conn, Mode::AffFlags);
+            set_mode(g, conn, Mode::AffFlags);
             disp_aff_flags(g, conn);
         }
         's' | 'S' => {
-            let vnum = states()
-                .lock()
-                .unwrap()
-                .get(&conn)
-                .map(|s| s.vnum)
-                .unwrap_or(0);
+            let vnum = states_mut(g).get(&conn).map(|s| s.vnum).unwrap_or(0);
             olc::dg_script_menu(g, conn, crate::dg_handler::MOB_TRIGGER, vnum);
-            set_mode(conn, Mode::Script(olc::DgScriptEditMode::Main));
+            set_mode(g, conn, Mode::Script(olc::DgScriptEditMode::Main));
         }
         _ => disp_menu(g, conn),
     }
@@ -1097,32 +1077,37 @@ where
     F: FnOnce(&std::path::Path, &[u8]) -> std::io::Result<()>,
 {
     // Force MOB_ISNPC regardless of which way the user answers (C medit_parse).
-    with_mob(conn, |m| m.mob_flags |= MOB_ISNPC);
+    with_mob(g, conn, |m| m.mob_flags |= MOB_ISNPC);
     match line.trim().chars().next().unwrap_or('\0') {
         'y' | 'Y' => match save_to_disk_with(g, conn, replace) {
             Ok(()) => {
                 save_internally(g, conn);
-                if let Some(state) = crate::lock_ok::lock(&states()).get(&conn) {
-                    crate::olc::clear_unresolved_publication(EditorKind::Medit, state.vnum);
-                    crate::olc::olc_remove_from_save_list(
-                        state.zone_number,
-                        crate::olc::OLC_SAVE_MOB,
-                    );
-                }
+                let (state_vnum, state_zone) = states(g)
+                    .get(&conn)
+                    .map(|s| (s.vnum, s.zone_number))
+                    .unwrap_or((0, 0));
+                crate::olc::clear_unresolved_publication(g, EditorKind::Medit, state_vnum);
+                crate::olc::olc_remove_from_save_list(g, state_zone, crate::olc::OLC_SAVE_MOB);
                 send(g, conn, "Mobile saved to disk and memory.\r\n");
                 finish(g, conn);
             }
             Err(err) => {
                 log::warn!("SYSERR: OLC: could not save mobile: {}", err);
-                if let Some(state) = crate::lock_ok::lock(&states()).get(&conn) {
-                    crate::olc::mark_unresolved_save_failure(EditorKind::Medit, state.vnum, &err);
+                if let Some(state) = states(g).get(&conn) {
+                    crate::olc::mark_unresolved_save_failure(
+                        g,
+                        EditorKind::Medit,
+                        state.vnum,
+                        &err,
+                    );
                 }
                 if crate::olc::replacement_was_published(&err) {
                     // rename(2) already made the candidate visible.  Keep the
                     // editor/dirty marker for a retry, but reconcile runtime so
                     // a forced restart cannot reveal different content.
-                    if let Some(state) = crate::lock_ok::lock(&states()).get(&conn) {
+                    if let Some(state) = states(g).get(&conn) {
                         crate::olc::olc_add_to_save_list(
+                            g,
                             state.zone_number,
                             crate::olc::OLC_SAVE_MOB,
                         );
@@ -1154,15 +1139,15 @@ where
 
 /// Tear down the editor for this connection (CircleMUD cleanup_olc).
 
-fn editor_char(g: &GameState, conn: ConnId) -> Option<CharId> {
+fn editor_char(g: &mut GameState, conn: ConnId) -> Option<CharId> {
     g.descriptors.get(&conn).and_then(|d| d.character)
 }
 
 fn finish(g: &mut GameState, conn: ConnId) {
-    if let Some(state) = crate::lock_ok::lock(&states()).remove(&conn) {
-        olc::discard_unresolved_save(EditorKind::Medit, state.vnum);
+    if let Some(state) = states_mut(g).remove(&conn) {
+        olc::discard_unresolved_save(g, EditorKind::Medit, state.vnum);
     }
-    olc::clear_active(conn);
+    olc::clear_active(g, conn);
     // C olc.c:610-613 cleanup_olc: clear PLR_WRITING and act '$n stops using
     // OLC.' The invented 'Mobile editor exited.' line appears nowhere in C
     // (#273).
@@ -1187,9 +1172,7 @@ fn finish(g: &mut GameState, conn: ConnId) {
 fn ddesc_input(g: &mut GameState, conn: ConnId, line: &str) {
     if line.trim() == "@" {
         // Commit the gathered buffer into the mob description.
-        let buf = states()
-            .lock()
-            .unwrap()
+        let buf = states_mut(g)
             .get(&conn)
             .map(|s| s.ddesc_buf.clone())
             .unwrap_or_default();
@@ -1198,29 +1181,27 @@ fn ddesc_input(g: &mut GameState, conn: ConnId, line: &str) {
             text.push('\n');
         }
         crate::text::truncate_utf8_bytes(&mut text, MAX_MOB_DESC);
-        with_mob(conn, |m| m.description = text);
+        with_mob(g, conn, |m| m.description = text);
         after_edit(g, conn);
         return;
     }
 
-    let mut buf = states()
-        .lock()
-        .unwrap()
+    let mut buf = states_mut(g)
         .get(&conn)
         .map(|s| s.ddesc_buf.clone())
         .unwrap_or_default();
     match crate::modify::editor_buffer_input(g, conn, &mut buf, MAX_MOB_DESC, line) {
         crate::modify::BufferEditorResult::Continue => {
-            if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+            if let Some(s) = states_mut(g).get_mut(&conn) {
                 s.ddesc_buf = buf;
             }
         }
         crate::modify::BufferEditorResult::Save => {
-            with_mob(conn, |m| m.description = buf);
+            with_mob(g, conn, |m| m.description = buf);
             after_edit(g, conn);
         }
         crate::modify::BufferEditorResult::Abort => {
-            if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+            if let Some(s) = states_mut(g).get_mut(&conn) {
                 s.ddesc_buf.clear();
                 s.mode = Mode::MainMenu;
             }
@@ -1239,7 +1220,7 @@ fn ddesc_input(g: &mut GameState, conn: ConnId, line: &str) {
 /// (flags/abilities/alignment/etc.) live only on disk; they are preserved by
 /// the byte-faithful `.mob` write that follows.
 fn save_internally(g: &mut GameState, conn: ConnId) {
-    let st = match crate::lock_ok::lock(&states()).get(&conn).cloned_state() {
+    let st = match states_mut(g).get(&conn).cloned_state() {
         Some(s) => s,
         None => return,
     };
@@ -1328,7 +1309,7 @@ fn save_to_disk_with<F>(g: &mut GameState, conn: ConnId, replace: F) -> std::io:
 where
     F: FnOnce(&std::path::Path, &[u8]) -> std::io::Result<()>,
 {
-    let st = match crate::lock_ok::lock(&states()).get(&conn).cloned_state() {
+    let st = match states_mut(g).get(&conn).cloned_state() {
         Some(s) => s,
         None => {
             return Err(std::io::Error::new(
@@ -1428,7 +1409,7 @@ pub fn medit_save_to_disk(g: &mut GameState, zone_rnum: usize) -> std::io::Resul
     };
     // C medit.c:465: the internal save marks the save list; the disk write
     // (this function, in the port's eager model) clears it (#274).
-    crate::olc::olc_add_to_save_list(zone_number, crate::olc::OLC_SAVE_MOB);
+    crate::olc::olc_add_to_save_list(g, zone_number, crate::olc::OLC_SAVE_MOB);
     let path = mob_file_path(g, zone_number);
     let mut vnums: Vec<MobVnum> = g
         .mob_protos
@@ -1455,8 +1436,8 @@ pub fn medit_save_to_disk(g: &mut GameState, zone_rnum: usize) -> std::io::Resul
         std::fs::create_dir_all(parent)?;
     }
     crate::olc::atomic_replace(&path, out.as_bytes())?;
-    crate::olc::olc_remove_from_save_list(zone_number, crate::olc::OLC_SAVE_MOB);
-    crate::olc::clear_published_unresolved_numeric_range(EditorKind::Medit, zone_lo, zone_top);
+    crate::olc::olc_remove_from_save_list(g, zone_number, crate::olc::OLC_SAVE_MOB);
+    crate::olc::clear_published_unresolved_numeric_range(g, EditorKind::Medit, zone_lo, zone_top);
     Ok(())
 }
 
@@ -2138,7 +2119,7 @@ mod tests {
         medit_parse(&mut g, conn, "d"); // exp prompt
         medit_parse(&mut g, conn, "99999999999");
         let exp = std::cell::Cell::new(0i64);
-        with_mob(conn, |m| exp.set(m.exp));
+        with_mob(&mut g, conn, |m| exp.set(m.exp));
         // C stores into an int; a wider value would overflow the .mob loader (#303).
         assert_eq!(exp.get(), i32::MAX as i64);
     }
@@ -2200,13 +2181,13 @@ mod tests {
         std::fs::write(mob_dir.join("1.mob"), record("2147483647")).unwrap();
         do_medit(&mut g, ch, "198", 0);
         let alignment = std::cell::Cell::new(0);
-        with_mob(conn, |m| alignment.set(m.alignment));
+        with_mob(&mut g, conn, |m| alignment.set(m.alignment));
         assert_eq!(alignment.get(), 777, "valid classic record is loaded");
         finish(&mut g, conn);
 
         std::fs::write(mob_dir.join("1.mob"), record("2147483648")).unwrap();
         do_medit(&mut g, ch, "198", 0);
-        assert_eq!(crate::olc::active_editor(conn), None);
+        assert_eq!(crate::olc::active_editor(&g, conn), None);
         assert!(
             g.descriptors[&conn]
                 .outbuf
@@ -2238,7 +2219,7 @@ mod tests {
 
             do_medit(&mut g, ch, "198", 0);
 
-            assert_eq!(crate::olc::active_editor(conn), None);
+            assert_eq!(crate::olc::active_editor(&g, conn), None);
             assert!(
                 g.descriptors[&conn]
                     .outbuf
@@ -2278,13 +2259,12 @@ mod tests {
         g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
         crate::olc::olc_saveinfo(&mut g, ch);
         assert!(g.descriptors[&conn].outbuf.contains("Mobiles for zone 1"));
-        crate::olc::olc_remove_from_save_list(1, crate::olc::OLC_SAVE_MOB);
+        crate::olc::olc_remove_from_save_list(&mut g, 1, crate::olc::OLC_SAVE_MOB);
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn post_rename_mobile_failure_reconciles_live_and_keeps_zone_dirty() {
-        let _save_guard = crate::olc::test_save_list_guard();
         let conn = ConnId(984);
         let (mut g, ch) = editor_game(conn);
         let root = std::env::temp_dir().join(format!(
@@ -2299,7 +2279,7 @@ mod tests {
         g.config.lib_path = root.to_string_lossy().into_owned();
 
         do_medit(&mut g, ch, "new 198", 0);
-        with_mob(conn, |mob| mob.alignment = 777);
+        with_mob(&mut g, conn, |mob| mob.alignment = 777);
         parse_confirm_save_with(&mut g, conn, "y", |path, bytes| {
             crate::olc::atomic_replace_with_hooks(
                 path,
@@ -2316,12 +2296,17 @@ mod tests {
                 .alignment,
             777
         );
-        assert!(crate::olc::test_pending_save(1, crate::olc::OLC_SAVE_MOB));
+        assert!(crate::olc::test_pending_save(
+            &g,
+            1,
+            crate::olc::OLC_SAVE_MOB
+        ));
         assert!(crate::olc::test_unresolved_publication(
+            &g,
             EditorKind::Medit,
             198
         ));
-        assert_eq!(crate::olc::active_editor(conn), Some(EditorKind::Medit));
+        assert_eq!(crate::olc::active_editor(&g, conn), Some(EditorKind::Medit));
         assert!(
             g.descriptors[&conn]
                 .outbuf
@@ -2330,11 +2315,16 @@ mod tests {
 
         parse_confirm_save_with(&mut g, conn, "y", crate::olc::atomic_replace);
         assert!(!crate::olc::test_unresolved_publication(
+            &g,
             EditorKind::Medit,
             198
         ));
-        assert!(!crate::olc::test_pending_save(1, crate::olc::OLC_SAVE_MOB));
-        assert!(!crate::olc::in_olc(conn));
+        assert!(!crate::olc::test_pending_save(
+            &g,
+            1,
+            crate::olc::OLC_SAVE_MOB
+        ));
+        assert!(!crate::olc::in_olc(&g, conn));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2346,22 +2336,15 @@ mod tests {
 
         for scalar in ['é', '€', '🦀'] {
             medit_parse(&mut g, conn, "5");
-            crate::lock_ok::lock(&states())
-                .get_mut(&conn)
-                .unwrap()
-                .ddesc_buf
-                .clear();
+            states_mut(&mut g).get_mut(&conn).unwrap().ddesc_buf.clear();
             let input = format!("{}{scalar}", "a".repeat(MAX_MOB_DESC - 1));
             medit_parse(&mut g, conn, &input);
             medit_parse(&mut g, conn, "/s");
-            let description = crate::lock_ok::lock(&states())[&conn]
-                .mob
-                .description
-                .clone();
+            let description = states_mut(&mut g)[&conn].mob.description.clone();
             assert!(description.is_char_boundary(description.len()));
             assert!(!description.contains(scalar));
         }
-        crate::lock_ok::lock(&states()).remove(&conn);
-        olc::clear_active(conn);
+        states_mut(&mut g).remove(&conn);
+        olc::clear_active(&mut g, conn);
     }
 }

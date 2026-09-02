@@ -2711,7 +2711,7 @@ mod tests {
 
         list_all_shops(&mut g, ch);
 
-        assert!(crate::modify::page_active(conn));
+        assert!(crate::modify::page_active(&g, conn));
         let out = &g.descriptors.get(&conn).unwrap().outbuf;
         assert!(out.contains("Virtual"));
         assert!(!out.contains("10039"));

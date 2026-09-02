@@ -17,8 +17,6 @@ use crate::room::{EX_ISDOOR, EX_PICKPROOF, Exit, Room, RoomFlags, SectorType};
 use crate::state::GameState;
 use crate::types::*;
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::sync::OnceLock;
 
 // EX_HIDDEN — DeltaMUD adds a hidden flag past the standard CircleMUD set.
 // (structs.h: EX_PICKPROOF = 1<<3, EX_HIDDEN = 1<<4.)
@@ -31,6 +29,13 @@ const MAX_EXIT_DESC: usize = 256;
 
 // NUM_ROOM_FLAGS / NUM_ROOM_SECTORS — count of real entries (excluding the
 // trailing "\n" sentinel) in the constants tables.
+fn states(g: &GameState) -> &HashMap<ConnId, ReditState> {
+    &g.olc.redit_states
+}
+fn states_mut(g: &mut GameState) -> &mut HashMap<ConnId, ReditState> {
+    &mut g.olc.redit_states
+}
+
 fn num_room_flags() -> usize {
     ROOM_BITS.iter().take_while(|&&s| s != "\n").count()
 }
@@ -83,7 +88,7 @@ struct RoomEdit {
     extra_descriptions: Vec<(String, String)>,
 }
 
-struct ReditState {
+pub struct ReditState {
     vnum: RoomVnum,
     znum: usize, // loaded-zone index
     zone_number: i32,
@@ -96,14 +101,13 @@ struct ReditState {
     cur_desc: usize, // index into extra_descriptions being edited
 }
 
-fn states() -> &'static Mutex<HashMap<ConnId, ReditState>> {
-    static S: OnceLock<Mutex<HashMap<ConnId, ReditState>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 // Helper: run a closure with mutable access to a conn's edit state.
-fn with_state<R>(conn: ConnId, f: impl FnOnce(&mut ReditState) -> R) -> Option<R> {
-    crate::lock_ok::lock(&states()).get_mut(&conn).map(f)
+fn with_state<R>(
+    g: &mut GameState,
+    conn: ConnId,
+    f: impl FnOnce(&mut ReditState) -> R,
+) -> Option<R> {
+    states_mut(g).get_mut(&conn).map(f)
 }
 
 fn send(g: &mut GameState, conn: ConnId, msg: &str) {
@@ -143,9 +147,7 @@ pub fn do_redit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     };
 
     // Already-being-edited check.
-    let conflict = crate::lock_ok::lock(&states())
-        .values()
-        .any(|s| s.vnum == vnum);
+    let conflict = states_mut(g).values().any(|s| s.vnum == vnum);
     if conflict {
         g.send_to_char(ch, "That room is currently being edited.\r\n");
         return;
@@ -168,12 +170,13 @@ pub fn do_redit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
     };
 
-    crate::lock_ok::lock(&states()).insert(
+    let zone_number = g.zones[znum].number;
+    states_mut(g).insert(
         conn,
         ReditState {
             vnum,
             znum,
-            zone_number: g.zones[znum].number,
+            zone_number,
             authorization,
             room,
             mode: ReditMode::MainMenu,
@@ -183,7 +186,7 @@ pub fn do_redit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             cur_desc: 0,
         },
     );
-    olc::set_active(conn, EditorKind::Redit);
+    olc::set_active(g, conn, EditorKind::Redit);
 
     // act("$n starts using OLC.", TO_ROOM)
     crate::act::act(
@@ -216,7 +219,7 @@ fn snapshot_room(room: &Room) -> RoomEdit {
 // Menu display.
 // ===========================================================================
 fn disp_menu(g: &mut GameState, conn: ConnId) {
-    let s = match crate::lock_ok::lock(&states()).get(&conn).map(|s| {
+    let s = match states_mut(g).get(&conn).map(|s| {
         (
             s.vnum,
             s.znum,
@@ -293,7 +296,7 @@ fn disp_menu(g: &mut GameState, conn: ConnId) {
             },
     );
     send(g, conn, &body);
-    let _ = with_state(conn, |s| s.mode = ReditMode::MainMenu);
+    let _ = with_state(g, conn, |s| s.mode = ReditMode::MainMenu);
 }
 
 fn exit_to_vnum(room: &RoomEdit, dir: usize) -> i32 {
@@ -304,7 +307,7 @@ fn exit_to_vnum(room: &RoomEdit, dir: usize) -> i32 {
 }
 
 fn disp_flag_menu(g: &mut GameState, conn: ConnId) {
-    let cur = with_state(conn, |s| s.room.room_flags.bits() as i64).unwrap_or(0);
+    let cur = with_state(g, conn, |s| s.room.room_flags.bits() as i64).unwrap_or(0);
     let mut out = String::new();
     let mut columns = 0;
     for (i, name) in ROOM_BITS.iter().take(num_room_flags()).enumerate() {
@@ -325,7 +328,7 @@ fn disp_flag_menu(g: &mut GameState, conn: ConnId) {
         flags = olc::sprintbit(cur, ROOM_BITS),
     ));
     send(g, conn, &out);
-    let _ = with_state(conn, |s| s.mode = ReditMode::Flags);
+    let _ = with_state(g, conn, |s| s.mode = ReditMode::Flags);
 }
 
 fn disp_sector_menu(g: &mut GameState, conn: ConnId) {
@@ -344,12 +347,12 @@ fn disp_sector_menu(g: &mut GameState, conn: ConnId) {
     }
     out.push_str("\r\nEnter sector type : ");
     send(g, conn, &out);
-    let _ = with_state(conn, |s| s.mode = ReditMode::Sector);
+    let _ = with_state(g, conn, |s| s.mode = ReditMode::Sector);
 }
 
 fn disp_exit_menu(g: &mut GameState, conn: ConnId) {
     // Ensure the exit exists.
-    with_state(conn, |s| {
+    with_state(g, conn, |s| {
         let dir = s.cur_exit;
         if s.room.exits[dir].is_none() {
             s.room.exits[dir] = Some(Exit {
@@ -361,7 +364,7 @@ fn disp_exit_menu(g: &mut GameState, conn: ConnId) {
             });
         }
     });
-    let (to, desc, kw, key, doorstr) = match with_state(conn, |s| {
+    let (to, desc, kw, key, doorstr) = match with_state(g, conn, |s| {
         let e = s.room.exits[s.cur_exit].as_ref().unwrap();
         (
             e.to_room,
@@ -395,7 +398,7 @@ fn disp_exit_menu(g: &mut GameState, conn: ConnId) {
         door = doorstr,
     );
     send(g, conn, &body);
-    let _ = with_state(conn, |s| s.mode = ReditMode::ExitMenu);
+    let _ = with_state(g, conn, |s| s.mode = ReditMode::ExitMenu);
 }
 
 fn door_flag_str(exit_info: i32) -> String {
@@ -431,7 +434,7 @@ fn disp_exit_flag_menu(g: &mut GameState, conn: ConnId) {
 /// scratch lives in room.special_exit, created on first display (C's
 /// OLC_SEXIT == OLC_ROOM(d)->special_exit).
 fn disp_special_exit_menu(g: &mut GameState, conn: ConnId) {
-    with_state(conn, |s| {
+    with_state(g, conn, |s| {
         if s.room.special_exit.is_none() {
             s.room.special_exit = Some(crate::room::SpecialExit {
                 general_description: None,
@@ -444,7 +447,7 @@ fn disp_special_exit_menu(g: &mut GameState, conn: ConnId) {
             });
         }
     });
-    let (to, desc, kw, name, msg, key, doorstr) = match with_state(conn, |s| {
+    let (to, desc, kw, name, msg, key, doorstr) = match with_state(g, conn, |s| {
         let se = s.room.special_exit.as_ref().unwrap();
         (
             se.to_room,
@@ -484,7 +487,7 @@ fn disp_special_exit_menu(g: &mut GameState, conn: ConnId) {
         doorstr = doorstr,
     );
     send(g, conn, &body);
-    let _ = with_state(conn, |s| s.mode = ReditMode::SExitMenu);
+    let _ = with_state(g, conn, |s| s.mode = ReditMode::SExitMenu);
 }
 
 /// The REDIT_SEXIT_* input block (C redit.c:1140-1310).
@@ -494,7 +497,7 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
             Some('0') => {
                 // C redit.c:1148-1154: a nameless or undirected special exit
                 // is not silently discarded.
-                let dangling = with_state(conn, |s| {
+                let dangling = with_state(g, conn, |s| {
                     s.room
                         .special_exit
                         .as_ref()
@@ -510,16 +513,16 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
                     );
                     disp_special_exit_menu(g, conn);
                 } else {
-                    with_state(conn, |s| s.modified = true);
+                    with_state(g, conn, |s| s.modified = true);
                     disp_menu(g, conn);
                 }
             }
             Some('1') => {
                 send(g, conn, "Exit to room number : ");
-                let _ = with_state(conn, |s| s.mode = ReditMode::SExitNumber);
+                let _ = with_state(g, conn, |s| s.mode = ReditMode::SExitNumber);
             }
             Some('2') => {
-                let seed = with_state(conn, |s| {
+                let seed = with_state(g, conn, |s| {
                     s.room
                         .special_exit
                         .as_ref()
@@ -531,11 +534,11 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
             }
             Some('3') => {
                 send(g, conn, "Enter keywords : ");
-                let _ = with_state(conn, |s| s.mode = ReditMode::SExitKeyword);
+                let _ = with_state(g, conn, |s| s.mode = ReditMode::SExitKeyword);
             }
             Some('4') => {
                 send(g, conn, "Enter name (command to enter) : ");
-                let _ = with_state(conn, |s| s.mode = ReditMode::SExitName);
+                let _ = with_state(g, conn, |s| s.mode = ReditMode::SExitName);
             }
             Some('5') => {
                 send(
@@ -545,19 +548,19 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
                      Example:  $n steps through the portal, and vanishes!\r\n\
                      Message : ",
                 );
-                let _ = with_state(conn, |s| s.mode = ReditMode::SExitMessage);
+                let _ = with_state(g, conn, |s| s.mode = ReditMode::SExitMessage);
             }
             Some('6') => {
                 send(g, conn, "Enter key number : ");
-                let _ = with_state(conn, |s| s.mode = ReditMode::SExitKey);
+                let _ = with_state(g, conn, |s| s.mode = ReditMode::SExitKey);
             }
             Some('7') => {
                 disp_exit_flag_menu(g, conn);
-                let _ = with_state(conn, |s| s.mode = ReditMode::SExitDoorflags);
+                let _ = with_state(g, conn, |s| s.mode = ReditMode::SExitDoorflags);
             }
             Some('8') => {
                 // Purge.
-                with_state(conn, |s| {
+                with_state(g, conn, |s| {
                     s.room.special_exit = None;
                     s.modified = true;
                 });
@@ -574,7 +577,7 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
                 return;
             };
             if number == -1 {
-                with_state(conn, |s| {
+                with_state(g, conn, |s| {
                     if let Some(se) = s.room.special_exit.as_mut() {
                         se.to_room = NOWHERE;
                     }
@@ -603,7 +606,7 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
                 );
                 return;
             }
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 if let Some(se) = s.room.special_exit.as_mut() {
                     se.to_room = number;
                 }
@@ -615,7 +618,7 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
         ReditMode::SExitDescription => {
             if let Some(result) = text_input(g, conn, mode, arg) {
                 if let Some(text) = result {
-                    with_state(conn, |s| {
+                    with_state(g, conn, |s| {
                         if let Some(se) = s.room.special_exit.as_mut() {
                             se.general_description =
                                 if text.is_empty() { None } else { Some(text) };
@@ -633,7 +636,7 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
             } else {
                 Some(arg.to_string())
             };
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 if let Some(se) = s.room.special_exit.as_mut() {
                     se.keyword = v;
                 }
@@ -648,7 +651,7 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
             } else {
                 Some(arg.to_string())
             };
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 if let Some(se) = s.room.special_exit.as_mut() {
                     se.ex_name = v;
                 }
@@ -664,7 +667,7 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
             } else {
                 Some(crate::modify::delete_doubledollar(arg))
             };
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 if let Some(se) = s.room.special_exit.as_mut() {
                     se.leave_msg = v;
                 }
@@ -677,7 +680,7 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
             let Some(key) = olc::parse_i32_input(g, conn, arg.trim(), -1) else {
                 return;
             };
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 if let Some(se) = s.room.special_exit.as_mut() {
                     se.key = key;
                 }
@@ -696,7 +699,7 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
                 send(g, conn, "That's not a valid choice!\r\n");
                 disp_exit_flag_menu(g, conn);
             } else {
-                let hidden_msg = with_state(conn, |s| {
+                let hidden_msg = with_state(g, conn, |s| {
                     if let Some(se) = s.room.special_exit.as_mut() {
                         let was_hidden = se.exit_info & EX_HIDDEN != 0;
                         if number == 3 {
@@ -718,7 +721,7 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
                     None
                 })
                 .flatten();
-                with_state(conn, |s| s.modified = true);
+                with_state(g, conn, |s| s.modified = true);
                 if let Some(msg) = hidden_msg {
                     send(g, conn, msg);
                     disp_exit_flag_menu(g, conn);
@@ -732,7 +735,7 @@ fn parse_sexit(g: &mut GameState, conn: ConnId, mode: ReditMode, arg: &str) {
 }
 
 fn disp_extradesc_menu(g: &mut GameState, conn: ConnId) {
-    let (kw, desc, has_next) = match with_state(conn, |s| {
+    let (kw, desc, has_next) = match with_state(g, conn, |s| {
         let idx = s.cur_desc;
         let (k, d) = s
             .room
@@ -776,7 +779,7 @@ fn disp_extradesc_menu(g: &mut GameState, conn: ConnId) {
         next = next_str,
     );
     send(g, conn, &body);
-    let _ = with_state(conn, |s| s.mode = ReditMode::ExtradescMenu);
+    let _ = with_state(g, conn, |s| s.mode = ReditMode::ExtradescMenu);
 }
 
 // ===========================================================================
@@ -784,14 +787,16 @@ fn disp_extradesc_menu(g: &mut GameState, conn: ConnId) {
 // router always forwards input to redit_parse while in_olc; we collect lines in
 // a per-conn buffer until "/s" (save) or "/a" (abort), or a lone "~".
 // ===========================================================================
-fn text_bufs() -> &'static Mutex<HashMap<ConnId, String>> {
-    static B: OnceLock<Mutex<HashMap<ConnId, String>>> = OnceLock::new();
-    B.get_or_init(|| Mutex::new(HashMap::new()))
+fn text_bufs(g: &GameState) -> &HashMap<ConnId, String> {
+    &g.olc.redit_text_bufs
+}
+fn text_bufs_mut(g: &mut GameState) -> &mut HashMap<ConnId, String> {
+    &mut g.olc.redit_text_bufs
 }
 
 fn begin_text(g: &mut GameState, conn: ConnId, seed: &str, mode: ReditMode) {
-    crate::lock_ok::lock(&text_bufs()).insert(conn, seed.to_string());
-    let _ = with_state(conn, |s| s.mode = mode);
+    text_bufs_mut(g).insert(conn, seed.to_string());
+    let _ = with_state(g, conn, |s| s.mode = mode);
     // C redit.c:900/1030/1321 use a distinct banner per sub-editor (#291).
     let prompt = match mode {
         ReditMode::Desc => "Enter room description: (/s saves /h for help)\r\n\r\n",
@@ -819,13 +824,7 @@ fn text_input(
 ) -> Option<Option<String>> {
     let trimmed = line.trim_end_matches(['\r', '\n']);
     if trimmed == "~" {
-        return Some(Some(
-            text_bufs()
-                .lock()
-                .unwrap()
-                .remove(&conn)
-                .unwrap_or_default(),
-        ));
+        return Some(Some(text_bufs_mut(g).remove(&conn).unwrap_or_default()));
     }
     let max = match mode {
         ReditMode::Desc => MAX_ROOM_DESC,
@@ -834,14 +833,10 @@ fn text_input(
         ReditMode::ExitDescription | ReditMode::SExitDescription => MAX_EXIT_DESC,
         _ => MAX_MESSAGE_LENGTH,
     };
-    let mut buf = text_bufs()
-        .lock()
-        .unwrap()
-        .remove(&conn)
-        .unwrap_or_default();
+    let mut buf = text_bufs_mut(g).remove(&conn).unwrap_or_default();
     match crate::modify::editor_buffer_input(g, conn, &mut buf, max, line) {
         crate::modify::BufferEditorResult::Continue => {
-            crate::lock_ok::lock(&text_bufs()).insert(conn, buf);
+            text_bufs_mut(g).insert(conn, buf);
             None
         }
         crate::modify::BufferEditorResult::Save => Some(Some(buf)),
@@ -853,7 +848,7 @@ fn text_input(
 // redit_parse — per-line input handler (the olc router calls this).
 // ===========================================================================
 pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
-    let mode = match with_state(conn, |s| s.mode) {
+    let mode = match with_state(g, conn, |s| s.mode) {
         Some(m) => m,
         None => return,
     };
@@ -901,7 +896,7 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             if name.len() > MAX_ROOM_NAME {
                 crate::text::truncate_utf8_bytes(&mut name, MAX_ROOM_NAME - 1);
             }
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 s.room.name = name;
                 s.modified = true;
             });
@@ -911,7 +906,7 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         ReditMode::Desc => {
             if let Some(result) = text_input(g, conn, mode, line) {
                 if let Some(text) = result {
-                    with_state(conn, |s| {
+                    with_state(g, conn, |s| {
                         s.room.description = if text.is_empty() {
                             "Empty\r\n".to_string()
                         } else {
@@ -932,10 +927,10 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 send(g, conn, "That is not a valid choice!\r\n");
                 disp_flag_menu(g, conn);
             } else if number == 0 {
-                with_state(conn, |s| s.modified = true);
+                with_state(g, conn, |s| s.modified = true);
                 disp_menu(g, conn);
             } else {
-                with_state(conn, |s| {
+                with_state(g, conn, |s| {
                     let bit = 1u32 << (number - 1);
                     s.room.room_flags ^= RoomFlags::from_bits_truncate(bit);
                     s.modified = true;
@@ -952,7 +947,7 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 send(g, conn, "Invalid choice!");
                 disp_sector_menu(g, conn);
             } else {
-                with_state(conn, |s| {
+                with_state(g, conn, |s| {
                     s.room.sector_type = SectorType::from_i32(number);
                     s.modified = true;
                 });
@@ -993,7 +988,7 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     return;
                 }
             }
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 if let Some(e) = s.room.exits[s.cur_exit].as_mut() {
                     e.to_room = number;
                 }
@@ -1005,7 +1000,7 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         ReditMode::ExitDescription => {
             if let Some(result) = text_input(g, conn, mode, line) {
                 if let Some(text) = result {
-                    with_state(conn, |s| {
+                    with_state(g, conn, |s| {
                         if let Some(e) = s.room.exits[s.cur_exit].as_mut() {
                             e.description = if text.is_empty() { None } else { Some(text) };
                         }
@@ -1017,7 +1012,7 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
 
         ReditMode::ExitKeyword => {
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 if let Some(e) = s.room.exits[s.cur_exit].as_mut() {
                     e.keyword = if arg.is_empty() {
                         None
@@ -1034,7 +1029,7 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             let Some(key) = olc::parse_i32_input(g, conn, arg, NOTHING) else {
                 return;
             };
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 if let Some(e) = s.room.exits[s.cur_exit].as_mut() {
                     e.key = key;
                 }
@@ -1051,7 +1046,7 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 send(g, conn, "That's not a valid choice!\r\n");
                 disp_exit_flag_menu(g, conn);
             } else {
-                let hidden_msg = with_state(conn, |s| {
+                let hidden_msg = with_state(g, conn, |s| {
                     if let Some(e) = s.room.exits[s.cur_exit].as_mut() {
                         let was_hidden = e.exit_info & EX_HIDDEN != 0;
                         if number == 3 {
@@ -1073,7 +1068,7 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     None
                 })
                 .flatten();
-                with_state(conn, |s| s.modified = true);
+                with_state(g, conn, |s| s.modified = true);
                 if let Some(msg) = hidden_msg {
                     send(g, conn, msg);
                     disp_exit_flag_menu(g, conn);
@@ -1084,7 +1079,7 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
 
         ReditMode::ExtradescKey => {
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 let idx = s.cur_desc;
                 if let Some(ed) = s.room.extra_descriptions.get_mut(idx) {
                     ed.0 = arg.to_string();
@@ -1097,7 +1092,7 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         ReditMode::ExtradescDescription => {
             if let Some(result) = text_input(g, conn, mode, line) {
                 if let Some(text) = result {
-                    with_state(conn, |s| {
+                    with_state(g, conn, |s| {
                         let idx = s.cur_desc;
                         if let Some(ed) = s.room.extra_descriptions.get_mut(idx) {
                             ed.1 = text;
@@ -1119,7 +1114,7 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         | ReditMode::SExitKey
         | ReditMode::SExitDoorflags => parse_sexit(g, conn, mode, arg),
         ReditMode::Script(mut script_mode) => {
-            let vnum = with_state(conn, |s| s.vnum).unwrap_or(0);
+            let vnum = with_state(g, conn, |s| s.vnum).unwrap_or(0);
             let keep = olc::dg_script_edit_parse(
                 g,
                 conn,
@@ -1129,7 +1124,7 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 arg,
             );
             if keep {
-                let _ = with_state(conn, |s| {
+                let _ = with_state(g, conn, |s| {
                     s.mode = ReditMode::Script(script_mode);
                     if matches!(
                         script_mode,
@@ -1150,46 +1145,46 @@ pub fn redit_parse(g: &mut GameState, conn: ConnId, line: &str) {
 fn parse_main_menu(g: &mut GameState, conn: ConnId, arg: &str) {
     match arg.chars().next().map(|c| c.to_ascii_lowercase()) {
         Some('q') => {
-            let modified = with_state(conn, |s| s.modified).unwrap_or(false);
+            let modified = with_state(g, conn, |s| s.modified).unwrap_or(false);
             if modified {
                 send(g, conn, "Do you wish to save this room internally? : ");
-                let _ = with_state(conn, |s| s.mode = ReditMode::ConfirmSave);
+                let _ = with_state(g, conn, |s| s.mode = ReditMode::ConfirmSave);
             } else {
                 finish(g, conn);
             }
         }
         Some('1') => {
             send(g, conn, "Enter room name:-\r\n] ");
-            let _ = with_state(conn, |s| s.mode = ReditMode::Name);
+            let _ = with_state(g, conn, |s| s.mode = ReditMode::Name);
         }
         Some('2') => {
-            let seed = with_state(conn, |s| s.room.description.clone()).unwrap_or_default();
+            let seed = with_state(g, conn, |s| s.room.description.clone()).unwrap_or_default();
             begin_text(g, conn, &seed, ReditMode::Desc);
         }
         Some('3') => disp_flag_menu(g, conn),
         Some('4') => disp_sector_menu(g, conn),
         Some('5') => {
-            set_exit(conn, NORTH);
+            set_exit(g, conn, NORTH);
             disp_exit_menu(g, conn);
         }
         Some('6') => {
-            set_exit(conn, EAST);
+            set_exit(g, conn, EAST);
             disp_exit_menu(g, conn);
         }
         Some('7') => {
-            set_exit(conn, SOUTH);
+            set_exit(g, conn, SOUTH);
             disp_exit_menu(g, conn);
         }
         Some('8') => {
-            set_exit(conn, WEST);
+            set_exit(g, conn, WEST);
             disp_exit_menu(g, conn);
         }
         Some('9') => {
-            set_exit(conn, UP);
+            set_exit(g, conn, UP);
             disp_exit_menu(g, conn);
         }
         Some('a') => {
-            set_exit(conn, DOWN);
+            set_exit(g, conn, DOWN);
             disp_exit_menu(g, conn);
         }
         Some('b') | Some('B') => {
@@ -1198,7 +1193,7 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, arg: &str) {
         Some('c') => {
             // Ensure at least one (empty) extra desc to edit, position on the
             // first incomplete one.
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 if s.room.extra_descriptions.is_empty() {
                     s.room
                         .extra_descriptions
@@ -1209,9 +1204,9 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, arg: &str) {
             disp_extradesc_menu(g, conn);
         }
         Some('s') => {
-            let vnum = with_state(conn, |s| s.vnum).unwrap_or(0);
+            let vnum = with_state(g, conn, |s| s.vnum).unwrap_or(0);
             olc::dg_script_menu(g, conn, crate::dg_handler::WLD_TRIGGER, vnum);
-            let _ = with_state(conn, |s| {
+            let _ = with_state(g, conn, |s| {
                 s.mode = ReditMode::Script(olc::DgScriptEditMode::Main)
             });
         }
@@ -1222,8 +1217,8 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, arg: &str) {
     }
 }
 
-fn set_exit(conn: ConnId, dir: usize) {
-    let _ = with_state(conn, |s| {
+fn set_exit(g: &mut GameState, conn: ConnId, dir: usize) {
+    let _ = with_state(g, conn, |s| {
         s.cur_exit = dir;
         s.val = dir as i32;
     });
@@ -1234,7 +1229,7 @@ fn parse_exit_menu(g: &mut GameState, conn: ConnId, arg: &str) {
         Some('0') => {
             // C redit.c:1015-1023: a fresh exit with no destination is not
             // silently discarded; refuse and redisplay the exit menu (#292).
-            let dangling = with_state(conn, |s| {
+            let dangling = with_state(g, conn, |s| {
                 s.room.exits[s.cur_exit]
                     .as_ref()
                     .map(|e| e.to_room == NOWHERE)
@@ -1251,7 +1246,7 @@ fn parse_exit_menu(g: &mut GameState, conn: ConnId, arg: &str) {
                 return;
             }
             // Backing out.
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 let dir = s.cur_exit;
                 if let Some(e) = &s.room.exits[dir] {
                     if e.to_room == NOWHERE
@@ -1263,15 +1258,15 @@ fn parse_exit_menu(g: &mut GameState, conn: ConnId, arg: &str) {
                     }
                 }
             });
-            with_state(conn, |s| s.modified = true);
+            with_state(g, conn, |s| s.modified = true);
             disp_menu(g, conn);
         }
         Some('1') => {
             send(g, conn, "Exit to room number : ");
-            let _ = with_state(conn, |s| s.mode = ReditMode::ExitNumber);
+            let _ = with_state(g, conn, |s| s.mode = ReditMode::ExitNumber);
         }
         Some('2') => {
-            let seed = with_state(conn, |s| {
+            let seed = with_state(g, conn, |s| {
                 s.room.exits[s.cur_exit]
                     .as_ref()
                     .and_then(|e| e.description.clone())
@@ -1282,18 +1277,18 @@ fn parse_exit_menu(g: &mut GameState, conn: ConnId, arg: &str) {
         }
         Some('3') => {
             send(g, conn, "Enter keywords : ");
-            let _ = with_state(conn, |s| s.mode = ReditMode::ExitKeyword);
+            let _ = with_state(g, conn, |s| s.mode = ReditMode::ExitKeyword);
         }
         Some('4') => {
             send(g, conn, "Enter key number : ");
-            let _ = with_state(conn, |s| s.mode = ReditMode::ExitKey);
+            let _ = with_state(g, conn, |s| s.mode = ReditMode::ExitKey);
         }
         Some('5') => {
             disp_exit_flag_menu(g, conn);
-            let _ = with_state(conn, |s| s.mode = ReditMode::ExitDoorflags);
+            let _ = with_state(g, conn, |s| s.mode = ReditMode::ExitDoorflags);
         }
         Some('6') => {
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 s.room.exits[s.cur_exit] = None;
                 s.modified = true;
             });
@@ -1310,7 +1305,7 @@ fn parse_extradesc_menu(g: &mut GameState, conn: ConnId, arg: &str) {
     match number {
         0 => {
             // Drop the current extra desc if incomplete.
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 let idx = s.cur_desc;
                 if let Some(ed) = s.room.extra_descriptions.get(idx) {
                     if ed.0.is_empty() || ed.1.is_empty() {
@@ -1318,15 +1313,15 @@ fn parse_extradesc_menu(g: &mut GameState, conn: ConnId, arg: &str) {
                     }
                 }
             });
-            with_state(conn, |s| s.modified = true);
+            with_state(g, conn, |s| s.modified = true);
             disp_menu(g, conn);
         }
         1 => {
             send(g, conn, "Enter keywords, separated by spaces : ");
-            let _ = with_state(conn, |s| s.mode = ReditMode::ExtradescKey);
+            let _ = with_state(g, conn, |s| s.mode = ReditMode::ExtradescKey);
         }
         2 => {
-            let seed = with_state(conn, |s| {
+            let seed = with_state(g, conn, |s| {
                 let idx = s.cur_desc;
                 s.room
                     .extra_descriptions
@@ -1338,7 +1333,7 @@ fn parse_extradesc_menu(g: &mut GameState, conn: ConnId, arg: &str) {
             begin_text(g, conn, &seed, ReditMode::ExtradescDescription);
         }
         3 => {
-            let (complete, at_end) = with_state(conn, |s| {
+            let (complete, at_end) = with_state(g, conn, |s| {
                 let idx = s.cur_desc;
                 let cur = s.room.extra_descriptions.get(idx);
                 let complete = cur
@@ -1355,7 +1350,7 @@ fn parse_extradesc_menu(g: &mut GameState, conn: ConnId, arg: &str) {
                     "You can't edit the next extra desc without completing this one.\r\n",
                 );
             } else {
-                with_state(conn, |s| {
+                with_state(g, conn, |s| {
                     if at_end {
                         s.room
                             .extra_descriptions
@@ -1375,7 +1370,7 @@ fn parse_extradesc_menu(g: &mut GameState, conn: ConnId, arg: &str) {
 // world. New rooms are appended (rnum reindexing is implicit via add_room).
 // ===========================================================================
 fn save_internally(g: &mut GameState, conn: ConnId) -> std::io::Result<()> {
-    let (vnum, zone_number, authorization, edit) = match with_state(conn, |s| {
+    let (vnum, zone_number, authorization, edit) = match with_state(g, conn, |s| {
         (s.vnum, s.zone_number, s.authorization, s.room.clone())
     }) {
         Some(v) => v,
@@ -1423,7 +1418,7 @@ fn save_internally(g: &mut GameState, conn: ConnId) -> std::io::Result<()> {
         room.extra_descriptions = edit.extra_descriptions;
         g.add_room(room);
     }
-    olc::olc_add_to_save_list(zone_number, olc::OLC_SAVE_ROOM);
+    olc::olc_add_to_save_list(g, zone_number, olc::OLC_SAVE_ROOM);
     Ok(())
 }
 
@@ -1431,15 +1426,15 @@ fn save_internally(g: &mut GameState, conn: ConnId) -> std::io::Result<()> {
 /// disconnects mid-edit, so the edited vnum's lock is released). Mirrors the
 /// state-removal half of `finish`/`cleanup_olc` minus the save and the room
 /// announce. `olc::abort_editor` calls `olc::clear_active` for us.
-pub fn abort(conn: ConnId) {
-    crate::lock_ok::lock(&states()).remove(&conn);
-    crate::lock_ok::lock(&text_bufs()).remove(&conn);
+pub(crate) fn abort(g: &mut GameState, conn: ConnId) {
+    states_mut(g).remove(&conn);
+    text_bufs_mut(g).remove(&conn);
 }
 
 fn finish(g: &mut GameState, conn: ConnId) {
-    crate::lock_ok::lock(&states()).remove(&conn);
-    crate::lock_ok::lock(&text_bufs()).remove(&conn);
-    olc::clear_active(conn);
+    states_mut(g).remove(&conn);
+    text_bufs_mut(g).remove(&conn);
+    olc::clear_active(g, conn);
     if let Some(ch) = conn_char(g, conn) {
         crate::act::act(
             g,
@@ -1490,7 +1485,7 @@ pub fn redit_save_to_disk(g: &mut GameState, zone_rnum: usize) -> std::io::Resul
             ));
         }
     }
-    olc::olc_add_to_save_list(zone_number, olc::OLC_SAVE_ROOM);
+    olc::olc_add_to_save_list(g, zone_number, olc::OLC_SAVE_ROOM);
     let mut out = String::new();
     for vnum in start..=top {
         let rnum = match g.real_room(vnum) {
@@ -1607,7 +1602,7 @@ pub fn redit_save_to_disk(g: &mut GameState, zone_rnum: usize) -> std::io::Resul
         std::fs::create_dir_all(parent)?;
     }
     olc::atomic_replace(&path, out.as_bytes())?;
-    olc::olc_remove_from_save_list(zone_number, olc::OLC_SAVE_ROOM);
+    olc::olc_remove_from_save_list(g, zone_number, olc::OLC_SAVE_ROOM);
     Ok(())
 }
 
@@ -1661,7 +1656,7 @@ mod tests {
         let out = &g.descriptors.get(&conn).unwrap().outbuf;
         // C redit.c:1015-1023: refusal, not a silent purge (#292).
         assert!(out.contains("Please specify an exit number or purge the exit."));
-        let kept = crate::lock_ok::lock(&states())[&conn].room.exits[NORTH]
+        let kept = states_mut(&mut g)[&conn].room.exits[NORTH]
             .as_ref()
             .map(|e| e.to_room)
             .unwrap();
@@ -1673,7 +1668,7 @@ mod tests {
         let (mut g, _ch, conn) = setup(102, ConnId(72));
         redit_parse(&mut g, conn, "1");
         redit_parse(&mut g, conn, &"x".repeat(200));
-        let name = crate::lock_ok::lock(&states())[&conn].room.name.clone();
+        let name = states_mut(&mut g)[&conn].room.name.clone();
         // C writes arg[MAX_ROOM_NAME - 1] = '\0' (74 kept chars).
         assert_eq!(name.len(), MAX_ROOM_NAME - 1);
     }
@@ -1685,7 +1680,7 @@ mod tests {
             redit_parse(&mut g, conn, "1");
             let input = format!("{}{scalar}", "a".repeat(MAX_ROOM_NAME - 1));
             redit_parse(&mut g, conn, &input);
-            let name = crate::lock_ok::lock(&states())[&conn].room.name.clone();
+            let name = states_mut(&mut g)[&conn].room.name.clone();
             assert_eq!(name.len(), MAX_ROOM_NAME - 1);
             assert!(name.is_char_boundary(name.len()));
             assert!(!name.contains(scalar));
@@ -1713,11 +1708,7 @@ mod tests {
         redit_parse(&mut g, conn, "105");
         redit_parse(&mut g, conn, "5"); // leave message
         redit_parse(&mut g, conn, "$n steps through the portal!");
-        let se = crate::lock_ok::lock(&states())[&conn]
-            .room
-            .special_exit
-            .clone()
-            .unwrap();
+        let se = states_mut(&mut g)[&conn].room.special_exit.clone().unwrap();
         assert_eq!(se.to_room, 105);
         assert_eq!(se.ex_name.as_deref(), Some("portal"));
         assert_eq!(
@@ -1727,12 +1718,7 @@ mod tests {
 
         // Purge path clears the scratch and returns to the main menu.
         redit_parse(&mut g, conn, "8");
-        assert!(
-            crate::lock_ok::lock(&states())[&conn]
-                .room
-                .special_exit
-                .is_none()
-        );
+        assert!(states_mut(&mut g)[&conn].room.special_exit.is_none());
     }
 
     #[test]
@@ -1756,7 +1742,7 @@ mod tests {
         redit_parse(&mut g, conn, "1"); // destination prompt
         redit_parse(&mut g, conn, "205");
         assert_eq!(
-            crate::lock_ok::lock(&states())[&conn].room.exits[NORTH]
+            states_mut(&mut g)[&conn].room.exits[NORTH]
                 .as_ref()
                 .unwrap()
                 .to_room,
@@ -1764,12 +1750,12 @@ mod tests {
             "display level must not bypass destination-zone ownership"
         );
 
-        with_state(conn, |state| state.mode = ReditMode::MainMenu);
+        with_state(&mut g, conn, |state| state.mode = ReditMode::MainMenu);
         redit_parse(&mut g, conn, "b"); // main-menu special exit
         redit_parse(&mut g, conn, "1"); // destination prompt
         redit_parse(&mut g, conn, "205");
         assert_eq!(
-            crate::lock_ok::lock(&states())[&conn]
+            states_mut(&mut g)[&conn]
                 .room
                 .special_exit
                 .as_ref()
@@ -1781,7 +1767,7 @@ mod tests {
         g.get_char_mut(ch).unwrap().trust = i32::from(LVL_IMPL);
         redit_parse(&mut g, conn, "205");
         assert_eq!(
-            crate::lock_ok::lock(&states())[&conn]
+            states_mut(&mut g)[&conn]
                 .room
                 .special_exit
                 .as_ref()

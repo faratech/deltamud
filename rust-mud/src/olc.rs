@@ -697,19 +697,24 @@ pub enum EditorKind {
 // ---------------------------------------------------------------------------
 // Active-editor registry (replaces STATE(d) == CON_*EDIT). Keyed by ConnId.
 // ---------------------------------------------------------------------------
-fn active() -> &'static Mutex<HashMap<ConnId, EditorKind>> {
-    static ACTIVE: OnceLock<Mutex<HashMap<ConnId, EditorKind>>> = OnceLock::new();
-    ACTIVE.get_or_init(|| Mutex::new(HashMap::new()))
+// The active-editor registry lives on GameState as `olc.active` (phase-1
+// statics migration); the retired port-era brief forbade GameState fields.
+fn active(g: &GameState) -> &HashMap<ConnId, EditorKind> {
+    &g.olc.active
+}
+
+fn active_mut(g: &mut GameState) -> &mut HashMap<ConnId, EditorKind> {
+    &mut g.olc.active
 }
 
 /// Mark `conn` as actively editing in `kind`. Called by each `do_X` on entry.
-pub fn set_active(conn: ConnId, kind: EditorKind) {
-    crate::lock_ok::lock(&active()).insert(conn, kind);
+pub fn set_active(g: &mut GameState, conn: ConnId, kind: EditorKind) {
+    g.olc.active.insert(conn, kind);
 }
 
 /// Clear `conn`'s OLC editor (called on save/quit by each editor's parser).
-pub fn clear_active(conn: ConnId) {
-    crate::lock_ok::lock(&active()).remove(&conn);
+pub fn clear_active(g: &mut GameState, conn: ConnId) {
+    g.olc.active.remove(&conn);
 }
 
 /// Abort whatever OLC editor `conn` is in WITHOUT saving, then clear active.
@@ -719,32 +724,32 @@ pub fn clear_active(conn: ConnId) {
 /// next reboot. Dispatches to the owning editor's `abort(conn)`, which removes
 /// the conn's working copy (and any text buffer) from that editor's per-conn
 /// map. No-op if the conn isn't editing.
-pub fn abort_editor(conn: ConnId) {
-    if let Some(kind) = active_editor(conn) {
+pub fn abort_editor(g: &mut GameState, conn: ConnId) {
+    if let Some(kind) = active_editor(g, conn) {
         match kind {
-            EditorKind::Redit => crate::redit::abort(conn),
-            EditorKind::Oedit => crate::oedit::abort(conn),
-            EditorKind::Medit => crate::medit::abort(conn),
-            EditorKind::Zedit => crate::zedit::abort(conn),
-            EditorKind::Sedit => crate::sedit::abort(conn),
-            EditorKind::Aedit => crate::aedit::abort(conn),
-            EditorKind::Hedit => crate::hedit::abort(conn),
-            EditorKind::Trigedit => crate::trigedit::abort(conn),
+            EditorKind::Redit => crate::redit::abort(g, conn),
+            EditorKind::Oedit => crate::oedit::abort(g, conn),
+            EditorKind::Medit => crate::medit::abort(g, conn),
+            EditorKind::Zedit => crate::zedit::abort(g, conn),
+            EditorKind::Sedit => crate::sedit::abort(g, conn),
+            EditorKind::Aedit => crate::aedit::abort(g, conn),
+            EditorKind::Hedit => crate::hedit::abort(g, conn),
+            EditorKind::Trigedit => crate::trigedit::abort(g, conn),
             EditorKind::Tedit => {}
         }
     }
-    clear_active(conn);
+    clear_active(g, conn);
 }
 
 /// True if `conn` is currently inside any OLC editor. game.rs consults this to
 /// route raw input into `olc_input` instead of the command interpreter.
-pub fn in_olc(conn: ConnId) -> bool {
-    crate::lock_ok::lock(&active()).contains_key(&conn)
+pub fn in_olc(g: &GameState, conn: ConnId) -> bool {
+    active(g).contains_key(&conn)
 }
 
 /// The currently-active editor kind for `conn`, if any.
-pub fn active_editor(conn: ConnId) -> Option<EditorKind> {
-    crate::lock_ok::lock(&active()).get(&conn).copied()
+pub fn active_editor(g: &GameState, conn: ConnId) -> Option<EditorKind> {
+    active(g).get(&conn).copied()
 }
 
 /// Master input router (CircleMUD: the `case CON_*EDIT:` block of nanny()).
@@ -752,7 +757,7 @@ pub fn active_editor(conn: ConnId) -> Option<EditorKind> {
 /// if the connection is not in OLC (defensive — game.rs should gate on
 /// `in_olc` first).
 pub fn olc_input(g: &mut GameState, conn: ConnId, line: &str) {
-    let kind = match active_editor(conn) {
+    let kind = match active_editor(g, conn) {
         Some(k) => k,
         None => return,
     };
@@ -773,28 +778,13 @@ pub fn olc_input(g: &mut GameState, conn: ConnId, line: &str) {
 // OLC save list (olc.c olc_save_list). A global list of (zone, component) pairs
 // that have been edited in memory but not yet written to disk.
 // ===========================================================================
-#[cfg(not(test))]
-fn save_list() -> &'static Mutex<Vec<(i32, i32)>> {
-    static SAVE_LIST: OnceLock<Mutex<Vec<(i32, i32)>>> = OnceLock::new();
-    SAVE_LIST.get_or_init(|| Mutex::new(Vec::new()))
+fn with_save_list<R>(g: &mut GameState, operation: impl FnOnce(&mut Vec<(i32, i32)>) -> R) -> R {
+    operation(&mut g.olc.save_list)
 }
 
-#[cfg(test)]
-thread_local! {
-    static TEST_SAVE_LIST: std::cell::RefCell<Vec<(i32, i32)>> = const {
-        std::cell::RefCell::new(Vec::new())
-    };
-}
-
-#[cfg(not(test))]
-fn with_save_list<R>(operation: impl FnOnce(&mut Vec<(i32, i32)>) -> R) -> R {
-    let mut list = crate::lock_ok::lock(&save_list());
-    operation(&mut list)
-}
-
-#[cfg(test)]
-fn with_save_list<R>(operation: impl FnOnce(&mut Vec<(i32, i32)>) -> R) -> R {
-    TEST_SAVE_LIST.with(|list| operation(&mut list.borrow_mut()))
+/// Read-only save-list access (tests / info paths).
+fn with_save_list_ref<R>(g: &GameState, operation: impl FnOnce(&[(i32, i32)]) -> R) -> R {
+    operation(&g.olc.save_list)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -813,8 +803,8 @@ impl std::fmt::Display for UnresolvedSaveKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct UnresolvedSave {
-    kind: EditorKind,
+pub(crate) struct UnresolvedSave {
+    pub(crate) kind: EditorKind,
     key: UnresolvedSaveKey,
     published: bool,
 }
@@ -826,32 +816,28 @@ pub(crate) enum UnresolvedDiscardOutcome {
     Published,
 }
 
-#[cfg(not(test))]
-fn unresolved_publications() -> &'static Mutex<Vec<UnresolvedSave>> {
-    static UNRESOLVED: OnceLock<Mutex<Vec<UnresolvedSave>>> = OnceLock::new();
-    UNRESOLVED.get_or_init(|| Mutex::new(Vec::new()))
+fn with_unresolved_publications<R>(
+    g: &mut GameState,
+    operation: impl FnOnce(&mut Vec<UnresolvedSave>) -> R,
+) -> R {
+    operation(&mut g.olc.unresolved)
 }
 
-#[cfg(test)]
-thread_local! {
-    static TEST_UNRESOLVED_PUBLICATIONS: std::cell::RefCell<Vec<UnresolvedSave>> = const {
-        std::cell::RefCell::new(Vec::new())
-    };
+/// Read-only unresolved-publications access (tests / info paths).
+fn with_unresolved_publications_ref<R>(
+    g: &GameState,
+    operation: impl FnOnce(&[UnresolvedSave]) -> R,
+) -> R {
+    operation(&g.olc.unresolved)
 }
 
-#[cfg(not(test))]
-fn with_unresolved_publications<R>(operation: impl FnOnce(&mut Vec<UnresolvedSave>) -> R) -> R {
-    let mut unresolved = crate::lock_ok::lock(&unresolved_publications());
-    operation(&mut unresolved)
-}
-
-#[cfg(test)]
-fn with_unresolved_publications<R>(operation: impl FnOnce(&mut Vec<UnresolvedSave>) -> R) -> R {
-    TEST_UNRESOLVED_PUBLICATIONS.with(|unresolved| operation(&mut unresolved.borrow_mut()))
-}
-
-fn mark_unresolved_save(kind: EditorKind, key: UnresolvedSaveKey, published: bool) {
-    with_unresolved_publications(|unresolved| {
+fn mark_unresolved_save(
+    g: &mut GameState,
+    kind: EditorKind,
+    key: UnresolvedSaveKey,
+    published: bool,
+) {
+    with_unresolved_publications(g, |unresolved| {
         if let Some(entry) = unresolved
             .iter_mut()
             .find(|entry| entry.kind == kind && entry.key == key)
@@ -873,9 +859,13 @@ fn mark_unresolved_save(kind: EditorKind, key: UnresolvedSaveKey, published: boo
 /// blocker registry. The prior process's exact publication phase is unknowable,
 /// so recovered markers are conservatively non-discardable until an exact retry
 /// confirms all files and indexes and removes the durable gate.
-pub(crate) fn register_pending_new_zone_publication_blockers(pending: &HashSet<i32>) {
+pub(crate) fn register_pending_new_zone_publication_blockers(
+    g: &mut GameState,
+    pending: &HashSet<i32>,
+) {
     for &zone_number in pending {
         mark_unresolved_save(
+            g,
             EditorKind::Zedit,
             UnresolvedSaveKey::Name(new_zone_unresolved_key(zone_number)),
             true,
@@ -884,32 +874,44 @@ pub(crate) fn register_pending_new_zone_publication_blockers(pending: &HashSet<i
 }
 
 /// Record every failed editor save, including failures before publication.
-pub(crate) fn mark_unresolved_save_failure(kind: EditorKind, key: i32, error: &io::Error) {
+pub(crate) fn mark_unresolved_save_failure(
+    g: &mut GameState,
+    kind: EditorKind,
+    key: i32,
+    error: &io::Error,
+) {
     mark_unresolved_save(
+        g,
         kind,
         UnresolvedSaveKey::Number(key),
         replacement_was_published(error),
     );
 }
 
-pub(crate) fn mark_unresolved_named_save_failure(kind: EditorKind, key: &str, error: &io::Error) {
+pub(crate) fn mark_unresolved_named_save_failure(
+    g: &mut GameState,
+    kind: EditorKind,
+    key: &str,
+    error: &io::Error,
+) {
     mark_unresolved_save(
+        g,
         kind,
         UnresolvedSaveKey::Name(key.to_string()),
         replacement_was_published(error),
     );
 }
 
-pub(crate) fn clear_unresolved_publication(kind: EditorKind, key: i32) {
+pub(crate) fn clear_unresolved_publication(g: &mut GameState, kind: EditorKind, key: i32) {
     let key = UnresolvedSaveKey::Number(key);
-    with_unresolved_publications(|unresolved| {
+    with_unresolved_publications(g, |unresolved| {
         unresolved.retain(|entry| entry.kind != kind || entry.key != key)
     });
 }
 
-pub(crate) fn clear_unresolved_named_save(kind: EditorKind, key: &str) {
+pub(crate) fn clear_unresolved_named_save(g: &mut GameState, kind: EditorKind, key: &str) {
     let key = UnresolvedSaveKey::Name(key.to_string());
-    with_unresolved_publications(|unresolved| {
+    with_unresolved_publications(g, |unresolved| {
         unresolved.retain(|entry| entry.kind != kind || entry.key != key)
     });
 }
@@ -917,19 +919,20 @@ pub(crate) fn clear_unresolved_named_save(kind: EditorKind, key: &str) {
 /// Dropping a scratch edit resolves a failed pre-publication attempt because
 /// neither durable nor live state changed. A post-publication marker is kept:
 /// abandoning the editor cannot confirm the rename's crash durability.
-pub(crate) fn discard_unresolved_save(kind: EditorKind, key: i32) {
+pub(crate) fn discard_unresolved_save(g: &mut GameState, kind: EditorKind, key: i32) {
     let key = UnresolvedSaveKey::Number(key);
-    with_unresolved_publications(|unresolved| {
+    with_unresolved_publications(g, |unresolved| {
         unresolved.retain(|entry| entry.kind != kind || entry.key != key || entry.published)
     });
 }
 
 pub(crate) fn discard_unresolved_named_save(
+    g: &mut GameState,
     kind: EditorKind,
     key: &str,
 ) -> UnresolvedDiscardOutcome {
     let key = UnresolvedSaveKey::Name(key.to_string());
-    with_unresolved_publications(|unresolved| {
+    with_unresolved_publications(g, |unresolved| {
         let Some(index) = unresolved
             .iter()
             .position(|entry| entry.kind == kind && entry.key == key)
@@ -948,14 +951,19 @@ pub(crate) fn discard_unresolved_named_save(
 /// A successful whole-component rewrite confirms every prior published
 /// candidate of that editor kind. Pre-publication failures remain tied to the
 /// still-open scratch editor and must not be cleared by an unrelated save.
-pub(crate) fn clear_published_unresolved_kind(kind: EditorKind) {
-    with_unresolved_publications(|unresolved| {
+pub(crate) fn clear_published_unresolved_kind(g: &mut GameState, kind: EditorKind) {
+    with_unresolved_publications(g, |unresolved| {
         unresolved.retain(|entry| entry.kind != kind || !entry.published)
     });
 }
 
-pub(crate) fn clear_published_unresolved_numeric_range(kind: EditorKind, first: i32, last: i32) {
-    with_unresolved_publications(|unresolved| {
+pub(crate) fn clear_published_unresolved_numeric_range(
+    g: &mut GameState,
+    kind: EditorKind,
+    first: i32,
+    last: i32,
+) {
+    with_unresolved_publications(g, |unresolved| {
         unresolved.retain(|entry| {
             if entry.kind != kind || !entry.published {
                 return true;
@@ -966,9 +974,9 @@ pub(crate) fn clear_published_unresolved_numeric_range(kind: EditorKind, first: 
 }
 
 #[cfg(test)]
-pub(crate) fn test_unresolved_publication(kind: EditorKind, key: i32) -> bool {
+pub(crate) fn test_unresolved_publication(g: &GameState, kind: EditorKind, key: i32) -> bool {
     let key = UnresolvedSaveKey::Number(key);
-    with_unresolved_publications(|unresolved| {
+    with_unresolved_publications_ref(g, |unresolved| {
         unresolved
             .iter()
             .any(|entry| entry.kind == kind && entry.key == key)
@@ -976,9 +984,9 @@ pub(crate) fn test_unresolved_publication(kind: EditorKind, key: i32) -> bool {
 }
 
 #[cfg(test)]
-pub(crate) fn test_unresolved_named_save(kind: EditorKind, key: &str) -> bool {
+pub(crate) fn test_unresolved_named_save(g: &GameState, kind: EditorKind, key: &str) -> bool {
     let key = UnresolvedSaveKey::Name(key.to_string());
-    with_unresolved_publications(|unresolved| {
+    with_unresolved_publications_ref(g, |unresolved| {
         unresolved
             .iter()
             .any(|entry| entry.kind == kind && entry.key == key)
@@ -988,32 +996,10 @@ pub(crate) fn test_unresolved_named_save(kind: EditorKind, key: &str) -> bool {
 /// Serialize tests which manipulate the process-global OLC save list. Tests in
 /// sibling modules use the same guard so parallel `cargo test` execution cannot
 /// make one test flush or remove another test's dirty entries.
-#[cfg(test)]
-pub(crate) struct TestSaveListGuard {
-    _guard: std::sync::MutexGuard<'static, ()>,
-}
-
-#[cfg(test)]
-impl Drop for TestSaveListGuard {
-    fn drop(&mut self) {
-        with_save_list(Vec::clear);
-        with_unresolved_publications(Vec::clear);
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn test_save_list_guard() -> TestSaveListGuard {
-    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let guard = crate::lock_ok::lock(TEST_LOCK.get_or_init(|| Mutex::new(())));
-    with_save_list(Vec::clear);
-    with_unresolved_publications(Vec::clear);
-    TestSaveListGuard { _guard: guard }
-}
-
 /// olc_add_to_save_list: record that `zone` (the builder zone *number*, not
 /// rnum) has unsaved `kind` changes. No-op if already present.
-pub fn olc_add_to_save_list(zone: i32, kind: i32) {
-    with_save_list(|list| {
+pub fn olc_add_to_save_list(g: &mut GameState, zone: i32, kind: i32) {
+    with_save_list(g, |list| {
         if !list.iter().any(|&(z, t)| z == zone && t == kind) {
             // C prepends; order only matters for olc_saveinfo display, where we
             // iterate the whole list, so prepend to mirror C exactly.
@@ -1023,13 +1009,13 @@ pub fn olc_add_to_save_list(zone: i32, kind: i32) {
 }
 
 /// olc_remove_from_save_list: drop the (zone, kind) entry once it is on disk.
-pub fn olc_remove_from_save_list(zone: i32, kind: i32) {
-    with_save_list(|list| list.retain(|&(z, t)| !(z == zone && t == kind)));
+pub fn olc_remove_from_save_list(g: &mut GameState, zone: i32, kind: i32) {
+    with_save_list(g, |list| list.retain(|&(z, t)| !(z == zone && t == kind)));
 }
 
 #[cfg(test)]
-pub(crate) fn test_pending_save(zone: i32, kind: i32) -> bool {
-    with_save_list(|list| list.contains(&(zone, kind)))
+pub(crate) fn test_pending_save(g: &GameState, zone: i32, kind: i32) -> bool {
+    with_save_list_ref(g, |list| list.contains(&(zone, kind)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1086,7 +1072,7 @@ impl std::error::Error for OlcFlushError {}
 pub fn flush_save_list_to_disk(
     g: &mut GameState,
 ) -> std::result::Result<OlcFlushReport, OlcFlushError> {
-    let entries: Vec<(i32, i32)> = with_save_list(|list| list.clone());
+    let entries: Vec<(i32, i32)> = with_save_list(g, |list| list.clone());
     let mut report = OlcFlushReport {
         attempted: entries.len(),
         saved: Vec::new(),
@@ -1118,7 +1104,7 @@ pub fn flush_save_list_to_disk(
                 // Zone writers already remove their own entry after durable
                 // publication. This explicit removal also covers the global
                 // help/action writers and is intentionally success-only.
-                olc_remove_from_save_list(zone, kind);
+                olc_remove_from_save_list(g, zone, kind);
                 report.saved.push(target);
                 log::info!("OLC: Reboot saved zone {} component {}.", zone, kind);
             }
@@ -1142,7 +1128,7 @@ pub fn flush_save_list_to_disk(
     // component retry may have resolved a post-publication marker during this
     // same flush. Pre-publication failures have no publishable live candidate
     // and therefore remain blockers until retry or explicit discard.
-    let unresolved = with_unresolved_publications(|unresolved| unresolved.clone());
+    let unresolved = with_unresolved_publications(g, |unresolved| unresolved.clone());
     report.attempted += unresolved.len();
     failures.extend(unresolved.into_iter().map(|entry| {
         let report_key = match &entry.key {
@@ -1173,8 +1159,8 @@ pub fn flush_save_list_to_disk(
 
 /// olc_saveinfo: tell the immortal which OLC components still need saving.
 pub fn olc_saveinfo(g: &mut GameState, ch: CharId) {
-    let entries: Vec<(i32, i32)> = with_save_list(|list| list.clone());
-    let unresolved = with_unresolved_publications(|unresolved| unresolved.clone());
+    let entries: Vec<(i32, i32)> = with_save_list(g, |list| list.clone());
+    let unresolved = with_unresolved_publications(g, |unresolved| unresolved.clone());
     if entries.is_empty() && unresolved.is_empty() {
         g.send_to_char(ch, "The database is up to date.\r\n");
         return;
@@ -1586,7 +1572,7 @@ fn mark_dg_script_dirty(g: &mut GameState, kind: i32, entity_vnum: i32) {
         crate::dg_handler::WLD_TRIGGER => OLC_SAVE_ROOM,
         _ => return,
     };
-    olc_add_to_save_list(zone.number, save_kind);
+    olc_add_to_save_list(g, zone.number, save_kind);
 }
 
 fn send_to_conn(g: &mut GameState, conn: ConnId, msg: &str) {
@@ -1845,7 +1831,7 @@ pub fn do_copy(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             vnum_targ
         ),
     );
-    olc_add_to_save_list(save_zone, room_or_obj); // C: ROOM==OLC_SAVE_ROOM, OBJECT==OLC_SAVE_OBJ
+    olc_add_to_save_list(g, save_zone, room_or_obj); // C: ROOM==OLC_SAVE_ROOM, OBJECT==OLC_SAVE_OBJ
 }
 
 /// C olc.c:767 create_dir: an empty exit in `dir` ("No target yet").
@@ -2108,9 +2094,9 @@ pub fn do_rlink(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         g.send_to_char(ch, "Exit deleted.\r\n");
     }
 
-    olc_add_to_save_list(save_zone_1, OLC_SAVE_ROOM);
+    olc_add_to_save_list(g, save_zone_1, OLC_SAVE_ROOM);
     if save_zone_2 != 0 {
-        olc_add_to_save_list(save_zone_2, OLC_SAVE_ROOM);
+        olc_add_to_save_list(g, save_zone_2, OLC_SAVE_ROOM);
     }
 }
 
@@ -2497,13 +2483,8 @@ mod tests {
         path
     }
 
-    fn olc_test_lock() -> TestSaveListGuard {
-        test_save_list_guard()
-    }
-
     #[test]
     fn atomic_replace_is_durable_and_preserves_old_file_before_rename_failure() {
-        let _guard = olc_test_lock();
         let dir = temp_lib("atomic-replace");
         let path = dir.join("durable.txt");
         std::fs::write(&path, b"old contents").unwrap();
@@ -2531,7 +2512,6 @@ mod tests {
 
     #[test]
     fn atomic_replace_reports_post_rename_directory_sync_failure_as_published() {
-        let _guard = olc_test_lock();
         let dir = temp_lib("atomic-replace-directory-sync");
         let path = dir.join("durable.txt");
         std::fs::write(&path, b"old contents").unwrap();
@@ -2559,7 +2539,6 @@ mod tests {
 
     #[test]
     fn atomic_create_never_clobbers_an_existing_target() {
-        let _guard = olc_test_lock();
         let dir = temp_lib("atomic-create-no-clobber");
         let path = dir.join("new-zone-component.wld");
 
@@ -2581,7 +2560,6 @@ mod tests {
 
     #[test]
     fn new_zone_transaction_marker_is_durable_idempotent_and_exact() {
-        let _guard = olc_test_lock();
         let lib = temp_lib("new-zone-transaction");
         let lib_text = lib.to_string_lossy();
         let zone_number = 40417;
@@ -2609,7 +2587,6 @@ mod tests {
 
     #[test]
     fn new_zone_transaction_retry_reconfirms_directory_parent_durability() {
-        let _guard = olc_test_lock();
         let lib = temp_lib("new-zone-transaction-parent-sync-retry");
         let lib_text = lib.to_string_lossy();
         let world_directory = lib.join("world");
@@ -2657,7 +2634,6 @@ mod tests {
 
     #[test]
     fn malformed_new_zone_transaction_state_fails_closed() {
-        let _guard = olc_test_lock();
         let lib = temp_lib("malformed-new-zone-transaction");
         let directory = lib.join("world").join(NEW_ZONE_TRANSACTION_DIRECTORY);
         std::fs::create_dir_all(&directory).unwrap();
@@ -2671,7 +2647,6 @@ mod tests {
 
     #[test]
     fn failed_flush_reports_target_and_retains_pending_save_entry() {
-        let _guard = olc_test_lock();
         let lib = temp_lib("failed-zone-save");
         std::fs::remove_dir_all(lib.join("world/zon")).unwrap();
         std::fs::write(lib.join("world/zon"), b"not a directory").unwrap();
@@ -2680,7 +2655,7 @@ mod tests {
         cfg.lib_path = lib.to_string_lossy().to_string();
         let mut g = GameState::new(cfg);
         g.zones.push(zone(47, "Root"));
-        olc_add_to_save_list(47, OLC_SAVE_ZONE);
+        olc_add_to_save_list(&mut g, 47, OLC_SAVE_ZONE);
 
         let error = flush_save_list_to_disk(&mut g).unwrap_err();
         assert_eq!(error.report.attempted, 1);
@@ -2693,24 +2668,23 @@ mod tests {
                 kind: OLC_SAVE_ZONE
             }
         );
-        assert!(with_save_list(|list| list
+        assert!(with_save_list(&mut g, |list| list
             .iter()
             .any(|&(zone, kind)| zone == 47 && kind == OLC_SAVE_ZONE)));
 
-        olc_remove_from_save_list(47, OLC_SAVE_ZONE);
+        olc_remove_from_save_list(&mut g, 47, OLC_SAVE_ZONE);
         let _ = std::fs::remove_dir_all(lib);
     }
 
     #[test]
     fn flush_removes_successes_but_retains_independent_failures() {
-        let _guard = olc_test_lock();
         let lib = temp_lib("partial-flush");
         let mut cfg = Config::default();
         cfg.lib_path = lib.to_string_lossy().to_string();
         let mut g = GameState::new(cfg);
         g.zones.push(zone(43, "Root"));
-        olc_add_to_save_list(43, OLC_SAVE_ZONE);
-        olc_add_to_save_list(99, OLC_SAVE_ZONE);
+        olc_add_to_save_list(&mut g, 43, OLC_SAVE_ZONE);
+        olc_add_to_save_list(&mut g, 99, OLC_SAVE_ZONE);
 
         let error = flush_save_list_to_disk(&mut g).unwrap_err();
         assert_eq!(error.report.attempted, 2);
@@ -2724,18 +2698,17 @@ mod tests {
         assert_eq!(error.failures.len(), 1);
         assert_eq!(error.failures[0].target.zone, 99);
         assert_eq!(error.failures[0].error_kind, io::ErrorKind::NotFound);
-        let dirty = with_save_list(|list| list.clone());
+        let dirty = with_save_list(&mut g, |list| list.clone());
         assert!(!dirty.contains(&(43, OLC_SAVE_ZONE)));
         assert!(dirty.contains(&(99, OLC_SAVE_ZONE)));
         assert!(lib.join("world/zon/43.zon").exists());
 
-        olc_remove_from_save_list(99, OLC_SAVE_ZONE);
+        olc_remove_from_save_list(&mut g, 99, OLC_SAVE_ZONE);
         let _ = std::fs::remove_dir_all(lib);
     }
 
     #[test]
     fn manual_olc_save_reports_failure_without_a_success_message() {
-        let _guard = olc_test_lock();
         let lib = temp_lib("manual-save-failure");
         std::fs::remove_dir_all(lib.join("world/zon")).unwrap();
         std::fs::write(lib.join("world/zon"), b"not a directory").unwrap();
@@ -2744,7 +2717,7 @@ mod tests {
         cfg.lib_path = lib.to_string_lossy().to_string();
         let mut g = GameState::new(cfg);
         g.zones.push(zone(47, "Root"));
-        olc_add_to_save_list(47, OLC_SAVE_ZONE);
+        olc_add_to_save_list(&mut g, 47, OLC_SAVE_ZONE);
 
         let conn = ConnId(109);
         let ch = player(&mut g, "Root", LVL_IMPL);
@@ -2761,9 +2734,9 @@ mod tests {
         assert!(output.contains("changes remain pending"));
         assert!(!output.contains("Saved all"));
         assert!(!output.contains("Saving all"));
-        assert!(with_save_list(|list| list.contains(&(47, OLC_SAVE_ZONE))));
+        assert!(with_save_list(&mut g, |list| list.contains(&(47, OLC_SAVE_ZONE))));
 
-        olc_remove_from_save_list(47, OLC_SAVE_ZONE);
+        olc_remove_from_save_list(&mut g, 47, OLC_SAVE_ZONE);
         let _ = std::fs::remove_dir_all(lib);
     }
 
@@ -2878,7 +2851,6 @@ mod tests {
 
     #[test]
     fn persisted_trust_controls_unowned_zone_override_not_character_level() {
-        let _guard = olc_test_lock();
         let lib = temp_lib("trust-authority");
         let mut cfg = Config::default();
         cfg.lib_path = lib.to_string_lossy().into_owned();
@@ -2933,13 +2905,12 @@ mod tests {
         );
         assert!(lib.join("world/zon/1.zon").exists());
 
-        olc_remove_from_save_list(1, OLC_SAVE_ZONE);
+        olc_remove_from_save_list(&mut g, 1, OLC_SAVE_ZONE);
         let _ = std::fs::remove_dir_all(lib);
     }
 
     #[test]
     fn real_olc_new_zone_checks_boundary_and_overflow_before_writing() {
-        let _guard = olc_test_lock();
         let lib = temp_lib("zone-number-boundary");
         for extension in ["zon", "wld", "mob", "obj", "shp", "trg"] {
             let directory = lib.join(format!("world/{extension}"));
@@ -3006,10 +2977,9 @@ mod tests {
 
     #[test]
     fn dg_script_editor_adds_deletes_and_marks_room_dirty() {
-        let _guard = olc_test_lock();
         let mut g = GameState::new(Config::default());
         g.zones.push(zone(42, "Root"));
-        olc_remove_from_save_list(42, OLC_SAVE_ROOM);
+        olc_remove_from_save_list(&mut g, 42, OLC_SAVE_ROOM);
 
         let conn = ConnId(99);
         let ch = player(&mut g, "Root", LVL_IMPL);
@@ -3116,13 +3086,12 @@ mod tests {
         olc_saveinfo(&mut g, ch);
         let out = &g.descriptors.get(&conn).unwrap().outbuf;
         assert!(out.contains("Rooms for zone 42"));
-        olc_remove_from_save_list(42, OLC_SAVE_ROOM);
+        olc_remove_from_save_list(&mut g, 42, OLC_SAVE_ROOM);
         crate::dg_db_scripts::clear_proto_triggers(&mut g, crate::dg_handler::WLD_TRIGGER, 4201);
     }
 
     #[test]
     fn dg_script_editor_reprompts_on_unparseable_line() {
-        let _guard = olc_test_lock();
         let mut g = GameState::new(Config::default());
         g.zones.push(zone(44, "Root"));
         let conn = ConnId(103);
@@ -3150,7 +3119,6 @@ mod tests {
 
     #[test]
     fn menu_colours_follow_the_builder_colour_level() {
-        let _guard = olc_test_lock();
         let mut g = GameState::new(Config::default());
         let colour_on = player(&mut g, "Colour", LVL_IMPL);
         let colour_off = player(&mut g, "Plain", LVL_IMPL);
@@ -3174,12 +3142,11 @@ mod tests {
 
     #[test]
     fn saveinfo_hides_zones_the_builder_cannot_edit() {
-        let _guard = olc_test_lock();
         let mut g = GameState::new(Config::default());
         g.zones.push(zone(45, "Alice"));
         g.zones.push(zone(46, "Bob"));
-        olc_add_to_save_list(45, OLC_SAVE_ROOM);
-        olc_add_to_save_list(46, OLC_SAVE_ROOM);
+        olc_add_to_save_list(&mut g, 45, OLC_SAVE_ROOM);
+        olc_add_to_save_list(&mut g, 46, OLC_SAVE_ROOM);
 
         let conn = ConnId(104);
         let alice = player(&mut g, "Alice", LVL_BUILDER_LEVEL as Level);
@@ -3192,13 +3159,12 @@ mod tests {
         let out = &g.descriptors.get(&conn).unwrap().outbuf.clone();
         assert!(out.contains("zone 45"));
         assert!(!out.contains("zone 46"), "Bob's zone must be hidden (#278)");
-        olc_remove_from_save_list(45, OLC_SAVE_ROOM);
-        olc_remove_from_save_list(46, OLC_SAVE_ROOM);
+        olc_remove_from_save_list(&mut g, 45, OLC_SAVE_ROOM);
+        olc_remove_from_save_list(&mut g, 46, OLC_SAVE_ROOM);
     }
 
     #[test]
     fn central_olc_save_dispatches_zone_mob_and_shop_writers() {
-        let _guard = olc_test_lock();
         let lib = temp_lib("central-save");
         let mut cfg = Config::default();
         cfg.lib_path = lib.to_string_lossy().to_string();
@@ -3211,9 +3177,9 @@ mod tests {
         .unwrap();
         std::fs::write(lib.join("world/shp/index"), "43.shp\n$\n").unwrap();
 
-        olc_add_to_save_list(43, OLC_SAVE_ZONE);
-        olc_add_to_save_list(43, OLC_SAVE_MOB);
-        olc_add_to_save_list(43, OLC_SAVE_SHOP);
+        olc_add_to_save_list(&mut g, 43, OLC_SAVE_ZONE);
+        olc_add_to_save_list(&mut g, 43, OLC_SAVE_MOB);
+        olc_add_to_save_list(&mut g, 43, OLC_SAVE_SHOP);
 
         olc_save_to_disk(&mut g, 0, OLC_SAVE_ZONE);
         olc_save_to_disk(&mut g, 0, OLC_SAVE_MOB);
@@ -3263,7 +3229,6 @@ mod tests {
 
     #[test]
     fn do_copy_copies_room_fields_and_marks_dirty() {
-        let _guard = olc_test_lock();
         let mut g = GameState::new(Config::default());
         g.zones.push(zone(45, "Root"));
         let mut src = crate::room::Room::new(4500, 0, "Source".into(), "Src desc.\r\n".into());
@@ -3293,12 +3258,11 @@ mod tests {
                 .contains("You copy room 4500 to 4501.")
         );
         // Save-list marks the target zone dirty (C: ROOM == OLC_SAVE_ROOM).
-        olc_remove_from_save_list(45, OLC_SAVE_ROOM);
+        olc_remove_from_save_list(&mut g, 45, OLC_SAVE_ROOM);
     }
 
     #[test]
     fn do_rlink_connects_disconnects_and_autocreates() {
-        let _guard = olc_test_lock();
         let mut g = GameState::new(Config::default());
         g.zones.push(zone(46, "Root"));
         let a = g.add_room(crate::room::Room::new(4600, 0, "A".into(), String::new()));
@@ -3366,12 +3330,11 @@ mod tests {
             g.room(g.real_room(4602).unwrap()).name,
             "An unfinished room"
         );
-        olc_remove_from_save_list(46, OLC_SAVE_ROOM);
+        olc_remove_from_save_list(&mut g, 46, OLC_SAVE_ROOM);
     }
 
     #[test]
     fn rlink_two_way_disconnect_validates_reciprocal_and_tracks_both_zones() {
-        let _guard = olc_test_lock();
         let mut g = GameState::new(Config::default());
         g.zones.push(zone(46, "Root"));
         g.zones.push(zone(47, "Root"));
@@ -3405,11 +3368,11 @@ mod tests {
         g.descriptors.insert(conn, descriptor);
 
         do_rlink(&mut g, ch, "east connect 2 4700", 0);
-        let dirty = with_save_list(|list| list.clone());
+        let dirty = with_save_list(&mut g, |list| list.clone());
         assert!(dirty.contains(&(46, OLC_SAVE_ROOM)));
         assert!(dirty.contains(&(47, OLC_SAVE_ROOM)));
-        olc_remove_from_save_list(46, OLC_SAVE_ROOM);
-        olc_remove_from_save_list(47, OLC_SAVE_ROOM);
+        olc_remove_from_save_list(&mut g, 46, OLC_SAVE_ROOM);
+        olc_remove_from_save_list(&mut g, 47, OLC_SAVE_ROOM);
 
         // A missing reciprocal is a transactional failure: keep the own exit.
         free_dir(&mut g, target, WEST);
@@ -3445,10 +3408,10 @@ mod tests {
         do_rlink(&mut g, ch, "east disconnect 2 4700", 0);
         assert!(g.room(base).exits[EAST].is_none());
         assert!(g.room(target).exits[WEST].is_none());
-        let dirty = with_save_list(|list| list.clone());
+        let dirty = with_save_list(&mut g, |list| list.clone());
         assert!(dirty.contains(&(46, OLC_SAVE_ROOM)));
         assert!(dirty.contains(&(47, OLC_SAVE_ROOM)));
-        olc_remove_from_save_list(46, OLC_SAVE_ROOM);
-        olc_remove_from_save_list(47, OLC_SAVE_ROOM);
+        olc_remove_from_save_list(&mut g, 46, OLC_SAVE_ROOM);
+        olc_remove_from_save_list(&mut g, 47, OLC_SAVE_ROOM);
     }
 }

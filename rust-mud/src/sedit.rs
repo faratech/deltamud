@@ -33,7 +33,6 @@ use crate::olc::{self, EditorKind};
 use crate::state::GameState;
 use crate::types::*;
 use std::io::Result as IoResult;
-use std::sync::{Mutex, OnceLock};
 
 // olc.h.
 const NUM_SHOP_FLAGS: usize = 2;
@@ -127,7 +126,7 @@ impl Shop {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
-struct SeditState {
+pub struct SeditState {
     ch: CharId,
     /// Exact authenticated session which opened this editor. Test-only
     /// low-level publication fixtures may omit it because they bypass the
@@ -203,50 +202,40 @@ fn is_numerical_mode(m: SeditMode) -> bool {
     )
 }
 
-static STATES: OnceLock<Mutex<std::collections::HashMap<ConnId, SeditState>>> = OnceLock::new();
-
-fn states() -> &'static Mutex<std::collections::HashMap<ConnId, SeditState>> {
-    STATES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+fn states(g: &GameState) -> &std::collections::HashMap<ConnId, SeditState> {
+    &g.olc.sedit_states
+}
+fn states_mut(g: &mut GameState) -> &mut std::collections::HashMap<ConnId, SeditState> {
+    &mut g.olc.sedit_states
 }
 
-fn with_state<R>(conn: ConnId, f: impl FnOnce(&mut SeditState) -> R) -> Option<R> {
-    let mut guard = match states().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.get_mut(&conn).map(f)
+fn with_state<R>(
+    g: &mut GameState,
+    conn: ConnId,
+    f: impl FnOnce(&mut SeditState) -> R,
+) -> Option<R> {
+    states_mut(g).get_mut(&conn).map(f)
 }
 
-fn take_state(conn: ConnId) -> Option<SeditState> {
-    let mut guard = match states().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.remove(&conn)
+fn take_state(g: &mut GameState, conn: ConnId) -> Option<SeditState> {
+    states_mut(g).remove(&conn)
 }
 
 /// abort: drop this conn's editor state without saving (player disconnected
 /// mid-edit). `olc::abort_editor` calls `olc::clear_active`.
-pub fn abort(conn: ConnId) {
-    if let Some(state) = take_state(conn) {
-        olc::discard_unresolved_save(EditorKind::Sedit, state.vnum);
+pub fn abort(g: &mut GameState, conn: ConnId) {
+    if let Some(state) = take_state(g, conn) {
+        olc::discard_unresolved_save(g, EditorKind::Sedit, state.vnum);
     }
 }
 
-fn set_state(conn: ConnId, st: SeditState) {
-    let mut guard = match states().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.insert(conn, st);
+fn set_state(g: &mut GameState, conn: ConnId, st: SeditState) {
+    states_mut(g).insert(conn, st);
 }
 
 /// True if another connection is already editing this shop vnum.
-fn shop_busy(vnum: i32, exclude: ConnId) -> bool {
-    let guard = match states().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
+fn shop_busy(g: &GameState, vnum: i32, exclude: ConnId) -> bool {
+    let guard = states(g);
     guard.iter().any(|(&c, st)| c != exclude && st.vnum == vnum)
 }
 
@@ -832,7 +821,7 @@ fn shop_index_update(path: &std::path::Path, content: &str, zone: i32) -> IoResu
 pub fn sedit_save_zone_to_disk(g: &mut GameState, zone_rnum: usize) -> IoResult<()> {
     if let Some(z) = g.zones.get(zone_rnum) {
         // C sedit.c:532 (#274).
-        crate::olc::olc_add_to_save_list(z.number, crate::olc::OLC_SAVE_SHOP);
+        crate::olc::olc_add_to_save_list(g, z.number, crate::olc::OLC_SAVE_SHOP);
     }
     let (zone, zone_start, zone_top) = match g.zones.get(zone_rnum) {
         Some(z) => (
@@ -855,8 +844,13 @@ pub fn sedit_save_zone_to_disk(g: &mut GameState, zone_rnum: usize) -> IoResult<
     let lib_path = g.config.lib_path.clone();
     let shops = load_zone_shops(&lib_path, zone)?;
     sedit_save_to_disk(&lib_path, zone, &shops)?;
-    crate::olc::olc_remove_from_save_list(zone, crate::olc::OLC_SAVE_SHOP);
-    crate::olc::clear_published_unresolved_numeric_range(EditorKind::Sedit, zone_start, zone_top);
+    crate::olc::olc_remove_from_save_list(g, zone, crate::olc::OLC_SAVE_SHOP);
+    crate::olc::clear_published_unresolved_numeric_range(
+        g,
+        EditorKind::Sedit,
+        zone_start,
+        zone_top,
+    );
     Ok(())
 }
 
@@ -946,7 +940,7 @@ pub fn do_sedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         return;
     }
 
-    if shop_busy(vnum, conn) {
+    if shop_busy(g, vnum, conn) {
         g.send_to_char(
             ch,
             "That shop is currently being edited by someone else.\r\n",
@@ -994,6 +988,7 @@ pub fn do_sedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     }
 
     set_state(
+        g,
         conn,
         SeditState {
             ch,
@@ -1006,7 +1001,7 @@ pub fn do_sedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             pending_type: 0,
         },
     );
-    olc::set_active(conn, EditorKind::Sedit);
+    olc::set_active(g, conn, EditorKind::Sedit);
 
     crate::act::act(
         g,
@@ -1073,7 +1068,7 @@ fn sprintbit(bits: i64, names: &[&str]) -> String {
 // ---------------------------------------------------------------------------
 
 fn sedit_disp_menu(g: &mut GameState, conn: ConnId) {
-    let st = match with_state(conn, |st| {
+    let st = match with_state(g, conn, |st| {
         st.mode = SeditMode::MainMenu;
         st.clone()
     }) {
@@ -1143,7 +1138,7 @@ Enter Choice : ",
 }
 
 fn sedit_products_menu(g: &mut GameState, conn: ConnId) {
-    let prods = match with_state(conn, |st| {
+    let prods = match with_state(g, conn, |st| {
         st.mode = SeditMode::ProductsMenu;
         st.shop.producing.clone()
     }) {
@@ -1170,7 +1165,7 @@ fn sedit_products_menu(g: &mut GameState, conn: ConnId) {
 }
 
 fn sedit_rooms_menu(g: &mut GameState, conn: ConnId) {
-    let rooms = match with_state(conn, |st| {
+    let rooms = match with_state(g, conn, |st| {
         st.mode = SeditMode::RoomsMenu;
         st.shop.in_room.clone()
     }) {
@@ -1198,7 +1193,7 @@ fn sedit_rooms_menu(g: &mut GameState, conn: ConnId) {
 }
 
 fn sedit_compact_rooms_menu(g: &mut GameState, conn: ConnId) {
-    let rooms = match with_state(conn, |st| {
+    let rooms = match with_state(g, conn, |st| {
         st.mode = SeditMode::RoomsMenu;
         st.shop.in_room.clone()
     }) {
@@ -1224,7 +1219,7 @@ fn sedit_compact_rooms_menu(g: &mut GameState, conn: ConnId) {
 }
 
 fn sedit_namelist_menu(g: &mut GameState, conn: ConnId) {
-    let types = match with_state(conn, |st| {
+    let types = match with_state(g, conn, |st| {
         st.mode = SeditMode::NamelistMenu;
         st.shop.type_.clone()
     }) {
@@ -1252,7 +1247,7 @@ fn sedit_namelist_menu(g: &mut GameState, conn: ConnId) {
 }
 
 fn sedit_types_menu(g: &mut GameState, conn: ConnId) {
-    with_state(conn, |st| st.mode = SeditMode::TypeMenu);
+    with_state(g, conn, |st| st.mode = SeditMode::TypeMenu);
     let ch = match conn_char(g, conn) {
         Some(c) => c,
         None => return,
@@ -1271,7 +1266,7 @@ fn sedit_types_menu(g: &mut GameState, conn: ConnId) {
 }
 
 fn sedit_shop_flags_menu(g: &mut GameState, conn: ConnId) {
-    let bits = match with_state(conn, |st| {
+    let bits = match with_state(g, conn, |st| {
         st.mode = SeditMode::ShopFlags;
         st.shop.bitvector
     }) {
@@ -1299,7 +1294,7 @@ fn sedit_shop_flags_menu(g: &mut GameState, conn: ConnId) {
 }
 
 fn sedit_no_trade_menu(g: &mut GameState, conn: ConnId) {
-    let bits = match with_state(conn, |st| {
+    let bits = match with_state(g, conn, |st| {
         st.mode = SeditMode::NoTrade;
         st.shop.with_who
     }) {
@@ -1341,17 +1336,17 @@ fn type_name(t: i32) -> String {
 // ---------------------------------------------------------------------------
 
 pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
-    let mode = match with_state(conn, |st| st.mode) {
+    let mode = match with_state(g, conn, |st| st.mode) {
         Some(m) => m,
         None => {
-            olc::clear_active(conn);
+            olc::clear_active(g, conn);
             return;
         }
     };
     let ch = match conn_char(g, conn) {
         Some(c) => c,
         None => {
-            cleanup(conn);
+            cleanup(g, conn);
             return;
         }
     };
@@ -1387,10 +1382,10 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                             g.get_char(ch)
                                 .map(|c| c.player.name.clone())
                                 .unwrap_or_default(),
-                            with_state(conn, |st| st.vnum).unwrap_or(0),
+                            with_state(g, conn, |st| st.vnum).unwrap_or(0),
                         );
                         log::info!("OLC: {} edits shop {}", name, vnum);
-                        cleanup(conn);
+                        cleanup(g, conn);
                     }
                     Err(err) => {
                         log::warn!("SYSERR: OLC: Cannot save edited shop: {}", err);
@@ -1401,7 +1396,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                         );
                     }
                 },
-                Some('n') | Some('N') => cleanup(conn),
+                Some('n') | Some('N') => cleanup(g, conn),
                 _ => send(g, ch, "Invalid choice!\r\nDo you wish to save the shop? : "),
             }
             return;
@@ -1412,86 +1407,86 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             // prompted); false when we should fall through to disp_menu.
             match trimmed.chars().next() {
                 Some('q') | Some('Q') => {
-                    let changed = with_state(conn, |st| st.changed).unwrap_or(false);
+                    let changed = with_state(g, conn, |st| st.changed).unwrap_or(false);
                     if changed {
                         send(
                             g,
                             ch,
                             "Do you wish to save the changes to the shop? (y/n) : ",
                         );
-                        with_state(conn, |st| st.mode = SeditMode::ConfirmSave);
+                        with_state(g, conn, |st| st.mode = SeditMode::ConfirmSave);
                     } else {
-                        cleanup(conn);
+                        cleanup(g, conn);
                     }
                     return;
                 }
                 Some('0') => {
-                    with_state(conn, |st| st.mode = SeditMode::Keeper);
+                    with_state(g, conn, |st| st.mode = SeditMode::Keeper);
                     send(g, ch, "Enter virtual number of shop keeper : ");
                     return;
                 }
                 Some('1') => {
-                    with_state(conn, |st| st.mode = SeditMode::Open1);
+                    with_state(g, conn, |st| st.mode = SeditMode::Open1);
                     send(g, ch, "\r\nEnter new value : ");
                     return;
                 }
                 Some('2') => {
-                    with_state(conn, |st| st.mode = SeditMode::Close1);
+                    with_state(g, conn, |st| st.mode = SeditMode::Close1);
                     send(g, ch, "\r\nEnter new value : ");
                     return;
                 }
                 Some('3') => {
-                    with_state(conn, |st| st.mode = SeditMode::Open2);
+                    with_state(g, conn, |st| st.mode = SeditMode::Open2);
                     send(g, ch, "\r\nEnter new value : ");
                     return;
                 }
                 Some('4') => {
-                    with_state(conn, |st| st.mode = SeditMode::Close2);
+                    with_state(g, conn, |st| st.mode = SeditMode::Close2);
                     send(g, ch, "\r\nEnter new value : ");
                     return;
                 }
                 Some('5') => {
-                    with_state(conn, |st| st.mode = SeditMode::BuyProfit);
+                    with_state(g, conn, |st| st.mode = SeditMode::BuyProfit);
                     send(g, ch, "\r\nEnter new value : ");
                     return;
                 }
                 Some('6') => {
-                    with_state(conn, |st| st.mode = SeditMode::SellProfit);
+                    with_state(g, conn, |st| st.mode = SeditMode::SellProfit);
                     send(g, ch, "\r\nEnter new value : ");
                     return;
                 }
                 Some('7') => {
-                    with_state(conn, |st| st.mode = SeditMode::NoItem1);
+                    with_state(g, conn, |st| st.mode = SeditMode::NoItem1);
                     send(g, ch, "\r\nEnter new text :\r\n] ");
                     return;
                 }
                 Some('8') => {
-                    with_state(conn, |st| st.mode = SeditMode::NoItem2);
+                    with_state(g, conn, |st| st.mode = SeditMode::NoItem2);
                     send(g, ch, "\r\nEnter new text :\r\n] ");
                     return;
                 }
                 Some('9') => {
-                    with_state(conn, |st| st.mode = SeditMode::NoCash1);
+                    with_state(g, conn, |st| st.mode = SeditMode::NoCash1);
                     send(g, ch, "\r\nEnter new text :\r\n] ");
                     return;
                 }
                 Some('a') | Some('A') => {
-                    with_state(conn, |st| st.mode = SeditMode::NoCash2);
+                    with_state(g, conn, |st| st.mode = SeditMode::NoCash2);
                     send(g, ch, "\r\nEnter new text :\r\n] ");
                     return;
                 }
                 Some('b') | Some('B') => {
-                    with_state(conn, |st| st.mode = SeditMode::NoBuy);
+                    with_state(g, conn, |st| st.mode = SeditMode::NoBuy);
                     send(g, ch, "\r\nEnter new text :\r\n] ");
                     return;
                 }
                 Some('c') | Some('C') => {
-                    with_state(conn, |st| st.mode = SeditMode::Buy);
+                    with_state(g, conn, |st| st.mode = SeditMode::Buy);
                     send(g, ch, "\r\nEnter new text :\r\n] ");
                     return;
                 }
                 Some('d') | Some('D') => {
-                    with_state(conn, |st| st.mode = SeditMode::Sell);
+                    with_state(g, conn, |st| st.mode = SeditMode::Sell);
                     send(g, ch, "\r\nEnter new text :\r\n] ");
                     return;
                 }
@@ -1530,7 +1525,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 }
                 Some('d') | Some('D') => {
                     send(g, ch, "\r\nDelete which entry? : ");
-                    with_state(conn, |st| st.mode = SeditMode::DeleteType);
+                    with_state(g, conn, |st| st.mode = SeditMode::DeleteType);
                     return;
                 }
                 Some('q') | Some('Q') => {} // fall to disp_menu
@@ -1541,12 +1536,12 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         SeditMode::ProductsMenu => match trimmed.chars().next() {
             Some('a') | Some('A') => {
                 send(g, ch, "\r\nEnter new product virtual number : ");
-                with_state(conn, |st| st.mode = SeditMode::NewProduct);
+                with_state(g, conn, |st| st.mode = SeditMode::NewProduct);
                 return;
             }
             Some('d') | Some('D') => {
                 send(g, ch, "\r\nDelete which product? : ");
-                with_state(conn, |st| st.mode = SeditMode::DeleteProduct);
+                with_state(g, conn, |st| st.mode = SeditMode::DeleteProduct);
                 return;
             }
             Some('q') | Some('Q') => {}
@@ -1556,7 +1551,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         SeditMode::RoomsMenu => match trimmed.chars().next() {
             Some('a') | Some('A') => {
                 send(g, ch, "\r\nEnter new room virtual number : ");
-                with_state(conn, |st| st.mode = SeditMode::NewRoom);
+                with_state(g, conn, |st| st.mode = SeditMode::NewRoom);
                 return;
             }
             Some('c') | Some('C') => {
@@ -1569,7 +1564,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             }
             Some('d') | Some('D') => {
                 send(g, ch, "\r\nDelete which room? : ");
-                with_state(conn, |st| st.mode = SeditMode::DeleteRoom);
+                with_state(g, conn, |st| st.mode = SeditMode::DeleteRoom);
                 return;
             }
             Some('q') | Some('Q') => {}
@@ -1578,25 +1573,25 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
 
         // ---- String edits -------------------------------------------------
         SeditMode::NoItem1 => {
-            modify_string(conn, arg, |s, v| s.no_such_item1 = v);
+            modify_string(g, conn, arg, |s, v| s.no_such_item1 = v);
         }
         SeditMode::NoItem2 => {
-            modify_string(conn, arg, |s, v| s.no_such_item2 = v);
+            modify_string(g, conn, arg, |s, v| s.no_such_item2 = v);
         }
         SeditMode::NoCash1 => {
-            modify_string(conn, arg, |s, v| s.missing_cash1 = v);
+            modify_string(g, conn, arg, |s, v| s.missing_cash1 = v);
         }
         SeditMode::NoCash2 => {
-            modify_string(conn, arg, |s, v| s.missing_cash2 = v);
+            modify_string(g, conn, arg, |s, v| s.missing_cash2 = v);
         }
         SeditMode::NoBuy => {
-            modify_string(conn, arg, |s, v| s.do_not_buy = v);
+            modify_string(g, conn, arg, |s, v| s.do_not_buy = v);
         }
         SeditMode::Buy => {
-            modify_string(conn, arg, |s, v| s.message_buy = v);
+            modify_string(g, conn, arg, |s, v| s.message_buy = v);
         }
         SeditMode::Sell => {
-            modify_string(conn, arg, |s, v| s.message_sell = v);
+            modify_string(g, conn, arg, |s, v| s.message_sell = v);
         }
         SeditMode::Namelist => {
             // The keyword line for a previously chosen trade type.
@@ -1605,7 +1600,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             } else {
                 Some(trimmed.to_string())
             };
-            with_state(conn, |st| {
+            with_state(g, conn, |st| {
                 let entry = ShopBuyData {
                     type_: st.pending_type,
                     keywords: kw,
@@ -1622,7 +1617,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 return;
             };
             if i == -1 {
-                with_state(conn, |st| st.shop.keeper = NOBODY);
+                with_state(g, conn, |st| st.shop.keeper = NOBODY);
             } else if !mob_exists(g, i) {
                 send(g, ch, "That mobile does not exist, try again : ");
                 return;
@@ -1637,7 +1632,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     );
                     return;
                 }
-                with_state(conn, |st| st.shop.keeper = i);
+                with_state(g, conn, |st| st.shop.keeper = i);
             }
         }
         SeditMode::Open1 => {
@@ -1645,39 +1640,39 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 return;
             };
             let v = v.clamp(0, 28);
-            with_state(conn, |st| st.shop.open1 = v);
+            with_state(g, conn, |st| st.shop.open1 = v);
         }
         SeditMode::Open2 => {
             let Some(v) = olc::parse_i32_input(g, conn, trimmed, 0) else {
                 return;
             };
             let v = v.clamp(0, 28);
-            with_state(conn, |st| st.shop.open2 = v);
+            with_state(g, conn, |st| st.shop.open2 = v);
         }
         SeditMode::Close1 => {
             let Some(v) = olc::parse_i32_input(g, conn, trimmed, 0) else {
                 return;
             };
             let v = v.clamp(0, 28);
-            with_state(conn, |st| st.shop.close1 = v);
+            with_state(g, conn, |st| st.shop.close1 = v);
         }
         SeditMode::Close2 => {
             let Some(v) = olc::parse_i32_input(g, conn, trimmed, 0) else {
                 return;
             };
             let v = v.clamp(0, 28);
-            with_state(conn, |st| st.shop.close2 = v);
+            with_state(g, conn, |st| st.shop.close2 = v);
         }
         SeditMode::BuyProfit => {
             // C sscanf("%f") leaves the field untouched on parse failure — a
             // bad rate must NOT become 0.00 ("everything free") (#295).
             if let Ok(v) = trimmed.parse::<f32>() {
-                with_state(conn, |st| st.shop.profit_buy = v);
+                with_state(g, conn, |st| st.shop.profit_buy = v);
             }
         }
         SeditMode::SellProfit => {
             if let Ok(v) = trimmed.parse::<f32>() {
-                with_state(conn, |st| st.shop.profit_sell = v);
+                with_state(g, conn, |st| st.shop.profit_sell = v);
             }
         }
         SeditMode::TypeMenu => {
@@ -1685,7 +1680,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 return;
             };
             let v = v.clamp(0, NUM_ITEM_TYPES as i32 - 1);
-            with_state(conn, |st| {
+            with_state(g, conn, |st| {
                 st.pending_type = v;
                 st.mode = SeditMode::Namelist;
             });
@@ -1696,7 +1691,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             let Some(n) = olc::parse_i32_input(g, conn, trimmed, -1) else {
                 return;
             };
-            with_state(conn, |st| {
+            with_state(g, conn, |st| {
                 if n >= 0 && (n as usize) < st.shop.type_.len() {
                     st.shop.type_.remove(n as usize);
                 }
@@ -1726,7 +1721,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 );
                 return;
             }
-            with_state(conn, |st| st.shop.producing.push(i));
+            with_state(g, conn, |st| st.shop.producing.push(i));
             sedit_products_menu(g, conn);
             return;
         }
@@ -1734,7 +1729,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             let Some(n) = olc::parse_i32_input(g, conn, trimmed, -1) else {
                 return;
             };
-            with_state(conn, |st| {
+            with_state(g, conn, |st| {
                 if n >= 0 && (n as usize) < st.shop.producing.len() {
                     st.shop.producing.remove(n as usize);
                 }
@@ -1770,7 +1765,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 );
                 return;
             }
-            with_state(conn, |st| st.shop.in_room.push(i));
+            with_state(g, conn, |st| st.shop.in_room.push(i));
             sedit_rooms_menu(g, conn);
             return;
         }
@@ -1778,7 +1773,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             let Some(n) = olc::parse_i32_input(g, conn, trimmed, -1) else {
                 return;
             };
-            with_state(conn, |st| {
+            with_state(g, conn, |st| {
                 if n >= 0 && (n as usize) < st.shop.in_room.len() {
                     st.shop.in_room.remove(n as usize);
                 }
@@ -1792,7 +1787,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             };
             let i = i.clamp(0, NUM_SHOP_FLAGS as i32);
             if i > 0 {
-                with_state(conn, |st| st.shop.bitvector ^= 1 << (i - 1));
+                with_state(g, conn, |st| st.shop.bitvector ^= 1 << (i - 1));
                 sedit_shop_flags_menu(g, conn);
                 return;
             }
@@ -1803,7 +1798,7 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             };
             let i = i.clamp(0, NUM_TRADERS as i32);
             if i > 0 {
-                with_state(conn, |st| st.shop.with_who ^= 1 << (i - 1));
+                with_state(g, conn, |st| st.shop.with_who ^= 1 << (i - 1));
                 sedit_no_trade_menu(g, conn);
                 return;
             }
@@ -1811,19 +1806,24 @@ pub fn sedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
     }
 
     // END OF CASE: something changed; return to the main menu.
-    with_state(conn, |st| st.changed = true);
+    with_state(g, conn, |st| st.changed = true);
     sedit_disp_menu(g, conn);
 }
 
 /// sedit_modify_string: ensure a leading "%s " when the text doesn't start with
 /// '%', then store. Mirrors C sedit_modify_string exactly.
-fn modify_string(conn: ConnId, new: &str, apply: impl FnOnce(&mut Shop, String)) {
+fn modify_string(
+    g: &mut GameState,
+    conn: ConnId,
+    new: &str,
+    apply: impl FnOnce(&mut Shop, String),
+) {
     let value = if !new.starts_with('%') {
         format!("%s {}", new)
     } else {
         new.to_string()
     };
-    with_state(conn, |st| apply(&mut st.shop, value));
+    with_state(g, conn, |st| apply(&mut st.shop, value));
 }
 
 // ---------------------------------------------------------------------------
@@ -1831,15 +1831,15 @@ fn modify_string(conn: ConnId, new: &str, apply: impl FnOnce(&mut Shop, String))
 // ---------------------------------------------------------------------------
 
 fn sedit_save_internally(g: &mut GameState, conn: ConnId) -> IoResult<()> {
-    let (vnum, zone_number, authorization) =
-        with_state(conn, |state| (state.vnum, state.zone, state.authorization)).ok_or_else(
-            || {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "shop editor state is missing",
-                )
-            },
-        )?;
+    let (vnum, zone_number, authorization) = with_state(g, conn, |state| {
+        (state.vnum, state.zone, state.authorization)
+    })
+    .ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "shop editor state is missing",
+        )
+    })?;
     let authorization = authorization.ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -1866,14 +1866,16 @@ fn sedit_save_internally_with<F>(g: &mut GameState, conn: ConnId, replace: F) ->
 where
     F: FnOnce(&std::path::Path, &[u8]) -> IoResult<()>,
 {
-    let vnum = with_state(conn, |state| state.vnum);
+    let vnum = with_state(g, conn, |state| state.vnum);
     let result = sedit_save_internally_with_reconcile(g, conn, replace, |game, contents, vnum| {
         crate::shop::upsert_shop_from_zone_contents(game, contents, vnum)
     });
     if let Some(vnum) = vnum {
         match &result {
-            Ok(()) => crate::olc::clear_unresolved_publication(EditorKind::Sedit, vnum),
-            Err(error) => crate::olc::mark_unresolved_save_failure(EditorKind::Sedit, vnum, error),
+            Ok(()) => crate::olc::clear_unresolved_publication(g, EditorKind::Sedit, vnum),
+            Err(error) => {
+                crate::olc::mark_unresolved_save_failure(g, EditorKind::Sedit, vnum, error)
+            }
         }
     }
     result
@@ -1889,7 +1891,7 @@ where
     F: FnOnce(&std::path::Path, &[u8]) -> IoResult<()>,
     R: FnOnce(&mut GameState, &str, i32) -> IoResult<()>,
 {
-    let (shop, vnum, zone) = match with_state(conn, |st| (st.shop.clone(), st.vnum, st.zone)) {
+    let (shop, vnum, zone) = match with_state(g, conn, |st| (st.shop.clone(), st.vnum, st.zone)) {
         Some(v) => v,
         None => return Ok(()),
     };
@@ -1923,7 +1925,7 @@ where
     };
 
     if let Err(reconcile_error) = reconcile(g, &candidate, vnum) {
-        crate::olc::olc_add_to_save_list(zone, crate::olc::OLC_SAVE_SHOP);
+        crate::olc::olc_add_to_save_list(g, zone, crate::olc::OLC_SAVE_SHOP);
         let context = publication_error.as_ref().map_or_else(
             || "shop data was published, but the live shop could not be reconciled".to_string(),
             |publication_error| {
@@ -1939,10 +1941,10 @@ where
     }
 
     if let Some(error) = publication_error {
-        crate::olc::olc_add_to_save_list(zone, crate::olc::OLC_SAVE_SHOP);
+        crate::olc::olc_add_to_save_list(g, zone, crate::olc::OLC_SAVE_SHOP);
         Err(error)
     } else {
-        crate::olc::olc_remove_from_save_list(zone, crate::olc::OLC_SAVE_SHOP);
+        crate::olc::olc_remove_from_save_list(g, zone, crate::olc::OLC_SAVE_SHOP);
         Ok(())
     }
 }
@@ -1951,11 +1953,11 @@ where
 // Cleanup.
 // ---------------------------------------------------------------------------
 
-fn cleanup(conn: ConnId) {
-    if let Some(state) = take_state(conn) {
-        olc::discard_unresolved_save(EditorKind::Sedit, state.vnum);
+fn cleanup(g: &mut GameState, conn: ConnId) {
+    if let Some(state) = take_state(g, conn) {
+        olc::discard_unresolved_save(g, EditorKind::Sedit, state.vnum);
     }
-    olc::clear_active(conn);
+    olc::clear_active(g, conn);
 }
 
 /// zone rnum for a mob vnum (C real_zone).
@@ -2042,6 +2044,7 @@ mod tests {
         edited.keeper = new_keeper;
         edited.profit_buy = 1.75;
         set_state(
+            &mut g,
             conn,
             SeditState {
                 ch,
@@ -2068,7 +2071,7 @@ mod tests {
         assert!(!crate::shop::is_shop_keeper_vnum(&g, old_keeper));
         assert!(crate::shop::is_shop_keeper_vnum(&g, new_keeper));
 
-        take_state(conn);
+        take_state(&mut g, conn);
         crate::shop::test_remove_shop(&mut g, vnum);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2120,6 +2123,7 @@ mod tests {
         closed.open2 = 24;
         closed.close2 = 24;
         set_state(
+            &mut g,
             conn,
             SeditState {
                 ch: buyer,
@@ -2161,6 +2165,7 @@ mod tests {
         open.no_such_item1 = "%s LIVE NO STOCK.".into();
         open.message_buy = "%s LIVE PURCHASE %d.".into();
         set_state(
+            &mut g,
             conn,
             SeditState {
                 ch: buyer,
@@ -2208,7 +2213,7 @@ mod tests {
         assert!(g.get_char(buyer).unwrap().carrying.contains(&widget));
         assert!(g.descriptors[&conn].outbuf.contains("LIVE PURCHASE 50."));
 
-        take_state(conn);
+        take_state(&mut g, conn);
         crate::shop::test_remove_shop(&mut g, vnum);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2236,6 +2241,7 @@ mod tests {
         edited.keeper = 987_802;
         edited.profit_buy = 9.75;
         set_state(
+            &mut g,
             conn,
             SeditState {
                 ch,
@@ -2262,7 +2268,7 @@ mod tests {
         assert_eq!(live.0, 987_801);
         assert_eq!(live.1, 1.25);
 
-        take_state(conn);
+        take_state(&mut g, conn);
         crate::shop::test_remove_shop(&mut g, vnum);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2289,6 +2295,7 @@ mod tests {
             let mut edited = Shop::new(vnum);
             edited.keeper = vnum + 2;
             set_state(
+                &mut g,
                 conn,
                 SeditState {
                     ch,
@@ -2333,12 +2340,13 @@ mod tests {
                 vnum + 1
             );
             assert!(crate::olc::test_pending_save(
+                &g,
                 zone,
                 crate::olc::OLC_SAVE_SHOP
             ));
 
-            crate::olc::olc_remove_from_save_list(zone, crate::olc::OLC_SAVE_SHOP);
-            take_state(conn);
+            crate::olc::olc_remove_from_save_list(&mut g, zone, crate::olc::OLC_SAVE_SHOP);
+            take_state(&mut g, conn);
             crate::shop::test_remove_shop(&mut g, vnum);
             let _ = std::fs::remove_dir_all(dir);
         }
@@ -2453,18 +2461,18 @@ mod tests {
         sedit_parse(&mut g, conn, "6"); // sell rate
         sedit_parse(&mut g, conn, "1.25");
         assert_eq!(
-            with_state(conn, |st| st.shop.profit_sell).unwrap(),
+            with_state(&mut g, conn, |st| st.shop.profit_sell).unwrap(),
             1.25,
             "a valid rate is stored"
         );
         // C sscanf("%f") leaves the field untouched on failure (#295).
         sedit_parse(&mut g, conn, "garbage");
         assert_eq!(
-            with_state(conn, |st| st.shop.profit_sell).unwrap(),
+            with_state(&mut g, conn, |st| st.shop.profit_sell).unwrap(),
             1.25,
             "garbage must not zero the rate"
         );
-        take_state(conn);
+        take_state(&mut g, conn);
         let _ = std::fs::remove_dir_all(lib);
     }
 }

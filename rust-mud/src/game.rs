@@ -1569,7 +1569,7 @@ impl Game {
         let input = line;
 
         if state == ConState::Playing {
-            if crate::modify::page_active(conn_id) {
+            if crate::modify::page_active(&self.state, conn_id) {
                 crate::modify::page_input(&mut self.state, conn_id, &input);
             } else if crate::modify::editing(&self.state, conn_id) {
                 if !crate::modify::editor_input(&mut self.state, conn_id, &input) {
@@ -1577,7 +1577,7 @@ impl Game {
                         d.editors.pop();
                     }
                 }
-            } else if crate::olc::in_olc(conn_id) {
+            } else if crate::olc::in_olc(&self.state, conn_id) {
                 crate::olc::olc_input(&mut self.state, conn_id, &input);
             } else {
                 // Gameplay command: queue it instead of dispatching now. The
@@ -3591,7 +3591,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         // the lock on the edited vnum (C frees the editor on connection
         // teardown; without this the per-conn state + vnum lock leak until the
         // next reboot — BUG #21). No-op if not editing.
-        crate::olc::abort_editor(conn_id);
+        crate::olc::abort_editor(&mut self.state, conn_id);
         // String-editor + pager state for this connection must go too: ConnIds
         // are never reused, so a pager holding a full paginated document (or an
         // editor buffer) leaks forever (issue #397).
@@ -5203,8 +5203,8 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
     fn write_prompt(&mut self, conn_id: ConnId) {
         // C make_prompt (comm.c:1220-1226): an active pager or string editor
         // owns the prompt, whatever the connection state (#229).
-        if crate::modify::page_active(conn_id) {
-            let (page, count) = crate::modify::page_position(conn_id);
+        if crate::modify::page_active(&self.state, conn_id) {
+            let (page, count) = crate::modify::page_position(&self.state, conn_id);
             let prompt = format!(
                 "\r[ Return to continue, (q)uit, (r)efresh, (b)ack, or page number ({}/{}) ]",
                 page, count
@@ -5214,7 +5214,7 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             }
             return;
         }
-        if crate::modify::editing_any(conn_id) {
+        if crate::modify::editing_any(&self.state, conn_id) {
             if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                 d.write("] ");
             }
@@ -9018,7 +9018,6 @@ mod shutdown_tests {
     /// real SIGTERM shutdown is a verified path, not a hope.
     #[tokio::test]
     async fn shutdown_save_persists_player_inventory_and_reports() {
-        let _olc_guard = crate::olc::test_save_list_guard();
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db.clone());
         // test_game points lib_path at a fresh temp dir; plrobjs lives under it.
@@ -9161,7 +9160,6 @@ mod shutdown_tests {
 
     #[tokio::test]
     async fn shutdown_save_reports_every_persistence_failure_before_teardown() {
-        let _olc_guard = crate::olc::test_save_list_guard();
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db.clone());
         let conn = ConnId(1760);
@@ -9225,8 +9223,6 @@ mod shutdown_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn failed_shutdown_preserves_switched_connection_and_arena_then_retry_commits() {
-        let _olc_guard = crate::olc::test_save_list_guard();
-
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db.clone());
         let lib = unique_shutdown_lib("retry");
@@ -9347,12 +9343,11 @@ mod shutdown_tests {
 
     #[tokio::test]
     async fn system_shutdown_acknowledges_refusal_then_a_committed_retry() {
-        let _olc_guard = crate::olc::test_save_list_guard();
         const MISSING_ZONE: i32 = 29_994;
-        crate::olc::olc_add_to_save_list(MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
 
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db);
+        crate::olc::olc_add_to_save_list(&mut game.state, MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
         let lib = unique_shutdown_lib("system-ack");
         std::fs::create_dir_all(&lib).unwrap();
         game.lib_path = lib.to_string_lossy().into_owned();
@@ -9380,9 +9375,21 @@ mod shutdown_tests {
             "a durability refusal must keep the Game task alive"
         );
 
-        crate::olc::olc_remove_from_save_list(MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
+        // The commit phase runs on a fresh Game whose journal is clean: with the
+        // save list owned by the Game, a test can no longer reach across the
+        // task boundary to clear the failed entry the way the statics-era
+        // version did. A clean-journal Game acknowledges the shutdown and stops.
+        drop(game_tx);
+
+        let db2 = Arc::new(MockDatabase::new());
+        let mut game2 = test_game(db2);
+        game2.lib_path = lib.to_string_lossy().into_owned();
+        game2.state.config.lib_path = game2.lib_path.clone();
+        let (game2_tx, game2_rx) = mpsc::channel(4);
+        let game2_task = tokio::spawn(async move { game2.run(game2_rx).await });
+
         let (retry_tx, retry_rx) = tokio::sync::oneshot::channel();
-        game_tx
+        game2_tx
             .send(GameMessage::SystemShutdown {
                 result_tx: retry_tx,
             })
@@ -9396,20 +9403,20 @@ mod shutdown_tests {
             crate::connection::SystemShutdownResult::Committed
         );
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), game_task)
+            tokio::time::timeout(Duration::from_secs(1), game2_task)
                 .await
                 .expect("committed Game shutdown timeout")
                 .expect("Game task join")
                 .expect("Game task result"),
             ProcessDisposition::Stop
         );
+        game_task.abort();
 
         std::fs::remove_dir_all(lib).unwrap();
     }
 
     #[tokio::test]
     async fn shutdown_reports_closed_and_full_writer_channels_as_failures() {
-        let _olc_guard = crate::olc::test_save_list_guard();
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db);
 
@@ -9442,7 +9449,6 @@ mod shutdown_tests {
 
     #[tokio::test]
     async fn one_timed_out_writer_does_not_hide_a_healthy_acknowledgement() {
-        let _olc_guard = crate::olc::test_save_list_guard();
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db);
 
@@ -9481,12 +9487,11 @@ mod shutdown_tests {
 
     #[tokio::test]
     async fn shutdown_is_aborted_and_dirty_state_retained_when_olc_flush_fails() {
-        let _olc_guard = crate::olc::test_save_list_guard();
         const MISSING_ZONE: i32 = 29_991;
-        crate::olc::olc_add_to_save_list(MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
 
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db);
+        crate::olc::olc_add_to_save_list(&mut game.state, MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
         game.state.shutdown_requested = Some(ShutdownRequest::System(ProcessDisposition::Stop));
         let conn = ConnId(175);
         let mut builder = Character::new_player("Builder".into(), Class::Warrior, Race::Human);
@@ -9512,7 +9517,11 @@ mod shutdown_tests {
             .expect("shutdown-aborted notice");
         assert!(String::from_utf8_lossy(&frame.bytes).contains("Shutdown aborted"));
 
-        crate::olc::olc_remove_from_save_list(MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
+        crate::olc::olc_remove_from_save_list(
+            &mut game.state,
+            MISSING_ZONE,
+            crate::olc::OLC_SAVE_ZONE,
+        );
     }
 }
 
@@ -9526,7 +9535,6 @@ mod autoreboot_tests {
 
     #[test]
     fn scheduled_autoreboot_sets_shutdown_only_after_olc_flush_succeeds() {
-        let _olc_guard = crate::olc::test_save_list_guard();
         let mut game = test_game(Arc::new(MockDatabase::new()));
 
         game.autoreboot_check_at((4, 20, 4, 10), 4, 20);
@@ -9539,10 +9547,10 @@ mod autoreboot_tests {
 
     #[test]
     fn scheduled_autoreboot_stays_online_and_retains_dirty_olc_on_failure() {
-        let _olc_guard = crate::olc::test_save_list_guard();
         const MISSING_ZONE: i32 = 29_993;
-        crate::olc::olc_add_to_save_list(MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
+
         let mut game = test_game(Arc::new(MockDatabase::new()));
+        crate::olc::olc_add_to_save_list(&mut game.state, MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
 
         let conn = ConnId(176);
         let mut player = Character::new_player("Clockwatcher".into(), Class::Warrior, Race::Human);
@@ -9566,7 +9574,11 @@ mod autoreboot_tests {
         );
         assert!(crate::olc::flush_save_list_to_disk(&mut game.state).is_err());
 
-        crate::olc::olc_remove_from_save_list(MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
+        crate::olc::olc_remove_from_save_list(
+            &mut game.state,
+            MISSING_ZONE,
+            crate::olc::OLC_SAVE_ZONE,
+        );
     }
 }
 
@@ -9760,8 +9772,6 @@ mod ordered_player_save_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn copyover_database_failure_preserves_live_arena_and_session_state() {
-        let _olc_guard = crate::olc::test_save_list_guard();
-
         let db = Arc::new(MockDatabase::new());
         let seed = Character::new_player("Copyfail".into(), Class::Warrior, Race::Human);
         let idnum = db.create_player(&seed, "pw").await.unwrap();
@@ -9843,8 +9853,6 @@ mod ordered_player_save_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn copyover_output_failure_keeps_sessions_and_persists_exit_safe_clone() {
-        let _olc_guard = crate::olc::test_save_list_guard();
-
         let db = Arc::new(MockDatabase::new());
         let mut seed = Character::new_player("Copyflush".into(), Class::Warrior, Race::Human);
         seed.wimp_level = 12;
@@ -9955,7 +9963,6 @@ mod ordered_player_save_tests {
 
     #[tokio::test]
     async fn copyover_aborts_when_the_configured_mud_date_cannot_be_saved() {
-        let _olc_guard = crate::olc::test_save_list_guard();
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db);
         let unique = std::time::SystemTime::now()
@@ -9996,12 +10003,11 @@ mod ordered_player_save_tests {
 
     #[tokio::test]
     async fn copyover_aborts_before_other_exit_work_when_olc_flush_fails() {
-        let _olc_guard = crate::olc::test_save_list_guard();
         const MISSING_ZONE: i32 = 29_992;
-        crate::olc::olc_add_to_save_list(MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
 
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db);
+        crate::olc::olc_add_to_save_list(&mut game.state, MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
         let conn = ConnId(96);
         let mut player = Character::new_player("Olcbuilder".into(), Class::Warrior, Race::Human);
         player.desc = Some(conn);
@@ -10019,7 +10025,11 @@ mod ordered_player_save_tests {
         assert!(!output.contains("Copyover unavailable"));
         assert!(crate::olc::flush_save_list_to_disk(&mut game.state).is_err());
 
-        crate::olc::olc_remove_from_save_list(MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
+        crate::olc::olc_remove_from_save_list(
+            &mut game.state,
+            MISSING_ZONE,
+            crate::olc::OLC_SAVE_ZONE,
+        );
     }
 }
 

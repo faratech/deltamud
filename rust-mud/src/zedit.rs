@@ -8,12 +8,12 @@
 //     is given (the room the player is in, if no arg). It snapshots that
 //     zone's header AND every reset command relating to that room into a
 //     per-connection `ZeditState`, registers via
-//     `olc::set_active(conn, EditorKind::Zedit)`, and shows the main menu.
+//     `olc::set_active(g, conn, EditorKind::Zedit)`, and shows the main menu.
 //   * `zedit_parse(g, conn, line)` is the per-line handler the OLC router calls.
 //   * On save the editor splices the edited room's commands back into the
 //     zone's full command list, updates the zone header, writes the result
 //     into `GameState::zones`, rewrites the on-disk `<zone>.zon` file byte-
-//     faithfully, and calls `olc::clear_active(conn)`.
+//     faithfully, and calls `olc::clear_active(g, conn)`.
 //
 // CircleMUD's zedit edits exactly the reset commands that *relate to the room*
 // being edited (load mob/obj into it, give/equip on the last-loaded mob, put
@@ -32,8 +32,6 @@ use crate::state::GameState;
 use crate::types::*;
 use crate::world::{MAX_ZONE_NUMBER, ResetCmd, zone_vnum_bounds};
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
 // Constants mirrored from olc.h / structs.h.
@@ -118,7 +116,7 @@ struct ZoneHdr {
     cmds_changed: bool,
 }
 
-struct ZeditState {
+pub struct ZeditState {
     room_vnum: RoomVnum, // the room whose commands are being edited
     zone_number: i32,
     zone_index: usize, // index into GameState::zones
@@ -130,17 +128,19 @@ struct ZeditState {
     trust_of_editor: i32,
 }
 
-fn states() -> &'static Mutex<HashMap<ConnId, ZeditState>> {
-    static S: OnceLock<Mutex<HashMap<ConnId, ZeditState>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 /// abort: drop this conn's editor state without saving (player disconnected
 /// mid-edit), releasing the per-conn working copy. `olc::abort_editor` clears
 /// active.
-pub fn abort(conn: ConnId) {
-    if let Some(state) = crate::lock_ok::lock(&states()).remove(&conn) {
-        olc::discard_unresolved_save(EditorKind::Zedit, state.zone_number);
+fn states(g: &GameState) -> &HashMap<ConnId, ZeditState> {
+    &g.olc.zedit_states
+}
+fn states_mut(g: &mut GameState) -> &mut HashMap<ConnId, ZeditState> {
+    &mut g.olc.zedit_states
+}
+
+pub fn abort(g: &mut GameState, conn: ConnId) {
+    if let Some(state) = states_mut(g).remove(&conn) {
+        olc::discard_unresolved_save(g, EditorKind::Zedit, state.zone_number);
     }
 }
 
@@ -322,7 +322,7 @@ pub fn do_zedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         trust_of_editor: authority,
     };
     // C olc.c:198-212 (#272): key on the zone being edited.
-    if crate::lock_ok::lock(&states())
+    if states_mut(g)
         .values()
         .any(|s| s.zone_number == st.zone_number)
     {
@@ -332,8 +332,8 @@ pub fn do_zedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         );
         return;
     }
-    crate::lock_ok::lock(&states()).insert(conn, st);
-    olc::set_active(conn, EditorKind::Zedit);
+    states_mut(g).insert(conn, st);
+    olc::set_active(g, conn, EditorKind::Zedit);
     // C olc.c:381-382 (#273).
     if let Some(cid) = editor_char(g, conn) {
         if let Some(c) = g.get_char_mut(cid) {
@@ -440,7 +440,7 @@ fn filter_room_cmds(cmds: &[RawCmd], room_vnum: RoomVnum, keep: bool) -> Vec<Raw
 // ===========================================================================
 
 fn disp_menu(g: &mut GameState, conn: ConnId) {
-    let st = match snapshot(conn) {
+    let st = match snapshot(g, conn) {
         Some(s) => s,
         None => return,
     };
@@ -503,7 +503,7 @@ fn disp_menu(g: &mut GameState, conn: ConnId) {
         counter
     ));
     send(g, conn, &buf);
-    set_mode(conn, Mode::MainMenu);
+    set_mode(g, conn, Mode::MainMenu);
 }
 
 /// Human-readable line for one reset command (CircleMUD zedit_disp_menu cases).
@@ -596,11 +596,11 @@ fn disp_comtype(g: &mut GameState, conn: ConnId) {
          &gR&n) Remove an object from the room\r\n\
          What sort of command will this be? : ",
     );
-    set_mode(conn, Mode::CommandType);
+    set_mode(g, conn, Mode::CommandType);
 }
 
 fn disp_levels(g: &mut GameState, conn: ConnId) {
-    let st = match snapshot(conn) {
+    let st = match snapshot(g, conn) {
         Some(s) => s,
         None => return,
     };
@@ -612,25 +612,26 @@ fn disp_levels(g: &mut GameState, conn: ConnId) {
         st.hdr.lvl1, st.hdr.lvl2
     );
     send(g, conn, &buf);
-    set_mode(conn, Mode::Levels);
+    set_mode(g, conn, Mode::Levels);
 }
 
 // ---- arg-prompt dispatch (CircleMUD zedit_disp_arg{1,2,3,4}) --------------
 
 fn disp_arg1(g: &mut GameState, conn: ConnId) {
-    let cmd = cur_cmd_letter(conn);
+    let cmd = cur_cmd_letter(g, conn);
     match cmd {
         'M' => {
             send(g, conn, "Input mob's vnum : ");
-            set_mode(conn, Mode::Arg1);
+            set_mode(g, conn, Mode::Arg1);
         }
         'O' | 'E' | 'P' | 'G' => {
             send(g, conn, "Input object vnum : ");
-            set_mode(conn, Mode::Arg1);
+            set_mode(g, conn, Mode::Arg1);
         }
         'D' | 'R' => {
             // arg1 is the room number (this room); skip straight to arg2.
-            with_cur(conn, |c| c.arg1 = state_room(conn));
+            let room_vnum = state_room(g, conn);
+            with_cur(g, conn, |c| c.arg1 = room_vnum);
             disp_arg2(g, conn);
         }
         _ => log::warn!("SYSERR: OLC: zedit_parse(): invalid command state"),
@@ -638,7 +639,7 @@ fn disp_arg1(g: &mut GameState, conn: ConnId) {
 }
 
 fn disp_arg2(g: &mut GameState, conn: ConnId) {
-    let cmd = cur_cmd_letter(conn);
+    let cmd = cur_cmd_letter(g, conn);
     match cmd {
         'M' | 'O' | 'E' | 'P' | 'G' => {
             send(
@@ -662,11 +663,11 @@ fn disp_arg2(g: &mut GameState, conn: ConnId) {
         }
         _ => log::warn!("SYSERR: OLC: zedit_parse(): invalid command state"),
     }
-    set_mode(conn, Mode::Arg2);
+    set_mode(g, conn, Mode::Arg2);
 }
 
 fn disp_arg3(g: &mut GameState, conn: ConnId) {
-    let cmd = cur_cmd_letter(conn);
+    let cmd = cur_cmd_letter(g, conn);
     match cmd {
         'E' => {
             let mut out = String::new();
@@ -706,11 +707,11 @@ fn disp_arg3(g: &mut GameState, conn: ConnId) {
         ),
         _ => log::warn!("SYSERR: OLC: zedit_parse(): invalid command state"),
     }
-    set_mode(conn, Mode::Arg3);
+    set_mode(g, conn, Mode::Arg3);
 }
 
 fn disp_arg4(g: &mut GameState, conn: ConnId) {
-    let cmd = cur_cmd_letter(conn);
+    let cmd = cur_cmd_letter(g, conn);
     match cmd {
         'E' | 'M' | 'O' | 'P' => {
             send(
@@ -718,7 +719,7 @@ fn disp_arg4(g: &mut GameState, conn: ConnId) {
                 conn,
                 "Give the percentage chance that this event should happen: ",
             );
-            set_mode(conn, Mode::Arg4);
+            set_mode(g, conn, Mode::Arg4);
         }
         _ => log::warn!("SYSERR: OLC: zedit_parse(): invalid command state"),
     }
@@ -759,47 +760,40 @@ fn equipment_name(i: i32) -> &'static str {
 // State helpers.
 // ===========================================================================
 
-fn snapshot(conn: ConnId) -> Option<ZeditState> {
-    crate::lock_ok::lock(&states())
-        .get(&conn)
-        .map(|s| ZeditState {
-            room_vnum: s.room_vnum,
-            zone_number: s.zone_number,
-            zone_index: s.zone_index,
-            authorization: s.authorization,
-            hdr: s.hdr.clone(),
-            cmds: s.cmds.clone(),
-            mode: s.mode,
-            cur: s.cur,
-            trust_of_editor: s.trust_of_editor,
-        })
+fn snapshot(g: &mut GameState, conn: ConnId) -> Option<ZeditState> {
+    states_mut(g).get(&conn).map(|s| ZeditState {
+        room_vnum: s.room_vnum,
+        zone_number: s.zone_number,
+        zone_index: s.zone_index,
+        authorization: s.authorization,
+        hdr: s.hdr.clone(),
+        cmds: s.cmds.clone(),
+        mode: s.mode,
+        cur: s.cur,
+        trust_of_editor: s.trust_of_editor,
+    })
 }
 
-fn set_mode(conn: ConnId, mode: Mode) {
-    if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+fn set_mode(g: &mut GameState, conn: ConnId, mode: Mode) {
+    if let Some(s) = states_mut(g).get_mut(&conn) {
         s.mode = mode;
     }
 }
 
-fn state_room(conn: ConnId) -> RoomVnum {
-    states()
-        .lock()
-        .unwrap()
-        .get(&conn)
-        .map(|s| s.room_vnum)
-        .unwrap_or(0)
+fn state_room(g: &mut GameState, conn: ConnId) -> RoomVnum {
+    states_mut(g).get(&conn).map(|s| s.room_vnum).unwrap_or(0)
 }
 
-fn cur_cmd_letter(conn: ConnId) -> char {
-    let g = crate::lock_ok::lock(&states());
+fn cur_cmd_letter(g: &mut GameState, conn: ConnId) -> char {
+    let g = states_mut(g);
     g.get(&conn)
         .and_then(|s| s.cmds.get(s.cur))
         .map(|c| c.command)
         .unwrap_or('\0')
 }
 
-fn with_cur<F: FnOnce(&mut RawCmd)>(conn: ConnId, f: F) {
-    let mut g = crate::lock_ok::lock(&states());
+fn with_cur<F: FnOnce(&mut RawCmd)>(g: &mut GameState, conn: ConnId, f: F) {
+    let g = states_mut(g);
     if let Some(s) = g.get_mut(&conn) {
         let cur = s.cur;
         if let Some(c) = s.cmds.get_mut(cur) {
@@ -808,13 +802,13 @@ fn with_cur<F: FnOnce(&mut RawCmd)>(conn: ConnId, f: F) {
     }
 }
 
-fn mark_cmds_changed(conn: ConnId) {
-    if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+fn mark_cmds_changed(g: &mut GameState, conn: ConnId) {
+    if let Some(s) = states_mut(g).get_mut(&conn) {
         s.hdr.cmds_changed = true;
     }
 }
-fn mark_header_changed(conn: ConnId) {
-    if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+fn mark_header_changed(g: &mut GameState, conn: ConnId) {
+    if let Some(s) = states_mut(g).get_mut(&conn) {
         s.hdr.header_changed = true;
     }
 }
@@ -824,10 +818,10 @@ fn mark_header_changed(conn: ConnId) {
 // ===========================================================================
 
 pub fn zedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
-    let mode = match crate::lock_ok::lock(&states()).get(&conn) {
+    let mode = match states_mut(g).get(&conn) {
         Some(s) => s.mode,
         None => {
-            olc::clear_active(conn);
+            olc::clear_active(g, conn);
             return;
         }
     };
@@ -861,17 +855,13 @@ pub fn zedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
 // ---- Main menu ------------------------------------------------------------
 
 fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
-    let authority = states()
-        .lock()
-        .unwrap()
+    let authority = states_mut(g)
         .get(&conn)
         .map(|s| s.trust_of_editor)
         .unwrap_or(-1);
     match line.trim().chars().next().unwrap_or('\0') {
         'q' | 'Q' => {
-            let (cmds_changed, header_changed) = states()
-                .lock()
-                .unwrap()
+            let (cmds_changed, header_changed) = states_mut(g)
                 .get(&conn)
                 .map(|s| (s.hdr.cmds_changed, s.hdr.header_changed))
                 .unwrap_or((false, false));
@@ -881,7 +871,7 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
                     conn,
                     "Do you wish to save the changes to the zone info? (y/n) : ",
                 );
-                set_mode(conn, Mode::ConfirmSave);
+                set_mode(g, conn, Mode::ConfirmSave);
             } else {
                 send(g, conn, "No changes made.\r\n");
                 finish(g, conn);
@@ -893,26 +883,26 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
                 conn,
                 "What number in the list should the new command be? : ",
             );
-            set_mode(conn, Mode::NewEntry);
+            set_mode(g, conn, Mode::NewEntry);
         }
         'e' | 'E' => {
             send(g, conn, "Which command do you wish to change? : ");
-            set_mode(conn, Mode::ChangeEntry);
+            set_mode(g, conn, Mode::ChangeEntry);
         }
         'd' | 'D' => {
             send(g, conn, "Which command do you wish to delete? : ");
-            set_mode(conn, Mode::DeleteEntry);
+            set_mode(g, conn, Mode::DeleteEntry);
         }
         'z' | 'Z' => {
             send(g, conn, "Enter new zone name : ");
-            set_mode(conn, Mode::ZoneName);
+            set_mode(g, conn, Mode::ZoneName);
         }
         't' | 'T' => {
             if authority != i32::from(LVL_IMPL) {
                 disp_menu(g, conn);
             } else {
                 send(g, conn, "Enter new top of zone : ");
-                set_mode(conn, Mode::ZoneTop);
+                set_mode(g, conn, Mode::ZoneTop);
             }
         }
         'a' | 'A' => {
@@ -920,13 +910,13 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
                 disp_menu(g, conn);
             } else {
                 send(g, conn, "Approve this zone? ");
-                set_mode(conn, Mode::Approve);
+                set_mode(g, conn, Mode::Approve);
             }
         }
         'v' | 'V' => disp_levels(g, conn),
         'l' | 'L' => {
             send(g, conn, "Enter new zone lifespan : ");
-            set_mode(conn, Mode::ZoneLife);
+            set_mode(g, conn, Mode::ZoneLife);
         }
         'r' | 'R' => {
             send(
@@ -934,7 +924,7 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
                 conn,
                 "\r\n0) Never reset\r\n1) Reset only when no players in zone\r\n2) Normal reset\r\nEnter new zone reset type : ",
             );
-            set_mode(conn, Mode::ZoneReset);
+            set_mode(g, conn, Mode::ZoneReset);
         }
         'b' | 'B' => {
             if authority != i32::from(LVL_IMPL) {
@@ -946,12 +936,12 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
                 disp_menu(g, conn);
             } else {
                 send(g, conn, "Enter new zone builders : ");
-                set_mode(conn, Mode::ZoneBuilders);
+                set_mode(g, conn, Mode::ZoneBuilders);
             }
         }
         'c' | 'C' => {
             send(g, conn, "Which command? ");
-            set_mode(conn, Mode::Prob);
+            set_mode(g, conn, Mode::Prob);
         }
         _ => disp_menu(g, conn),
     }
@@ -962,10 +952,10 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
 fn parse_new_entry(g: &mut GameState, conn: ConnId, line: &str) {
     let t = line.trim();
     if let Ok(pos) = t.parse::<usize>() {
-        if new_command(conn, pos) {
+        if new_command(g, conn, pos) {
             // start change at pos
-            with_state(conn, |s| s.cur = pos);
-            mark_cmds_changed(conn);
+            with_state(g, conn, |s| s.cur = pos);
+            mark_cmds_changed(g, conn);
             disp_comtype(g, conn);
             return;
         }
@@ -976,8 +966,8 @@ fn parse_new_entry(g: &mut GameState, conn: ConnId, line: &str) {
 fn parse_delete_entry(g: &mut GameState, conn: ConnId, line: &str) {
     let t = line.trim();
     if let Ok(pos) = t.parse::<usize>() {
-        delete_command(conn, pos);
-        mark_cmds_changed(conn);
+        delete_command(g, conn, pos);
+        mark_cmds_changed(g, conn);
     }
     disp_menu(g, conn);
 }
@@ -985,8 +975,8 @@ fn parse_delete_entry(g: &mut GameState, conn: ConnId, line: &str) {
 fn parse_change_entry(g: &mut GameState, conn: ConnId, line: &str) {
     let t = line.trim();
     if let Ok(pos) = t.parse::<usize>() {
-        if start_change_command(conn, pos) {
-            mark_cmds_changed(conn);
+        if start_change_command(g, conn, pos) {
+            mark_cmds_changed(g, conn);
             disp_comtype(g, conn);
             return;
         }
@@ -996,8 +986,8 @@ fn parse_change_entry(g: &mut GameState, conn: ConnId, line: &str) {
 
 /// Insert a new blank command at `pos` (CircleMUD new_command). Returns false
 /// if pos is out of range.
-fn new_command(conn: ConnId, pos: usize) -> bool {
-    let mut g = crate::lock_ok::lock(&states());
+fn new_command(g: &mut GameState, conn: ConnId, pos: usize) -> bool {
+    let g = states_mut(g);
     let s = match g.get_mut(&conn) {
         Some(s) => s,
         None => return false,
@@ -1010,8 +1000,8 @@ fn new_command(conn: ConnId, pos: usize) -> bool {
 }
 
 /// Delete command at `pos` if in range (CircleMUD delete_command).
-fn delete_command(conn: ConnId, pos: usize) {
-    let mut g = crate::lock_ok::lock(&states());
+fn delete_command(g: &mut GameState, conn: ConnId, pos: usize) {
+    let g = states_mut(g);
     if let Some(s) = g.get_mut(&conn) {
         if pos < s.cmds.len() {
             s.cmds.remove(pos);
@@ -1020,8 +1010,8 @@ fn delete_command(conn: ConnId, pos: usize) {
 }
 
 /// Set the "current" command index to pos if valid (CircleMUD start_change_command).
-fn start_change_command(conn: ConnId, pos: usize) -> bool {
-    let mut g = crate::lock_ok::lock(&states());
+fn start_change_command(g: &mut GameState, conn: ConnId, pos: usize) -> bool {
+    let g = states_mut(g);
     let s = match g.get_mut(&conn) {
         Some(s) => s,
         None => return false,
@@ -1046,31 +1036,26 @@ fn parse_command_type(g: &mut GameState, conn: ConnId, line: &str) {
         send(g, conn, "Invalid choice, try again : ");
         return;
     }
-    with_cur(conn, |cmd| cmd.command = c);
+    with_cur(g, conn, |cmd| cmd.command = c);
     // If there is a previous command in the list, offer the if-flag chaining.
-    let cur = states()
-        .lock()
-        .unwrap()
-        .get(&conn)
-        .map(|s| s.cur)
-        .unwrap_or(0);
+    let cur = states_mut(g).get(&conn).map(|s| s.cur).unwrap_or(0);
     if cur > 0 {
         send(
             g,
             conn,
             "Is this command dependent on the success of the previous one? (y/n)\r\n",
         );
-        set_mode(conn, Mode::IfFlag);
+        set_mode(g, conn, Mode::IfFlag);
     } else {
-        with_cur(conn, |cmd| cmd.if_flag = 0);
+        with_cur(g, conn, |cmd| cmd.if_flag = 0);
         disp_arg1(g, conn);
     }
 }
 
 fn parse_if_flag(g: &mut GameState, conn: ConnId, line: &str) {
     match line.trim().chars().next().unwrap_or('\0') {
-        'y' | 'Y' => with_cur(conn, |c| c.if_flag = 1),
-        'n' | 'N' => with_cur(conn, |c| c.if_flag = 0),
+        'y' | 'Y' => with_cur(g, conn, |c| c.if_flag = 1),
+        'n' | 'N' => with_cur(g, conn, |c| c.if_flag = 0),
         _ => {
             send(g, conn, "Try again : ");
             return;
@@ -1090,7 +1075,7 @@ fn parse_arg1(g: &mut GameState, conn: ConnId, line: &str) {
     let Some(vnum) = olc_atoi(g, conn, t) else {
         return;
     };
-    let cmd = cur_cmd_letter(conn);
+    let cmd = cur_cmd_letter(g, conn);
     let ch = char_for_conn(g, conn);
     match cmd {
         'M' => {
@@ -1108,7 +1093,7 @@ fn parse_arg1(g: &mut GameState, conn: ConnId, line: &str) {
                 return;
             }
             if g.mob_protos.contains_key(&vnum) {
-                with_cur(conn, |c| c.arg1 = vnum);
+                with_cur(g, conn, |c| c.arg1 = vnum);
                 disp_arg2(g, conn);
             } else {
                 send(g, conn, "That mobile does not exist, try again : ");
@@ -1123,7 +1108,7 @@ fn parse_arg1(g: &mut GameState, conn: ConnId, line: &str) {
                     send(g, conn, "You do not have permission to edit this zone.\r\n");
                     return;
                 }
-                with_cur(conn, |c| c.arg1 = vnum);
+                with_cur(g, conn, |c| c.arg1 = vnum);
                 disp_arg2(g, conn);
             } else {
                 send(g, conn, "That object does not exist, try again : ");
@@ -1142,18 +1127,18 @@ fn parse_arg2(g: &mut GameState, conn: ConnId, line: &str) {
     let Some(val) = olc_atoi(g, conn, t) else {
         return;
     };
-    let cmd = cur_cmd_letter(conn);
+    let cmd = cur_cmd_letter(g, conn);
     match cmd {
         'M' | 'O' => {
-            let room = state_room(conn);
-            with_cur(conn, |c| {
+            let room = state_room(g, conn);
+            with_cur(g, conn, |c| {
                 c.arg2 = val;
                 c.arg3 = room;
             });
             disp_arg4(g, conn);
         }
         'G' | 'P' | 'E' => {
-            with_cur(conn, |c| c.arg2 = val);
+            with_cur(g, conn, |c| c.arg2 = val);
             disp_arg3(g, conn);
         }
         'D' => {
@@ -1165,13 +1150,13 @@ fn parse_arg2(g: &mut GameState, conn: ConnId, line: &str) {
             if val < 0 || val as usize > maxdir {
                 send(g, conn, "Try again : ");
             } else {
-                with_cur(conn, |c| c.arg2 = val);
+                with_cur(g, conn, |c| c.arg2 = val);
                 disp_arg3(g, conn);
             }
         }
         'R' => {
             if g.obj_protos.contains_key(&val) {
-                with_cur(conn, |c| c.arg2 = val);
+                with_cur(g, conn, |c| c.arg2 = val);
                 disp_menu(g, conn);
             } else {
                 send(g, conn, "That object does not exist, try again : ");
@@ -1190,7 +1175,7 @@ fn parse_arg3(g: &mut GameState, conn: ConnId, line: &str) {
     let Some(val) = olc_atoi(g, conn, t) else {
         return;
     };
-    let cmd = cur_cmd_letter(conn);
+    let cmd = cur_cmd_letter(g, conn);
     match cmd {
         'E' => {
             let mut maxpos = 0;
@@ -1200,13 +1185,13 @@ fn parse_arg3(g: &mut GameState, conn: ConnId, line: &str) {
             if val < 0 || val as usize > maxpos {
                 send(g, conn, "Try again : ");
             } else {
-                with_cur(conn, |c| c.arg3 = val);
+                with_cur(g, conn, |c| c.arg3 = val);
                 disp_menu(g, conn);
             }
         }
         'P' => {
             if g.obj_protos.contains_key(&val) {
-                with_cur(conn, |c| c.arg3 = val);
+                with_cur(g, conn, |c| c.arg3 = val);
                 disp_arg4(g, conn);
             } else {
                 send(g, conn, "That object does not exist, try again : ");
@@ -1216,17 +1201,17 @@ fn parse_arg3(g: &mut GameState, conn: ConnId, line: &str) {
             if !(0..=2).contains(&val) {
                 send(g, conn, "Try again : ");
             } else {
-                with_cur(conn, |c| c.arg3 = val);
+                with_cur(g, conn, |c| c.arg3 = val);
                 disp_menu(g, conn);
             }
         }
         'M' | 'O' | 'G' => {
             // Load-chance: 100 -> 0 (always), 1..99 stored directly.
             if val == 100 {
-                with_cur(conn, |c| c.arg3 = 0);
+                with_cur(g, conn, |c| c.arg3 = 0);
                 disp_menu(g, conn);
             } else if val > 0 && val < 100 {
-                with_cur(conn, |c| c.arg3 = val);
+                with_cur(g, conn, |c| c.arg3 = val);
                 disp_menu(g, conn);
             } else {
                 send(g, conn, "Give a number between 0 and 100. Try again: ");
@@ -1245,14 +1230,14 @@ fn parse_arg4(g: &mut GameState, conn: ConnId, line: &str) {
     let Some(val) = olc_atoi(g, conn, t) else {
         return;
     };
-    let cmd = cur_cmd_letter(conn);
+    let cmd = cur_cmd_letter(g, conn);
     match cmd {
         'E' | 'M' | 'O' | 'P' => {
             if val == 100 {
-                with_cur(conn, |c| c.arg4 = 0);
+                with_cur(g, conn, |c| c.arg4 = 0);
                 disp_menu(g, conn);
             } else if val > 0 && val < 100 {
-                with_cur(conn, |c| c.arg4 = 101 - val);
+                with_cur(g, conn, |c| c.arg4 = 101 - val);
                 disp_menu(g, conn);
             } else {
                 send(g, conn, "Give a number between 1 and 100. Try again: ");
@@ -1267,10 +1252,10 @@ fn parse_arg4(g: &mut GameState, conn: ConnId, line: &str) {
 fn parse_prob(g: &mut GameState, conn: ConnId, line: &str) {
     let t = line.trim();
     if let Ok(pos) = t.parse::<usize>() {
-        if start_change_command(conn, pos) {
-            mark_cmds_changed(conn);
+        if start_change_command(g, conn, pos) {
+            mark_cmds_changed(g, conn);
             send(g, conn, "Chance of loading (0-100) : ");
-            set_mode(conn, Mode::Prob2);
+            set_mode(g, conn, Mode::Prob2);
             return;
         }
     }
@@ -1283,21 +1268,21 @@ fn parse_prob2(g: &mut GameState, conn: ConnId, line: &str) {
         return;
     };
     let val = val.clamp(0, 100);
-    with_cur(conn, |c| c.arg4 = val);
+    with_cur(g, conn, |c| c.arg4 = val);
     disp_menu(g, conn);
 }
 
 // ---- Header fields --------------------------------------------------------
 
 fn parse_zone_name(g: &mut GameState, conn: ConnId, line: &str) {
-    with_state(conn, |s| s.hdr.name = line.trim().to_string());
-    mark_header_changed(conn);
+    with_state(g, conn, |s| s.hdr.name = line.trim().to_string());
+    mark_header_changed(g, conn);
     disp_menu(g, conn);
 }
 
 fn parse_zone_builders(g: &mut GameState, conn: ConnId, line: &str) {
-    with_state(conn, |s| s.hdr.builders = line.trim().to_string());
-    mark_header_changed(conn);
+    with_state(g, conn, |s| s.hdr.builders = line.trim().to_string());
+    mark_header_changed(g, conn);
     disp_menu(g, conn);
 }
 
@@ -1306,7 +1291,7 @@ fn parse_zone_top(g: &mut GameState, conn: ConnId, line: &str) {
         return;
     };
     let (zone_index, zone_number) = {
-        let st = crate::lock_ok::lock(&states());
+        let st = states_mut(g);
         match st.get(&conn) {
             Some(s) => (s.zone_index, s.zone_number),
             None => return,
@@ -1327,8 +1312,8 @@ fn parse_zone_top(g: &mut GameState, conn: ConnId, line: &str) {
         Some(u) => val.max(lower).min(u),
         None => val.max(lower),
     };
-    with_state(conn, |s| s.hdr.top = new_top);
-    mark_header_changed(conn);
+    with_state(g, conn, |s| s.hdr.top = new_top);
+    mark_header_changed(g, conn);
     disp_menu(g, conn);
 }
 
@@ -1341,8 +1326,8 @@ fn parse_zone_life(g: &mut GameState, conn: ConnId, line: &str) {
         send(g, conn, "Try again (0-240) : ");
         return;
     }
-    with_state(conn, |s| s.hdr.lifespan = val);
-    mark_header_changed(conn);
+    with_state(g, conn, |s| s.hdr.lifespan = val);
+    mark_header_changed(g, conn);
     disp_menu(g, conn);
 }
 
@@ -1355,8 +1340,8 @@ fn parse_zone_reset(g: &mut GameState, conn: ConnId, line: &str) {
         send(g, conn, "Try again (0-2) : ");
         return;
     }
-    with_state(conn, |s| s.hdr.reset_mode = val);
-    mark_header_changed(conn);
+    with_state(g, conn, |s| s.hdr.reset_mode = val);
+    mark_header_changed(g, conn);
     disp_menu(g, conn);
 }
 
@@ -1369,14 +1354,14 @@ fn parse_levels(g: &mut GameState, conn: ConnId, line: &str) {
         match value {
             1 => {
                 send(g, conn, "Minimum level? ");
-                set_mode(conn, Mode::MinLvl);
-                mark_header_changed(conn);
+                set_mode(g, conn, Mode::MinLvl);
+                mark_header_changed(g, conn);
                 return;
             }
             2 => {
                 send(g, conn, "Maximum level? ");
-                set_mode(conn, Mode::MaxLvl);
-                mark_header_changed(conn);
+                set_mode(g, conn, Mode::MaxLvl);
+                mark_header_changed(g, conn);
                 return;
             }
             _ => {
@@ -1385,7 +1370,7 @@ fn parse_levels(g: &mut GameState, conn: ConnId, line: &str) {
             }
         }
     }
-    mark_header_changed(conn);
+    mark_header_changed(g, conn);
     disp_levels(g, conn);
 }
 
@@ -1409,7 +1394,7 @@ fn parse_min_lvl(g: &mut GameState, conn: ConnId, line: &str) {
         disp_menu(g, conn);
         return;
     }
-    with_state(conn, |s| {
+    with_state(g, conn, |s| {
         s.hdr.lvl1 = pos;
         s.hdr.header_changed = true;
     });
@@ -1436,7 +1421,7 @@ fn parse_max_lvl(g: &mut GameState, conn: ConnId, line: &str) {
         disp_menu(g, conn);
         return;
     }
-    with_state(conn, |s| {
+    with_state(g, conn, |s| {
         s.hdr.lvl2 = pos;
         s.hdr.header_changed = true;
     });
@@ -1445,14 +1430,14 @@ fn parse_max_lvl(g: &mut GameState, conn: ConnId, line: &str) {
 
 fn parse_approve(g: &mut GameState, conn: ConnId, line: &str) {
     match line.trim().chars().next().unwrap_or('\0') {
-        'y' | 'Y' => with_state(conn, |s| s.hdr.status_mode = 1),
-        'n' | 'N' => with_state(conn, |s| s.hdr.status_mode = 0),
+        'y' | 'Y' => with_state(g, conn, |s| s.hdr.status_mode = 1),
+        'n' | 'N' => with_state(g, conn, |s| s.hdr.status_mode = 0),
         _ => {
             send(g, conn, "Try again : ");
             return;
         }
     }
-    mark_header_changed(conn);
+    mark_header_changed(g, conn);
     disp_menu(g, conn);
 }
 
@@ -1470,9 +1455,14 @@ where
         'y' | 'Y' => match save_to_disk_with(g, conn, replace) {
             Ok((all_commands, None)) => {
                 save_internally(g, conn, &all_commands);
-                if let Some(state) = snapshot(conn) {
-                    crate::olc::clear_unresolved_publication(EditorKind::Zedit, state.zone_number);
+                if let Some(state) = snapshot(g, conn) {
+                    crate::olc::clear_unresolved_publication(
+                        g,
+                        EditorKind::Zedit,
+                        state.zone_number,
+                    );
                     crate::olc::olc_remove_from_save_list(
+                        g,
                         state.zone_number,
                         crate::olc::OLC_SAVE_ZONE,
                     );
@@ -1484,13 +1474,18 @@ where
                 log::warn!("SYSERR: OLC: could not confirm zone durability: {}", err);
                 // The exact validated candidate is still in scope after
                 // rename, so reconciliation cannot fail on a secondary read.
-                if let Some(state) = snapshot(conn) {
+                if let Some(state) = snapshot(g, conn) {
                     crate::olc::mark_unresolved_save_failure(
+                        g,
                         EditorKind::Zedit,
                         state.zone_number,
                         &err,
                     );
-                    crate::olc::olc_add_to_save_list(state.zone_number, crate::olc::OLC_SAVE_ZONE);
+                    crate::olc::olc_add_to_save_list(
+                        g,
+                        state.zone_number,
+                        crate::olc::OLC_SAVE_ZONE,
+                    );
                 }
                 save_internally(g, conn, &all_commands);
                 send(
@@ -1501,8 +1496,9 @@ where
             }
             Err(err) => {
                 log::warn!("SYSERR: OLC: could not save zone info: {}", err);
-                if let Some(state) = snapshot(conn) {
+                if let Some(state) = snapshot(g, conn) {
                     crate::olc::mark_unresolved_save_failure(
+                        g,
                         EditorKind::Zedit,
                         state.zone_number,
                         &err,
@@ -1523,15 +1519,15 @@ where
     }
 }
 
-fn editor_char(g: &GameState, conn: ConnId) -> Option<CharId> {
+fn editor_char(g: &mut GameState, conn: ConnId) -> Option<CharId> {
     g.descriptors.get(&conn).and_then(|d| d.character)
 }
 
 fn finish(g: &mut GameState, conn: ConnId) {
-    if let Some(state) = crate::lock_ok::lock(&states()).remove(&conn) {
-        olc::discard_unresolved_save(EditorKind::Zedit, state.zone_number);
+    if let Some(state) = states_mut(g).remove(&conn) {
+        olc::discard_unresolved_save(g, EditorKind::Zedit, state.zone_number);
     }
-    olc::clear_active(conn);
+    olc::clear_active(g, conn);
     // C olc.c:610-613 cleanup_olc (#273).
     if let Some(cid) = editor_char(g, conn) {
         if let Some(c) = g.get_char_mut(cid) {
@@ -1549,8 +1545,8 @@ fn finish(g: &mut GameState, conn: ConnId) {
     }
 }
 
-fn with_state<F: FnOnce(&mut ZeditState)>(conn: ConnId, f: F) {
-    if let Some(s) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+fn with_state<F: FnOnce(&mut ZeditState)>(g: &mut GameState, conn: ConnId, f: F) {
+    if let Some(s) = states_mut(g).get_mut(&conn) {
         f(s);
     }
 }
@@ -1563,7 +1559,7 @@ fn with_state<F: FnOnce(&mut ZeditState)>(conn: ConnId, f: F) {
 /// Rebuild the zone's complete command list (every room) and write it into
 /// GameState::zones as simplified ResetCmd entries (CircleMUD zedit_save_internally).
 fn save_internally(g: &mut GameState, conn: ConnId, all: &[RawCmd]) {
-    let st = match snapshot(conn) {
+    let st = match snapshot(g, conn) {
         Some(s) => s,
         None => return,
     };
@@ -1599,7 +1595,7 @@ fn save_to_disk_with<F>(
 where
     F: FnOnce(&std::path::Path, &[u8]) -> std::io::Result<()>,
 {
-    let st = match snapshot(conn) {
+    let st = match snapshot(g, conn) {
         Some(s) => s,
         None => {
             return Err(std::io::Error::new(
@@ -1687,7 +1683,7 @@ where
 pub fn zedit_save_to_disk(g: &mut GameState, zone_rnum: usize) -> std::io::Result<()> {
     if let Some(z) = g.zones.get(zone_rnum) {
         // C zedit.c:474: mark pending, cleared by the disk write below (#274).
-        crate::olc::olc_add_to_save_list(z.number, crate::olc::OLC_SAVE_ZONE);
+        crate::olc::olc_add_to_save_list(g, z.number, crate::olc::OLC_SAVE_ZONE);
     }
     let z = match g.zones.get(zone_rnum) {
         Some(z) => z.clone(),
@@ -1740,8 +1736,8 @@ pub fn zedit_save_to_disk(g: &mut GameState, zone_rnum: usize) -> std::io::Resul
         std::fs::create_dir_all(parent)?;
     }
     crate::olc::atomic_replace(&path, out.as_bytes())?;
-    olc::olc_remove_from_save_list(z.number, olc::OLC_SAVE_ZONE);
-    olc::clear_published_unresolved_numeric_range(EditorKind::Zedit, z.number, z.number);
+    olc::olc_remove_from_save_list(g, z.number, olc::OLC_SAVE_ZONE);
+    olc::clear_published_unresolved_numeric_range(g, EditorKind::Zedit, z.number, z.number);
     Ok(())
 }
 
@@ -2358,20 +2354,19 @@ mod tests {
         (g, ch, room_vnum, room_vnum)
     }
 
-    fn top_and_mode(conn: ConnId) -> (RoomVnum, Mode) {
-        let map = crate::lock_ok::lock(&states());
-        let state = map.get(&conn).expect("active zedit state");
+    fn top_and_mode(g: &GameState, conn: ConnId) -> (RoomVnum, Mode) {
+        let state = g.olc.zedit_states.get(&conn).expect("active zedit state");
         (state.hdr.top, state.mode)
     }
 
     #[test]
     fn post_rename_zone_failure_reconciles_from_the_candidate_and_stays_dirty() {
-        let _save_guard = crate::olc::test_save_list_guard();
         let conn = ConnId(4_040_099);
-        crate::olc::abort_editor(conn);
+
         let (mut g, ch, room_vnum, _) = editor_game(conn);
+        crate::olc::abort_editor(&mut g, conn);
         do_zedit(&mut g, ch, &room_vnum.to_string(), 0);
-        with_state(conn, |state| {
+        with_state(&mut g, conn, |state| {
             state.hdr.name = "Published Zone Candidate".to_string();
             state.hdr.header_changed = true;
             state.mode = Mode::ConfirmSave;
@@ -2394,14 +2389,16 @@ mod tests {
                 .contains("Published Zone Candidate~")
         );
         assert!(crate::olc::test_pending_save(
+            &g,
             zone_number,
             crate::olc::OLC_SAVE_ZONE
         ));
         assert!(crate::olc::test_unresolved_publication(
+            &g,
             EditorKind::Zedit,
             zone_number
         ));
-        assert_eq!(crate::olc::active_editor(conn), Some(EditorKind::Zedit));
+        assert_eq!(crate::olc::active_editor(&g, conn), Some(EditorKind::Zedit));
         assert!(
             g.descriptors[&conn]
                 .outbuf
@@ -2410,25 +2407,27 @@ mod tests {
 
         parse_confirm_save_with(&mut g, conn, "y", crate::olc::atomic_replace);
         assert!(!crate::olc::test_unresolved_publication(
+            &g,
             EditorKind::Zedit,
             zone_number
         ));
         assert!(!crate::olc::test_pending_save(
+            &g,
             zone_number,
             crate::olc::OLC_SAVE_ZONE
         ));
-        assert!(!crate::olc::in_olc(conn));
+        assert!(!crate::olc::in_olc(&g, conn));
         let _ = std::fs::remove_dir_all(&g.config.lib_path);
     }
 
     #[test]
     fn zedit_save_reconciles_the_published_builder_acl_into_live_zone_state() {
-        let _save_guard = crate::olc::test_save_list_guard();
         let conn = ConnId(4_040_100);
-        crate::olc::abort_editor(conn);
+
         let (mut g, ch, room_vnum, _) = editor_game(conn);
+        crate::olc::abort_editor(&mut g, conn);
         do_zedit(&mut g, ch, &room_vnum.to_string(), 0);
-        with_state(conn, |state| {
+        with_state(&mut g, conn, |state| {
             state.hdr.builders = "Nextbuilder".to_string();
             state.hdr.status_mode = 1;
             state.hdr.header_changed = true;
@@ -2441,15 +2440,16 @@ mod tests {
         assert_eq!(g.zones[0].status_mode, 1);
         let disk = std::fs::read_to_string(zon_file_path(&g, g.zones[0].number)).unwrap();
         assert!(disk.contains("\nNextbuilder~\n"));
-        assert!(!crate::olc::in_olc(conn));
+        assert!(!crate::olc::in_olc(&g, conn));
         let _ = std::fs::remove_dir_all(&g.config.lib_path);
     }
 
     #[test]
     fn zedit_entry_accepts_i32_edges_and_rejects_adjacent_overflow() {
         let conn = ConnId(4_040_003);
-        crate::olc::abort_editor(conn);
+
         let (mut g, ch, room_vnum, zone_start) = editor_game(conn);
+        crate::olc::abort_editor(&mut g, conn);
 
         for input in ["2147483648", "-2147483649"] {
             g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
@@ -2458,12 +2458,12 @@ mod tests {
                 g.descriptors[&conn].outbuf, "That room VNUM is outside the supported range.\r\n",
                 "input={input:?}"
             );
-            assert!(!crate::olc::in_olc(conn));
+            assert!(!crate::olc::in_olc(&g, conn));
         }
 
         g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
         do_zedit(&mut g, ch, &room_vnum.to_string(), 0);
-        assert_eq!(crate::olc::active_editor(conn), Some(EditorKind::Zedit));
+        assert_eq!(crate::olc::active_editor(&g, conn), Some(EditorKind::Zedit));
 
         for (input, expected) in [
             ("2147483647", Some(i32::MAX)),
@@ -2471,14 +2471,14 @@ mod tests {
             ("2147483648", None),
             ("-2147483649", None),
         ] {
-            set_mode(conn, Mode::MainMenu);
+            set_mode(&mut g, conn, Mode::MainMenu);
             zedit_parse(&mut g, conn, "t");
-            assert!(top_and_mode(conn).1 == Mode::ZoneTop);
-            let before = top_and_mode(conn).0;
+            assert!(top_and_mode(&g, conn).1 == Mode::ZoneTop);
+            let before = top_and_mode(&g, conn).0;
             g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
 
             zedit_parse(&mut g, conn, input);
-            let (top, mode) = top_and_mode(conn);
+            let (top, mode) = top_and_mode(&g, conn);
             match expected {
                 Some(value) => {
                     assert_eq!(top, value, "input={input:?}");
@@ -2502,10 +2502,10 @@ mod tests {
             }
         }
 
-        set_mode(conn, Mode::MainMenu);
+        set_mode(&mut g, conn, Mode::MainMenu);
         zedit_parse(&mut g, conn, "q");
         zedit_parse(&mut g, conn, "n");
-        assert!(!crate::olc::in_olc(conn));
+        assert!(!crate::olc::in_olc(&g, conn));
         assert_eq!(
             g.get_char(ch).unwrap().act_flags & crate::flags::PLR_WRITING,
             0
@@ -2544,7 +2544,6 @@ mod tests {
 
     #[test]
     fn unpublished_new_zone_failure_blocks_shutdown_until_explicit_discard() {
-        let _save_guard = crate::olc::test_save_list_guard();
         let zone_number = 40_410;
         let (mut g, implementor, lib) = new_zone_game("unpublished-discard", ConnId(4_041_001));
         let key = new_zone_unresolved_key(zone_number);
@@ -2560,6 +2559,7 @@ mod tests {
         );
 
         assert!(crate::olc::test_unresolved_named_save(
+            &g,
             EditorKind::Zedit,
             &key
         ));
@@ -2572,6 +2572,7 @@ mod tests {
             crate::olc::SCMD_OLC_ZEDIT,
         );
         assert!(!crate::olc::test_unresolved_named_save(
+            &g,
             EditorKind::Zedit,
             &key
         ));
@@ -2586,7 +2587,6 @@ mod tests {
 
     #[test]
     fn reboot_new_zone_marker_restores_exit_blocker_and_requires_exact_retry() {
-        let _save_guard = crate::olc::test_save_list_guard();
         let zone_number = 40_420;
         let conn = ConnId(4_042_001);
         let (mut g, implementor, lib) = new_zone_game("reboot-blocker", conn);
@@ -2594,7 +2594,7 @@ mod tests {
 
         crate::olc::begin_new_zone_publication(lib.to_str().unwrap(), zone_number).unwrap();
         let pending = crate::olc::pending_new_zone_publications(lib.to_str().unwrap()).unwrap();
-        crate::olc::register_pending_new_zone_publication_blockers(&pending);
+        crate::olc::register_pending_new_zone_publication_blockers(&mut g, &pending);
 
         assert!(crate::olc::flush_save_list_to_disk(&mut g).is_err());
         crate::olc::olc_saveinfo(&mut g, implementor);
@@ -2617,6 +2617,7 @@ mod tests {
 
         zedit_new_zone(&mut g, implementor, zone_number);
         assert!(!crate::olc::test_unresolved_named_save(
+            &g,
             EditorKind::Zedit,
             &key
         ));
@@ -2632,7 +2633,6 @@ mod tests {
 
     #[test]
     fn existing_new_zone_marker_with_uncertain_index_state_cannot_be_discarded() {
-        let _save_guard = crate::olc::test_save_list_guard();
         let zone_number = 40_421;
         let conn = ConnId(4_042_002);
         let (mut g, implementor, lib) = new_zone_game("ambiguous-index", conn);
@@ -2645,6 +2645,7 @@ mod tests {
 
         zedit_new_zone(&mut g, implementor, zone_number);
         assert!(crate::olc::test_unresolved_named_save(
+            &g,
             EditorKind::Zedit,
             &key
         ));
@@ -2660,13 +2661,12 @@ mod tests {
                 .contains(&zone_number)
         );
 
-        crate::olc::clear_unresolved_named_save(EditorKind::Zedit, &key);
+        crate::olc::clear_unresolved_named_save(&mut g, EditorKind::Zedit, &key);
         let _ = std::fs::remove_dir_all(lib);
     }
 
     #[test]
     fn uncertain_new_zone_preflight_before_a_marker_remains_explicitly_discardable() {
-        let _save_guard = crate::olc::test_save_list_guard();
         let zone_number = 40_422;
         let conn = ConnId(4_042_003);
         let (mut g, implementor, lib) = new_zone_game("unpublished-ambiguous-index", conn);
@@ -2677,11 +2677,13 @@ mod tests {
 
         zedit_new_zone(&mut g, implementor, zone_number);
         assert!(crate::olc::test_unresolved_named_save(
+            &g,
             EditorKind::Zedit,
             &key
         ));
         zedit_discard_new_zone_failure(&mut g, implementor, zone_number);
         assert!(!crate::olc::test_unresolved_named_save(
+            &g,
             EditorKind::Zedit,
             &key
         ));
@@ -2697,7 +2699,6 @@ mod tests {
 
     #[test]
     fn partial_new_zone_publication_cannot_be_discarded_and_retry_is_idempotent() {
-        let _save_guard = crate::olc::test_save_list_guard();
         let zone_number = 40_411;
         let conn = ConnId(4_041_002);
         let (mut g, implementor, lib) = new_zone_game("partial-retry", conn);
@@ -2721,6 +2722,7 @@ mod tests {
 
         assert!(lib.join(format!("world/zon/{zone_number}.zon")).exists());
         assert!(crate::olc::test_unresolved_named_save(
+            &g,
             EditorKind::Zedit,
             &key
         ));
@@ -2728,6 +2730,7 @@ mod tests {
 
         zedit_discard_new_zone_failure(&mut g, implementor, zone_number);
         assert!(crate::olc::test_unresolved_named_save(
+            &g,
             EditorKind::Zedit,
             &key
         ));
@@ -2739,6 +2742,7 @@ mod tests {
 
         zedit_new_zone(&mut g, implementor, zone_number);
         assert!(!crate::olc::test_unresolved_named_save(
+            &g,
             EditorKind::Zedit,
             &key
         ));
@@ -2761,7 +2765,6 @@ mod tests {
 
     #[test]
     fn index_publication_failure_retains_partial_new_zone_blocker() {
-        let _save_guard = crate::olc::test_save_list_guard();
         let zone_number = 40_412;
         let conn = ConnId(4_041_003);
         let (mut g, implementor, lib) = new_zone_game("index-failure", conn);
@@ -2776,6 +2779,7 @@ mod tests {
         );
 
         assert!(crate::olc::test_unresolved_named_save(
+            &g,
             EditorKind::Zedit,
             &key
         ));
@@ -2789,6 +2793,7 @@ mod tests {
 
         zedit_new_zone(&mut g, implementor, zone_number);
         assert!(!crate::olc::test_unresolved_named_save(
+            &g,
             EditorKind::Zedit,
             &key
         ));
@@ -2797,7 +2802,6 @@ mod tests {
 
     #[test]
     fn index_compare_and_replace_preserves_an_intervening_writer() {
-        let _save_guard = crate::olc::test_save_list_guard();
         let zone_number = 40_413;
         let (mut g, implementor, lib) = new_zone_game("index-cas", ConnId(4_041_004));
         let key = new_zone_unresolved_key(zone_number);
@@ -2824,18 +2828,18 @@ mod tests {
             "a stale new-zone snapshot must not erase another index writer"
         );
         assert!(crate::olc::test_unresolved_named_save(
+            &g,
             EditorKind::Zedit,
             &key
         ));
         assert!(g.zones.is_empty());
 
-        crate::olc::clear_unresolved_named_save(EditorKind::Zedit, &key);
+        crate::olc::clear_unresolved_named_save(&mut g, EditorKind::Zedit, &key);
         let _ = std::fs::remove_dir_all(lib);
     }
 
     #[test]
     fn idempotent_index_confirmation_rejects_an_intervening_row_removal() {
-        let _save_guard = crate::olc::test_save_list_guard();
         let zone_number = 40_414;
         let (mut g, implementor, lib) = new_zone_game("index-confirm-cas", ConnId(4_041_005));
         let key = new_zone_unresolved_key(zone_number);
@@ -2860,18 +2864,18 @@ mod tests {
         assert!(injected);
         assert_eq!(std::fs::read_to_string(&wld_index).unwrap(), "$\n");
         assert!(crate::olc::test_unresolved_named_save(
+            &g,
             EditorKind::Zedit,
             &key
         ));
         assert!(g.zones.is_empty());
 
-        crate::olc::clear_unresolved_named_save(EditorKind::Zedit, &key);
+        crate::olc::clear_unresolved_named_save(&mut g, EditorKind::Zedit, &key);
         let _ = std::fs::remove_dir_all(lib);
     }
 
     #[tokio::test]
     async fn durable_gate_hides_partial_zone_until_idempotent_crash_recovery() {
-        let _save_guard = crate::olc::test_save_list_guard();
         let zone_number = 4_041;
         let conn = ConnId(4_041_006);
         let (mut g, implementor, lib) = new_zone_game("zon-commit-retry", conn);
@@ -2905,6 +2909,7 @@ mod tests {
         assert_eq!(order, ["zon"]);
         assert!(g.zones.is_empty());
         assert!(crate::olc::test_unresolved_named_save(
+            &g,
             EditorKind::Zedit,
             &key
         ));
@@ -2917,7 +2922,7 @@ mod tests {
         // Process-local blockers do not survive a hard crash, but the durable
         // marker does. A fresh boot must load neither the zone nor its room
         // while any of the six independent index publications is incomplete.
-        crate::olc::clear_unresolved_named_save(EditorKind::Zedit, &key);
+        crate::olc::clear_unresolved_named_save(&mut g, EditorKind::Zedit, &key);
         let mut rebooted = GameState::new(g.config.clone());
         crate::file_loader::FileLoader::load_world(&mut rebooted, lib.to_str().unwrap())
             .await
@@ -2944,6 +2949,7 @@ mod tests {
             1
         );
         assert!(!crate::olc::test_unresolved_named_save(
+            &g,
             EditorKind::Zedit,
             &key
         ));
@@ -2980,7 +2986,6 @@ mod tests {
 
     #[test]
     fn customized_loaded_zone_is_not_misclassified_as_crash_recovery() {
-        let _save_guard = crate::olc::test_save_list_guard();
         let zone_number = 40_416;
         let conn = ConnId(4_041_007);
         let (mut g, implementor, lib) = new_zone_game("custom-live-zone", conn);
@@ -3133,6 +3138,7 @@ fn zedit_new_zone_with<C, R>(
                 error,
             );
             crate::olc::mark_unresolved_named_save_failure(
+                g,
                 EditorKind::Zedit,
                 &unresolved_key,
                 &error,
@@ -3161,6 +3167,7 @@ fn zedit_new_zone_with<C, R>(
                 error,
             );
             crate::olc::mark_unresolved_named_save_failure(
+                g,
                 EditorKind::Zedit,
                 &unresolved_key,
                 &error,
@@ -3216,7 +3223,12 @@ fn zedit_new_zone_with<C, R>(
             "new-zone preflight failed after an earlier component was published",
             error,
         );
-        crate::olc::mark_unresolved_named_save_failure(EditorKind::Zedit, &unresolved_key, &error);
+        crate::olc::mark_unresolved_named_save_failure(
+            g,
+            EditorKind::Zedit,
+            &unresolved_key,
+            &error,
+        );
         crate::syslog::mudlog(
             g,
             &format!("SYSERR: OLC: new-zone preflight failed: {error}"),
@@ -3237,7 +3249,12 @@ fn zedit_new_zone_with<C, R>(
             "new-zone transaction marker could not be made durable",
             error,
         );
-        crate::olc::mark_unresolved_named_save_failure(EditorKind::Zedit, &unresolved_key, &error);
+        crate::olc::mark_unresolved_named_save_failure(
+            g,
+            EditorKind::Zedit,
+            &unresolved_key,
+            &error,
+        );
         crate::syslog::mudlog(
             g,
             &format!("SYSERR: OLC: new-zone transaction could not begin: {error}"),
@@ -3260,6 +3277,7 @@ fn zedit_new_zone_with<C, R>(
                 error,
             );
             crate::olc::mark_unresolved_named_save_failure(
+                g,
                 EditorKind::Zedit,
                 &unresolved_key,
                 &error,
@@ -3303,6 +3321,7 @@ fn zedit_new_zone_with<C, R>(
                 error,
             );
             crate::olc::mark_unresolved_named_save_failure(
+                g,
                 EditorKind::Zedit,
                 &unresolved_key,
                 &error,
@@ -3330,7 +3349,12 @@ fn zedit_new_zone_with<C, R>(
             "new-zone components are complete but the durable boot gate could not be cleared",
             error,
         );
-        crate::olc::mark_unresolved_named_save_failure(EditorKind::Zedit, &unresolved_key, &error);
+        crate::olc::mark_unresolved_named_save_failure(
+            g,
+            EditorKind::Zedit,
+            &unresolved_key,
+            &error,
+        );
         crate::syslog::mudlog(
             g,
             &format!("SYSERR: OLC: new-zone transaction could not complete: {error}"),
@@ -3365,7 +3389,7 @@ fn zedit_new_zone_with<C, R>(
             .unwrap_or(g.zones.len());
         g.zones.insert(pos, zone);
     }
-    crate::olc::clear_unresolved_named_save(EditorKind::Zedit, &unresolved_key);
+    crate::olc::clear_unresolved_named_save(g, EditorKind::Zedit, &unresolved_key);
 
     crate::syslog::mudlog(
         g,
@@ -3470,7 +3494,7 @@ pub fn zedit_discard_new_zone_failure(g: &mut GameState, ch: CharId, vzone_num: 
         return;
     }
     let key = new_zone_unresolved_key(vzone_num);
-    match crate::olc::discard_unresolved_named_save(EditorKind::Zedit, &key) {
+    match crate::olc::discard_unresolved_named_save(g, EditorKind::Zedit, &key) {
         crate::olc::UnresolvedDiscardOutcome::Missing => {
             g.send_to_char(
                 ch,
@@ -3489,7 +3513,7 @@ pub fn zedit_discard_new_zone_failure(g: &mut GameState, ch: CharId, vzone_num: 
                     "The unpublished new-zone failure was explicitly discarded; no world files were removed.\r\n",
                 ),
                 Err(error) => {
-                    crate::olc::mark_unresolved_named_save_failure(
+                    crate::olc::mark_unresolved_named_save_failure(g,
                         EditorKind::Zedit,
                         &key,
                         &error,

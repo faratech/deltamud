@@ -764,7 +764,7 @@ async fn run_server() -> Result<state::ProcessDisposition> {
     // it could expose a zone whose six files were only partly committed.
     let pending_new_zones = olc::pending_new_zone_publications(&config.lib_path)
         .context("validate durable new-zone publication gates")?;
-    olc::register_pending_new_zone_publication_blockers(&pending_new_zones);
+    olc::register_pending_new_zone_publication_blockers(&mut state, &pending_new_zones);
     for zone_number in &pending_new_zones {
         warn!(
             "New-zone publication {} is incomplete; all of its indexed components will stay hidden until an Implementor retries `zedit new {}`",

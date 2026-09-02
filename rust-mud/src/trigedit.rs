@@ -8,7 +8,7 @@
 // trig_index (crate::dg_db_scripts) by reloading prototypes from disk.
 //
 // The shared OLC framework (olc.rs) routes one input line at a time into
-// trigedit_parse() while in_olc(conn) is true; do_trigedit() starts the editor.
+// trigedit_parse() while in_olc(&g, conn) is true; do_trigedit() starts the editor.
 // Because Character / GameState / Descriptor may not gain an OLC_DATA field, the
 // per-connection edit state lives in a module-static keyed by ConnId (the same
 // pattern shop.rs / quest.rs / dg_handler.rs use).
@@ -25,7 +25,6 @@ use crate::state::GameState;
 use crate::types::*;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
 // Trigger-type name tables (dg_triggers.c: trig_types/otrig_types/wtrig_types).
@@ -97,7 +96,7 @@ enum Mode {
 /// trig_data), OLC_NUM(d) (vnum being edited), OLC_ZNUM(d) (the zone rnum the
 /// trigger belongs to), OLC_STORAGE(d) (the cmdlist as a flat editable string)
 /// and OLC_VAL(d) (the dirty flag).
-struct TrigEditState {
+pub struct TrigEditState {
     mode: Mode,
     vnum: i32,        // OLC_NUM
     znum: usize,      // OLC_ZNUM (index into g.zones)
@@ -114,17 +113,18 @@ struct TrigEditState {
     val: i32, // OLC_VAL: has-changed flag
 }
 
-static EDIT_STATES: OnceLock<Mutex<HashMap<ConnId, TrigEditState>>> = OnceLock::new();
-
-fn states() -> &'static Mutex<HashMap<ConnId, TrigEditState>> {
-    EDIT_STATES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 /// abort: drop this conn's editor state without saving (player disconnected
 /// mid-edit). `olc::abort_editor` calls `olc::clear_active`.
-pub fn abort(conn: ConnId) {
-    if let Some(state) = crate::lock_ok::lock(&states()).remove(&conn) {
-        olc::discard_unresolved_save(EditorKind::Trigedit, state.vnum);
+fn states(g: &GameState) -> &HashMap<ConnId, TrigEditState> {
+    &g.olc.trigedit_states
+}
+fn states_mut(g: &mut GameState) -> &mut HashMap<ConnId, TrigEditState> {
+    &mut g.olc.trigedit_states
+}
+
+pub fn abort(g: &mut GameState, conn: ConnId) {
+    if let Some(state) = states_mut(g).remove(&conn) {
+        olc::discard_unresolved_save(g, EditorKind::Trigedit, state.vnum);
     }
 }
 
@@ -288,7 +288,7 @@ pub fn do_trigedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 
     // Check that this trigger isn't already being edited on another connection.
     let busy_name: Option<String> = {
-        let map = crate::lock_ok::lock(&states());
+        let map = states_mut(g);
         let mut who = None;
         for (&other_conn, st) in map.iter() {
             if other_conn != conn && st.vnum == number {
@@ -322,8 +322,8 @@ pub fn do_trigedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         _ => setup_new(number, znum, zone_number, authorization),
     };
 
-    crate::lock_ok::lock(&states()).insert(conn, state);
-    olc::set_active(conn, EditorKind::Trigedit);
+    states_mut(g).insert(conn, state);
+    olc::set_active(g, conn, EditorKind::Trigedit);
     disp_menu(g, conn);
 }
 
@@ -400,7 +400,7 @@ fn setup_new(
 
 fn disp_menu(g: &mut GameState, conn: ConnId) {
     let (attach_label, trgtypes, vnum, name, narg, arglist, storage) = {
-        let map = crate::lock_ok::lock(&states());
+        let map = states_mut(g);
         let st = match map.get(&conn) {
             Some(s) => s,
             None => return,
@@ -445,12 +445,12 @@ fn disp_menu(g: &mut GameState, conn: ConnId) {
         cmds = storage,
     );
     send(g, conn, &menu);
-    set_mode(conn, Mode::MainMenu);
+    set_mode(g, conn, Mode::MainMenu);
 }
 
 fn disp_types(g: &mut GameState, conn: ConnId) {
     let (table, cur) = {
-        let map = crate::lock_ok::lock(&states());
+        let map = states_mut(g);
         let st = match map.get(&conn) {
             Some(s) => s,
             None => return,
@@ -483,14 +483,14 @@ fn disp_types(g: &mut GameState, conn: ConnId) {
 // State helpers
 // ---------------------------------------------------------------------------
 
-fn set_mode(conn: ConnId, mode: Mode) {
-    if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+fn set_mode(g: &mut GameState, conn: ConnId, mode: Mode) {
+    if let Some(st) = states_mut(g).get_mut(&conn) {
         st.mode = mode;
     }
 }
 
-fn get_mode(conn: ConnId) -> Option<Mode> {
-    crate::lock_ok::lock(&states()).get(&conn).map(|s| s.mode)
+fn get_mode(g: &GameState, conn: ConnId) -> Option<Mode> {
+    states(g).get(&conn).map(|s| s.mode)
 }
 
 // ---------------------------------------------------------------------------
@@ -498,7 +498,7 @@ fn get_mode(conn: ConnId) -> Option<Mode> {
 // ---------------------------------------------------------------------------
 
 pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
-    let mode = match get_mode(conn) {
+    let mode = match get_mode(g, conn) {
         Some(m) => m,
         None => return,
     };
@@ -528,12 +528,7 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                             .and_then(|c| g.get_char(c))
                             .map(|c| c.player.name.clone())
                             .unwrap_or_default();
-                        let vnum = states()
-                            .lock()
-                            .unwrap()
-                            .get(&conn)
-                            .map(|s| s.vnum)
-                            .unwrap_or(0);
+                        let vnum = states_mut(g).get(&conn).map(|s| s.vnum).unwrap_or(0);
                         mudlog(g, &format!("OLC: {} edits trigger {}", cname, vnum));
                         cleanup(g, conn);
                     }
@@ -571,7 +566,7 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         Mode::Name => {
             // C dg_olc.c:340 stores the raw line (str_dup); no trim (#300).
             let arg = line;
-            if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+            if let Some(st) = states_mut(g).get_mut(&conn) {
                 st.name = if arg.is_empty() {
                     "undefined".to_string()
                 } else {
@@ -584,7 +579,7 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             let Some(v) = olc_atoi(g, conn, line) else {
                 return;
             };
-            if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+            if let Some(st) = states_mut(g).get_mut(&conn) {
                 // C: ((atoi>=MOB_TRIGGER) || (atoi<=WLD_TRIGGER)) — that guard is
                 // always true in C, so any value is accepted, stored as
                 // (byte)atoi (wraps 0-255, dg_olc.c:353) (#300).
@@ -596,7 +591,7 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             let Some(v) = olc_atoi(g, conn, line) else {
                 return;
             };
-            if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+            if let Some(st) = states_mut(g).get_mut(&conn) {
                 st.narg = v;
                 st.val += 1;
             }
@@ -604,7 +599,7 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         Mode::Argument => {
             // C dg_olc.c:356 stores the raw line; no trim (#300).
             let arg = line;
-            if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+            if let Some(st) = states_mut(g).get_mut(&conn) {
                 st.arglist = arg.to_string();
                 st.val += 1;
             }
@@ -616,7 +611,7 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             if i == 0 {
                 // fall through to main menu
             } else {
-                if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+                if let Some(st) = states_mut(g).get_mut(&conn) {
                     if i > 0 && i <= NUM_TRIG_TYPE_FLAGS as i32 {
                         st.trigger_type ^= 1 << (i - 1);
                     }
@@ -629,7 +624,7 @@ pub fn trigedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
     }
 
     // Default: return to the main menu (C: OLC_MODE = MAIN_MENU; disp_menu).
-    set_mode(conn, Mode::MainMenu);
+    set_mode(g, conn, Mode::MainMenu);
     disp_menu(g, conn);
 }
 
@@ -641,16 +636,9 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
         .map(|c| c.to_ascii_lowercase());
     match c {
         Some('q') => {
-            let val = states()
-                .lock()
-                .unwrap()
-                .get(&conn)
-                .map(|s| s.val)
-                .unwrap_or(0);
+            let val = states_mut(g).get(&conn).map(|s| s.val).unwrap_or(0);
             if val != 0 {
-                let ttype = states()
-                    .lock()
-                    .unwrap()
+                let ttype = states_mut(g)
                     .get(&conn)
                     .map(|s| s.trigger_type)
                     .unwrap_or(0);
@@ -662,50 +650,46 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
                     conn,
                     "Do you wish to save the changes to the trigger? (y/n): ",
                 );
-                set_mode(conn, Mode::ConfirmSaveString);
+                set_mode(g, conn, Mode::ConfirmSaveString);
             } else {
                 cleanup(g, conn);
             }
         }
         Some('1') => {
-            set_mode(conn, Mode::Name);
+            set_mode(g, conn, Mode::Name);
             send(g, conn, "Name: ");
         }
         Some('2') => {
-            set_mode(conn, Mode::Intended);
+            set_mode(g, conn, Mode::Intended);
             send(g, conn, "0: Mobiles, 1: Objects, 2: Rooms: ");
         }
         Some('3') => {
-            set_mode(conn, Mode::Types);
+            set_mode(g, conn, Mode::Types);
             disp_types(g, conn);
         }
         Some('4') => {
-            set_mode(conn, Mode::Narg);
+            set_mode(g, conn, Mode::Narg);
             send(g, conn, "Numeric argument: ");
         }
         Some('5') => {
-            set_mode(conn, Mode::Argument);
+            set_mode(g, conn, Mode::Argument);
             send(g, conn, "Argument: ");
         }
         Some('6') => {
-            set_mode(conn, Mode::Commands);
+            set_mode(g, conn, Mode::Commands);
             send(
                 g,
                 conn,
                 "Enter trigger commands: (/s saves /h for help)\r\n\r\n",
             );
             // Echo the current buffer (C sends OLC_STORAGE then dups to backstr).
-            let storage = states()
-                .lock()
-                .unwrap()
-                .get(&conn)
-                .map(|s| s.storage.clone());
+            let storage = states_mut(g).get(&conn).map(|s| s.storage.clone());
             if let Some(s) = storage {
                 if !s.is_empty() {
                     send(g, conn, &s);
                 }
             }
-            if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+            if let Some(st) = states_mut(g).get_mut(&conn) {
                 st.back_storage = Some(st.storage.clone());
                 st.val = 1;
             }
@@ -724,29 +708,27 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, line: &str) {
 // ---------------------------------------------------------------------------
 
 fn commands_input(g: &mut GameState, conn: ConnId, line: &str) {
-    let mut buf = states()
-        .lock()
-        .unwrap()
+    let mut buf = states_mut(g)
         .get(&conn)
         .map(|s| s.storage.clone())
         .unwrap_or_default();
 
     match crate::modify::editor_buffer_input(g, conn, &mut buf, MAX_CMD_LENGTH, line) {
         crate::modify::BufferEditorResult::Continue => {
-            if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+            if let Some(st) = states_mut(g).get_mut(&conn) {
                 st.storage = buf;
             }
         }
         crate::modify::BufferEditorResult::Save => {
-            if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+            if let Some(st) = states_mut(g).get_mut(&conn) {
                 st.storage = buf;
                 st.back_storage = None;
             }
-            set_mode(conn, Mode::MainMenu);
+            set_mode(g, conn, Mode::MainMenu);
             disp_menu(g, conn);
         }
         crate::modify::BufferEditorResult::Abort => {
-            if let Some(st) = crate::lock_ok::lock(&states()).get_mut(&conn) {
+            if let Some(st) = states_mut(g).get_mut(&conn) {
                 if let Some(back) = st.back_storage.take() {
                     st.storage = back;
                 }
@@ -783,7 +765,7 @@ where
         arglist,
         storage,
     ) = {
-        let map = crate::lock_ok::lock(&states());
+        let map = states_mut(g);
         let st = match map.get(&conn) {
             Some(s) => s,
             None => {
@@ -918,7 +900,7 @@ where
             // Publish the edited prototype only after its durable
             // representation is in place.
             dg_db_scripts::upsert_proto_trigger(g, edited);
-            olc::clear_unresolved_publication(EditorKind::Trigedit, vnum);
+            olc::clear_unresolved_publication(g, EditorKind::Trigedit, vnum);
             Ok(())
         }
         Err(error) => {
@@ -928,7 +910,7 @@ where
                 // for a durability-confirming retry.
                 dg_db_scripts::upsert_proto_trigger(g, edited);
             }
-            olc::mark_unresolved_save_failure(EditorKind::Trigedit, vnum, &error);
+            olc::mark_unresolved_save_failure(g, EditorKind::Trigedit, vnum, &error);
             Err(error)
         }
     }
@@ -939,10 +921,10 @@ where
 // ---------------------------------------------------------------------------
 
 fn cleanup(g: &mut GameState, conn: ConnId) {
-    if let Some(state) = crate::lock_ok::lock(&states()).remove(&conn) {
-        olc::discard_unresolved_save(EditorKind::Trigedit, state.vnum);
+    if let Some(state) = states_mut(g).remove(&conn) {
+        olc::discard_unresolved_save(g, EditorKind::Trigedit, state.vnum);
     }
-    olc::clear_active(conn);
+    olc::clear_active(g, conn);
     // C cleanup_olc returns to the playing prompt; the framework restores the
     // descriptor state. Echo a blank line so the player sees the prompt return.
     send(g, conn, "\r\n");
@@ -995,28 +977,35 @@ mod tests {
         (g, ch, vnum)
     }
 
-    fn narg_and_mode(conn: ConnId) -> (i32, Mode) {
-        let map = crate::lock_ok::lock(&states());
-        let state = map.get(&conn).expect("active trigedit state");
+    fn narg_and_mode(g: &GameState, conn: ConnId) -> (i32, Mode) {
+        let state = g
+            .olc
+            .trigedit_states
+            .get(&conn)
+            .expect("active trigedit state");
         (state.narg, state.mode)
     }
 
     #[test]
     fn trigedit_entry_accepts_i32_edges_and_rejects_adjacent_overflow() {
         let conn = ConnId(4_040_002);
-        crate::olc::abort_editor(conn);
+
         let (mut g, ch, vnum) = editor_game(conn);
+        crate::olc::abort_editor(&mut g, conn);
 
         do_trigedit(&mut g, ch, "2147483648", 0);
         assert_eq!(
             g.descriptors[&conn].outbuf,
             "That number is outside the supported range.\r\n"
         );
-        assert!(!crate::olc::in_olc(conn));
+        assert!(!crate::olc::in_olc(&g, conn));
 
         g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
         do_trigedit(&mut g, ch, &vnum.to_string(), 0);
-        assert_eq!(crate::olc::active_editor(conn), Some(EditorKind::Trigedit));
+        assert_eq!(
+            crate::olc::active_editor(&g, conn),
+            Some(EditorKind::Trigedit)
+        );
 
         for (input, expected) in [
             ("2147483647", Some(i32::MAX)),
@@ -1024,14 +1013,14 @@ mod tests {
             ("2147483648", None),
             ("-2147483649", None),
         ] {
-            set_mode(conn, Mode::MainMenu);
+            set_mode(&mut g, conn, Mode::MainMenu);
             trigedit_parse(&mut g, conn, "4");
-            assert_eq!(get_mode(conn), Some(Mode::Narg));
-            let before = narg_and_mode(conn).0;
+            assert_eq!(get_mode(&g, conn), Some(Mode::Narg));
+            let before = narg_and_mode(&g, conn).0;
             g.descriptors.get_mut(&conn).unwrap().outbuf.clear();
 
             trigedit_parse(&mut g, conn, input);
-            let (narg, mode) = narg_and_mode(conn);
+            let (narg, mode) = narg_and_mode(&g, conn);
             match expected {
                 Some(value) => {
                     assert_eq!(narg, value, "input={input:?}");
@@ -1055,17 +1044,18 @@ mod tests {
             }
         }
 
-        set_mode(conn, Mode::MainMenu);
+        set_mode(&mut g, conn, Mode::MainMenu);
         trigedit_parse(&mut g, conn, "q");
         trigedit_parse(&mut g, conn, "n");
-        assert!(!crate::olc::in_olc(conn));
+        assert!(!crate::olc::in_olc(&g, conn));
     }
 
     #[test]
     fn trigedit_entry_uses_authenticated_zone_acl_not_display_level() {
         let conn = ConnId(4_040_003);
-        crate::olc::abort_editor(conn);
+
         let (mut g, ch, vnum) = editor_game(conn);
+        crate::olc::abort_editor(&mut g, conn);
         {
             let intruder = g.get_char_mut(ch).unwrap();
             intruder.player.name = "Intruder".into();
@@ -1075,7 +1065,7 @@ mod tests {
 
         do_trigedit(&mut g, ch, &vnum.to_string(), 0);
 
-        assert!(!crate::olc::in_olc(conn));
+        assert!(!crate::olc::in_olc(&g, conn));
         assert!(
             g.descriptors[&conn]
                 .outbuf
@@ -1086,11 +1076,12 @@ mod tests {
     #[test]
     fn trigedit_save_rechecks_principal_zone_ownership_before_publication() {
         let conn = ConnId(4_040_004);
-        crate::olc::abort_editor(conn);
+
         let (mut g, ch, vnum) = editor_game(conn);
+        crate::olc::abort_editor(&mut g, conn);
         g.get_char_mut(ch).unwrap().trust = i32::from(LVL_IMMORT);
         do_trigedit(&mut g, ch, &vnum.to_string(), 0);
-        assert!(crate::olc::in_olc(conn));
+        assert!(crate::olc::in_olc(&g, conn));
 
         g.zones[0].builders = "SomebodyElse".into();
         let error = save_with(&mut g, conn, |_path, _bytes| {
@@ -1099,7 +1090,7 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
-        assert!(crate::olc::in_olc(conn));
+        assert!(crate::olc::in_olc(&g, conn));
         cleanup(&mut g, conn);
     }
 
@@ -1127,8 +1118,9 @@ mod tests {
         .enumerate()
         {
             let conn = ConnId(4_040_020 + index as u64);
-            crate::olc::abort_editor(conn);
+
             let (mut g, ch, zone_start) = editor_game(conn);
+            crate::olc::abort_editor(&mut g, conn);
             if matches!(revocation, Revocation::ZoneOwnership) {
                 // Exact Implementors legitimately override zone.builders;
                 // exercise ACL revocation with an ordinary listed builder.
@@ -1136,7 +1128,7 @@ mod tests {
             }
             let vnum = zone_start + 20 + index as i32;
             do_trigedit(&mut g, ch, &vnum.to_string(), 0);
-            assert!(crate::olc::in_olc(conn), "case={revocation:?}");
+            assert!(crate::olc::in_olc(&g, conn), "case={revocation:?}");
 
             match revocation {
                 Revocation::Grant => g.get_char_mut(ch).unwrap().godcmds2 = 0,
@@ -1175,10 +1167,10 @@ mod tests {
 
     #[test]
     fn unpublished_save_failure_blocks_flush_until_retry_or_explicit_discard() {
-        let _save_guard = crate::olc::test_save_list_guard();
         let conn = ConnId(4_040_098);
-        crate::olc::abort_editor(conn);
+
         let (mut g, ch, zone_start) = editor_game(conn);
+        crate::olc::abort_editor(&mut g, conn);
         let vnum = zone_start + 2;
         let lib = std::env::temp_dir().join(format!(
             "deltamud-trigedit-unpublished-{}",
@@ -1197,6 +1189,7 @@ mod tests {
         .unwrap_err();
         assert!(!crate::olc::replacement_was_published(&error));
         assert!(crate::olc::test_unresolved_publication(
+            &g,
             EditorKind::Trigedit,
             vnum
         ));
@@ -1204,9 +1197,10 @@ mod tests {
 
         // Declining after an unpublished failure explicitly discards only
         // this scratch trigger, so no unresolved durable state remains.
-        set_mode(conn, Mode::ConfirmSaveString);
+        set_mode(&mut g, conn, Mode::ConfirmSaveString);
         trigedit_parse(&mut g, conn, "n");
         assert!(!crate::olc::test_unresolved_publication(
+            &g,
             EditorKind::Trigedit,
             vnum
         ));
@@ -1221,6 +1215,7 @@ mod tests {
         assert!(crate::olc::flush_save_list_to_disk(&mut g).is_err());
         save_with(&mut g, conn, crate::olc::atomic_replace).unwrap();
         assert!(!crate::olc::test_unresolved_publication(
+            &g,
             EditorKind::Trigedit,
             vnum
         ));
@@ -1230,10 +1225,10 @@ mod tests {
 
     #[test]
     fn post_rename_sync_failure_reconciles_live_trigger_and_retains_editor() {
-        let _save_guard = crate::olc::test_save_list_guard();
         let conn = ConnId(4_040_099);
-        crate::olc::abort_editor(conn);
+
         let (mut g, ch, zone_start) = editor_game(conn);
+        crate::olc::abort_editor(&mut g, conn);
         let vnum = zone_start + 1;
         let lib = std::env::temp_dir().join(format!(
             "deltamud-trigedit-published-{}",
@@ -1257,8 +1252,9 @@ mod tests {
 
         assert!(crate::olc::replacement_was_published(&error));
         assert!(crate::dg_db_scripts::real_trigger(&g, vnum) >= 0);
-        assert!(crate::olc::in_olc(conn));
+        assert!(crate::olc::in_olc(&g, conn));
         assert!(crate::olc::test_unresolved_publication(
+            &g,
             EditorKind::Trigedit,
             vnum
         ));
@@ -1270,10 +1266,11 @@ mod tests {
 
         // Discarding cannot clear a marker after rename: the scratch editor
         // closes, but durability still needs a same-entry retry.
-        set_mode(conn, Mode::ConfirmSaveString);
+        set_mode(&mut g, conn, Mode::ConfirmSaveString);
         trigedit_parse(&mut g, conn, "n");
-        assert!(!crate::olc::in_olc(conn));
+        assert!(!crate::olc::in_olc(&g, conn));
         assert!(crate::olc::test_unresolved_publication(
+            &g,
             EditorKind::Trigedit,
             vnum
         ));
@@ -1282,6 +1279,7 @@ mod tests {
         do_trigedit(&mut g, ch, &vnum.to_string(), 0);
         save_with(&mut g, conn, crate::olc::atomic_replace).unwrap();
         assert!(!crate::olc::test_unresolved_publication(
+            &g,
             EditorKind::Trigedit,
             vnum
         ));

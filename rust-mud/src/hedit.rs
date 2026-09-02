@@ -32,7 +32,6 @@
 use crate::olc::{self, EditorKind};
 use crate::state::GameState;
 use crate::types::*;
-use std::sync::{Mutex, OnceLock};
 
 // olc.h limits.
 const MAX_HELP_KEYWORDS: usize = 75;
@@ -175,7 +174,7 @@ fn load_help_file(lib_path: &str) -> std::io::Result<Vec<HelpEntry>> {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
-struct HeditState {
+pub struct HeditState {
     /// The character doing the editing (for log/permission/output).
     ch: CharId,
     authorization: olc::OlcAuthorization,
@@ -201,45 +200,39 @@ enum HeditMode {
     MinLevel,
 }
 
-static STATES: OnceLock<Mutex<std::collections::HashMap<ConnId, HeditState>>> = OnceLock::new();
-
-fn states() -> &'static Mutex<std::collections::HashMap<ConnId, HeditState>> {
-    STATES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+fn states(g: &GameState) -> &std::collections::HashMap<ConnId, HeditState> {
+    &g.olc.hedit_states
+}
+fn states_mut(g: &mut GameState) -> &mut std::collections::HashMap<ConnId, HeditState> {
+    &mut g.olc.hedit_states
 }
 
-fn with_state<R>(conn: ConnId, f: impl FnOnce(&mut HeditState) -> R) -> Option<R> {
-    let mut guard = match states().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.get_mut(&conn).map(f)
+fn with_state<R>(
+    g: &mut GameState,
+    conn: ConnId,
+    f: impl FnOnce(&mut HeditState) -> R,
+) -> Option<R> {
+    states_mut(g).get_mut(&conn).map(f)
 }
 
-fn take_state(conn: ConnId) -> Option<HeditState> {
-    let mut guard = match states().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.remove(&conn)
+fn take_state(g: &mut GameState, conn: ConnId) -> Option<HeditState> {
+    states_mut(g).remove(&conn)
 }
 
 /// abort: drop this conn's editor state without saving (player disconnected
 /// mid-edit). `olc::abort_editor` calls `olc::clear_active`.
-pub fn abort(conn: ConnId) {
-    if let Some(state) = take_state(conn) {
+pub fn abort(g: &mut GameState, conn: ConnId) {
+    if let Some(state) = take_state(g, conn) {
         olc::discard_unresolved_named_save(
+            g,
             EditorKind::Hedit,
             &state.help.keywords.to_ascii_lowercase(),
         );
     }
 }
 
-fn set_state(conn: ConnId, st: HeditState) {
-    let mut guard = match states().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.insert(conn, st);
+fn set_state(g: &mut GameState, conn: ConnId, st: HeditState) {
+    states_mut(g).insert(conn, st);
 }
 
 // ---------------------------------------------------------------------------
@@ -337,7 +330,7 @@ pub fn do_hedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     // Every save rewrites the whole help table, and a newly inserted entry
     // shifts every numeric rnum. Serialize Hedit sessions globally so an editor
     // cannot later publish a scratch copy against a stale rnum.
-    if let Some(other_conn) = other_hedit_session(conn) {
+    if let Some(other_conn) = other_hedit_session(g, conn) {
         let other = g
             .descriptors
             .get(&other_conn)
@@ -364,6 +357,7 @@ pub fn do_hedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
     };
 
     set_state(
+        g,
         conn,
         HeditState {
             ch,
@@ -375,7 +369,7 @@ pub fn do_hedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             text_buf: None,
         },
     );
-    olc::set_active(conn, EditorKind::Hedit);
+    olc::set_active(g, conn, EditorKind::Hedit);
 
     // act("$n starts using OLC.", TO_ROOM).
     crate::act::act(
@@ -394,11 +388,8 @@ pub fn do_hedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 /// Return another active Hedit connection, if any. Hedit stores table indexes,
 /// and a save may insert at index zero, so distinct entries cannot be edited
 /// concurrently without invalidating one session's identity.
-fn other_hedit_session(exclude: ConnId) -> Option<ConnId> {
-    crate::lock_ok::lock(&states())
-        .keys()
-        .copied()
-        .find(|conn| *conn != exclude)
+fn other_hedit_session(g: &GameState, exclude: ConnId) -> Option<ConnId> {
+    states(g).keys().copied().find(|conn| *conn != exclude)
 }
 
 // ---------------------------------------------------------------------------
@@ -406,7 +397,7 @@ fn other_hedit_session(exclude: ConnId) -> Option<ConnId> {
 // ---------------------------------------------------------------------------
 
 fn hedit_disp_menu(g: &mut GameState, conn: ConnId) {
-    let (keywords, entry, min_level) = match with_state(conn, |st| {
+    let (keywords, entry, min_level) = match with_state(g, conn, |st| {
         st.mode = HeditMode::MainMenu;
         (
             st.help.keywords.clone(),
@@ -439,11 +430,11 @@ Enter choice : ",
 // ---------------------------------------------------------------------------
 
 pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
-    let mode = match with_state(conn, |st| st.mode) {
+    let mode = match with_state(g, conn, |st| st.mode) {
         Some(m) => m,
         None => {
             // No state — abandon (should not happen if olc routing is correct).
-            olc::clear_active(conn);
+            olc::clear_active(g, conn);
             return;
         }
     };
@@ -451,7 +442,7 @@ pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
     let ch = match conn_char(g, conn) {
         Some(c) => c,
         None => {
-            cleanup(conn);
+            cleanup(g, conn);
             return;
         }
     };
@@ -464,11 +455,11 @@ pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                         g.get_char(ch)
                             .map(|c| c.player.name.clone())
                             .unwrap_or_default(),
-                        with_state(conn, |st| st.help.keywords.clone()).unwrap_or_default(),
+                        with_state(g, conn, |st| st.help.keywords.clone()).unwrap_or_default(),
                     );
                     log::info!("OLC: {} edits help for {}.", name, kw);
                     send(g, ch, "Help entry saved to disk and memory.\r\n");
-                    cleanup(conn);
+                    cleanup(g, conn);
                 }
                 Err(err) => {
                     log::warn!("SYSERR: OLC: cannot save help entry: {}", err);
@@ -488,7 +479,7 @@ pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 }
             },
             Some('n') | Some('N') => {
-                cleanup(conn);
+                cleanup(g, conn);
             }
             _ => {
                 g.send_to_char(
@@ -500,21 +491,21 @@ pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
 
         HeditMode::MainMenu => match arg.chars().next() {
             Some('q') | Some('Q') => {
-                let changed = with_state(conn, |st| st.changed).unwrap_or(false);
+                let changed = with_state(g, conn, |st| st.changed).unwrap_or(false);
                 if changed {
                     send(g, ch, "Do you wish to save this help entry internally? : ");
-                    with_state(conn, |st| st.mode = HeditMode::ConfirmSave);
+                    with_state(g, conn, |st| st.mode = HeditMode::ConfirmSave);
                 } else {
-                    cleanup(conn);
+                    cleanup(g, conn);
                 }
                 send(g, ch, "\r\n");
             }
             Some('1') => {
                 send(g, ch, "Enter keywords:-\r\n] ");
-                with_state(conn, |st| st.mode = HeditMode::Keywords);
+                with_state(g, conn, |st| st.mode = HeditMode::Keywords);
             }
             Some('2') => {
-                with_state(conn, |st| {
+                with_state(g, conn, |st| {
                     st.mode = HeditMode::Entry;
                     // Begin the text editor with the existing entry preloaded.
                     st.text_buf = Some(st.help.entry.clone());
@@ -522,14 +513,14 @@ pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 });
                 send(g, ch, "");
                 send(g, ch, "Enter help entry: (/s saves /h for help)\r\n\r\n");
-                let cur = with_state(conn, |st| st.help.entry.clone()).unwrap_or_default();
+                let cur = with_state(g, conn, |st| st.help.entry.clone()).unwrap_or_default();
                 if !cur.is_empty() {
                     send(g, ch, &cur);
                 }
             }
             Some('3') => {
                 send(g, ch, "Enter min level:-\r\n] ");
-                with_state(conn, |st| st.mode = HeditMode::MinLevel);
+                with_state(g, conn, |st| st.mode = HeditMode::MinLevel);
             }
             _ => {
                 send(g, ch, "Invalid choice!\r\n");
@@ -547,7 +538,7 @@ pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             } else {
                 new_kw
             };
-            with_state(conn, |st| {
+            with_state(g, conn, |st| {
                 st.help.keywords = kw;
                 st.changed = true;
             });
@@ -583,7 +574,7 @@ pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                     "That is not a valid choice!\r\nEnter min level:-\r\n] ",
                 );
             } else {
-                with_state(conn, |st| {
+                with_state(g, conn, |st| {
                     st.help.min_level = number;
                     st.changed = true;
                 });
@@ -599,18 +590,18 @@ pub fn hedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
 /// per-line "\r\n").
 fn hedit_text_input(g: &mut GameState, conn: ConnId, line: &str) {
     if conn_char(g, conn).is_none() {
-        cleanup(conn);
+        cleanup(g, conn);
         return;
     }
 
     let mut buf =
-        with_state(conn, |st| st.text_buf.clone().unwrap_or_default()).unwrap_or_default();
+        with_state(g, conn, |st| st.text_buf.clone().unwrap_or_default()).unwrap_or_default();
     match crate::modify::editor_buffer_input(g, conn, &mut buf, MAX_HELP_ENTRY, line) {
         crate::modify::BufferEditorResult::Continue => {
-            with_state(conn, |st| st.text_buf = Some(buf));
+            with_state(g, conn, |st| st.text_buf = Some(buf));
         }
         crate::modify::BufferEditorResult::Save => {
-            with_state(conn, |st| {
+            with_state(g, conn, |st| {
                 st.help.entry = buf;
                 st.text_buf = None;
                 st.changed = true;
@@ -619,7 +610,7 @@ fn hedit_text_input(g: &mut GameState, conn: ConnId, line: &str) {
             hedit_disp_menu(g, conn);
         }
         crate::modify::BufferEditorResult::Abort => {
-            with_state(conn, |st| {
+            with_state(g, conn, |st| {
                 st.text_buf = None;
                 st.mode = HeditMode::MainMenu;
             });
@@ -641,7 +632,7 @@ where
     F: FnOnce(&std::path::Path, &[u8]) -> std::io::Result<()>,
 {
     let (help, rnum, authorization) =
-        match with_state(conn, |st| (st.help.clone(), st.rnum, st.authorization)) {
+        match with_state(g, conn, |st| (st.help.clone(), st.rnum, st.authorization)) {
             Some(v) => v,
             None => {
                 return Err(std::io::Error::new(
@@ -670,10 +661,10 @@ where
     match hedit_save_to_disk_with(&lib_path, &entries, replace) {
         Ok(()) => {
             g.social.help_table = entries;
-            crate::olc::olc_remove_from_save_list(0, crate::olc::OLC_SAVE_HELP);
-            crate::olc::clear_unresolved_named_save(EditorKind::Hedit, &unresolved_key);
-            crate::olc::clear_unresolved_named_save(EditorKind::Hedit, HEDIT_GLOBAL_SAVE_KEY);
-            crate::olc::clear_published_unresolved_kind(EditorKind::Hedit);
+            crate::olc::olc_remove_from_save_list(g, 0, crate::olc::OLC_SAVE_HELP);
+            crate::olc::clear_unresolved_named_save(g, EditorKind::Hedit, &unresolved_key);
+            crate::olc::clear_unresolved_named_save(g, EditorKind::Hedit, HEDIT_GLOBAL_SAVE_KEY);
+            crate::olc::clear_published_unresolved_kind(g, EditorKind::Hedit);
             Ok(())
         }
         Err(error) if crate::olc::replacement_was_published(&error) => {
@@ -682,10 +673,11 @@ where
                 // The candidate is already live at index zero. Retrying the
                 // still-open editor must replace that entry, not insert a
                 // duplicate and shift the table again.
-                with_state(conn, |state| state.rnum = Some(0));
+                with_state(g, conn, |state| state.rnum = Some(0));
             }
-            crate::olc::olc_add_to_save_list(0, crate::olc::OLC_SAVE_HELP);
+            crate::olc::olc_add_to_save_list(g, 0, crate::olc::OLC_SAVE_HELP);
             crate::olc::mark_unresolved_named_save_failure(
+                g,
                 EditorKind::Hedit,
                 &unresolved_key,
                 &error,
@@ -694,6 +686,7 @@ where
         }
         Err(error) => {
             crate::olc::mark_unresolved_named_save_failure(
+                g,
                 EditorKind::Hedit,
                 &unresolved_key,
                 &error,
@@ -714,11 +707,12 @@ pub fn save_all_help(g: &mut GameState) -> std::io::Result<()> {
     })();
     match &result {
         Ok(()) => {
-            crate::olc::olc_remove_from_save_list(0, crate::olc::OLC_SAVE_HELP);
-            crate::olc::clear_unresolved_named_save(EditorKind::Hedit, HEDIT_GLOBAL_SAVE_KEY);
-            crate::olc::clear_published_unresolved_kind(EditorKind::Hedit);
+            crate::olc::olc_remove_from_save_list(g, 0, crate::olc::OLC_SAVE_HELP);
+            crate::olc::clear_unresolved_named_save(g, EditorKind::Hedit, HEDIT_GLOBAL_SAVE_KEY);
+            crate::olc::clear_published_unresolved_kind(g, EditorKind::Hedit);
         }
         Err(error) => crate::olc::mark_unresolved_named_save_failure(
+            g,
             EditorKind::Hedit,
             HEDIT_GLOBAL_SAVE_KEY,
             error,
@@ -787,14 +781,15 @@ fn delete_doubledollar(s: &str) -> String {
 // Cleanup.
 // ---------------------------------------------------------------------------
 
-fn cleanup(conn: ConnId) {
-    if let Some(state) = take_state(conn) {
+fn cleanup(g: &mut GameState, conn: ConnId) {
+    if let Some(state) = take_state(g, conn) {
         olc::discard_unresolved_named_save(
+            g,
             EditorKind::Hedit,
             &state.help.keywords.to_ascii_lowercase(),
         );
     }
-    olc::clear_active(conn);
+    olc::clear_active(g, conn);
 }
 
 /// OLC output with C get_char_cols semantics: the &-codes in these menus are
@@ -826,7 +821,6 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Help state is per-GameState now: a fresh GameState starts unloaded,
         // so no global reset is needed here any more.
-        crate::lock_ok::lock(&states()).clear();
         let lib =
             std::env::temp_dir().join(format!("deltamud-hedit-{label}-{}", std::process::id()));
         let help_dir = lib.join(HLP_REL_DIR);
@@ -855,11 +849,11 @@ mod tests {
         hedit_parse(&mut g, conn, "3"); // min level prompt
         // C hedit.c:317: atoi("abc") == 0 -> passes the range check (#298).
         hedit_parse(&mut g, conn, "abc");
-        assert_eq!(with_state(conn, |st| st.help.min_level), Some(0));
+        assert_eq!(with_state(&mut g, conn, |st| st.help.min_level), Some(0));
         // A genuine out-of-range number is still rejected.
         hedit_parse(&mut g, conn, "-4");
-        assert_eq!(with_state(conn, |st| st.help.min_level), Some(0));
-        cleanup(conn);
+        assert_eq!(with_state(&mut g, conn, |st| st.help.min_level), Some(0));
+        cleanup(&mut g, conn);
         let _ = std::fs::remove_dir_all(lib);
     }
 
@@ -905,12 +899,12 @@ mod tests {
             hedit_parse(&mut g, conn, "1");
             let input = format!("{}{scalar}", "a".repeat(MAX_HELP_KEYWORDS - 1));
             hedit_parse(&mut g, conn, &input);
-            let keyword = with_state(conn, |state| state.help.keywords.clone()).unwrap();
+            let keyword = with_state(&mut g, conn, |state| state.help.keywords.clone()).unwrap();
             assert_eq!(keyword.len(), MAX_HELP_KEYWORDS - 1);
             assert!(keyword.is_char_boundary(keyword.len()));
             assert!(!keyword.contains(scalar));
         }
-        cleanup(conn);
+        cleanup(&mut g, conn);
         let _ = std::fs::remove_dir_all(lib);
     }
 
@@ -945,29 +939,31 @@ mod tests {
         g.descriptors.insert(second_conn, second_descriptor);
 
         do_hedit(&mut g, first, "alpha", 0);
-        assert_eq!(with_state(first_conn, |state| state.rnum), Some(Some(0)));
+        assert_eq!(
+            with_state(&mut g, first_conn, |state| state.rnum),
+            Some(Some(0))
+        );
 
         // A distinct new entry would insert at zero and shift alpha's rnum.
         do_hedit(&mut g, second, "gamma", 0);
-        assert!(with_state(second_conn, |_| ()).is_none());
+        assert!(with_state(&mut g, second_conn, |_| ()).is_none());
         assert!(
             g.descriptors[&second_conn]
                 .outbuf
                 .contains("already being editted by First")
         );
 
-        cleanup(first_conn);
+        cleanup(&mut g, first_conn);
         do_hedit(&mut g, second, "gamma", 0);
-        assert!(with_state(second_conn, |_| ()).is_some());
+        assert!(with_state(&mut g, second_conn, |_| ()).is_some());
 
-        cleanup(second_conn);
+        cleanup(&mut g, second_conn);
         let _ = std::fs::remove_dir_all(lib);
     }
 
     #[test]
     fn post_publication_retry_of_new_help_replaces_instead_of_inserting_twice() {
         let (_guard, lib) = test_help_lib("published-new-retry");
-        let _save_guard = crate::olc::test_save_list_guard();
         let mut config = Config::default();
         config.lib_path = lib.to_string_lossy().into_owned();
         let mut g = GameState::new(config);
@@ -996,14 +992,14 @@ mod tests {
 
         assert!(crate::olc::replacement_was_published(&error));
         assert_eq!(g.social.help_table.len(), 1);
-        assert_eq!(with_state(conn, |state| state.rnum), Some(Some(0)));
+        assert_eq!(with_state(&mut g, conn, |state| state.rnum), Some(Some(0)));
 
         hedit_save_internally(&mut g, conn).unwrap();
         assert_eq!(g.social.help_table.len(), 1);
         let saved = std::fs::read_to_string(lib.join(HLP_REL_DIR).join(HELP_FILE)).unwrap();
         assert_eq!(saved.lines().filter(|line| *line == "gamma").count(), 1);
 
-        cleanup(conn);
+        cleanup(&mut g, conn);
         let _ = std::fs::remove_dir_all(lib);
     }
 }

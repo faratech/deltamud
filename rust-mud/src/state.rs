@@ -493,6 +493,37 @@ pub enum DeferredDbOp {
     /// clan.c:388-405: lower every member of the clan to rank 1.
     ClanLowerRanks(i32),
 }
+/// The OLC core registry (phase 1: was olc.rs module statics).
+#[derive(Default)]
+pub struct OlcState {
+    /// conn -> active editor kind.
+    pub active: HashMap<ConnId, crate::olc::EditorKind>,
+    /// (zone, component) pairs edited but not yet written to disk.
+    pub save_list: Vec<(i32, i32)>,
+    /// save-list entries whose durable publication is unresolved.
+    pub unresolved: Vec<crate::olc::UnresolvedSave>,
+    /// modify.rs: in-flight string-editor states keyed by connection.
+    pub edits: HashMap<ConnId, crate::modify::EditState>,
+    /// modify.rs: active pagers keyed by connection.
+    pub pagers: HashMap<ConnId, crate::modify::Pager>,
+    /// Per-editor working copies keyed by connection (the old per-editor
+    /// `STATES` statics).
+    pub redit_states: HashMap<ConnId, crate::redit::ReditState>,
+    pub oedit_states: HashMap<ConnId, crate::oedit::OeditState>,
+    pub medit_states: HashMap<ConnId, crate::medit::MeditState>,
+    pub zedit_states: HashMap<ConnId, crate::zedit::ZeditState>,
+    pub sedit_states: HashMap<ConnId, crate::sedit::SeditState>,
+    pub aedit_states: HashMap<ConnId, crate::aedit::AeditState>,
+    pub hedit_states: HashMap<ConnId, crate::hedit::HeditState>,
+    pub trigedit_states: HashMap<ConnId, crate::trigedit::TrigEditState>,
+    /// redit/oedit multi-line text sub-editor buffers.
+    pub redit_text_bufs: HashMap<ConnId, String>,
+    pub oedit_text_bufs: HashMap<ConnId, String>,
+    /// aedit.rs: durable editor social-action table + loaded flag.
+    pub aedit_soc_list: Vec<crate::aedit::SocialAction>,
+    pub aedit_soc_loaded: bool,
+}
+
 /// World-side boot tables and runtime state that used to live in module
 /// statics (phase 1 migration). Grows as families migrate off globals.
 /// The DG script VM's boot tables (phase 1 migration; the live script/trigger
@@ -743,6 +774,9 @@ pub struct GameState {
     /// interpreter.rs: whether the in-flight command arrived from the live
     /// Playing descriptor of the acting principal (Indirect for force/queue/DM).
     pub command_source: crate::interpreter::CommandSource,
+    /// olc.rs: the OLC core registry (active editors, save journal, unresolved
+    /// publications).
+    pub olc: OlcState,
     /// The mud calendar + sun state (weather.rs TimeWeather).
     pub clock: crate::weather::MudClock,
     /// Economy stores (quest givers; shops/clans/houses/auction as families
@@ -798,6 +832,7 @@ impl GameState {
             social: SocialState::default(),
             dg: DgState::default(),
             command_source: crate::interpreter::CommandSource::Indirect,
+            olc: OlcState::default(),
             clock: crate::weather::MudClock::default(),
             econ: EconomyState::default(),
             credits: String::new(),

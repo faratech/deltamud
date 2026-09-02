@@ -22,8 +22,6 @@ use crate::state::GameState;
 use crate::types::*;
 use crate::world::ObjectProto;
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::sync::OnceLock;
 
 // MAX_OBJ_AFFECT (structs.h) — DeltaMUD object affect slots.
 const MAX_OBJ_AFFECT: usize = 6;
@@ -37,6 +35,13 @@ const PC_CLASS_TYPES: &[&str] = &["Magic User", "Cleric", "Thief", "Warrior", "A
 const CLASS_UNDEFINED: i32 = -1;
 
 // Counts of real entries in each name table (excluding the "\n" sentinel).
+fn states(g: &GameState) -> &HashMap<ConnId, OeditState> {
+    &g.olc.oedit_states
+}
+fn states_mut(g: &mut GameState) -> &mut HashMap<ConnId, OeditState> {
+    &mut g.olc.oedit_states
+}
+
 fn real_len(table: &[&str]) -> usize {
     table.iter().take_while(|&&s| s != "\n").count()
 }
@@ -101,7 +106,7 @@ struct ObjEdit {
     extra_descriptions: Vec<(String, String)>,
 }
 
-struct OeditState {
+pub struct OeditState {
     zone_number: i32,
     authorization: olc::OlcAuthorization,
     obj: ObjEdit,
@@ -111,13 +116,12 @@ struct OeditState {
     cur_desc: usize,
 }
 
-fn states() -> &'static Mutex<HashMap<ConnId, OeditState>> {
-    static S: OnceLock<Mutex<HashMap<ConnId, OeditState>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn with_state<R>(conn: ConnId, f: impl FnOnce(&mut OeditState) -> R) -> Option<R> {
-    crate::lock_ok::lock(&states()).get_mut(&conn).map(f)
+fn with_state<R>(
+    g: &mut GameState,
+    conn: ConnId,
+    f: impl FnOnce(&mut OeditState) -> R,
+) -> Option<R> {
+    states_mut(g).get_mut(&conn).map(f)
 }
 
 fn send(g: &mut GameState, conn: ConnId, msg: &str) {
@@ -166,11 +170,7 @@ pub fn do_oedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
     };
 
-    let conflict = states()
-        .lock()
-        .unwrap()
-        .values()
-        .any(|s| s.obj.vnum == vnum);
+    let conflict = states_mut(g).values().any(|s| s.obj.vnum == vnum);
     if conflict {
         g.send_to_char(ch, "That object is currently being edited.\r\n");
         return;
@@ -204,10 +204,11 @@ pub fn do_oedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
         }
     };
 
-    crate::lock_ok::lock(&states()).insert(
+    let zone_number = g.zones[znum].number;
+    states_mut(g).insert(
         conn,
         OeditState {
-            zone_number: g.zones[znum].number,
+            zone_number,
             authorization,
             obj,
             mode: OeditMode::MainMenu,
@@ -216,7 +217,7 @@ pub fn do_oedit(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             cur_desc: 0,
         },
     );
-    olc::set_active(conn, EditorKind::Oedit);
+    olc::set_active(g, conn, EditorKind::Oedit);
     crate::act::act(
         g,
         "$n starts using OLC.",
@@ -271,14 +272,16 @@ fn from_proto(p: &ObjectProto) -> ObjEdit {
 // ===========================================================================
 // Multi-line text sub-editor (action desc / extra desc).
 // ===========================================================================
-fn text_bufs() -> &'static Mutex<HashMap<ConnId, String>> {
-    static B: OnceLock<Mutex<HashMap<ConnId, String>>> = OnceLock::new();
-    B.get_or_init(|| Mutex::new(HashMap::new()))
+fn text_bufs(g: &GameState) -> &HashMap<ConnId, String> {
+    &g.olc.oedit_text_bufs
+}
+fn text_bufs_mut(g: &mut GameState) -> &mut HashMap<ConnId, String> {
+    &mut g.olc.oedit_text_bufs
 }
 
 fn begin_text(g: &mut GameState, conn: ConnId, seed: &str, mode: OeditMode) {
-    crate::lock_ok::lock(&text_bufs()).insert(conn, seed.to_string());
-    let _ = with_state(conn, |s| s.mode = mode);
+    text_bufs_mut(g).insert(conn, seed.to_string());
+    let _ = with_state(g, conn, |s| s.mode = mode);
     // C oedit.c:1032/1428: distinct banner per sub-editor (#291).
     let prompt = match mode {
         OeditMode::ActDesc => "Enter action description: (/s saves /h for help)\r\n\r\n",
@@ -296,22 +299,12 @@ fn begin_text(g: &mut GameState, conn: ConnId, seed: &str, mode: OeditMode) {
 fn text_input(g: &mut GameState, conn: ConnId, line: &str) -> Option<Option<String>> {
     let trimmed = line.trim_end_matches(['\r', '\n']);
     if trimmed == "~" {
-        return Some(Some(
-            text_bufs()
-                .lock()
-                .unwrap()
-                .remove(&conn)
-                .unwrap_or_default(),
-        ));
+        return Some(Some(text_bufs_mut(g).remove(&conn).unwrap_or_default()));
     }
-    let mut buf = text_bufs()
-        .lock()
-        .unwrap()
-        .remove(&conn)
-        .unwrap_or_default();
+    let mut buf = text_bufs_mut(g).remove(&conn).unwrap_or_default();
     match crate::modify::editor_buffer_input(g, conn, &mut buf, MAX_MESSAGE_LENGTH, line) {
         crate::modify::BufferEditorResult::Continue => {
-            crate::lock_ok::lock(&text_bufs()).insert(conn, buf);
+            text_bufs_mut(g).insert(conn, buf);
             None
         }
         crate::modify::BufferEditorResult::Save => Some(Some(buf)),
@@ -323,7 +316,7 @@ fn text_input(g: &mut GameState, conn: ConnId, line: &str) -> Option<Option<Stri
 // Main menu display.
 // ===========================================================================
 fn disp_menu(g: &mut GameState, conn: ConnId) {
-    let o = match with_state(conn, |s| s.obj.clone()) {
+    let o = match with_state(g, conn, |s| s.obj.clone()) {
         Some(o) => o,
         None => return,
     };
@@ -382,7 +375,7 @@ fn disp_menu(g: &mut GameState, conn: ConnId) {
         },
     );
     send(g, conn, &body);
-    let _ = with_state(conn, |s| s.mode = OeditMode::MainMenu);
+    let _ = with_state(g, conn, |s| s.mode = OeditMode::MainMenu);
 }
 
 // Two-column bit menu (type/extra/wear/affect tables; offset = first label's
@@ -408,11 +401,11 @@ fn disp_bit_menu(g: &mut GameState, conn: ConnId, table: &[&str], one_based: boo
 fn disp_type_menu(g: &mut GameState, conn: ConnId) {
     disp_bit_menu(g, conn, ITEM_TYPES, false);
     send(g, conn, "\r\nEnter object type : ");
-    let _ = with_state(conn, |s| s.mode = OeditMode::Type);
+    let _ = with_state(g, conn, |s| s.mode = OeditMode::Type);
 }
 
 fn disp_extra_menu(g: &mut GameState, conn: ConnId) {
-    let cur = with_state(conn, |s| s.obj.extra_flags.bits() as i64).unwrap_or(0);
+    let cur = with_state(g, conn, |s| s.obj.extra_flags.bits() as i64).unwrap_or(0);
     disp_bit_menu(g, conn, EXTRA_BITS, true);
     send(
         g,
@@ -427,7 +420,7 @@ fn disp_extra_menu(g: &mut GameState, conn: ConnId) {
 }
 
 fn disp_wear_menu(g: &mut GameState, conn: ConnId) {
-    let cur = with_state(conn, |s| s.obj.wear_flags.bits() as i64).unwrap_or(0);
+    let cur = with_state(g, conn, |s| s.obj.wear_flags.bits() as i64).unwrap_or(0);
     disp_bit_menu(g, conn, WEAR_BITS, true);
     send(
         g,
@@ -442,7 +435,7 @@ fn disp_wear_menu(g: &mut GameState, conn: ConnId) {
 }
 
 fn disp_perm_affects_menu(g: &mut GameState, conn: ConnId) {
-    let cur = with_state(conn, |s| s.obj.bitvector).unwrap_or(0);
+    let cur = with_state(g, conn, |s| s.obj.bitvector).unwrap_or(0);
     disp_bit_menu(g, conn, AFFECTED_BITS, true);
     send(
         g,
@@ -498,7 +491,7 @@ fn disp_liquid_menu(g: &mut GameState, conn: ConnId) {
     }
     out.push_str(&format!("\r\n{nrm}Enter drink type : ", nrm = NRM));
     send(g, conn, &out);
-    let _ = with_state(conn, |s| s.mode = OeditMode::Value3);
+    let _ = with_state(g, conn, |s| s.mode = OeditMode::Value3);
 }
 
 fn disp_weapon_menu(g: &mut GameState, conn: ConnId) {
@@ -525,7 +518,7 @@ fn disp_weapon_menu(g: &mut GameState, conn: ConnId) {
 }
 
 fn disp_container_flags_menu(g: &mut GameState, conn: ConnId) {
-    let cur = with_state(conn, |s| s.obj.values[1] as i64).unwrap_or(0);
+    let cur = with_state(g, conn, |s| s.obj.values[1] as i64).unwrap_or(0);
     let body = format!(
         "{grn}1{nrm}) CLOSEABLE\r\n\
          {grn}2{nrm}) PICKPROOF\r\n\
@@ -542,7 +535,7 @@ fn disp_container_flags_menu(g: &mut GameState, conn: ConnId) {
 }
 
 fn disp_prompt_apply_menu(g: &mut GameState, conn: ConnId) {
-    let affects = with_state(conn, |s| s.obj.affects).unwrap_or([(0, 0); MAX_OBJ_AFFECT]);
+    let affects = with_state(g, conn, |s| s.obj.affects).unwrap_or([(0, 0); MAX_OBJ_AFFECT]);
     let mut out = String::new();
     for (i, (loc, modi)) in affects.iter().enumerate() {
         if *modi != 0 {
@@ -571,7 +564,7 @@ fn disp_prompt_apply_menu(g: &mut GameState, conn: ConnId) {
         n = MAX_OBJ_AFFECT + 1,
     ));
     send(g, conn, &out);
-    let _ = with_state(conn, |s| s.mode = OeditMode::PromptApply);
+    let _ = with_state(g, conn, |s| s.mode = OeditMode::PromptApply);
 }
 
 fn disp_apply_menu(g: &mut GameState, conn: ConnId) {
@@ -579,11 +572,11 @@ fn disp_apply_menu(g: &mut GameState, conn: ConnId) {
     // offered or accepted ('This is BOGUS, don't use it.') (#289).
     disp_bit_menu(g, conn, &APPLY_TYPES[..22], false);
     send(g, conn, "\r\nEnter apply type (0 is no apply) : ");
-    let _ = with_state(conn, |s| s.mode = OeditMode::Apply);
+    let _ = with_state(g, conn, |s| s.mode = OeditMode::Apply);
 }
 
 fn disp_extradesc_menu(g: &mut GameState, conn: ConnId) {
-    let (kw, desc, has_next) = match with_state(conn, |s| {
+    let (kw, desc, has_next) = match with_state(g, conn, |s| {
         let idx = s.cur_desc;
         let (k, d) = s
             .obj
@@ -625,15 +618,15 @@ fn disp_extradesc_menu(g: &mut GameState, conn: ConnId) {
         next = next_str,
     );
     send(g, conn, &body);
-    let _ = with_state(conn, |s| s.mode = OeditMode::ExtradescMenu);
+    let _ = with_state(g, conn, |s| s.mode = OeditMode::ExtradescMenu);
 }
 
 // ===========================================================================
 // Type-aware value menus (oedit_disp_valN_menu).
 // ===========================================================================
 fn disp_val1_menu(g: &mut GameState, conn: ConnId) {
-    let _ = with_state(conn, |s| s.mode = OeditMode::Value1);
-    let t = with_state(conn, |s| s.obj.obj_type).unwrap_or(ObjectType::Other);
+    let _ = with_state(g, conn, |s| s.mode = OeditMode::Value1);
+    let t = with_state(g, conn, |s| s.obj.obj_type).unwrap_or(ObjectType::Other);
     match t {
         ObjectType::Light => disp_val3_menu(g, conn),
         ObjectType::Scroll | ObjectType::Wand | ObjectType::Staff | ObjectType::Potion => {
@@ -655,8 +648,8 @@ fn disp_val1_menu(g: &mut GameState, conn: ConnId) {
 }
 
 fn disp_val2_menu(g: &mut GameState, conn: ConnId) {
-    let _ = with_state(conn, |s| s.mode = OeditMode::Value2);
-    let t = with_state(conn, |s| s.obj.obj_type).unwrap_or(ObjectType::Other);
+    let _ = with_state(g, conn, |s| s.mode = OeditMode::Value2);
+    let t = with_state(g, conn, |s| s.obj.obj_type).unwrap_or(ObjectType::Other);
     match t {
         ObjectType::Scroll | ObjectType::Potion => disp_spells_menu(g, conn),
         ObjectType::Wand | ObjectType::Staff => send(g, conn, "Max number of charges : "),
@@ -669,8 +662,8 @@ fn disp_val2_menu(g: &mut GameState, conn: ConnId) {
 }
 
 fn disp_val3_menu(g: &mut GameState, conn: ConnId) {
-    let _ = with_state(conn, |s| s.mode = OeditMode::Value3);
-    let t = with_state(conn, |s| s.obj.obj_type).unwrap_or(ObjectType::Other);
+    let _ = with_state(g, conn, |s| s.mode = OeditMode::Value3);
+    let t = with_state(g, conn, |s| s.obj.obj_type).unwrap_or(ObjectType::Other);
     match t {
         ObjectType::Light => {
             send(g, conn, "Number of hours (0 = burnt, -1 is infinite) : ");
@@ -687,8 +680,8 @@ fn disp_val3_menu(g: &mut GameState, conn: ConnId) {
 }
 
 fn disp_val4_menu(g: &mut GameState, conn: ConnId) {
-    let _ = with_state(conn, |s| s.mode = OeditMode::Value4);
-    let t = with_state(conn, |s| s.obj.obj_type).unwrap_or(ObjectType::Other);
+    let _ = with_state(g, conn, |s| s.mode = OeditMode::Value4);
+    let t = with_state(g, conn, |s| s.obj.obj_type).unwrap_or(ObjectType::Other);
     match t {
         ObjectType::Scroll | ObjectType::Potion | ObjectType::Wand | ObjectType::Staff => {
             disp_spells_menu(g, conn);
@@ -705,7 +698,7 @@ fn disp_val4_menu(g: &mut GameState, conn: ConnId) {
 // oedit_parse — per-line input handler.
 // ===========================================================================
 pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
-    let mode = match with_state(conn, |s| s.mode) {
+    let mode = match with_state(g, conn, |s| s.mode) {
         Some(m) => m,
         None => return,
     };
@@ -742,7 +735,7 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             } else {
                 arg.to_string()
             };
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 s.obj.name = v;
             });
             commit_and_menu(g, conn);
@@ -753,7 +746,7 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             } else {
                 arg.to_string()
             };
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 s.obj.short_description = v;
             });
             commit_and_menu(g, conn);
@@ -764,7 +757,7 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             } else {
                 arg.to_string()
             };
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 s.obj.description = v;
             });
             commit_and_menu(g, conn);
@@ -772,7 +765,7 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         OeditMode::ActDesc => {
             if let Some(result) = text_input(g, conn, line) {
                 if let Some(text) = result {
-                    with_state(conn, |s| {
+                    with_state(g, conn, |s| {
                         s.obj.action_description = if text.is_empty() { None } else { Some(text) };
                         s.modified = true;
                     });
@@ -788,7 +781,7 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             if number < 1 || number as usize >= real_len(ITEM_TYPES) {
                 send(g, conn, "Invalid choice, try again : ");
             } else {
-                with_state(conn, |s| s.obj.obj_type = ObjectType::from_i32(number));
+                with_state(g, conn, |s| s.obj.obj_type = ObjectType::from_i32(number));
                 commit_and_menu(g, conn);
             }
         }
@@ -802,7 +795,7 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             } else if number == 0 {
                 commit_and_menu(g, conn);
             } else {
-                with_state(conn, |s| {
+                with_state(g, conn, |s| {
                     let bit = 1u64 << (number - 1);
                     s.obj.extra_flags ^= ExtraFlags::from_bits_truncate(bit);
                     s.modified = true;
@@ -821,7 +814,7 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             } else if number == 0 {
                 commit_and_menu(g, conn);
             } else {
-                with_state(conn, |s| {
+                with_state(g, conn, |s| {
                     let bit = 1u32 << (number - 1);
                     s.obj.wear_flags ^= WearFlags::from_bits_truncate(bit);
                     s.modified = true;
@@ -834,54 +827,54 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             let Some(v) = olc::parse_i32_input(g, conn, arg, 0) else {
                 return;
             };
-            with_state(conn, |s| s.obj.weight = v);
+            with_state(g, conn, |s| s.obj.weight = v);
             commit_and_menu(g, conn);
         }
         OeditMode::Cost => {
             let Some(v) = olc::parse_i32_input(g, conn, arg, 0) else {
                 return;
             };
-            with_state(conn, |s| s.obj.cost = v);
+            with_state(g, conn, |s| s.obj.cost = v);
             commit_and_menu(g, conn);
         }
         OeditMode::CostPerDay => {
             let Some(v) = olc::parse_i32_input(g, conn, arg, 0) else {
                 return;
             };
-            with_state(conn, |s| s.obj.rent = v);
+            with_state(g, conn, |s| s.obj.rent = v);
             commit_and_menu(g, conn);
         }
         OeditMode::Timer => {
             let Some(v) = olc::parse_i32_input(g, conn, arg, 0) else {
                 return;
             };
-            with_state(conn, |s| s.obj.timer = v);
+            with_state(g, conn, |s| s.obj.timer = v);
             commit_and_menu(g, conn);
         }
         OeditMode::Durability => {
             let Some(v) = olc::parse_i32_input(g, conn, arg, 0) else {
                 return;
             };
-            with_state(conn, |s| s.obj.cslots = v);
+            with_state(g, conn, |s| s.obj.cslots = v);
             commit_and_menu(g, conn);
         }
         OeditMode::Durability2 => {
             let Some(v) = olc::parse_i32_input(g, conn, arg, 0) else {
                 return;
             };
-            with_state(conn, |s| s.obj.tslots = v);
+            with_state(g, conn, |s| s.obj.tslots = v);
             commit_and_menu(g, conn);
         }
         OeditMode::Level => {
             let Some(v) = olc::parse_i32_input(g, conn, arg, 0) else {
                 return;
             };
-            with_state(conn, |s| s.obj.level = v);
+            with_state(g, conn, |s| s.obj.level = v);
             commit_and_menu(g, conn);
         }
         OeditMode::Class => {
             let v = class_str2num(arg);
-            with_state(conn, |s| s.obj.obj_class = v);
+            with_state(g, conn, |s| s.obj.obj_class = v);
             commit_and_menu(g, conn);
         }
 
@@ -890,7 +883,7 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             // principal's trust while this nested menu is open.
             if !can_edit_permanent_affects(g, conn) {
                 send(g, conn, "Your level isn't high enough to do that...\r\n");
-                set_mode(conn, OeditMode::MainMenu);
+                set_mode(g, conn, OeditMode::MainMenu);
                 disp_menu(g, conn);
                 return;
             }
@@ -902,7 +895,7 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             } else if number < 1 || number as usize > real_len(AFFECTED_BITS) {
                 send(g, conn, "Invalid choice, try again : ");
             } else {
-                with_state(conn, |s| {
+                with_state(g, conn, |s| {
                     s.obj.bitvector ^= 1i64 << (number - 1);
                     s.modified = true;
                 });
@@ -914,7 +907,7 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             let Some(v) = olc::parse_i32_input(g, conn, arg, 0) else {
                 return;
             };
-            with_state(conn, |s| s.obj.values[0] = v);
+            with_state(g, conn, |s| s.obj.values[0] = v);
             disp_val2_menu(g, conn);
         }
         OeditMode::Value2 => parse_value2(g, conn, arg),
@@ -933,7 +926,7 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 autoset_applies(g, conn);
                 disp_prompt_apply_menu(g, conn);
             } else {
-                with_state(conn, |s| s.apply_slot = (number - 1) as usize);
+                with_state(g, conn, |s| s.apply_slot = (number - 1) as usize);
                 disp_apply_menu(g, conn);
             }
         }
@@ -942,7 +935,7 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 return;
             };
             if number == 0 {
-                with_state(conn, |s| {
+                with_state(g, conn, |s| {
                     let slot = s.apply_slot;
                     s.obj.affects[slot] = (0, 0);
                 });
@@ -951,19 +944,19 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 // NUM_APPLIES (#289)
                 disp_apply_menu(g, conn);
             } else {
-                with_state(conn, |s| {
+                with_state(g, conn, |s| {
                     let slot = s.apply_slot;
                     s.obj.affects[slot].0 = number;
                 });
                 send(g, conn, "Modifier : ");
-                let _ = with_state(conn, |s| s.mode = OeditMode::ApplyMod);
+                let _ = with_state(g, conn, |s| s.mode = OeditMode::ApplyMod);
             }
         }
         OeditMode::ApplyMod => {
             let Some(v) = olc::parse_i32_input(g, conn, arg, 0) else {
                 return;
             };
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 let slot = s.apply_slot;
                 s.obj.affects[slot].1 = v;
             });
@@ -976,7 +969,7 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
             } else {
                 arg.to_string()
             };
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 let idx = s.cur_desc;
                 if let Some(ed) = s.obj.extra_descriptions.get_mut(idx) {
                     ed.0 = v;
@@ -987,7 +980,7 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         OeditMode::ExtradescDescription => {
             if let Some(result) = text_input(g, conn, line) {
                 if let Some(text) = result {
-                    with_state(conn, |s| {
+                    with_state(g, conn, |s| {
                         let idx = s.cur_desc;
                         if let Some(ed) = s.obj.extra_descriptions.get_mut(idx) {
                             ed.1 = text;
@@ -1000,7 +993,7 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
         }
         OeditMode::ExtradescMenu => parse_extradesc_menu(g, conn, arg),
         OeditMode::Script(mut script_mode) => {
-            let vnum = with_state(conn, |s| s.obj.vnum).unwrap_or(0);
+            let vnum = with_state(g, conn, |s| s.obj.vnum).unwrap_or(0);
             let keep = olc::dg_script_edit_parse(
                 g,
                 conn,
@@ -1010,7 +1003,7 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
                 arg,
             );
             if keep {
-                let _ = with_state(conn, |s| {
+                let _ = with_state(g, conn, |s| {
                     s.mode = OeditMode::Script(script_mode);
                     s.modified = true;
                 });
@@ -1024,28 +1017,28 @@ pub fn oedit_parse(g: &mut GameState, conn: ConnId, line: &str) {
 fn parse_main_menu(g: &mut GameState, conn: ConnId, arg: &str) {
     match arg.chars().next().map(|c| c.to_ascii_lowercase()) {
         Some('q') => {
-            let modified = with_state(conn, |s| s.modified).unwrap_or(false);
+            let modified = with_state(g, conn, |s| s.modified).unwrap_or(false);
             if modified {
                 send(g, conn, "Do you wish to save this object internally? : ");
-                let _ = with_state(conn, |s| s.mode = OeditMode::ConfirmSave);
+                let _ = with_state(g, conn, |s| s.mode = OeditMode::ConfirmSave);
             } else {
                 finish(g, conn);
             }
         }
         Some('1') => {
             send(g, conn, "Enter namelist : ");
-            set_mode(conn, OeditMode::Namelist);
+            set_mode(g, conn, OeditMode::Namelist);
         }
         Some('2') => {
             send(g, conn, "Enter short desc : ");
-            set_mode(conn, OeditMode::ShortDesc);
+            set_mode(g, conn, OeditMode::ShortDesc);
         }
         Some('3') => {
             send(g, conn, "Enter long desc :-\r\n| ");
-            set_mode(conn, OeditMode::LongDesc);
+            set_mode(g, conn, OeditMode::LongDesc);
         }
         Some('4') => {
-            let seed = with_state(conn, |s| {
+            let seed = with_state(g, conn, |s| {
                 s.obj.action_description.clone().unwrap_or_default()
             })
             .unwrap_or_default();
@@ -1054,35 +1047,35 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, arg: &str) {
         Some('5') => disp_type_menu(g, conn),
         Some('6') => {
             disp_extra_menu(g, conn);
-            set_mode(conn, OeditMode::Extras);
+            set_mode(g, conn, OeditMode::Extras);
         }
         Some('7') => {
             disp_wear_menu(g, conn);
-            set_mode(conn, OeditMode::Wear);
+            set_mode(g, conn, OeditMode::Wear);
         }
         Some('8') => {
             send(g, conn, "Enter weight : ");
-            set_mode(conn, OeditMode::Weight);
+            set_mode(g, conn, OeditMode::Weight);
         }
         Some('9') => {
             send(g, conn, "Enter cost : ");
-            set_mode(conn, OeditMode::Cost);
+            set_mode(g, conn, OeditMode::Cost);
         }
         Some('a') => {
             send(g, conn, "Enter cost per day : ");
-            set_mode(conn, OeditMode::CostPerDay);
+            set_mode(g, conn, OeditMode::CostPerDay);
         }
         Some('b') => {
             send(g, conn, "Enter timer : ");
-            set_mode(conn, OeditMode::Timer);
+            set_mode(g, conn, OeditMode::Timer);
         }
         Some('c') => {
-            with_state(conn, |s| s.obj.values = [0; 4]);
+            with_state(g, conn, |s| s.obj.values = [0; 4]);
             disp_val1_menu(g, conn);
         }
         Some('d') => disp_prompt_apply_menu(g, conn),
         Some('e') => {
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 if s.obj.extra_descriptions.is_empty() {
                     s.obj
                         .extra_descriptions
@@ -1094,32 +1087,32 @@ fn parse_main_menu(g: &mut GameState, conn: ConnId, arg: &str) {
         }
         Some('f') => {
             send(g, conn, "Enter numerator : ");
-            set_mode(conn, OeditMode::Durability);
+            set_mode(g, conn, OeditMode::Durability);
         }
         Some('g') => {
             send(g, conn, "Enter denominator : ");
-            set_mode(conn, OeditMode::Durability2);
+            set_mode(g, conn, OeditMode::Durability2);
         }
         Some('h') => {
             if !can_edit_permanent_affects(g, conn) {
                 send(g, conn, "Your level isn't high enough to do that...\r\n");
             } else {
                 disp_perm_affects_menu(g, conn);
-                set_mode(conn, OeditMode::PermAffects);
+                set_mode(g, conn, OeditMode::PermAffects);
             }
         }
         Some('k') => {
             send(g, conn, "Enter Intended Class For Object : ");
-            set_mode(conn, OeditMode::Class);
+            set_mode(g, conn, OeditMode::Class);
         }
         Some('l') => {
             send(g, conn, "Enter Minimum Level For Object : ");
-            set_mode(conn, OeditMode::Level);
+            set_mode(g, conn, OeditMode::Level);
         }
         Some('s') => {
-            let vnum = with_state(conn, |s| s.obj.vnum).unwrap_or(0);
+            let vnum = with_state(g, conn, |s| s.obj.vnum).unwrap_or(0);
             olc::dg_script_menu(g, conn, crate::dg_handler::OBJ_TRIGGER, vnum);
-            set_mode(conn, OeditMode::Script(olc::DgScriptEditMode::Main));
+            set_mode(g, conn, OeditMode::Script(olc::DgScriptEditMode::Main));
         }
         _ => disp_menu(g, conn),
     }
@@ -1129,13 +1122,13 @@ fn parse_value2(g: &mut GameState, conn: ConnId, arg: &str) {
     let Some(number) = olc::parse_i32_input(g, conn, arg, 0) else {
         return;
     };
-    let t = with_state(conn, |s| s.obj.obj_type).unwrap_or(ObjectType::Other);
+    let t = with_state(g, conn, |s| s.obj.obj_type).unwrap_or(ObjectType::Other);
     match t {
         ObjectType::Scroll | ObjectType::Potion => {
             if number < 0 || number >= NUM_SPELLS {
                 disp_val2_menu(g, conn);
             } else {
-                with_state(conn, |s| s.obj.values[1] = number);
+                with_state(g, conn, |s| s.obj.values[1] = number);
                 disp_val3_menu(g, conn);
             }
         }
@@ -1143,7 +1136,7 @@ fn parse_value2(g: &mut GameState, conn: ConnId, arg: &str) {
             if number < 0 || number > 4 {
                 disp_container_flags_menu(g, conn);
             } else if number != 0 {
-                with_state(conn, |s| {
+                with_state(g, conn, |s| {
                     s.obj.values[1] ^= 1 << (number - 1);
                     s.modified = true;
                 });
@@ -1153,7 +1146,7 @@ fn parse_value2(g: &mut GameState, conn: ConnId, arg: &str) {
             }
         }
         _ => {
-            with_state(conn, |s| s.obj.values[1] = number);
+            with_state(g, conn, |s| s.obj.values[1] = number);
             disp_val3_menu(g, conn);
         }
     }
@@ -1163,7 +1156,7 @@ fn parse_value3(g: &mut GameState, conn: ConnId, arg: &str) {
     let Some(number) = olc::parse_i32_input(g, conn, arg, 0) else {
         return;
     };
-    let t = with_state(conn, |s| s.obj.obj_type).unwrap_or(ObjectType::Other);
+    let t = with_state(g, conn, |s| s.obj.obj_type).unwrap_or(ObjectType::Other);
     let (min_val, max_val) = match t {
         ObjectType::Scroll | ObjectType::Potion => (0, NUM_SPELLS - 1),
         // NOTE: C falls through ITEM_WEAPON into WAND/STAFF (missing break), so
@@ -1173,7 +1166,7 @@ fn parse_value3(g: &mut GameState, conn: ConnId, arg: &str) {
         _ => (-32000, 32000),
     };
     let clamped = number.max(min_val).min(max_val);
-    with_state(conn, |s| s.obj.values[2] = clamped);
+    with_state(g, conn, |s| s.obj.values[2] = clamped);
     disp_val4_menu(g, conn);
 }
 
@@ -1181,7 +1174,7 @@ fn parse_value4(g: &mut GameState, conn: ConnId, arg: &str) {
     let Some(number) = olc::parse_i32_input(g, conn, arg, 0) else {
         return;
     };
-    let t = with_state(conn, |s| s.obj.obj_type).unwrap_or(ObjectType::Other);
+    let t = with_state(g, conn, |s| s.obj.obj_type).unwrap_or(ObjectType::Other);
     let (min_val, max_val) = match t {
         ObjectType::Scroll | ObjectType::Potion => (0, NUM_SPELLS - 1),
         ObjectType::Wand | ObjectType::Staff => (1, NUM_SPELLS - 1),
@@ -1189,7 +1182,7 @@ fn parse_value4(g: &mut GameState, conn: ConnId, arg: &str) {
         _ => (-32000, 32000),
     };
     let clamped = number.max(min_val).min(max_val);
-    with_state(conn, |s| s.obj.values[3] = clamped);
+    with_state(g, conn, |s| s.obj.values[3] = clamped);
     commit_and_menu(g, conn);
 }
 
@@ -1199,7 +1192,7 @@ fn parse_extradesc_menu(g: &mut GameState, conn: ConnId, arg: &str) {
     };
     match number {
         0 => {
-            with_state(conn, |s| {
+            with_state(g, conn, |s| {
                 let idx = s.cur_desc;
                 if let Some(ed) = s.obj.extra_descriptions.get(idx) {
                     if ed.0.is_empty() || ed.1.is_empty() {
@@ -1211,10 +1204,10 @@ fn parse_extradesc_menu(g: &mut GameState, conn: ConnId, arg: &str) {
         }
         1 => {
             send(g, conn, "Enter keywords, separated by spaces :-\r\n| ");
-            set_mode(conn, OeditMode::ExtradescKey);
+            set_mode(g, conn, OeditMode::ExtradescKey);
         }
         2 => {
-            let seed = with_state(conn, |s| {
+            let seed = with_state(g, conn, |s| {
                 let idx = s.cur_desc;
                 s.obj
                     .extra_descriptions
@@ -1226,7 +1219,7 @@ fn parse_extradesc_menu(g: &mut GameState, conn: ConnId, arg: &str) {
             begin_text(g, conn, &seed, OeditMode::ExtradescDescription);
         }
         3 => {
-            let (complete, at_end) = with_state(conn, |s| {
+            let (complete, at_end) = with_state(g, conn, |s| {
                 let idx = s.cur_desc;
                 let cur = s.obj.extra_descriptions.get(idx);
                 let complete = cur
@@ -1237,7 +1230,7 @@ fn parse_extradesc_menu(g: &mut GameState, conn: ConnId, arg: &str) {
             })
             .unwrap_or((false, true));
             if complete {
-                with_state(conn, |s| {
+                with_state(g, conn, |s| {
                     if at_end {
                         s.obj
                             .extra_descriptions
@@ -1252,13 +1245,13 @@ fn parse_extradesc_menu(g: &mut GameState, conn: ConnId, arg: &str) {
     }
 }
 
-fn set_mode(conn: ConnId, mode: OeditMode) {
-    let _ = with_state(conn, |s| s.mode = mode);
+fn set_mode(g: &mut GameState, conn: ConnId, mode: OeditMode) {
+    let _ = with_state(g, conn, |s| s.mode = mode);
 }
 
 /// After a simple field set: mark modified and redisplay the main menu.
 fn commit_and_menu(g: &mut GameState, conn: ConnId) {
-    with_state(conn, |s| s.modified = true);
+    with_state(g, conn, |s| s.modified = true);
     disp_menu(g, conn);
 }
 
@@ -1290,7 +1283,7 @@ fn autoset_applies(g: &mut GameState, conn: ConnId) {
         [5, 1, 5, 2, 3],
         [2, 5, 2, 2, 5],
     ];
-    let (level, class, name) = match with_state(conn, |s| {
+    let (level, class, name) = match with_state(g, conn, |s| {
         (
             s.obj.level,
             s.obj.obj_class,
@@ -1330,7 +1323,7 @@ fn autoset_applies(g: &mut GameState, conn: ConnId) {
     // CLASS_APPMODNUM(num) = 750 * strength * level / 5 / 100 / NUM_WEARS
     let modnum = |num: usize| -> i32 { 750 * row[num] * level / 5 / 100 / (NUM_WEARS as i32) };
     use crate::flags::{APPLY_DEFENSE, APPLY_MDEFENSE, APPLY_MPOWER, APPLY_POWER, APPLY_TECHNIQUE};
-    with_state(conn, |s| {
+    with_state(g, conn, |s| {
         s.obj.affects[0] = (APPLY_POWER, modnum(0));
         s.obj.affects[1] = (APPLY_MPOWER, modnum(1));
         s.obj.affects[2] = (APPLY_DEFENSE, modnum(2));
@@ -1370,7 +1363,7 @@ mod autoset_tests {
 // ===========================================================================
 fn save_internally(g: &mut GameState, conn: ConnId) -> std::io::Result<()> {
     let (zone_number, authorization, edit) =
-        match with_state(conn, |s| (s.zone_number, s.authorization, s.obj.clone())) {
+        match with_state(g, conn, |s| (s.zone_number, s.authorization, s.obj.clone())) {
             Some(v) => v,
             None => {
                 return Err(std::io::Error::new(
@@ -1452,22 +1445,22 @@ fn save_internally(g: &mut GameState, conn: ConnId) -> std::io::Result<()> {
         }
     }
 
-    olc::olc_add_to_save_list(zone_number, olc::OLC_SAVE_OBJ);
+    olc::olc_add_to_save_list(g, zone_number, olc::OLC_SAVE_OBJ);
     Ok(())
 }
 
 /// abort: drop this conn's editor state without saving (player disconnected
 /// mid-edit). Releases the per-conn working copy and text buffer so nothing
 /// lingers until reboot. `olc::abort_editor` calls `olc::clear_active`.
-pub fn abort(conn: ConnId) {
-    crate::lock_ok::lock(&states()).remove(&conn);
-    crate::lock_ok::lock(&text_bufs()).remove(&conn);
+pub(crate) fn abort(g: &mut GameState, conn: ConnId) {
+    states_mut(g).remove(&conn);
+    text_bufs_mut(g).remove(&conn);
 }
 
 fn finish(g: &mut GameState, conn: ConnId) {
-    crate::lock_ok::lock(&states()).remove(&conn);
-    crate::lock_ok::lock(&text_bufs()).remove(&conn);
-    olc::clear_active(conn);
+    states_mut(g).remove(&conn);
+    text_bufs_mut(g).remove(&conn);
+    olc::clear_active(g, conn);
     if let Some(ch) = conn_char(g, conn) {
         crate::act::act(
             g,
@@ -1509,7 +1502,7 @@ pub fn oedit_save_to_disk(g: &mut GameState, zone_rnum: usize) -> std::io::Resul
             ));
         }
     };
-    olc::olc_add_to_save_list(zone_number, olc::OLC_SAVE_OBJ);
+    olc::olc_add_to_save_list(g, zone_number, olc::OLC_SAVE_OBJ);
 
     let mut out = String::new();
     for vnum in start..=top {
@@ -1609,7 +1602,7 @@ pub fn oedit_save_to_disk(g: &mut GameState, zone_rnum: usize) -> std::io::Resul
         std::fs::create_dir_all(parent)?;
     }
     olc::atomic_replace(&path, out.as_bytes())?;
-    olc::olc_remove_from_save_list(zone_number, olc::OLC_SAVE_OBJ);
+    olc::olc_remove_from_save_list(g, zone_number, olc::OLC_SAVE_OBJ);
     Ok(())
 }
 
@@ -1657,7 +1650,7 @@ mod tests {
         do_oedit(&mut g, builder, "101", 0);
         oedit_parse(&mut g, conn, "h");
         assert_eq!(
-            with_state(conn, |state| state.mode),
+            with_state(&mut g, conn, |state| state.mode),
             Some(OeditMode::MainMenu),
             "a cosmetic Implementor level must not grant permanent-affect editing"
         );
@@ -1674,21 +1667,21 @@ mod tests {
         }
         oedit_parse(&mut g, conn, "h");
         assert_eq!(
-            with_state(conn, |state| state.mode),
+            with_state(&mut g, conn, |state| state.mode),
             Some(OeditMode::PermAffects),
             "persisted GRGOD trust must retain the legitimate editor path"
         );
 
-        let before = with_state(conn, |state| state.obj.bitvector).unwrap();
+        let before = with_state(&mut g, conn, |state| state.obj.bitvector).unwrap();
         g.get_char_mut(builder).unwrap().trust = i32::from(LVL_IMMORT);
         oedit_parse(&mut g, conn, "1");
         assert_eq!(
-            with_state(conn, |state| state.obj.bitvector),
+            with_state(&mut g, conn, |state| state.obj.bitvector),
             Some(before),
             "a mid-editor trust demotion must be rechecked at the mutation sink"
         );
         assert_eq!(
-            with_state(conn, |state| state.mode),
+            with_state(&mut g, conn, |state| state.mode),
             Some(OeditMode::MainMenu)
         );
 

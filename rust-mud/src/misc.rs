@@ -688,7 +688,7 @@ fn proto_target(g: &GameState, key: ScriptKey) -> Option<(i32, i32, i32)> {
 fn mark_proto_script_dirty(g: &mut GameState, entity_vnum: i32, save_kind: i32) {
     if let Some(zone_rnum) = crate::olc::real_zone(g, entity_vnum) {
         if let Some(zone_number) = g.zones.get(zone_rnum).map(|z| z.number) {
-            crate::olc::olc_add_to_save_list(zone_number, save_kind);
+            crate::olc::olc_add_to_save_list(g, zone_number, save_kind);
         }
     }
 }
@@ -946,7 +946,7 @@ pub fn do_rebalance(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
             zone_number
         ),
     );
-    crate::olc::olc_add_to_save_list(zone_number, if tobalance == 1 { 1 } else { 3 });
+    crate::olc::olc_add_to_save_list(g, zone_number, if tobalance == 1 { 1 } else { 3 });
 }
 
 fn rebalance_object_proto(proto: &mut crate::world::ObjectProto) {
@@ -1135,7 +1135,7 @@ mod tests {
                 .outbuf
                 .contains("Rebalancing objects in zone 1")
         );
-        crate::olc::olc_remove_from_save_list(1, crate::olc::OLC_SAVE_OBJ);
+        crate::olc::olc_remove_from_save_list(&mut g, 1, crate::olc::OLC_SAVE_OBJ);
     }
 
     #[test]
@@ -1160,7 +1160,7 @@ mod tests {
         assert_eq!(proto.gold, 100);
         assert!(proto.experience > 0);
         assert_eq!(g.mob_protos.get(&250).unwrap().power, 0);
-        crate::olc::olc_remove_from_save_list(1, crate::olc::OLC_SAVE_MOB);
+        crate::olc::olc_remove_from_save_list(&mut g, 1, crate::olc::OLC_SAVE_MOB);
     }
 
     #[test]
