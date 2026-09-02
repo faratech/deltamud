@@ -265,7 +265,8 @@ impl Game {
         let mut successful_crash_saves = Vec::new();
         for ch in crash_players {
             report.crash_saves_attempted = report.crash_saves_attempted.saturating_add(1);
-            if crate::objsave::crash_save(&mut self.state, ch, &self.lib_path) {
+            let lib_path = self.state.config.lib_path.clone();
+            if crate::objsave::crash_save(&mut self.state, ch, &lib_path) {
                 report.crash_saves_written = report.crash_saves_written.saturating_add(1);
                 successful_crash_saves.push(ch);
             } else {
@@ -301,7 +302,7 @@ impl Game {
             report.alias_writes_attempted = report.alias_writes_attempted.saturating_add(1);
             if let Err(error) = crate::alias::write_aliases(
                 &self.state,
-                &self.lib_path,
+                &self.state.config.lib_path,
                 snapshot.get_name(),
                 snapshot.idnum,
             ) {

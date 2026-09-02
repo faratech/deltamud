@@ -1055,9 +1055,10 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                         // Missing sidecars are success; any other cleanup error
                         // is explicitly surfaced and audited instead of falsely
                         // claiming that deletion completed.
+                        let lib_path = self.state.config.lib_path.clone();
                         if let Err(cleanup_error) = crate::player_sidecars::delete_player_sidecars(
                             &mut self.state,
-                            &self.lib_path,
+                            &lib_path,
                             &name,
                             rec.idnum,
                         ) {
@@ -1272,8 +1273,9 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
     pub(crate) fn user_cntr(&mut self, conn_id: ConnId) {
         // C resolves "USRCNT" against the server cwd, which is always the
         // directory containing lib/. Prefer the configured lib's parent.
-        let lib = if !self.lib_path.is_empty() && self.lib_path != "./lib" {
-            self.lib_path.clone()
+        let lib = if !self.state.config.lib_path.is_empty() && self.state.config.lib_path != "./lib"
+        {
+            self.state.config.lib_path.clone()
         } else {
             self.state.config.lib_path.clone()
         };
@@ -1621,8 +1623,9 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             }
         }
         let is_new_char = self.just_created.remove(&conn_id);
+        let lib_path = self.state.config.lib_path.clone();
         if let Err(e) =
-            crate::alias::read_aliases(&mut self.state, &self.lib_path, ch.get_name(), ch.idnum)
+            crate::alias::read_aliases(&mut self.state, &lib_path, ch.get_name(), ch.idnum)
         {
             warn!("read_aliases(g, {}) failed: {}", ch.get_name(), e);
         }
@@ -1811,7 +1814,8 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             self.state.char_to_room(id, rnum);
         }
         // Restore the player's rented/crash-saved objects (objsave.c).
-        crate::objsave::crash_load(&mut self.state, id, &self.lib_path);
+        let lib_path = self.state.config.lib_path.clone();
+        crate::objsave::crash_load(&mut self.state, id, &lib_path);
 
         // C interpreter.c menu '1' (2261-2268): WELC_MESSG, then for a fresh
         // character do_start + START_MESSG + do_newbie; then the first look.
@@ -1938,9 +1942,12 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                 alias_id_to_clear = Some(idnum);
                 self.state
                     .update_player_index_from_character(&snapshot, llogon, "");
-                if let Err(err) =
-                    crate::alias::write_aliases(&self.state, &self.lib_path, &pname, idnum)
-                {
+                if let Err(err) = crate::alias::write_aliases(
+                    &self.state,
+                    &self.state.config.lib_path,
+                    &pname,
+                    idnum,
+                ) {
                     warn!("write_aliases(g, {}) failed: {}", pname, err);
                 }
                 let host = self
@@ -1951,7 +1958,8 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                     .unwrap_or_default();
                 self.queue_player_save(snapshot, host);
             }
-            crate::objsave::crash_save(&mut self.state, cid, &self.lib_path);
+            let lib_path = self.state.config.lib_path.clone();
+            crate::objsave::crash_save(&mut self.state, cid, &lib_path);
             self.state.extract_char(cid);
             if let Some(idnum) = alias_id_to_clear {
                 crate::alias::clear_aliases(&mut self.state, idnum);

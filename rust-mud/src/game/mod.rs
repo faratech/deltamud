@@ -563,7 +563,6 @@ pub struct Game {
     /// completes; gameplay input, heartbeats, and output remain live.
     game_rx: Option<mpsc::Receiver<GameMessage>>,
     deferred_messages: VecDeque<GameMessage>,
-    lib_path: String,
     /// Who-list JSON snapshot (Deltania Breathes W5), shared with the metrics
     /// HTTP task's /api/who route. Written by the Game once a second; readers
     /// take a short read-lock. Empty string = nothing published yet.
@@ -600,7 +599,6 @@ impl Game {
             player_save_failures: 0,
             game_rx: None,
             deferred_messages: VecDeque::new(),
-            lib_path: "./lib".to_string(),
             metrics: Arc::new(Metrics::new()),
             who_snapshot: Arc::new(std::sync::RwLock::new(String::new())),
             started_at: chrono::Utc::now().timestamp(),
@@ -630,7 +628,7 @@ impl Game {
     }
 
     pub async fn load_text_files(&mut self, lib_path: &str) {
-        self.lib_path = lib_path.to_string();
+        self.state.config.lib_path = lib_path.to_string();
         let text_dir = std::path::Path::new(lib_path).join("text");
         self.state.credits = tokio::fs::read_to_string(text_dir.join("credits"))
             .await
@@ -2427,7 +2425,7 @@ mod tests {
         let idnum = db.create_player(&seed, "pw").await.unwrap();
         let record = db.load_player("Pendingdupe").await.unwrap();
         let mut game = test_game(db);
-        game.lib_path = game.state.config.lib_path.clone();
+        game.state.config.lib_path = game.state.config.lib_path.clone();
         game.state.add_room(crate::room::Room::new(
             0,
             0,
@@ -2435,7 +2433,8 @@ mod tests {
             String::new(),
         ));
 
-        let rent = crate::objsave::crash_filename(&game.lib_path, "Pendingdupe").unwrap();
+        let rent =
+            crate::objsave::crash_filename(&game.state.config.lib_path, "Pendingdupe").unwrap();
         std::fs::create_dir_all(rent.parent().unwrap()).unwrap();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -3600,7 +3599,7 @@ mod offline_inspection_tests {
     ) -> (Game, Arc<MockDatabase>, CharId, i64) {
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db.clone());
-        game.lib_path = game.state.config.lib_path.clone();
+        game.state.config.lib_path = game.state.config.lib_path.clone();
         let requester = attach_requester(&mut game, ConnId(240), LVL_GOD);
         let idnum = seed_target(&db, "Target", database_level).await;
         game.state
@@ -3725,7 +3724,7 @@ mod self_delete_tests {
     ) -> (Game, Arc<MockDatabase>, i64) {
         let db = Arc::new(MockDatabase::new());
         let mut game = test_game(db.clone());
-        game.lib_path = game.state.config.lib_path.clone();
+        game.state.config.lib_path = game.state.config.lib_path.clone();
         let mut character = Character::new_player(name.to_string(), Class::Warrior, Race::Human);
         character.act_flags = act_flags;
         db.create_player(&character, "secret").await.unwrap();
@@ -3742,7 +3741,7 @@ mod self_delete_tests {
     }
 
     fn seed_sidecars(game: &mut Game, name: &str, idnum: i64) -> (PathBuf, PathBuf) {
-        let rent = crate::objsave::crash_filename(&game.lib_path, name).unwrap();
+        let rent = crate::objsave::crash_filename(&game.state.config.lib_path, name).unwrap();
         std::fs::create_dir_all(rent.parent().unwrap()).unwrap();
         std::fs::write(&rent, b"rent evidence").unwrap();
 
@@ -3755,8 +3754,8 @@ mod self_delete_tests {
                 atype: 0,
             }],
         );
-        crate::alias::write_aliases(&game.state, &game.lib_path, name, idnum).unwrap();
-        let alias = crate::alias::alias_filename(&game.lib_path, name).unwrap();
+        crate::alias::write_aliases(&game.state, &game.state.config.lib_path, name, idnum).unwrap();
+        let alias = crate::alias::alias_filename(&game.state.config.lib_path, name).unwrap();
         (rent, alias)
     }
 
@@ -3783,8 +3782,8 @@ mod self_delete_tests {
         );
 
         let reused_idnum = idnum + 10_000;
-        crate::alias::read_aliases(&mut game.state, &game.lib_path, "mixedCASE", reused_idnum)
-            .unwrap();
+        let lib_path = game.state.config.lib_path.clone();
+        crate::alias::read_aliases(&mut game.state, &lib_path, "mixedCASE", reused_idnum).unwrap();
         assert!(crate::alias::get_aliases(&game.state, reused_idnum).is_empty());
     }
 
@@ -3808,8 +3807,8 @@ mod self_delete_tests {
         let conn = ConnId(212);
         let name = "Blockedfiles";
         let (mut game, db, idnum) = deletion_session(conn, name, 0).await;
-        let rent = crate::objsave::crash_filename(&game.lib_path, name).unwrap();
-        let alias = crate::alias::alias_filename(&game.lib_path, name).unwrap();
+        let rent = crate::objsave::crash_filename(&game.state.config.lib_path, name).unwrap();
+        let alias = crate::alias::alias_filename(&game.state.config.lib_path, name).unwrap();
         std::fs::create_dir_all(&rent).unwrap();
         std::fs::create_dir_all(&alias).unwrap();
         crate::alias::set_aliases(
@@ -3941,7 +3940,7 @@ mod self_delete_tests {
         character.idnum = idnum;
         db.save_player(&character).await.unwrap();
         let mut game = test_game(db.clone());
-        game.lib_path = game.state.config.lib_path.clone();
+        game.state.config.lib_path = game.state.config.lib_path.clone();
         let (rent, alias) = seed_sidecars(&mut game, "AdminGone", idnum);
         let cleaner = persistent_connected_player(
             &mut game,
@@ -3968,7 +3967,7 @@ mod self_delete_tests {
         deleted.act_flags |= crate::flags::PLR_DELETED;
         let idnum = db.create_player(&deleted, "secret").await.unwrap();
         let mut game = test_game(db.clone());
-        game.lib_path = game.state.config.lib_path.clone();
+        game.state.config.lib_path = game.state.config.lib_path.clone();
         let (rent, alias) = seed_sidecars(&mut game, "CleanRace", idnum);
         let cleaner_conn = ConnId(9_413_303);
         let cleaner = persistent_connected_player(
@@ -4012,8 +4011,9 @@ mod self_delete_tests {
         character.idnum = idnum;
         db.save_player(&character).await.unwrap();
         let mut game = test_game(db.clone());
-        game.lib_path = game.state.config.lib_path.clone();
-        let rent = crate::objsave::crash_filename(&game.lib_path, "AdminRetry").unwrap();
+        game.state.config.lib_path = game.state.config.lib_path.clone();
+        let rent =
+            crate::objsave::crash_filename(&game.state.config.lib_path, "AdminRetry").unwrap();
         std::fs::create_dir_all(&rent).unwrap();
         crate::alias::set_aliases(
             &mut game.state,
@@ -4024,8 +4024,15 @@ mod self_delete_tests {
                 atype: 0,
             }],
         );
-        crate::alias::write_aliases(&game.state, &game.lib_path, "AdminRetry", idnum).unwrap();
-        let alias = crate::alias::alias_filename(&game.lib_path, "AdminRetry").unwrap();
+        crate::alias::write_aliases(
+            &game.state,
+            &game.state.config.lib_path,
+            "AdminRetry",
+            idnum,
+        )
+        .unwrap();
+        let alias =
+            crate::alias::alias_filename(&game.state.config.lib_path, "AdminRetry").unwrap();
         let cleaner = persistent_connected_player(
             &mut game,
             db.as_ref(),
@@ -4073,8 +4080,7 @@ mod queued_admin_request_tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(root.join("lib")).unwrap();
-        game.lib_path = root.join("lib").to_string_lossy().into_owned();
-        game.state.config.lib_path = game.lib_path.clone();
+        game.state.config.lib_path = root.join("lib").to_string_lossy().into_owned();
 
         let staff = persistent_connected_player(
             &mut game,
@@ -4609,8 +4615,7 @@ mod shutdown_tests {
         // independently. SQL is failed by the mock on the same pass.
         let lib = unique_shutdown_lib("all-persistence-failures");
         std::fs::write(&lib, b"not a directory").unwrap();
-        game.lib_path = lib.to_string_lossy().into_owned();
-        game.state.config.lib_path = game.lib_path.clone();
+        game.state.config.lib_path = lib.to_string_lossy().into_owned();
         db.fail_next_save();
 
         let live_before = game.state.get_char(player).unwrap().clone();
@@ -4654,8 +4659,7 @@ mod shutdown_tests {
         let mut game = test_game(db.clone());
         let lib = unique_shutdown_lib("retry");
         std::fs::create_dir_all(&lib).unwrap();
-        game.lib_path = lib.to_string_lossy().into_owned();
-        game.state.config.lib_path = game.lib_path.clone();
+        game.state.config.lib_path = lib.to_string_lossy().into_owned();
 
         let conn = ConnId(1761);
         let player =
@@ -4777,8 +4781,7 @@ mod shutdown_tests {
         crate::olc::olc_add_to_save_list(&mut game.state, MISSING_ZONE, crate::olc::OLC_SAVE_ZONE);
         let lib = unique_shutdown_lib("system-ack");
         std::fs::create_dir_all(&lib).unwrap();
-        game.lib_path = lib.to_string_lossy().into_owned();
-        game.state.config.lib_path = game.lib_path.clone();
+        game.state.config.lib_path = lib.to_string_lossy().into_owned();
 
         let (game_tx, game_rx) = mpsc::channel(4);
         let game_task = tokio::spawn(async move { game.run(game_rx).await });
@@ -4810,8 +4813,7 @@ mod shutdown_tests {
 
         let db2 = Arc::new(MockDatabase::new());
         let mut game2 = test_game(db2);
-        game2.lib_path = lib.to_string_lossy().into_owned();
-        game2.state.config.lib_path = game2.lib_path.clone();
+        game2.state.config.lib_path = lib.to_string_lossy().into_owned();
         let (game2_tx, game2_rx) = mpsc::channel(4);
         let game2_task = tokio::spawn(async move { game2.run(game2_rx).await });
 
@@ -5304,8 +5306,7 @@ mod ordered_player_save_tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&lib).unwrap();
-        game.lib_path = lib.to_string_lossy().into_owned();
-        game.state.config.lib_path = game.lib_path.clone();
+        game.state.config.lib_path = lib.to_string_lossy().into_owned();
 
         let room = game.state.add_room(crate::room::Room::new(
             4343,
@@ -5401,8 +5402,7 @@ mod ordered_player_save_tests {
             std::process::id()
         ));
         std::fs::create_dir_all(lib.join("etc/date_record")).unwrap();
-        game.lib_path = lib.to_string_lossy().into_owned();
-        game.state.config.lib_path = game.lib_path.clone();
+        game.state.config.lib_path = lib.to_string_lossy().into_owned();
 
         let conn = ConnId(95);
         let mut requester = Character::new_player("Datekeeper".into(), Class::Warrior, Race::Human);
@@ -5500,7 +5500,7 @@ mod durable_player_rename_tests {
         let mut config = Config::default();
         config.lib_path = lib.to_string_lossy().into_owned();
         let mut game = Game::new(GameState::new(config.clone()), game_db);
-        game.lib_path = config.lib_path.clone();
+        game.state.config.lib_path = config.lib_path.clone();
 
         let mut stored = Character::new_player("Oldname".into(), Class::Warrior, Race::Human);
         stored.player.level = 20;

@@ -903,9 +903,10 @@ impl Game {
             // reconciliation at restart.  We never report success before the
             // window closes, and every recoverable runtime failure below is
             // compensated and audited rather than hidden.
+            let lib_path = self.state.config.lib_path.clone();
             if let Err(sidecar_error) = crate::player_sidecars::rename_player_sidecars(
                 &mut self.state,
-                &self.lib_path,
+                &lib_path,
                 &request.old_name,
                 &request.new_name,
                 request.idnum,
@@ -966,9 +967,10 @@ impl Game {
             // index/name mutation boundary.
             let Some(requester_name) = player_rename_request_is_current(&self.state, &request)
             else {
+                let lib_path = self.state.config.lib_path.clone();
                 let sidecar_rollback = crate::player_sidecars::rename_player_sidecars(
                     &mut self.state,
-                    &self.lib_path,
+                    &lib_path,
                     &request.new_name,
                     &request.old_name,
                     request.idnum,
@@ -1102,9 +1104,10 @@ impl Game {
 
         let mut cleanup_failures = Vec::new();
         for player in &deleted_players {
+            let lib_path = self.state.config.lib_path.clone();
             if let Err(error) = crate::player_sidecars::delete_player_sidecars(
                 &mut self.state,
-                &self.lib_path,
+                &lib_path,
                 &player.name,
                 player.idnum,
             ) {
@@ -1204,7 +1207,7 @@ impl Game {
             );
             if let Err(err) = crate::alias::write_aliases(
                 &self.state,
-                &self.lib_path,
+                &self.state.config.lib_path,
                 snapshot.get_name(),
                 snapshot.idnum,
             ) {
