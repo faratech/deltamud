@@ -604,6 +604,8 @@ pub struct WorldState {
     pub routes: HashMap<MobVnum, Vec<RoomRnum>>,
     /// maputils.rs: parsed worldmap grids keyed by their source file name.
     pub maps: HashMap<String, crate::maputils::MapData>,
+    /// castle.rs: King Welmar's patrol state keyed by the mob's CharId.
+    pub king_walks: HashMap<CharId, crate::castle::KingWalk>,
 }
 
 /// Economy-side stores that used to live in module statics (phase 1).
@@ -1799,6 +1801,158 @@ impl GameState {
         }
         if let Some(o) = self.objs.get_mut(&oid) {
             o.loc = ObjLoc::Nowhere;
+        }
+    }
+}
+
+/// Structural regression gate for the phase-1 statics retirement: the crate
+/// must not grow new `OnceLock`/`thread_local!` process globals outside the
+/// documented allowlist. Each allowlisted entry is either (a) genuinely
+/// cross-task infrastructure the single-owner design requires, or (b) a
+/// recursion/re-entrancy latch that carries no game state.
+/// Inventory/documentation test: every GameState-owned sub-struct is touched
+/// here, so removing or renaming one breaks this test and forces the copyover
+/// snapshot discussion to be revisited (the statics-era copyover could not see
+/// any of this state at all).
+#[cfg(test)]
+mod gamestate_inventory {
+    use super::*;
+    #[test]
+    fn every_owned_sub_struct_is_present_and_defaulted() {
+        let g = GameState::new(crate::config::Config::default());
+
+        // spells: spell_info table built at GameState construction.
+        assert!(!g.spells.info.is_empty());
+        // world tables default empty/absent.
+        assert!(g.world.fight_messages.is_empty());
+        assert!(!g.world.specs.built);
+        assert!(g.world.death_trap_rooms.is_empty());
+        let _ = g.world.mayor;
+        assert!(g.world.routes.is_empty());
+        assert!(g.world.maps.is_empty());
+        assert!(g.world.king_walks.is_empty());
+        // econ stores default empty.
+        assert!(g.econ.quest_givers.is_empty());
+        assert!(g.econ.arena.chars.is_empty());
+        assert!(g.econ.clans.clans.is_empty());
+        assert!(g.econ.houses.is_empty());
+        assert!(g.econ.house_object_formats.is_empty());
+        assert!(g.econ.shops.is_empty());
+        assert!(g.econ.shop_funcs.is_none());
+        // social stores default empty.
+        assert!(g.social.socials.list.is_empty());
+        assert!(g.social.help_table.is_empty());
+        assert!(!g.social.help_loaded);
+        assert!(g.social.aliases.is_empty());
+        assert_eq!(g.social.boards.boards.len(), 13); // NUM_OF_BOARDS, each empty
+        assert!(g.social.mail_pending.is_empty());
+        assert!(g.social.ban.ban_list.is_empty());
+        // dg prototype tables + runtime arenas default empty; script rng seeded.
+        assert!(g.dg.proto_trigs.is_empty());
+        assert!(g.dg.proto_scripts.is_empty());
+        assert!(g.dg.events.is_empty());
+        // next_event_id starts at 0 (first add_event consumes id 0).
+        assert!(g.dg.mob_memory.is_empty());
+        assert!(g.dg.script_memory.is_empty());
+        assert!(g.dg.scripts.is_empty());
+        assert!(g.dg.trigs.is_empty());
+        assert!(g.dg.dg_memory.is_empty());
+        // next_trig_id starts at 0 (first install_trig consumes id 0).
+        assert_eq!(g.dg.script_depth, 0);
+        assert!(!g.dg.owner_purged);
+        // clock defaults to the C epoch fallback.
+        assert_eq!(g.clock.tw.year, 1000);
+        // command dispatch starts indirect.
+        assert_eq!(
+            g.command_source,
+            crate::interpreter::CommandSource::Indirect
+        );
+        // olc registry defaults empty.
+        assert!(g.olc.active.is_empty());
+        assert!(g.olc.save_list.is_empty());
+        assert!(g.olc.unresolved.is_empty());
+        assert!(g.olc.edits.is_empty());
+        assert!(g.olc.pagers.is_empty());
+        assert!(g.olc.redit_states.is_empty());
+        assert!(g.olc.oedit_states.is_empty());
+        assert!(g.olc.medit_states.is_empty());
+        assert!(g.olc.zedit_states.is_empty());
+        assert!(g.olc.sedit_states.is_empty());
+        assert!(g.olc.aedit_states.is_empty());
+        assert!(g.olc.hedit_states.is_empty());
+        assert!(g.olc.trigedit_states.is_empty());
+        assert!(g.olc.redit_text_bufs.is_empty());
+        assert!(g.olc.oedit_text_bufs.is_empty());
+        assert!(g.olc.aedit_soc_list.is_empty());
+        assert!(!g.olc.aedit_soc_loaded);
+    }
+}
+
+#[cfg(test)]
+mod static_freedom_gate {
+    #[test]
+    fn module_statics_stay_within_the_documented_allowlist() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let src_dir = std::path::Path::new(manifest).join("src");
+        let mut offenders: Vec<String> = Vec::new();
+        let allow: &[&str] = &[
+            // Cross-task infrastructure (async edges), not world state:
+            "src/password.rs", // Argon2id semaphore shared with spawn_blocking
+            "src/olc.rs",      // atomic-publication lock + temp-name sequence
+            "src/state.rs",    // LISTENER_FD published by main before Game owns state
+            // Recursion/re-entrancy latches (no game data, cleared per call):
+            "src/spec_assign.rs",     // SPEC_DEPTH
+            "src/cmd_informative.rs", // LOC_DEPTH
+            // Test-only guards/fault injection:
+            "src/shop.rs",
+            "src/spells.rs",
+            "src/mail.rs",
+            "src/game.rs",
+            "src/clan.rs",
+            "src/arena.rs",
+            "src/dg_handler.rs",
+            "src/cmd_social.rs",
+            "src/hedit.rs",
+            "src/town_life.rs",
+            "src/cmd_other.rs",
+        ];
+        let mut entries: Vec<std::path::PathBuf> = Vec::new();
+        collect_rs(&src_dir, &mut entries);
+        for file in &entries {
+            let rel = file.strip_prefix(&src_dir).unwrap();
+            let rel_display = format!("src/{}", rel.display());
+            let content = std::fs::read_to_string(file).unwrap_or_default();
+            for (line_no, line) in content.lines().enumerate() {
+                let in_comment = line.trim_start().starts_with("//");
+                let in_test_cfg = content.contains("#[cfg(test)]");
+                let _ = in_test_cfg;
+                if in_comment {
+                    continue;
+                }
+                if (line.contains("OnceLock<") || line.contains("thread_local!"))
+                    && !allow.contains(&rel_display.as_str())
+                {
+                    offenders.push(format!("{}:{}: {}", rel_display, line_no + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "new process-global statics appeared outside the allowlist:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for entry in rd.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_rs(&path, out);
+                } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
+                    out.push(path);
+                }
+            }
         }
     }
 }

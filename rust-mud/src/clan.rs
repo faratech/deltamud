@@ -9,8 +9,8 @@
 // `struct clan_info`) AND mirrors per-player clan membership in the SQL
 // `player_main` table (clan / clan_rank columns). The Rust GameState exposes
 // no synchronous DB handle, so this module:
-//   * Holds the runtime clan table in a module static (OnceLock<Mutex<..>>),
-//     loaded by `boot_clans(lib_path)` and re-saved (via `save_clans`) on
+//   * Holds the runtime clan table on GameState (`econ.clans`), loaded by
+//     `boot_clans(g, lib_path)` and re-saved (via `save_clans`) on
 //     every mutation, exactly mirroring the C call sites.
 //   * Auto-detects the existing Rust binary layout and the C server's exact
 //     x86-64 LP64 struct dump, retaining the detected format on atomic writes.

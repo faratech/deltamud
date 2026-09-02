@@ -13,10 +13,9 @@
 //
 // House style (see cmd_informative.rs / cmd_wizard.rs): read scalars into
 // locals, look entities up by id, never hold a borrow across a mutation, emit
-// `&`-color codes literally. The ban list and invalid-name list have no home on
-// the Character/GameState contract, so they live in module statics
-// (`OnceLock<Mutex<..>>`) keyed by nothing — they are process-global tables,
-// exactly like C's `ban_list` / `invalid_list` file-scope globals.
+// `&`-color codes literally. The authoritative ban list and invalid-name list
+// live on GameState (`social.ban`); a published Arc snapshot (social.ban_handle)
+// lets the pre-Game accept path check bans without touching the world thread.
 //
 // Logging: C's `mudlog` writes the on-disk syslog file *and* echoes the line to
 // online immortals; we call the shared `crate::syslog::mudlog`, which does both

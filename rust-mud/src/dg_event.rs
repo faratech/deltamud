@@ -12,9 +12,9 @@
 // value (the only kind of event DG ever schedules) and, on fire, hands it back
 // to dg_scripts::trig_wait_event which resumes the paused trigger.
 //
-// Borrow discipline: the queue is a module-static `OnceLock<Mutex<…>>` keyed by
-// a monotonic EventId (the established shop/quest/arena pattern). It owns NO
-// GameState borrow; firing happens in `process_events(g)` which pops the due
+// Borrow discipline: the wait queue lives on GameState (`dg.events`) with a
+// monotonic id source (`dg.next_event_id`). Firing happens in
+// `process_events(g)` which pops the due
 // events under the lock, releases the lock, then drives each one against
 // `&mut GameState`. This avoids re-entrancy deadlocks when a resumed trigger
 // schedules a *new* wait (it re-locks cleanly because we are not holding it).

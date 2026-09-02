@@ -21,9 +21,8 @@
 //
 // Mob memory in C is a `memory_rec *` linked list hanging off
 // `mob_specials.memory`, storing the persistent player idnum of each attacker.
-// The Rust `Character` carries no such field, so — following the established
-// side-state pattern in `quest.rs`/`shop.rs` (`OnceLock<Mutex<HashMap<…>>>`) —
-// memory lives in a module-static map keyed by the mob's runtime `CharId`.
+// The Rust `Character` carries no such field, so the map lives on GameState
+// (`dg.mob_memory`) keyed by the mob's runtime `CharId`.
 // `CharId`s are never reused (the allocator only increments), so a stale entry
 // for an extracted mob is harmless; `clear_memory` reaps it on death/extract.
 //

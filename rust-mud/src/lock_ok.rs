@@ -1,14 +1,15 @@
-// lock_ok — poison-recovering lock helpers for the module-static
-// Mutex/RwLock tables (game.rs auditor finding, W6 crash hardening).
+// lock_ok — poison-recovering lock helpers (game.rs auditor finding, W6 crash
+// hardening).
 //
-// Every per-subsystem static (OLC editors, pagers, socials, DG script memory,
-// auction/ban/alias/questgiver tables, ...) is Game-task-owned state, so a
-// panic while holding its guard poisons the lock but leaves the data intact.
-// A `lock().unwrap()` on the poisoned lock then re-panics on EVERY later
-// touch — inside catch_unwind that quietly bricks the subsystem (the
-// heartbeat keeps counting while mob pulses / editor input / auctions all
-// no-op forever), and outside it kills the Game task. Weather's clock already
-// recovered via `into_inner()`; these helpers make that the uniform policy.
+// POLICY (post phase-1 statics retirement): world state lives on GameState and
+// must NEVER be reached through these helpers — a new `OnceLock<Mutex<..>>`
+// subsystem table is a design regression and the `static_freedom_gate` test in
+// state.rs rejects it. The remaining legitimate callers are genuinely
+// cross-task structures (mock database, ban snapshot handle, OLC publication
+// lock) plus test guards, where poison recovery is still the right behavior: a
+// panic while holding one of those guards leaves the data intact, and a bare
+// `lock().unwrap()` would re-panic on every later touch — bricking the
+// subsystem inside catch_unwind, or killing the Game task outside it.
 
 /// Lock a std Mutex, recovering the data from a poisoned guard.
 pub fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {

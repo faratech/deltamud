@@ -7,9 +7,9 @@
 // sunset message to every awake outdoor player — exactly as the C heartbeat
 // does once per SECS_PER_MUD_HOUR (75 real seconds).
 //
-// GameState owns no time/weather fields and we may not add any, so the clock
-// lives in a module static (OnceLock<Mutex<TimeWeather>>). Main explicitly
-// seeds it from the effective configured lib path before world construction.
+// The clock lives on GameState (`state.clock`, phase-1 statics migration).
+// Main explicitly seeds it from the effective configured lib path right after
+// GameState construction.
 // A defensive, path-free fallback exists only so isolated unit tests do not
 // panic; it is loudly logged and explicit initialization replaces it.
 

@@ -76,7 +76,7 @@ pub struct SpecTables {
     pub rooms: HashMap<RoomVnum, RoomSpecFn>,
     /// Set by `assign_specs()`; distinguishes "not built yet" from a build
     /// that legitimately assigned nothing.
-    built: bool,
+    pub(crate) built: bool,
 }
 
 /// ROOM_DEATH room vnums, captured from the loaded world before `assign_specs()`

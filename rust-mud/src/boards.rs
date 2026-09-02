@@ -189,7 +189,7 @@ const BOARD_INFO: [BoardInfo; NUM_OF_BOARDS] = [
 
 /// One stored message (C: board_msginfo.heading + msg_storage[slot]).
 #[derive(Clone)]
-struct BoardMsg {
+pub(crate) struct BoardMsg {
     /// Bytes excluding the C file's required trailing NUL. Keeping bytes here
     /// prevents a load/save cycle from normalising non-UTF-8 legacy text.
     heading: Vec<u8>,
@@ -211,7 +211,7 @@ pub struct BoardRuntime {
     /// Per-board message lists (index 0..NUM_OF_BOARDS). Order matters: message
     /// number shown to players is `index + 1`, newest appended last — exactly
     /// like C's `msg_index[board][0..num_of_msgs]`.
-    boards: Vec<Vec<BoardMsg>>,
+    pub(crate) boards: Vec<Vec<BoardMsg>>,
     formats: Vec<crate::cformat::PersistenceFormat>,
     /// Boards whose on-disk file failed to parse at boot. Unlike C — which
     /// "resets" a corrupt board and lets the next save destroy it — a

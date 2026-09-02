@@ -99,7 +99,7 @@ pub(crate) fn command_interpreter_authenticated(g: &mut GameState, ch: CharId, i
     run_authenticated_command(g, ch, input);
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandSource {
     Indirect,
     AuthenticatedInput,

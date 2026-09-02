@@ -7,12 +7,10 @@
 // arena/wins/losses, char_specials.flee_timer/last_fighting/observing/
 // observe_by, char_specials.bup_*) and in two global char_data pointers
 // (`arenamaster`, `defaultobserve`). The Rust Character carries `wins`/
-// `losses` (used directly), but not the rest of the arena-only fields, and we
-// are not allowed to grow Character or GameState. So every arena-private bit
-// of per-character state lives in a module-owned side table keyed by CharId,
-// exactly as shop.rs / mail.rs / boards.rs keep their own runtime state in a
-// `static OnceLock<Mutex<…>>`. The id keys make the C observer linked list a
-// pair of `Option<CharId>` links (`observing` / `observe_by`).
+// Arena-private per-character state (status, observer links, arenamaster,
+// flee timers, backup affects) lives on GameState as `econ.arena` (phase-1
+// statics migration). The C observer linked list is a pair of `Option<CharId>`
+// links (`observing` / `observe_by`).
 //
 // Public surface (the C externs other modules call):
 //   spec proc        arenaentrancemaster(g, ch, me, cmd, arg) -> bool
@@ -69,7 +67,7 @@ struct BupAffects {
 }
 
 #[derive(Default, Clone)]
-struct ArenaChar {
+pub(crate) struct ArenaChar {
     /// GET_ARENASTAT — ARENA_NOT when absent.
     stat: u8,
     /// char_specials.flee_timer (GET_ARENAFLEETIMER).
@@ -86,11 +84,11 @@ struct ArenaChar {
 
 #[derive(Default)]
 pub(crate) struct ArenaWorld {
-    chars: HashMap<CharId, ArenaChar>,
+    pub(crate) chars: HashMap<CharId, ArenaChar>,
     /// `arenamaster` global — the entrance-master mob (set by the spec proc).
-    arenamaster: Option<CharId>,
+    pub(crate) arenamaster: Option<CharId>,
     /// `defaultobserve` global — combatant new observers latch onto.
-    defaultobserve: Option<CharId>,
+    pub(crate) defaultobserve: Option<CharId>,
 }
 
 // Unit tests construct many independent GameStates in parallel, and each one

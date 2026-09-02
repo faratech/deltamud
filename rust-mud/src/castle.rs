@@ -532,17 +532,20 @@ const MONOLOG_PATH: &[u8] = b"ABCDPPPP.";
 /// function-static `path`/`index`/`move` — but those statics are shared across
 /// every king, which only works because there is a single King; the per-id map
 /// is the faithful single-king behaviour with no cross-talk risk.
-struct KingWalk {
-    path: &'static [u8],
-    index: usize,
-    moving: bool,
+pub(crate) struct KingWalk {
+    pub(crate) path: &'static [u8],
+    pub(crate) index: usize,
+    pub(crate) moving: bool,
 }
 
-fn king_walks() -> &'static std::sync::Mutex<std::collections::HashMap<CharId, KingWalk>> {
-    static WALKS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<CharId, KingWalk>>,
-    > = std::sync::OnceLock::new();
-    WALKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+// The King's patrol state lives on GameState as `world.king_walks` (phase-1
+// statics migration), keyed by the king mob's runtime CharId.
+fn king_walks(g: &GameState) -> &std::collections::HashMap<CharId, KingWalk> {
+    &g.world.king_walks
+}
+
+fn king_walks_mut(g: &mut GameState) -> &mut std::collections::HashMap<CharId, KingWalk> {
+    &mut g.world.king_walks
 }
 
 /// Control the actions and movements of the King.
@@ -551,7 +554,7 @@ pub fn king_welmar(g: &mut GameState, _ch: CharId, me: CharId, cmd: &str, _arg: 
 
     // Pull (or default-initialise) this king's walk state.
     let (mut path, mut index, mut moving) = {
-        let map = crate::lock_ok::lock(&king_walks());
+        let map = king_walks(g);
         match map.get(&ch) {
             Some(w) => (w.path, w.index, w.moving),
             None => (BEDROOM_PATH, 0, false),
@@ -581,21 +584,21 @@ pub fn king_welmar(g: &mut GameState, _ch: CharId, me: CharId, cmd: &str, _arg: 
     // (but persist whatever scheduling decision we just made).
     let pos = position(g, ch);
     if !cmd.is_empty() || pos < Position::Sleeping || (pos == Position::Sleeping && !moving) {
-        store_king_walk(ch, path, index, moving);
+        store_king_walk(g, ch, path, index, moving);
         return false;
     }
 
     if pos == Position::Fighting {
         fry_victim(g, ch);
-        store_king_walk(ch, path, index, moving);
+        store_king_walk(g, ch, path, index, moving);
         return false;
     } else if banzaii(g, ch) {
-        store_king_walk(ch, path, index, moving);
+        store_king_walk(g, ch, path, index, moving);
         return false;
     }
 
     if !moving {
-        store_king_walk(ch, path, index, moving);
+        store_king_walk(g, ch, path, index, moving);
         return false;
     }
 
@@ -696,12 +699,12 @@ pub fn king_welmar(g: &mut GameState, _ch: CharId, me: CharId, cmd: &str, _arg: 
     }
 
     index += 1;
-    store_king_walk(ch, path, index, moving);
+    store_king_walk(g, ch, path, index, moving);
     false
 }
 
-fn store_king_walk(ch: CharId, path: &'static [u8], index: usize, moving: bool) {
-    let mut map = crate::lock_ok::lock(&king_walks());
+fn store_king_walk(g: &mut GameState, ch: CharId, path: &'static [u8], index: usize, moving: bool) {
+    let map = king_walks_mut(g);
     map.insert(
         ch,
         KingWalk {
