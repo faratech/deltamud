@@ -776,6 +776,11 @@ pub struct GameState {
     /// interpreter.rs: whether the in-flight command arrived from the live
     /// Playing descriptor of the acting principal (Indirect for force/queue/DM).
     pub command_source: crate::interpreter::CommandSource,
+    /// combat.rs: fixed-slot death hooks (phase 5). Subsystems with kill
+    /// side effects (quest credit) register at boot instead of combat.rs
+    /// naming them directly; the Vec runs in registration order and the
+    /// registration order in main.rs mirrors C fight.c die() ordering.
+    pub on_kill_hooks: Vec<fn(&mut GameState, CharId, CharId)>,
     /// olc.rs: the OLC core registry (active editors, save journal, unresolved
     /// publications).
     pub olc: OlcState,
@@ -834,6 +839,7 @@ impl GameState {
             social: SocialState::default(),
             dg: DgState::default(),
             command_source: crate::interpreter::CommandSource::Indirect,
+            on_kill_hooks: Vec::new(),
             olc: OlcState::default(),
             clock: crate::weather::MudClock::default(),
             econ: EconomyState::default(),

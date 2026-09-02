@@ -741,6 +741,11 @@ async fn run_server() -> Result<state::ProcessDisposition> {
     // Build the world.
     let ban_handle = ban::BanHandle::default();
     let mut state = state::GameState::new(config.clone());
+    // Fixed-slot death hooks (phase 5): registration order mirrors the C
+    // fight.c die() side-effect ordering. quest.rs credits active autoquests.
+    state.on_kill_hooks.push(|g, killer, victim| {
+        crate::quest::quest_on_kill(g, killer, victim);
+    });
     state.social.ban_handle = ban_handle.clone();
     // Seed the mud clock from the effective lib path before any world/helper
     // reads time_now()/sunlight() (the old static had to self-initialize; the

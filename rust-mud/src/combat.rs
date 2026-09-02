@@ -1675,8 +1675,13 @@ pub(crate) fn die(g: &mut GameState, killer: Option<CharId>, victim: CharId) {
             }
         }
         if is_npc {
-            // Mark the kill against any active autoquest (fight.c PLR_QUESTOR).
-            crate::quest::quest_on_kill(g, k, victim);
+            // Run the registered kill side-effect hooks (fight.c PLR_QUESTOR
+            // quest credit is registered by quest.rs at boot — phase 5 fixed
+            // slots instead of a hardcoded cross-subsystem call).
+            let hooks = g.on_kill_hooks.clone();
+            for hook in hooks {
+                hook(g, k, victim);
+            }
         }
         handle_pc_kill_side_effects(g, k, victim);
     }

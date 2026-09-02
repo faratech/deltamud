@@ -857,6 +857,11 @@ pub static CMD_INFO: &[CommandDef] = &[
     g("uptime", Dead, DoDate, 1, GCMD_GEN, SCMD_UPTIME),
     c("use", Sitting, DoUse, 0, SCMD_USE),
     g("users", Dead, DoUsers, 2, GCMD2_USERS, 0),
+    // "appraise" — do_appraise exists in the Rust port (a value-at-a-shop
+    // synonym) but C's cmd_info[] never registered it (C's "value" row is
+    // itself a dead do_not_here stub). Registered as a finish-the-game
+    // activation; see COMPATIBILITY.md divergence register.
+    c("appraise", Standing, DoAppraise, 0, 0),
     c("value", Standing, DoValue, 0, 0),
     c("version", Dead, DoGenPs, 0, SCMD_VERSION),
     // C: GOD_CMD (set 1) but godcmd bit is GCMD2_OLC — bit value checked vs godcmds1.

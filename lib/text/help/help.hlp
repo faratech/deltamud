@@ -3090,6 +3090,15 @@ See also: BUY, LIST, SELL, SHOPS
 
 
 #0
+APPRAISE
+
+Usage: appraise <item>
+
+Before selling an item to a shop, you can ask the shopkeeper
+how much he or she is willing to pay for it.
+
+Related: VALUE.
+#
 VISIBLE
 
 Usage: visible
