@@ -64,6 +64,7 @@ mysql/*.log
 # IDE and editor files
 .vscode/
 .idea/
+.claude/
 *.sublime-*
 
 # OS files
