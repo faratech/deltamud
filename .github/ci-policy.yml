@@ -1,0 +1,4 @@
+version: 1
+workflows:
+  .github/workflows/rust-mud-ci.yml: fast
+  .github/workflows/codeql.yml: deep

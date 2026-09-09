@@ -1,13 +1,6 @@
 name: Rust MUD CI
 
 on:
-  push:
-    paths:
-      - "rust-mud/**"
-      - "lib/**"
-      - "deltamud_schema.sql"
-      - "AGREEMENT"
-      - ".github/workflows/rust-mud-ci.yml"
   pull_request:
     paths:
       - "rust-mud/**"
@@ -15,6 +8,7 @@ on:
       - "deltamud_schema.sql"
       - "AGREEMENT"
       - ".github/workflows/rust-mud-ci.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
