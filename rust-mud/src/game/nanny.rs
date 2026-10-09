@@ -294,6 +294,29 @@ impl Game {
             ConState::GetOldPassword => {
                 // C interpreter.c:1869-2020 CON_PASSWORD.
                 let name = self.descriptor_name(conn_id);
+                // C's max_bad_pws only counts this connection; the throttle
+                // remembers failures across reconnects and is checked before
+                // any hash or database work (#426).
+                let source = self.login_source(conn_id);
+                if let Some(remaining) =
+                    self.login_throttle
+                        .lockout(&name, &source, std::time::Instant::now())
+                {
+                    warn!(
+                        "Login throttled: {} [{}] ({}s remaining)",
+                        name,
+                        source,
+                        remaining.as_secs()
+                    );
+                    self.out(
+                        conn_id,
+                        "Too many failed login attempts. Please try again later.\r\n",
+                    );
+                    if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                        d.state = ConState::Close;
+                    }
+                    return;
+                }
                 // Fetch the exact durable hash once: it authenticates this
                 // attempt and becomes the session cache unless a legacy
                 // upgrade commits. This avoids a second DB read and a fresh,
@@ -325,6 +348,26 @@ impl Game {
                     // persist it), re-prompt; disconnect at max_bad_pws (#194).
                     let host = self.descriptor_host(conn_id);
                     warn!("Bad PW: {} [{}]", name, host);
+                    let ip_limit = self.state.config.login_ip_failure_limit;
+                    if let Some(started) = self.login_throttle.record_failure(
+                        &name,
+                        &source,
+                        ip_limit,
+                        std::time::Instant::now(),
+                    ) {
+                        crate::syslog::mudlog(
+                            &mut self.state,
+                            &format!(
+                                "Repeated bad passwords for {} from {}; locking {} for {}s.",
+                                name,
+                                source,
+                                started.scope.describe(),
+                                started.duration.as_secs()
+                            ),
+                            crate::syslog::BRF,
+                            LVL_GOD,
+                        );
+                    }
                     if let Ok(mut rec) = self.load_player_latest(&name).await {
                         rec.bad_pws = rec.bad_pws.saturating_add(1);
                         let _ = self.db_save_player(&rec).await;
@@ -351,6 +394,8 @@ impl Game {
                 }
 
                 // Password was correct.
+                self.login_throttle
+                    .record_success(&name, &source, std::time::Instant::now());
                 let host = self.descriptor_host(conn_id);
                 let mut rec = match self.load_player_latest(&name).await {
                     Ok(c) => c,
@@ -1151,6 +1196,22 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
             d.state = ConState::RollStats;
         }
+    }
+
+    /// Throttle key for a login source: the canonical socket peer IP, or the
+    /// descriptor host when no IP was captured.
+    fn login_source(&self, conn_id: ConnId) -> String {
+        self.state
+            .descriptors
+            .get(&conn_id)
+            .map(|d| {
+                if d.peer_ip.is_empty() {
+                    d.host.clone()
+                } else {
+                    d.peer_ip.clone()
+                }
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn descriptor_host(&self, conn_id: ConnId) -> String {

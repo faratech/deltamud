@@ -63,6 +63,7 @@ Key env vars (read in `config.rs` + `main.rs`):
 - `MUD_EXEC_PATH` optionally selects the copyover binary. A configured value must be absolute and resolve at copyover time to an executable regular file; production additionally requires the binary and both path chains to be root-owned and not group/world-writable. Production uses `/opt/deltamud/current/bin/deltamud`; development falls back to `current_exe()`.
 - `MUD_MAX_CONN` (default 256), `MUD_MAX_CONN_PER_IP` (default 16, 0 disables), `MUD_CONN_BURST`/`MUD_CONN_WINDOW_MS` (per-IP rate limit).
 - `MUD_REVERSE_DNS` (default true), `MUD_REVERSE_DNS_TIMEOUT_MS` (default 1000), and `MUD_REVERSE_DNS_MAX_INFLIGHT` (default 16) enable bounded FCrDNS host identity. Ban checks always include the canonical socket peer IP; lookup failure/timeout falls back to that IP.
+- `MUD_LOGIN_IP_FAILURES` (default 20, 0 disables): wrong passwords per source IP (across accounts, decaying one per minute) before that IP is locked. Independently, 5 wrong passwords for one account from one IP lock that pair, and 50 for one account from all IPs lock it for IPs with no recent successful login (`login_throttle.rs`, #426). Needs real client source IPs: behind a proxy that hides them every player shares one IP.
 
 Real-database setup is deliberately offline and explicit:
 

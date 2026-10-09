@@ -92,6 +92,9 @@ pub struct Config {
     /// fallback: mock-DB runs re-exec the current test binary; real-database
     /// runs refuse to copyover rather than guess an executable.
     pub exec_path: Option<String>,
+    /// Wrong passwords from one source address (across reconnects) before
+    /// login lockouts begin (`MUD_LOGIN_IP_FAILURES`, 0 disables) (#426).
+    pub login_ip_failure_limit: u32,
 }
 
 impl Config {
@@ -148,6 +151,10 @@ impl Config {
                 .map(|v| v != "0" && !v.is_empty())
                 .unwrap_or(false),
             exec_path: env::var("MUD_EXEC_PATH").ok(),
+            login_ip_failure_limit: env::var("MUD_LOGIN_IP_FAILURES")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(crate::login_throttle::DEFAULT_SOURCE_FREE_FAILURES),
         })
     }
 }
@@ -218,6 +225,7 @@ impl Default for Config {
             no_specials: false,
             enforce_multiplay: false,
             exec_path: None,
+            login_ip_failure_limit: crate::login_throttle::DEFAULT_SOURCE_FREE_FAILURES,
         }
     }
 }

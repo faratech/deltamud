@@ -101,6 +101,7 @@ workflow; never run a checkout binary against production. See
 | `MUD_REVERSE_DNS` | `true` | Resolve peer PTR names at the socket edge; only forward-confirmed names are trusted. Set `false`/`0` to use canonical IPs only. |
 | `MUD_REVERSE_DNS_TIMEOUT_MS` | `1000` | Whole PTR + forward-confirmation deadline per connection (clamped to 1–10000 ms); timeout falls back to the canonical peer IP. |
 | `MUD_REVERSE_DNS_MAX_INFLIGHT` | `16` | Maximum simultaneous blocking system-resolver calls (clamped to 1–256). |
+| `MUD_LOGIN_IP_FAILURES` | `20` | Wrong passwords from one source IP across all accounts (one forgiven per minute) before that IP is locked; `0` disables. Separately, 5 wrong passwords for one account from one IP lock that account for that IP, and 50 across all IPs lock it for IPs without a recent successful login. Set `0` behind a proxy that does not preserve client IPs (the per-account limits still apply to that shared IP). |
 | `RUST_LOG` | `info` | Log level. |
 
 ### Control / ops

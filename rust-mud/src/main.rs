@@ -63,6 +63,7 @@ mod interpreter;
 mod language;
 mod limits;
 mod lock_ok;
+mod login_throttle;
 mod magic;
 mod mail;
 mod maputils;
