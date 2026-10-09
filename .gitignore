@@ -60,6 +60,15 @@ mysql/mysqld.sock
 mysql/*.err
 mysql/*.pid
 mysql/*.log
+# Legacy MySQL data directories and dumps hold player records and password
+# verifiers; never commit them (#422). Only the historical scripts stay here.
+mysql/*/
+mysql/plrbackup*
+*.ISD
+*.ISM
+*.MYD
+*.MYI
+*.frm
 
 # IDE and editor files
 .vscode/
