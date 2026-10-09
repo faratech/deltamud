@@ -50,7 +50,6 @@ install -d -m 0755 \
   "$CHECK_ROOT/etc/systemd/system" \
   "$CHECK_ROOT/etc/deltamud" \
   "$CHECK_ROOT/opt/deltamud/current/bin" \
-  "$CHECK_ROOT/opt/deltamud/releases/test_instance/bin" \
   "$CHECK_ROOT/usr/local/sbin" \
   "$CHECK_ROOT/usr/lib/systemd" \
   "$CHECK_ROOT/var/lib/deltamud"
@@ -58,8 +57,18 @@ cp -a "$SYSTEM_UNIT_DIR" "$CHECK_ROOT/usr/lib/systemd/system"
 install -m 0644 "$MAIN_UNIT" "$MIGRATION_UNIT" \
   "$CHECK_ROOT/etc/systemd/system/"
 install -m 0755 /bin/true "$CHECK_ROOT/opt/deltamud/current/bin/deltamud"
-install -m 0755 /bin/true \
-  "$CHECK_ROOT/opt/deltamud/releases/test_instance/bin/deltamud"
+# `systemd-analyze verify` instantiates the migration template under a
+# placeholder instance name that depends on the systemd version: releases up to
+# at least 255 (Ubuntu 24.04, GitHub's ubuntu-latest) use "i", while newer ones
+# (for example 259 on Ubuntu 26.04) use "test_instance". Provide the executable
+# that ExecStart= names for every placeholder so the structural check does not
+# depend on which systemd happens to run it. Both are throwaway copies of
+# /bin/true inside the isolated root; nothing here weakens a verified property.
+for verify_instance in i test_instance; do
+  install -d -m 0755 "$CHECK_ROOT/opt/deltamud/releases/$verify_instance/bin"
+  install -m 0755 /bin/true \
+    "$CHECK_ROOT/opt/deltamud/releases/$verify_instance/bin/deltamud"
+done
 install -m 0755 /bin/true "$CHECK_ROOT/usr/local/sbin/deltamud-release"
 printf '%s\n' 'DATABASE_URL=mysql://example.invalid/deltamud' \
   >"$CHECK_ROOT/etc/deltamud/deltamud.env"
