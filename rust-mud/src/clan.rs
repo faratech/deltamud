@@ -861,6 +861,18 @@ fn handle_rank(g: &mut GameState, ch: CharId, arg: &str) {
         g.send_to_char(ch, NOCLAN);
         return;
     }
+    // C handle_rank checks membership only, so any enlisted member could make
+    // themselves the top rank, and `lower` demoted everyone else. Like `clan
+    // privilege`, changing the rank count belongs to the clan's head: its
+    // highest rank or its leader (#425; COMPATIBILITY.md).
+    let (ranks, leader) = with_clan(g, cl, |c| (c.ranks, c.leader.clone())).unwrap_or_default();
+    if rank != ranks && get_name(g, ch) != leader {
+        g.send_to_char(
+            ch,
+            "You have to be the highest rank of a clan to change its ranks.\r\n",
+        );
+        return;
+    }
 
     let (arg1, arg2) = half_chop(arg);
     if arg1.is_empty() || arg2.is_empty() {
@@ -870,7 +882,6 @@ fn handle_rank(g: &mut GameState, ch: CharId, arg: &str) {
     let Some(n) = clan_i32(g, ch, &arg2, 0) else {
         return;
     };
-    let ranks = with_clan(g, cl, |c| c.ranks).unwrap_or(0);
 
     if is_abbrev(&arg1, "raise") {
         // C guard: n in 1..9 AND n >= clan.ranks (raising upward).
@@ -2142,6 +2153,62 @@ mod tests {
 
         let out = &g.descriptors.get(&ConnId(1)).unwrap().outbuf;
         assert!(out.contains("[ 20 Th ] Offline - Officer\r\n"));
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
+    fn clan_member(g: &mut GameState, conn: ConnId, name: &str, rank: i32) -> CharId {
+        let id = connected_player(g, conn, name, 20);
+        let c = g.get_char_mut(id).unwrap();
+        c.clan = 0;
+        c.clan_rank = rank;
+        id
+    }
+
+    #[test]
+    fn clan_rank_raise_and_lower_are_refused_below_the_top_rank() {
+        let lib = temp_lib("rank-authority");
+        let mut g = GameState::new(Config::default());
+        install_test_clan(&mut g, &lib);
+        g.econ.clans.clans[0].leader = "Boss".to_string();
+        let member = clan_member(&mut g, ConnId(1), "Member", 1);
+        let officer = clan_member(&mut g, ConnId(2), "Officer", 2);
+
+        do_clan(&mut g, member, "rank raise 9", 0);
+        do_clan(&mut g, officer, "rank lower 1", 0);
+
+        assert_eq!(with_clan(&g, 0, |c| c.ranks), Some(3));
+        assert_eq!(g.get_char(member).unwrap().clan_rank, 1);
+        assert_eq!(g.get_char(officer).unwrap().clan_rank, 2);
+        assert!(g.deferred_db_ops.is_empty());
+        for conn in [ConnId(1), ConnId(2)] {
+            assert!(
+                g.descriptors[&conn]
+                    .outbuf
+                    .contains("You have to be the highest rank of a clan to change its ranks.")
+            );
+        }
+        let _ = std::fs::remove_dir_all(lib);
+    }
+
+    #[test]
+    fn clan_top_rank_and_leader_can_still_change_ranks() {
+        let lib = temp_lib("rank-head");
+        let mut g = GameState::new(Config::default());
+        install_test_clan(&mut g, &lib);
+        g.econ.clans.clans[0].leader = "Boss".to_string();
+        let head = clan_member(&mut g, ConnId(1), "Head", 3);
+
+        do_clan(&mut g, head, "rank raise 5", 0);
+        assert_eq!(with_clan(&g, 0, |c| c.ranks), Some(5));
+        assert_eq!(g.get_char(head).unwrap().clan_rank, 5);
+
+        // The named leader keeps authority even when not at the top rank.
+        let boss = clan_member(&mut g, ConnId(2), "Boss", 2);
+        let member = clan_member(&mut g, ConnId(3), "Member", 4);
+        do_clan(&mut g, boss, "rank lower 2", 0);
+        assert_eq!(with_clan(&g, 0, |c| c.ranks), Some(2));
+        assert_eq!(g.get_char(boss).unwrap().clan_rank, 2);
+        assert_eq!(g.get_char(member).unwrap().clan_rank, 1);
         let _ = std::fs::remove_dir_all(lib);
     }
 
