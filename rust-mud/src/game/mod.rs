@@ -4216,6 +4216,77 @@ mod gmcp_tests {
         assert_eq!(value["locked"][0], "e");
     }
 
+    fn room_info_json(game: &Game, conn: ConnId) -> serde_json::Value {
+        let messages = game.gmcp_snapshots(conn);
+        let room_info = messages
+            .iter()
+            .find(|m| m.starts_with("Room.Info "))
+            .expect("Room.Info must be part of the snapshot");
+        serde_json::from_str(room_info.split_once(' ').unwrap().1).unwrap()
+    }
+
+    #[test]
+    fn gmcp_room_info_reveals_no_more_than_the_text_view() {
+        let mut game = test_game(Arc::new(MockDatabase::new()));
+        let a = game
+            .state
+            .add_room(Room::new(100, 1, "Hall".into(), String::new()));
+        game.state
+            .add_room(Room::new(101, 1, "East".into(), String::new()));
+        game.state
+            .add_room(Room::new(102, 1, "Secret".into(), String::new()));
+        for (dir, to_room, exit_info) in [(EAST, 101, 0), (NORTH, 102, crate::room::EX_HIDDEN)] {
+            game.state.rooms[a].exits[dir] = Some(Exit {
+                description: None,
+                keyword: None,
+                exit_info,
+                key: -1,
+                to_room,
+            });
+        }
+        // Occupants: one plainly visible, then invisible, hidden and wizinvis.
+        for (name, affect, invis_level) in [
+            ("Plain", 0, 0),
+            ("Sneaky", crate::flags::AFF_INVISIBLE, 0),
+            ("Lurker", crate::flags::AFF_HIDE, 0),
+            ("Wizard", 0, i32::from(LVL_IMPL)),
+        ] {
+            let mut other = Character::new_player(name.into(), Class::Warrior, Race::Human);
+            other.affect_flags |= affect;
+            other.invis_level = invis_level;
+            let other = game.state.create_char(other);
+            game.state.char_to_room(other, a);
+        }
+
+        let mortal_conn = ConnId(64);
+        game.state
+            .descriptors
+            .insert(mortal_conn, Descriptor::new(mortal_conn, "t".into()));
+        let mortal = playing_char(&mut game, mortal_conn, "Viewer", a);
+        let value = room_info_json(&game, mortal_conn);
+        assert_eq!(value["num"], 100);
+        assert_eq!(value["exits"]["e"], 101);
+        assert!(value["exits"].get("n").is_none(), "hidden exit leaked");
+        assert_eq!(value["players"], serde_json::json!(["Plain"]));
+
+        // Immortals see hidden exits, as with `exits`.
+        let immortal_conn = ConnId(65);
+        game.state
+            .descriptors
+            .insert(immortal_conn, Descriptor::new(immortal_conn, "t".into()));
+        let immortal = playing_char(&mut game, immortal_conn, "Keeper", a);
+        game.state.get_char_mut(immortal).unwrap().player.level = LVL_IMMORT;
+        assert_eq!(room_info_json(&game, immortal_conn)["exits"]["n"], 102);
+
+        // A blind viewer learns nothing about the room.
+        game.state.get_char_mut(mortal).unwrap().affect_flags |= crate::flags::AFF_BLIND;
+        let blind = room_info_json(&game, mortal_conn);
+        assert_eq!(blind["num"], -1);
+        assert_eq!(blind["name"], "");
+        assert_eq!(blind["exits"], serde_json::json!({}));
+        assert_eq!(blind["players"], serde_json::json!([]));
+    }
+
     #[test]
     fn combat_damage_marks_both_sides_dirty() {
         let mut game = test_game(Arc::new(MockDatabase::new()));

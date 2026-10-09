@@ -142,7 +142,11 @@ the C world grammar or command-oracle policy:
 - Fresh connections receive server-initiated `WILL GMCP`; negotiated descriptors
   retain bounded `Core.Hello` and `Core.Supports.Set/Add/Remove` capability state
   and receive `Char.Vitals`/`Room.Info`. Plain Telnet and MSSP remain compatible,
-  and clients that do not negotiate GMCP receive no GMCP payload.
+  and clients that do not negotiate GMCP receive no GMCP payload. `Room.Info`
+  reveals no more than `look`/`exits` (#427): occupants must pass `can_see`,
+  `EX_HIDDEN` exits are omitted below LVL_IMMORT, and a room the viewer cannot
+  see (dark without infravision/holylight, or blind) is sent as `num: -1` with
+  empty fields.
 - UTF-8 negotiation/input policy, NAWS, TTYPE/MTTS, MCCP, `Room.Add/Remove`, and
   `Char.Items` are deliberately deferred rather than partially advertised.
 

@@ -305,8 +305,28 @@ impl Game {
 
         // Room.Info — vnum, name, zone, exits as {dir: dest-vnum}, plus the
         // closed/locked door lists the mapper needs (W5). Occupancy lists the
-        // other characters in the room so GUIs can draw fellow players.
+        // other characters in the room so GUIs can draw fellow players. The
+        // payload reveals no more than the text view (#427): a room the viewer
+        // cannot see is sent as unknown (num -1, empty fields), EX_HIDDEN exits
+        // are omitted below LVL_IMMORT, and occupants pass `can_see`.
         if let Some(rnum) = c.in_room {
+            if !crate::cmd_informative::viewer_sees_room(&self.state, ch, rnum) {
+                messages.push(gmcp_message(
+                    "Room.Info",
+                    &serde_json::json!({
+                        "num": -1,
+                        "name": "",
+                        "zone": "",
+                        "exits": {},
+                        "doors": [],
+                        "locked": [],
+                        "players": [],
+                        "map": { "x": 0, "y": 0 },
+                    }),
+                ));
+                return messages;
+            }
+            let immortal = c.player.level >= LVL_IMMORT;
             if let Some(room) = self.state.room_opt(rnum) {
                 let zone_name = self
                     .state
@@ -320,6 +340,10 @@ impl Game {
                 let mut locked: Vec<&str> = Vec::new();
                 for (i, key) in dir_keys.iter().enumerate() {
                     if let Some(ex) = room.exits.get(i).and_then(|e| e.as_ref()) {
+                        // C act.informative.c:645: hidden below LVL_IMMORT.
+                        if ex.exit_info & crate::room::EX_HIDDEN != 0 && !immortal {
+                            continue;
+                        }
                         exits.insert(key.to_string(), serde_json::json!(ex.to_room));
                         if ex.exit_info & crate::room::EX_CLOSED != 0 {
                             doors.push(key);
@@ -332,7 +356,7 @@ impl Game {
                 let occupants: Vec<String> = room
                     .people
                     .iter()
-                    .filter(|&&other| other != ch)
+                    .filter(|&&other| other != ch && self.state.can_see(ch, other))
                     .filter_map(|&other| self.state.get_char(other))
                     .filter(|other| !other.is_npc)
                     .map(|other| other.get_name().to_string())
