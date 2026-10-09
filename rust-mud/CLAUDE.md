@@ -61,7 +61,7 @@ Key env vars (read in `config.rs` + `main.rs`):
 - `MUD_RNG_SEED=<n>` pins the Lehmer PRNG for golden tests (same seed => identical zone prime / combat); `MUD_NO_SPECIALS` or argv `-s` enables C-compatible no-specials mode. `-q` is not treated as no-specials.
 - `MUD_METRICS_PORT=<port>` enables `/metrics`, `/live`, `/ready`, `/health`, and `/api/who`. `/live` proves only that the HTTP task responds; `/ready` also requires completed boot and a heartbeat no more than two seconds old. Invalid metrics addresses/ports and bind failures abort startup. **Never use 9200/9201 — this box's Elasticsearch owns them; use e.g. 19595.**
 - `MUD_EXEC_PATH` optionally selects the copyover binary. A configured value must be absolute and resolve at copyover time to an executable regular file; production additionally requires the binary and both path chains to be root-owned and not group/world-writable. Production uses `/opt/deltamud/current/bin/deltamud`; development falls back to `current_exe()`.
-- `MUD_MAX_CONN` (default 256), `MUD_CONN_BURST`/`MUD_CONN_WINDOW_MS` (per-IP rate limit).
+- `MUD_MAX_CONN` (default 256), `MUD_MAX_CONN_PER_IP` (default 16, 0 disables), `MUD_CONN_BURST`/`MUD_CONN_WINDOW_MS` (per-IP rate limit).
 - `MUD_REVERSE_DNS` (default true), `MUD_REVERSE_DNS_TIMEOUT_MS` (default 1000), and `MUD_REVERSE_DNS_MAX_INFLIGHT` (default 16) enable bounded FCrDNS host identity. Ban checks always include the canonical socket peer IP; lookup failure/timeout falls back to that IP.
 
 Real-database setup is deliberately offline and explicit:

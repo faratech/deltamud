@@ -229,6 +229,19 @@ pub const AUTOSAVE_TIME: u32 = 5;
 /// disconnected (#194).
 pub const MAX_BAD_PWS: u32 = 2;
 
+/// Idle limits for pre-game descriptors, in 15-second PULSE_IDLE_PASSWORD
+/// ticks. The colour question and name/password prompts keep C's two ticks;
+/// creation, MOTD, menu and menu-editor states (no C limit) get ten minutes.
+pub const LOGIN_PROMPT_IDLE_TICKS: u8 = 2;
+pub const PREGAME_IDLE_TICKS: u8 = 40;
+/// Absolute deadline from accept until a password is verified or a new
+/// character is created (15 minutes), regardless of input (#423).
+pub const UNAUTHENTICATED_DEADLINE_TICKS: u16 = 60;
+/// Pre-auth input lines one connection may have deferred behind a database
+/// wait, and the global cap for all deferred input (#424).
+pub const MAX_DEFERRED_LINES_PER_CONN: usize = 32;
+pub const MAX_DEFERRED_INPUT: usize = 1024;
+
 #[cfg(test)]
 mod tests {
     use super::*;

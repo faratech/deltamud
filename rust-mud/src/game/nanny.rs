@@ -18,6 +18,18 @@ impl Game {
             Some(d) => d.state,
             None => return,
         };
+        // Unauthenticated input runs inline on the Game task, so it is
+        // budgeted per connection; a flood closes the connection (#424).
+        if state.is_unauthenticated() {
+            if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                if !d.preauth_lines.try_take(std::time::Instant::now()) {
+                    warn!("Pre-login input flood from {}; closing", d.host);
+                    d.write("\r\nInput queue full.\r\n");
+                    d.state = ConState::Close;
+                    return;
+                }
+            }
+        }
 
         // C comm.c process_input (1836-1960), applied to every completed line
         // regardless of connection state:
@@ -1965,8 +1977,12 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                 crate::alias::clear_aliases(&mut self.state, idnum);
             }
         }
-        self.state.descriptors.remove(&conn_id);
+        // Dropping the Game's sender is what ends the connection task (#421);
+        // its follow-up Disconnect notice then finds nothing left to remove.
+        let removed = self.state.descriptors.remove(&conn_id).is_some();
         self.outputs.remove(&conn_id);
-        info!("Connection {} closed", conn_id);
+        if removed {
+            info!("Connection {} closed", conn_id);
+        }
     }
 }

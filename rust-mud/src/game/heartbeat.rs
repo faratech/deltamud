@@ -128,25 +128,40 @@ impl Game {
         }
     }
 
-    /// C comm.c:2049-2069 check_idle_passwords(): a descriptor sitting at a
-    /// name/password prompt for two consecutive 15-second ticks is disconnected
-    /// with C's message.
+    /// C comm.c:2049-2069 check_idle_passwords(): a descriptor sitting at the
+    /// colour question or a name/password prompt for two consecutive 15-second
+    /// ticks is disconnected with C's message. The port also ages every other
+    /// pre-game state and enforces an absolute deadline until authentication,
+    /// so trickled input cannot hold a connection slot forever (#423).
     pub(crate) fn check_idle_passwords(&mut self) {
+        use crate::config::{
+            LOGIN_PROMPT_IDLE_TICKS, PREGAME_IDLE_TICKS, UNAUTHENTICATED_DEADLINE_TICKS,
+        };
         let mut to_close: Vec<ConnId> = Vec::new();
         for (cid, d) in self.state.descriptors.iter_mut() {
-            if matches!(
+            if matches!(d.state, ConState::Playing | ConState::Close) {
+                continue;
+            }
+            let idle_limit = if matches!(
                 d.state,
-                ConState::GetName
+                ConState::QAnsi
+                    | ConState::GetName
                     | ConState::GetOldPassword
                     | ConState::GetNewPassword
                     | ConState::ConfirmPassword
                     | ConState::ConfirmName
             ) {
-                d.idle_tics += 1;
-                if d.idle_tics >= 2 {
-                    d.write("\r\nTimed out... goodbye.\r\n");
-                    to_close.push(*cid);
-                }
+                LOGIN_PROMPT_IDLE_TICKS
+            } else {
+                PREGAME_IDLE_TICKS
+            };
+            if d.state.is_unauthenticated() {
+                d.login_tics = d.login_tics.saturating_add(1);
+            }
+            d.idle_tics = d.idle_tics.saturating_add(1);
+            if d.idle_tics >= idle_limit || d.login_tics >= UNAUTHENTICATED_DEADLINE_TICKS {
+                d.write("\r\nTimed out... goodbye.\r\n");
+                to_close.push(*cid);
             }
         }
         for cid in to_close {

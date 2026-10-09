@@ -43,6 +43,7 @@ Environment (all read in `config.rs` / `main.rs`):
 | `MUD_DB_TIMEOUT_SECS` | 5 | hard application-boundary timeout for every DB operation |
 | `MUD_EXEC_PATH` | current executable | Copyover target. Production should set the absolute release-aware path `/opt/deltamud/current/bin/deltamud`; it is resolved and validated at copyover time. |
 | `MUD_MAX_CONN` | 256 | accept-loop semaphore |
+| `MUD_MAX_CONN_PER_IP` | 16 | concurrent sockets per source IP; 0 disables (needed behind a proxy that does not preserve source IPs) |
 | `MUD_REVERSE_DNS` | true | bounded PTR lookup plus forward confirmation; false/0 disables hostname identity |
 | `MUD_REVERSE_DNS_TIMEOUT_MS` | 1000 | whole hostname-resolution deadline; falls back to canonical peer IP |
 | `MUD_REVERSE_DNS_MAX_INFLIGHT` | 16 | cap for uncancellable libc resolver calls |

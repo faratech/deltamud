@@ -97,6 +97,7 @@ workflow; never run a checkout binary against production. See
 | `MUD_RNG_SEED` | *(clock)* | Pins the Lehmer PRNG for reproducible/golden runs. |
 | `MUD_NO_SPECIALS` / `-s` | off | Skip special-procedure assignment (C's `-s` flag). `-q` is not treated as no-specials. |
 | `MUD_MAX_CONN` | `256` | Concurrent-connection cap; `MUD_CONN_BURST`/`MUD_CONN_WINDOW_MS` add per-IP rate limiting. |
+| `MUD_MAX_CONN_PER_IP` | `16` | Concurrent connections from one source IP; `0` disables. Set `0` (or a high value) behind a proxy that does not preserve client IPs. |
 | `MUD_REVERSE_DNS` | `true` | Resolve peer PTR names at the socket edge; only forward-confirmed names are trusted. Set `false`/`0` to use canonical IPs only. |
 | `MUD_REVERSE_DNS_TIMEOUT_MS` | `1000` | Whole PTR + forward-confirmation deadline per connection (clamped to 1–10000 ms); timeout falls back to the canonical peer IP. |
 | `MUD_REVERSE_DNS_MAX_INFLIGHT` | `16` | Maximum simultaneous blocking system-resolver calls (clamped to 1–256). |

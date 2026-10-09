@@ -136,6 +136,51 @@ const DEFAULT_MAX_CONN: usize = 256;
 const DEFAULT_CONN_BURST: u32 = 10;
 const DEFAULT_CONN_WINDOW_MS: u64 = 1000;
 
+/// Per-IP concurrent connection cap, so one source cannot take every
+/// MUD_MAX_CONN slot (#423). Overridable via `MUD_MAX_CONN_PER_IP`; 0 disables
+/// it (needed behind a proxy that does not preserve client source IPs).
+const DEFAULT_MAX_CONN_PER_IP: usize = 16;
+
+/// Live connection count per source IP. Each accepted connection task holds
+/// one `PerIpSlot`; dropping it with the task releases the count.
+#[derive(Clone, Default)]
+struct PerIpConnections {
+    counts: Arc<std::sync::Mutex<HashMap<IpAddr, usize>>>,
+}
+
+struct PerIpSlot {
+    ip: IpAddr,
+    counts: Arc<std::sync::Mutex<HashMap<IpAddr, usize>>>,
+}
+
+impl PerIpConnections {
+    /// Take a slot for `ip`, or None when it already holds `limit` (0 = no cap).
+    fn try_acquire(&self, ip: IpAddr, limit: usize) -> Option<PerIpSlot> {
+        let mut counts = self.counts.lock().unwrap_or_else(|p| p.into_inner());
+        let count = counts.entry(ip).or_insert(0);
+        if limit > 0 && *count >= limit {
+            return None;
+        }
+        *count += 1;
+        Some(PerIpSlot {
+            ip,
+            counts: Arc::clone(&self.counts),
+        })
+    }
+}
+
+impl Drop for PerIpSlot {
+    fn drop(&mut self) {
+        let mut counts = self.counts.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(count) = counts.get_mut(&self.ip) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                counts.remove(&self.ip);
+            }
+        }
+    }
+}
+
 /// The metrics listener is intentionally much smaller than the game listener:
 /// Prometheus and health probes use short-lived connections, so 32 concurrent
 /// exchanges leave ample headroom while bounding slowloris resource use.
@@ -1033,13 +1078,19 @@ async fn run_server() -> Result<state::ProcessDisposition> {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(DEFAULT_CONN_WINDOW_MS),
     );
+    let max_conn_per_ip = std::env::var("MUD_MAX_CONN_PER_IP")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_MAX_CONN_PER_IP);
     info!(
-        "Connection limits: max_conn={}, per-IP burst={}/{}ms",
+        "Connection limits: max_conn={}, per-IP concurrent={}, per-IP burst={}/{}ms",
         max_conn,
+        max_conn_per_ip,
         conn_burst,
         conn_window.as_millis()
     );
     let conn_sem = Arc::new(Semaphore::new(max_conn));
+    let per_ip_connections = PerIpConnections::default();
     let reverse_dns = connection::ReverseDnsConfig {
         enabled: config.reverse_dns,
         timeout: Duration::from_millis(config.reverse_dns_timeout_ms),
@@ -1223,6 +1274,23 @@ async fn run_server() -> Result<state::ProcessDisposition> {
             });
         }
 
+        // Per-IP concurrent cap (#423): one source cannot hold every slot.
+        let ip_slot = match per_ip_connections.try_acquire(ip, max_conn_per_ip) {
+            Some(slot) => slot,
+            None => {
+                warn!(
+                    "Per-IP connection limit ({}) reached; rejecting {}",
+                    max_conn_per_ip, ip
+                );
+                let mut s = stream;
+                let _ = s
+                    .write_all(b"Too many connections from your site. Please try again later.\r\n")
+                    .await;
+                let _ = s.shutdown().await;
+                continue;
+            }
+        };
+
         // Task 5a: cap concurrent connections. try_acquire so a flood is
         // rejected immediately instead of queuing unbounded accepted sockets.
         let permit = match Arc::clone(&conn_sem).try_acquire_owned() {
@@ -1247,6 +1315,7 @@ async fn run_server() -> Result<state::ProcessDisposition> {
             // Hold the permit for the lifetime of the connection; dropping it on
             // task exit frees a slot for the next client.
             let _permit = permit;
+            let _ip_slot = ip_slot;
             if let Err(e) = connection::handle_client(
                 stream,
                 peer,
@@ -1310,6 +1379,30 @@ async fn main() -> std::process::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn per_ip_cap_refuses_the_extra_connection_and_releases_on_drop() {
+        let slots = PerIpConnections::default();
+        let busy: IpAddr = "192.0.2.10".parse().unwrap();
+        let other: IpAddr = "192.0.2.11".parse().unwrap();
+
+        let held: Vec<PerIpSlot> = (0..3)
+            .map(|_| slots.try_acquire(busy, 3).expect("under the cap"))
+            .collect();
+        assert!(slots.try_acquire(busy, 3).is_none());
+        // Other sources are unaffected by one source reaching its cap.
+        let other_slot = slots.try_acquire(other, 3).expect("separate source");
+
+        drop(held);
+        assert!(slots.try_acquire(busy, 3).is_some());
+        drop(other_slot);
+        assert!(slots.counts.lock().unwrap().is_empty());
+        // 0 disables the cap.
+        let unlimited: Vec<PerIpSlot> = (0..50)
+            .map(|_| slots.try_acquire(busy, 0).expect("cap disabled"))
+            .collect();
+        assert_eq!(unlimited.len(), 50);
+    }
 
     #[test]
     fn process_disposition_has_distinct_systemd_exit_statuses() {
