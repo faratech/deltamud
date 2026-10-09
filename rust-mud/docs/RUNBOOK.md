@@ -48,6 +48,7 @@ Environment (all read in `config.rs` / `main.rs`):
 | `MUD_REVERSE_DNS_MAX_INFLIGHT` | 16 | cap for uncancellable libc resolver calls |
 | `MUD_CONN_BURST` / `MUD_CONN_WINDOW_MS` | 10 / 1000 | per-IP connect rate limit |
 | `MUD_RNG_SEED` | time | pins the Lehmer PRNG — identical zone prime / combat for golden tests |
+| `MUD_LOGIN_IP_FAILURES` | 20 | wrong passwords per source IP before login lockouts (30 s doubling to 15 min); 0 disables; accounts lock after 5 regardless |
 | `MUD_NO_SPECIALS` (or argv `-s`) | off | C-compatible no-specials mode (`-q` is NOT no-specials) |
 | `MUD_ENFORCE_MULTIPLAY` | off | makes `check_multiplaying` enforce in dev too |
 | `MUD_CFORMAT_FILES` | off | selects exact C persistence for new/ambiguous runtime files; detected existing C/Rust formats are always preserved |

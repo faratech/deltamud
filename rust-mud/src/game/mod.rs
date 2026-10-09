@@ -584,6 +584,9 @@ pub struct Game {
     /// main distinguish a committed stop from an OLC-preserving refusal.
     system_shutdown_result:
         Option<tokio::sync::oneshot::Sender<crate::connection::SystemShutdownResult>>,
+    /// Wrong-password history per account and source address that survives
+    /// reconnects; consulted before any password check (#426).
+    login_throttle: crate::login_throttle::LoginThrottle,
 }
 
 impl Game {
@@ -607,6 +610,7 @@ impl Game {
             mins_since_crashsave: 0,
             reboot_warned: false,
             system_shutdown_result: None,
+            login_throttle: crate::login_throttle::LoginThrottle::default(),
         }
     }
 
@@ -2360,6 +2364,50 @@ mod tests {
                 .outbuf
                 .contains("Wrong password... disconnecting.")
         );
+    }
+
+    #[tokio::test]
+    async fn reconnecting_does_not_reset_the_bad_password_limit() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        let seed = crate::character::Character::new_player(
+            "Guessme".to_string(),
+            Class::Warrior,
+            Race::Human,
+        );
+        db.create_player(&seed, "right-password").await.unwrap();
+
+        // Each connection gets C's two tries; keep reconnecting and guessing.
+        let mut guesses = 0;
+        let mut conn_no = 300;
+        while guesses < crate::login_throttle::ACCOUNT_FREE_FAILURES {
+            let conn = ConnId(conn_no);
+            conn_no += 1;
+            attach_descriptor_at_name(&mut game, conn, "192.0.2.80").await;
+            game.nanny(conn, "Guessme".to_string()).await;
+            while guesses < crate::login_throttle::ACCOUNT_FREE_FAILURES
+                && descriptor_state(&game, conn) == ConState::GetOldPassword
+            {
+                game.nanny(conn, format!("wrong-{guesses}")).await;
+                guesses += 1;
+            }
+            game.disconnect(conn).await;
+        }
+
+        // A fresh connection from another address is refused before the
+        // password is even checked, so the right password does not log in.
+        let conn = ConnId(conn_no);
+        attach_descriptor_at_name(&mut game, conn, "198.51.100.4").await;
+        game.nanny(conn, "Guessme".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::GetOldPassword);
+        game.nanny(conn, "right-password".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::Close);
+        assert!(
+            game.state.descriptors[&conn]
+                .outbuf
+                .contains("Too many failed login attempts.")
+        );
+        assert!(!game.pending_load.contains_key(&conn));
     }
 
     #[tokio::test]
