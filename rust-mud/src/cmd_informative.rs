@@ -329,6 +329,12 @@ fn is_blind(g: &GameState, ch: CharId) -> bool {
         .unwrap_or(false)
 }
 
+/// The look_at_room sight gate: false when the room is dark to this viewer or
+/// the viewer is blind. GMCP Room.Info follows the same rule (#427).
+pub(crate) fn viewer_sees_room(g: &GameState, ch: CharId, rnum: RoomRnum) -> bool {
+    !(room_is_dark(g, rnum) && !can_see_in_dark(g, ch)) && !is_blind(g, ch)
+}
+
 /// CAN_SEE_OBJ for the (Tier-0) object model: invisible items need detect.
 pub(crate) fn can_see_obj(g: &GameState, ch: CharId, oid: ObjId) -> bool {
     let obj = match g.get_obj(oid) {
