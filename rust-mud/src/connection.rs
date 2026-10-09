@@ -20,6 +20,17 @@ use tokio::sync::{Semaphore, mpsc, oneshot};
 pub const DESCRIPTOR_OUTPUT_LIMIT: usize = 12_056;
 pub(crate) const OUTPUT_OVERFLOW_MARKER: &str = "\r\n**OVERFLOW**\r\n";
 
+/// Upper bound for writing and flushing one output frame. A peer that stays
+/// connected but stops reading would otherwise park the writer in `write_all`
+/// forever and keep its MUD_MAX_CONN permit (issue #421).
+pub const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Pre-authentication line budget (issue #424): a burst large enough for a
+/// scripted login or character-creation pipeline, then one line per refill
+/// interval. Exceeding it closes the connection like C's input overflow.
+pub const PREAUTH_LINE_BURST: u32 = 32;
+pub const PREAUTH_LINE_REFILL: Duration = Duration::from_millis(250);
+
 /// C `HOST_LENGTH`. Keep the operator/player-facing descriptor host compatible
 /// while retaining the complete verified hostname separately for ban matching.
 const C_HOST_LENGTH: usize = 30;
@@ -538,6 +549,67 @@ pub enum ConState {
     Close,
 }
 
+impl ConState {
+    /// States reachable before any account password has been verified: the
+    /// colour question, the name/password prompts, and new-character creation
+    /// up to the stat roll. Pre-auth budgets and deadlines apply only here.
+    pub fn is_unauthenticated(self) -> bool {
+        matches!(
+            self,
+            ConState::QAnsi
+                | ConState::GetName
+                | ConState::GetOldPassword
+                | ConState::ConfirmName
+                | ConState::GetNewPassword
+                | ConState::ConfirmPassword
+                | ConState::GetNewbie
+                | ConState::GetSex
+                | ConState::GetRace
+                | ConState::GetDeity
+                | ConState::GetClass
+                | ConState::GetHometown
+                | ConState::RollStats
+        )
+    }
+}
+
+/// Token bucket for lines received before authentication (issue #424).
+#[derive(Debug, Clone, Copy)]
+pub struct LineBudget {
+    tokens: u32,
+    refilled_at: std::time::Instant,
+}
+
+impl LineBudget {
+    pub fn new(now: std::time::Instant) -> Self {
+        LineBudget {
+            tokens: PREAUTH_LINE_BURST,
+            refilled_at: now,
+        }
+    }
+
+    /// Spend one line, refilling one token per PREAUTH_LINE_REFILL elapsed.
+    pub fn try_take(&mut self, now: std::time::Instant) -> bool {
+        let earned = now.saturating_duration_since(self.refilled_at).as_millis()
+            / PREAUTH_LINE_REFILL.as_millis();
+        if earned > 0 {
+            let refilled = u128::from(self.tokens) + earned;
+            if refilled >= u128::from(PREAUTH_LINE_BURST) {
+                self.tokens = PREAUTH_LINE_BURST;
+                self.refilled_at = now;
+            } else {
+                self.tokens = refilled as u32;
+                self.refilled_at += PREAUTH_LINE_REFILL * earned as u32;
+            }
+        }
+        if self.tokens == 0 {
+            return false;
+        }
+        self.tokens -= 1;
+        true
+    }
+}
+
 /// A nested input context (string editor, OLC editor). Tier-0 stub; the
 /// stack lets a Playing descriptor push an editor without a giant enum.
 #[derive(Debug, Clone)]
@@ -611,6 +683,11 @@ pub struct Descriptor {
     /// C comm.c d->idle_tics: 15-second heartbeat ticks spent sitting at a
     /// login prompt (name/password). Two ticks disconnect (issue #192).
     pub idle_tics: u8,
+    /// 15-second ticks spent in unauthenticated states since accept. Input
+    /// does not reset it, so trickled input cannot hold a slot forever (#423).
+    pub login_tics: u16,
+    /// Line budget charged while unauthenticated (#424).
+    pub preauth_lines: LineBudget,
     /// Command-lag counter (C `d->wait`): the heartbeat decrements it each pulse
     /// and only pulls the next queued command when it reaches <= 0. WAIT_STATE
     /// sets it from combat skills/casting to impose command lag.
@@ -684,6 +761,8 @@ impl Descriptor {
             outbuf: String::new(),
             output_overflowed: false,
             idle_tics: 0,
+            login_tics: 0,
+            preauth_lines: LineBudget::new(std::time::Instant::now()),
             need_prompt: true,
             wait: 1,
             input_queue: std::collections::VecDeque::new(),
@@ -916,26 +995,43 @@ impl OutputFrame {
 async fn run_output_writer<W>(
     mut writer: W,
     mut output_rx: mpsc::Receiver<OutputFrame>,
+    write_timeout: Duration,
 ) -> WriterEnd
 where
     W: AsyncWrite + Unpin,
 {
-    while let Some(frame) = output_rx.recv().await {
-        let mut ok = (frame.bytes.is_empty() || writer.write_all(&frame.bytes).await.is_ok())
-            && writer.flush().await.is_ok();
-        if ok && frame.close_after {
-            ok = writer.shutdown().await.is_ok();
-        }
-        if let Some(ack) = frame.ack {
+    while let Some(OutputFrame {
+        bytes,
+        ack,
+        close_after,
+    }) = output_rx.recv().await
+    {
+        let write = async {
+            let mut ok = (bytes.is_empty() || writer.write_all(&bytes).await.is_ok())
+                && writer.flush().await.is_ok();
+            if ok && close_after {
+                ok = writer.shutdown().await.is_ok();
+            }
+            ok
+        };
+        // A live peer that keeps its receive window closed is treated like a
+        // failed write, so it cannot hold the connection open (issue #421).
+        let ok = tokio::time::timeout(write_timeout, write)
+            .await
+            .unwrap_or(false);
+        if let Some(ack) = ack {
             let _ = ack.send(ok);
         }
         if !ok {
             return WriterEnd::IoFailure;
         }
-        if frame.close_after {
+        if close_after {
             return WriterEnd::ShutdownBarrier;
         }
     }
+    // The Game dropped the only strong sender (it closed this descriptor) and
+    // every queued frame has been written. Half-close so the client sees EOF.
+    let _ = tokio::time::timeout(write_timeout, writer.shutdown()).await;
     WriterEnd::OutputChannelClosed
 }
 
@@ -1043,14 +1139,17 @@ enum ConnectionEnd {
 /// in this `select!` means the losing half is dropped before this function
 /// returns; there is no nested writer task whose `JoinHandle` can be detached.
 /// Writer errors and shutdown barriers therefore terminate a blocked reader in
-/// exactly the same way reader EOF terminates a blocked writer.
+/// exactly the same way reader EOF terminates a blocked writer. The reader
+/// holds only a weak output handle, so the Game dropping its sender (any
+/// Game-initiated close) also ends this supervisor (issue #421).
 async fn supervise_connection<R, W>(
     reader: &mut R,
     writer: W,
     conn_id: ConnId,
     game_tx: &mpsc::Sender<GameMessage>,
-    output_tx: &mpsc::Sender<OutputFrame>,
+    reply_tx: mpsc::WeakSender<OutputFrame>,
     output_rx: mpsc::Receiver<OutputFrame>,
+    write_timeout: Duration,
 ) -> ConnectionEnd
 where
     R: AsyncReadExt + Unpin,
@@ -1060,8 +1159,8 @@ where
         biased;
         // A queued shutdown barrier must win a simultaneous read EOF so the
         // final output can be acknowledged instead of being cancelled.
-        writer_end = run_output_writer(writer, output_rx) => ConnectionEnd::Writer(writer_end),
-        _ = run_input_loop(reader, conn_id, game_tx, output_tx) => ConnectionEnd::Reader,
+        writer_end = run_output_writer(writer, output_rx, write_timeout) => ConnectionEnd::Writer(writer_end),
+        _ = run_input_loop(reader, conn_id, game_tx, &reply_tx) => ConnectionEnd::Reader,
     };
 
     let disconnect = GameMessage::Disconnect { conn_id };
@@ -1306,6 +1405,10 @@ pub async fn handle_client(
         .send(OutputFrame::data(initial_telnet_negotiation(false)))
         .await?;
 
+    // The Game receives the only strong sender. When it closes the descriptor
+    // (quit, bad password, idle timeout, full channel) the writer drains,
+    // half-closes, and this task ends, releasing the accept permit (#421).
+    let reply_tx = output_tx.downgrade();
     game_tx
         .send(GameMessage::NewConnection {
             id: conn_id,
@@ -1313,7 +1416,7 @@ pub async fn handle_client(
             peer_ip: identity.peer_ip.to_string(),
             verified_hostname: identity.verified_hostname,
             raw_fd: fd,
-            output_tx: output_tx.clone(),
+            output_tx,
         })
         .await?;
 
@@ -1322,8 +1425,9 @@ pub async fn handle_client(
         writer,
         conn_id,
         &game_tx,
-        &output_tx,
+        reply_tx,
         output_rx,
+        SOCKET_WRITE_TIMEOUT,
     )
     .await;
     Ok(())
@@ -1336,7 +1440,7 @@ async fn run_input_loop<R: AsyncReadExt + Unpin>(
     reader: &mut R,
     conn_id: ConnId,
     game_tx: &mpsc::Sender<GameMessage>,
-    output_tx: &mpsc::Sender<OutputFrame>,
+    reply_tx: &mpsc::WeakSender<OutputFrame>,
 ) {
     let mut filter = TelnetFilter::new();
     let mut buf = [0u8; 4096];
@@ -1357,6 +1461,10 @@ async fn run_input_loop<R: AsyncReadExt + Unpin>(
         // block. GMCP's initial WILL was already queued before registration.
         // The channel carries raw bytes because IAC is not valid UTF-8.
         if !reply.is_empty() {
+            // A failed upgrade means the Game already released this connection.
+            let Some(output_tx) = reply_tx.upgrade() else {
+                break;
+            };
             if output_tx
                 .send(OutputFrame::data(std::mem::take(&mut reply)))
                 .await
@@ -1424,6 +1532,9 @@ pub async fn handle_recovered(
         .send(OutputFrame::data(initial_telnet_negotiation(true)))
         .await?;
 
+    // Same sender ownership as handle_client: the Game holds the only strong
+    // sender, so a Game-initiated close ends this task.
+    let reply_tx = output_tx.downgrade();
     game_tx
         .send(GameMessage::Recover {
             id: conn_id,
@@ -1432,7 +1543,7 @@ pub async fn handle_recovered(
             verified_hostname,
             raw_fd,
             name,
-            output_tx: output_tx.clone(),
+            output_tx,
         })
         .await?;
 
@@ -1441,8 +1552,9 @@ pub async fn handle_recovered(
         writer,
         conn_id,
         &game_tx,
-        &output_tx,
+        reply_tx,
         output_rx,
+        SOCKET_WRITE_TIMEOUT,
     )
     .await;
     Ok(())
@@ -1833,7 +1945,7 @@ mod output_writer_tests {
     async fn shutdown_barrier_acknowledges_only_after_flush_and_socket_shutdown() {
         let (mut client, server) = tokio::io::duplex(64);
         let (tx, rx) = mpsc::channel(4);
-        let writer = tokio::spawn(run_output_writer(server, rx));
+        let writer = tokio::spawn(run_output_writer(server, rx, SOCKET_WRITE_TIMEOUT));
         tx.send(OutputFrame::data(b"final notice".to_vec()))
             .await
             .unwrap();
@@ -1982,6 +2094,7 @@ mod output_writer_tests {
         let writer = tokio::spawn(run_output_writer(
             PartialThenError { wrote_once: false },
             rx,
+            SOCKET_WRITE_TIMEOUT,
         ));
         tx.send(OutputFrame::data(b"cannot finish".to_vec()))
             .await
@@ -1999,7 +2112,7 @@ mod output_writer_tests {
     async fn non_reading_peer_cannot_produce_a_premature_acknowledgement() {
         let (_client, server) = tokio::io::duplex(1);
         let (tx, rx) = mpsc::channel(4);
-        let writer = tokio::spawn(run_output_writer(server, rx));
+        let writer = tokio::spawn(run_output_writer(server, rx, SOCKET_WRITE_TIMEOUT));
         tx.send(OutputFrame::data(vec![b'x'; 1024])).await.unwrap();
         let (ack_tx, ack_rx) = oneshot::channel();
         tx.send(OutputFrame::shutdown_barrier(ack_tx))
@@ -2033,8 +2146,9 @@ mod output_writer_tests {
                 PartialThenError { wrote_once: false },
                 conn_id,
                 &game_tx,
-                &output_tx,
+                output_tx.downgrade(),
                 output_rx,
+                SOCKET_WRITE_TIMEOUT,
             ),
         )
         .await
@@ -2063,8 +2177,9 @@ mod output_writer_tests {
             writer,
             conn_id,
             &game_tx,
-            &output_tx,
+            output_tx.downgrade(),
             output_rx,
+            SOCKET_WRITE_TIMEOUT,
         )
         .await;
 
@@ -2104,8 +2219,9 @@ mod output_writer_tests {
             writer,
             conn_id,
             &game_tx,
-            &output_tx,
+            output_tx.downgrade(),
             output_rx,
+            SOCKET_WRITE_TIMEOUT,
         )
         .await;
 
@@ -2195,6 +2311,112 @@ mod output_writer_tests {
             .expect("recovered connection task outlived its writer")
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn game_initiated_close_ends_the_task_and_releases_the_accept_permit() {
+        let (mut client, server, peer) = tcp_pair().await;
+        let conn_id = ConnId(46);
+        let (game_tx, mut game_rx) = mpsc::channel(4);
+        let accept_slots = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&accept_slots).try_acquire_owned().unwrap();
+        let task = tokio::spawn(async move {
+            // Mirrors main.rs: the accept permit lives exactly as long as the task.
+            let _permit = permit;
+            handle_client(
+                server,
+                peer,
+                conn_id,
+                game_tx,
+                ReverseDnsConfig::disabled(),
+                Arc::new(Semaphore::new(1)),
+                crate::ban::BanHandle::default(),
+            )
+            .await
+        });
+
+        let output_tx = match game_rx.recv().await {
+            Some(GameMessage::NewConnection { id, output_tx, .. }) if id == conn_id => output_tx,
+            other => panic!("unexpected registration: {other:?}"),
+        };
+        // Game::disconnect: the final frame is queued, then the Game drops its
+        // sender. No barrier is sent and the client never closes its side.
+        output_tx
+            .send(OutputFrame::data(b"Timed out... goodbye.\r\n".to_vec()))
+            .await
+            .unwrap();
+        drop(output_tx);
+
+        let mut received = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), client.read_to_end(&mut received))
+            .await
+            .expect("client never observed EOF after a Game-initiated close")
+            .unwrap();
+        assert!(received.ends_with(b"Timed out... goodbye.\r\n"));
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("connection task outlived the Game's sender")
+            .unwrap()
+            .unwrap();
+        assert_eq!(accept_slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn non_reading_peer_hits_the_write_timeout_and_ends_the_connection() {
+        let conn_id = ConnId(47);
+        let mut reader = PendingReader;
+        let dropped = Arc::new(AtomicBool::new(false));
+        // A writer that never accepts bytes is a live peer with a zero window.
+        let writer = DropAwareWriter {
+            dropped: Arc::clone(&dropped),
+        };
+        let (game_tx, mut game_rx) = mpsc::channel(4);
+        let (output_tx, output_rx) = mpsc::channel(4);
+        output_tx
+            .send(OutputFrame::data(b"never read".to_vec()))
+            .await
+            .unwrap();
+
+        let ended = tokio::time::timeout(
+            Duration::from_secs(1),
+            supervise_connection(
+                &mut reader,
+                writer,
+                conn_id,
+                &game_tx,
+                output_tx.downgrade(),
+                output_rx,
+                Duration::from_millis(50),
+            ),
+        )
+        .await
+        .expect("a non-reading peer parked the writer past its timeout");
+
+        assert_eq!(ended, ConnectionEnd::Writer(WriterEnd::IoFailure));
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(matches!(
+            game_rx.recv().await,
+            Some(GameMessage::Disconnect { conn_id: id }) if id == conn_id
+        ));
+    }
+
+    #[test]
+    fn preauth_line_budget_allows_a_burst_then_refills_at_a_fixed_rate() {
+        let start = std::time::Instant::now();
+        let mut budget = LineBudget::new(start);
+        for _ in 0..PREAUTH_LINE_BURST {
+            assert!(budget.try_take(start));
+        }
+        assert!(!budget.try_take(start));
+        assert!(!budget.try_take(start + PREAUTH_LINE_REFILL / 2));
+        assert!(budget.try_take(start + PREAUTH_LINE_REFILL));
+        assert!(!budget.try_take(start + PREAUTH_LINE_REFILL));
+        // A long pause refills to the burst cap, never beyond it.
+        let later = start + PREAUTH_LINE_REFILL * 1000;
+        for _ in 0..PREAUTH_LINE_BURST {
+            assert!(budget.try_take(later));
+        }
+        assert!(!budget.try_take(later));
     }
 }
 

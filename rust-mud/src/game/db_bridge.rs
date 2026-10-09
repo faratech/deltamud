@@ -72,8 +72,39 @@ impl Game {
             GameMessage::Gmcp { conn_id, event } => self.handle_gmcp_event(conn_id, event),
             GameMessage::SendMssp { conn_id } => self.send_mssp(conn_id),
             GameMessage::Disconnect { conn_id } => self.disconnect(conn_id).await,
+            // The Game already dropped this connection; replaying the line
+            // later would be a no-op, so do not queue it.
+            GameMessage::Input { conn_id, .. }
+                if !self.state.descriptors.contains_key(&conn_id) => {}
+            GameMessage::Input { conn_id, input } => self.defer_input(conn_id, input),
             other => self.deferred_messages.push_back(other),
         }
+    }
+
+    /// Queue pre-game input behind the current database wait. Deferral removes
+    /// the input channel's backpressure, so both the per-connection and the
+    /// total backlog are capped; the connection that overflows is closed like
+    /// C's input overflow (#424).
+    fn defer_input(&mut self, conn_id: ConnId, input: String) {
+        let pending = self
+            .deferred_messages
+            .iter()
+            .filter(|message| matches!(message, GameMessage::Input { conn_id: id, .. } if *id == conn_id))
+            .count();
+        if pending >= crate::config::MAX_DEFERRED_LINES_PER_CONN
+            || self.deferred_messages.len() >= crate::config::MAX_DEFERRED_INPUT
+        {
+            if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
+                if d.state != ConState::Close {
+                    warn!("Deferred input overflow from {}; closing", d.host);
+                    d.write("\r\nInput queue full.\r\n");
+                    d.state = ConState::Close;
+                }
+            }
+            return;
+        }
+        self.deferred_messages
+            .push_back(GameMessage::Input { conn_id, input });
     }
 
     pub(crate) async fn db_player_exists(&mut self, name: &str) -> Result<bool> {

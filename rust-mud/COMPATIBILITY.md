@@ -145,6 +145,18 @@ the C world grammar or command-oracle policy:
   and clients that do not negotiate GMCP receive no GMCP payload.
 - UTF-8 negotiation/input policy, NAWS, TTYPE/MTTS, MCCP, `Room.Add/Remove`, and
   `Char.Items` are deliberately deferred rather than partially advertised.
+- Connection slots are always reclaimed (#421, #423, #424). A Game-initiated
+  close (quit, bad passwords, timeouts, input overflow, a full output queue)
+  ends the socket task and frees its `MUD_MAX_CONN` permit, and a peer that
+  stops reading is dropped after a 30-second write timeout. The colour
+  question is idle-reaped with the name/password prompts, as in C. Creation,
+  MOTD, menu and menu-editor states, which C never reaped, close after 10
+  idle minutes, and any connection still unauthenticated 15 minutes after
+  accept closes regardless of input. `MUD_MAX_CONN_PER_IP` (default 16, `0`
+  disables) caps concurrent sockets per source address. Unauthenticated input
+  is budgeted per connection (a 32-line burst, then 4 lines per second), and
+  at most 32 such lines per connection (1024 in total) wait behind a database
+  call. Exceeding either closes the connection with C's "Input queue full."
 
 ## Divergence Register (deliberate deviations from the C oracle)
 

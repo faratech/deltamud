@@ -2734,6 +2734,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn game_initiated_close_drops_the_only_output_sender() {
+        let mut game = test_game(Arc::new(MockDatabase::new()));
+        let conn = ConnId(240);
+        attach_descriptor(&mut game, conn);
+        let (tx, mut rx) = mpsc::channel(4);
+        game.outputs.insert(conn, tx);
+        {
+            let d = game.state.descriptors.get_mut(&conn).unwrap();
+            d.write("Wrong password... disconnecting.\r\n");
+            d.state = ConState::Close;
+        }
+
+        game.flush_all().await;
+
+        // The final text is delivered, then the channel reports closed: in
+        // production the Game held the only strong sender, so this is what
+        // ends the connection task and frees its accept permit (#421).
+        let frame = rx.recv().await.expect("final output frame");
+        assert!(String::from_utf8_lossy(&frame.bytes).contains("disconnecting"));
+        assert!(rx.recv().await.is_none());
+        assert!(!game.state.descriptors.contains_key(&conn));
+    }
+
+    #[tokio::test]
+    async fn idle_sweep_reaps_the_colour_question_and_every_pregame_state() {
+        let mut game = test_game(Arc::new(MockDatabase::new()));
+        let fresh = ConnId(241);
+        let menu = ConnId(242);
+        let playing = ConnId(243);
+        attach_descriptor(&mut game, fresh);
+        attach_descriptor(&mut game, menu);
+        attach_descriptor(&mut game, playing);
+        game.state.descriptors.get_mut(&menu).unwrap().state = ConState::Menu;
+        game.state.descriptors.get_mut(&playing).unwrap().state = ConState::Playing;
+
+        // C check_idle_passwords includes CON_QANSI: two silent ticks.
+        game.check_idle_passwords();
+        assert_eq!(descriptor_state(&game, fresh), ConState::QAnsi);
+        game.check_idle_passwords();
+        assert_eq!(descriptor_state(&game, fresh), ConState::Close);
+        assert!(
+            game.state.descriptors[&fresh]
+                .outbuf
+                .contains("Timed out... goodbye.")
+        );
+
+        // States C never reaped get the longer pre-game idle limit.
+        while game.state.descriptors[&menu].idle_tics + 1 < crate::config::PREGAME_IDLE_TICKS {
+            game.check_idle_passwords();
+        }
+        assert_eq!(descriptor_state(&game, menu), ConState::Menu);
+        game.check_idle_passwords();
+        assert_eq!(descriptor_state(&game, menu), ConState::Close);
+        assert_eq!(descriptor_state(&game, playing), ConState::Playing);
+    }
+
+    #[tokio::test]
+    async fn trickled_input_cannot_outlast_the_unauthenticated_deadline() {
+        let mut game = test_game(Arc::new(MockDatabase::new()));
+        let conn = ConnId(244);
+        attach_descriptor(&mut game, conn);
+        game.state.descriptors.get_mut(&conn).unwrap().state = ConState::GetSex;
+
+        for _ in 1..crate::config::UNAUTHENTICATED_DEADLINE_TICKS {
+            // One line per tick keeps the idle counter from ever expiring.
+            game.state.descriptors.get_mut(&conn).unwrap().idle_tics = 0;
+            game.check_idle_passwords();
+            assert_eq!(descriptor_state(&game, conn), ConState::GetSex);
+        }
+        game.state.descriptors.get_mut(&conn).unwrap().idle_tics = 0;
+        game.check_idle_passwords();
+        assert_eq!(descriptor_state(&game, conn), ConState::Close);
+    }
+
+    #[tokio::test]
+    async fn preauth_input_flood_closes_the_connection() {
+        let mut game = test_game(Arc::new(MockDatabase::new()));
+        let conn = ConnId(245);
+        attach_descriptor(&mut game, conn);
+
+        // A full burst (more than a scripted login or creation pipeline) is
+        // accepted; QAnsi just re-asks the colour question.
+        for _ in 0..crate::connection::PREAUTH_LINE_BURST {
+            game.handle_input(conn, "?".to_string()).await;
+        }
+        assert_eq!(descriptor_state(&game, conn), ConState::QAnsi);
+
+        for _ in 0..200 {
+            game.handle_input(conn, "?".to_string()).await;
+        }
+        assert_eq!(descriptor_state(&game, conn), ConState::Close);
+        assert!(
+            game.state.descriptors[&conn]
+                .outbuf
+                .contains("Input queue full.")
+        );
+    }
+
+    #[tokio::test]
+    async fn database_wait_defers_a_bounded_number_of_preauth_lines() {
+        let mut game = test_game(Arc::new(MockDatabase::new()));
+        let conn = ConnId(246);
+        attach_descriptor(&mut game, conn);
+        game.state.descriptors.get_mut(&conn).unwrap().state = ConState::GetName;
+
+        for line in 0..crate::config::MAX_DEFERRED_LINES_PER_CONN {
+            game.service_message_during_database_wait(GameMessage::Input {
+                conn_id: conn,
+                input: format!("Name{line}"),
+            })
+            .await;
+        }
+        assert_eq!(
+            game.deferred_messages.len(),
+            crate::config::MAX_DEFERRED_LINES_PER_CONN
+        );
+        assert_eq!(descriptor_state(&game, conn), ConState::GetName);
+
+        game.service_message_during_database_wait(GameMessage::Input {
+            conn_id: conn,
+            input: "Overflow".to_string(),
+        })
+        .await;
+        assert_eq!(
+            game.deferred_messages.len(),
+            crate::config::MAX_DEFERRED_LINES_PER_CONN
+        );
+        assert_eq!(descriptor_state(&game, conn), ConState::Close);
+        assert!(
+            game.state.descriptors[&conn]
+                .outbuf
+                .contains("Input queue full.")
+        );
+
+        // Lines for a connection the Game already dropped are not queued.
+        game.service_message_during_database_wait(GameMessage::Input {
+            conn_id: ConnId(247),
+            input: "gone".to_string(),
+        })
+        .await;
+        assert_eq!(
+            game.deferred_messages.len(),
+            crate::config::MAX_DEFERRED_LINES_PER_CONN
+        );
+    }
+
+    #[tokio::test]
     async fn playing_input_truncates_multibyte_characters_at_the_byte_limit() {
         for (index, character) in ["é", "€", "🦀"].into_iter().enumerate() {
             let db = Arc::new(MockDatabase::new());
