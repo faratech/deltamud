@@ -2366,38 +2366,57 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn reconnecting_does_not_reset_the_bad_password_limit() {
-        let db = Arc::new(MockDatabase::new());
-        let mut game = test_game(db.clone());
-        let seed = crate::character::Character::new_player(
-            "Guessme".to_string(),
-            Class::Warrior,
-            Race::Human,
-        );
-        db.create_player(&seed, "right-password").await.unwrap();
-
-        // Each connection gets C's two tries; keep reconnecting and guessing.
+    /// Make one wrong-password attempt per connection (or two, C's limit) from
+    /// `address` until `failures` wrong passwords have been entered for `name`.
+    async fn guess_wrong_passwords(
+        game: &mut Game,
+        name: &str,
+        address: &str,
+        failures: u32,
+        first_conn: u64,
+    ) -> u64 {
         let mut guesses = 0;
-        let mut conn_no = 300;
-        while guesses < crate::login_throttle::ACCOUNT_FREE_FAILURES {
+        let mut conn_no = first_conn;
+        while guesses < failures {
             let conn = ConnId(conn_no);
             conn_no += 1;
-            attach_descriptor_at_name(&mut game, conn, "192.0.2.80").await;
-            game.nanny(conn, "Guessme".to_string()).await;
-            while guesses < crate::login_throttle::ACCOUNT_FREE_FAILURES
-                && descriptor_state(&game, conn) == ConState::GetOldPassword
-            {
+            attach_descriptor_at_name(game, conn, address).await;
+            game.nanny(conn, name.to_string()).await;
+            while guesses < failures && descriptor_state(game, conn) == ConState::GetOldPassword {
                 game.nanny(conn, format!("wrong-{guesses}")).await;
                 guesses += 1;
             }
             game.disconnect(conn).await;
         }
+        conn_no
+    }
 
-        // A fresh connection from another address is refused before the
+    async fn seed_player(db: &MockDatabase, name: &str, password: &str) {
+        let seed =
+            crate::character::Character::new_player(name.to_string(), Class::Warrior, Race::Human);
+        db.create_player(&seed, password).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconnecting_does_not_reset_the_bad_password_limit() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        seed_player(&db, "Guessme", "right-password").await;
+
+        // Each connection gets C's two tries; keep reconnecting and guessing.
+        let conn_no = guess_wrong_passwords(
+            &mut game,
+            "Guessme",
+            "192.0.2.80",
+            crate::login_throttle::PAIR_FREE_FAILURES,
+            300,
+        )
+        .await;
+
+        // A fresh connection from the same address is refused before the
         // password is even checked, so the right password does not log in.
         let conn = ConnId(conn_no);
-        attach_descriptor_at_name(&mut game, conn, "198.51.100.4").await;
+        attach_descriptor_at_name(&mut game, conn, "192.0.2.80").await;
         game.nanny(conn, "Guessme".to_string()).await;
         assert_eq!(descriptor_state(&game, conn), ConState::GetOldPassword);
         game.nanny(conn, "right-password".to_string()).await;
@@ -2408,6 +2427,118 @@ mod tests {
                 .contains("Too many failed login attempts.")
         );
         assert!(!game.pending_load.contains_key(&conn));
+    }
+
+    #[tokio::test]
+    async fn a_stranger_cannot_lock_the_owner_out() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        seed_player(&db, "Targeted", "right-password").await;
+
+        // Far more wrong guesses than the pair allowance, from one address.
+        let conn_no = guess_wrong_passwords(
+            &mut game,
+            "Targeted",
+            "192.0.2.81",
+            crate::login_throttle::PAIR_FREE_FAILURES,
+            320,
+        )
+        .await;
+
+        // The owner, from their own address, is not affected.
+        let conn = ConnId(conn_no);
+        attach_descriptor_at_name(&mut game, conn, "198.51.100.5").await;
+        game.nanny(conn, "Targeted".to_string()).await;
+        game.nanny(conn, "right-password".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::ReadMotd);
+        assert!(
+            !game.state.descriptors[&conn]
+                .outbuf
+                .contains("Too many failed login attempts.")
+        );
+
+        // The stranger is still locked out, even with the right password.
+        let conn = ConnId(conn_no + 1);
+        attach_descriptor_at_name(&mut game, conn, "192.0.2.81").await;
+        game.nanny(conn, "Targeted".to_string()).await;
+        game.nanny(conn, "right-password".to_string()).await;
+        assert_eq!(descriptor_state(&game, conn), ConState::Close);
+    }
+
+    #[tokio::test]
+    async fn account_ceiling_locks_unfamiliar_sources_but_not_the_owners_usual_one() {
+        let db = Arc::new(MockDatabase::new());
+        let mut game = test_game(db.clone());
+        seed_player(&db, "Ceiling", "right-password").await;
+
+        // The owner logs in from their usual address (a real login, so this
+        // also proves the success hook records the source).
+        let home = ConnId(340);
+        attach_descriptor_at_name(&mut game, home, "203.0.113.9").await;
+        game.nanny(home, "Ceiling".to_string()).await;
+        game.nanny(home, "right-password".to_string()).await;
+        assert_eq!(descriptor_state(&game, home), ConState::ReadMotd);
+        game.disconnect(home).await;
+
+        // Guessing spread over fifty other addresses: one failure each, so no
+        // per-address lockout, but the account ceiling is reached.
+        let ip_limit = game.state.config.login_ip_failure_limit;
+        for index in 0..crate::login_throttle::ACCOUNT_CEILING {
+            game.login_throttle.record_failure(
+                "Ceiling",
+                &format!("198.51.100.{}", index + 1),
+                ip_limit,
+                std::time::Instant::now(),
+            );
+        }
+
+        let stranger = ConnId(341);
+        attach_descriptor_at_name(&mut game, stranger, "192.0.2.99").await;
+        game.nanny(stranger, "Ceiling".to_string()).await;
+        game.nanny(stranger, "right-password".to_string()).await;
+        assert_eq!(descriptor_state(&game, stranger), ConState::Close);
+        assert!(
+            game.state.descriptors[&stranger]
+                .outbuf
+                .contains("Too many failed login attempts.")
+        );
+
+        let home_again = ConnId(342);
+        attach_descriptor_at_name(&mut game, home_again, "203.0.113.9").await;
+        game.nanny(home_again, "Ceiling".to_string()).await;
+        game.nanny(home_again, "right-password".to_string()).await;
+        assert_eq!(descriptor_state(&game, home_again), ConState::ReadMotd);
+    }
+
+    #[tokio::test]
+    async fn source_limit_locks_password_spraying_and_zero_disables_it() {
+        for (limit, sprayed_out) in [(3, true), (0, false)] {
+            let db = Arc::new(MockDatabase::new());
+            let mut game = test_game(db.clone());
+            game.state.config.login_ip_failure_limit = limit;
+            for name in ["Sprayone", "Spraytwo", "Spraythree", "Sprayfour"] {
+                seed_player(&db, name, "right-password").await;
+            }
+            // One wrong password against each of three different accounts.
+            for (index, name) in ["Sprayone", "Spraytwo", "Spraythree"].iter().enumerate() {
+                let conn = ConnId(360 + index as u64);
+                attach_descriptor_at_name(&mut game, conn, "192.0.2.90").await;
+                game.nanny(conn, name.to_string()).await;
+                game.nanny(conn, "wrong".to_string()).await;
+                game.disconnect(conn).await;
+            }
+            // A fourth account, right password, same address.
+            let conn = ConnId(370);
+            attach_descriptor_at_name(&mut game, conn, "192.0.2.90").await;
+            game.nanny(conn, "Sprayfour".to_string()).await;
+            game.nanny(conn, "right-password".to_string()).await;
+            let expected = if sprayed_out {
+                ConState::Close
+            } else {
+                ConState::ReadMotd
+            };
+            assert_eq!(descriptor_state(&game, conn), expected, "limit {limit}");
+        }
     }
 
     #[tokio::test]

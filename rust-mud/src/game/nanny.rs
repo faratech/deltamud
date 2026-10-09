@@ -337,7 +337,7 @@ impl Game {
                     let host = self.descriptor_host(conn_id);
                     warn!("Bad PW: {} [{}]", name, host);
                     let ip_limit = self.state.config.login_ip_failure_limit;
-                    if let Some(lock) = self.login_throttle.record_failure(
+                    if let Some(started) = self.login_throttle.record_failure(
                         &name,
                         &source,
                         ip_limit,
@@ -346,10 +346,11 @@ impl Game {
                         crate::syslog::mudlog(
                             &mut self.state,
                             &format!(
-                                "Repeated bad passwords for {} from {}; logins locked for {}s.",
+                                "Repeated bad passwords for {} from {}; locking {} for {}s.",
                                 name,
                                 source,
-                                lock.as_secs()
+                                started.scope.describe(),
+                                started.duration.as_secs()
                             ),
                             crate::syslog::BRF,
                             LVL_GOD,
@@ -381,7 +382,8 @@ impl Game {
                 }
 
                 // Password was correct.
-                self.login_throttle.record_success(&name);
+                self.login_throttle
+                    .record_success(&name, &source, std::time::Instant::now());
                 let host = self.descriptor_host(conn_id);
                 let mut rec = match self.load_player_latest(&name).await {
                     Ok(c) => c,
