@@ -445,11 +445,23 @@ where
         // Read just enough to see the request line. A real scrape sends a short
         // request; cap the read and its duration so a slow client cannot pin us.
         let mut buf = [0u8; 1024];
-        let n = match timeout(timeouts.io, sock.read(&mut buf)).await {
-            Err(_) => return MetricsConnectionOutcome::IoTimedOut,
-            Ok(Ok(0)) | Ok(Err(_)) => return MetricsConnectionOutcome::Complete,
-            Ok(Ok(n)) => n,
-        };
+        let mut n = 0;
+        let mut complete_line = false;
+        while n < buf.len() {
+            let read = match timeout(timeouts.io, sock.read(&mut buf[n..])).await {
+                Err(_) => return MetricsConnectionOutcome::IoTimedOut,
+                Ok(Ok(0)) if n == 0 => return MetricsConnectionOutcome::Complete,
+                Ok(Ok(0)) => break,
+                Ok(Err(_)) => return MetricsConnectionOutcome::Complete,
+                Ok(Ok(read)) => read,
+            };
+            n += read;
+            if let Some(end) = buf[..n].iter().position(|&byte| byte == b'\n') {
+                n = end + 1;
+                complete_line = true;
+                break;
+            }
+        }
         let req = String::from_utf8_lossy(&buf[..n]);
         let request_line = req.lines().next().unwrap_or_default();
         let mut fields = request_line.split_whitespace();
@@ -457,11 +469,11 @@ where
         let path = fields.next();
         let version = fields.next();
         let valid_version = matches!(version, Some("HTTP/1.0" | "HTTP/1.1"));
-        let valid_shape = method.is_some()
+        let valid_shape = complete_line
+            && method.is_some()
             && path.is_some()
             && valid_version
-            && fields.next().is_none()
-            && (n < buf.len() || request_line.ends_with('\n'));
+            && fields.next().is_none();
 
         let (status, ctype, body) = if !valid_shape {
             (
@@ -1667,6 +1679,61 @@ mod tests {
 
     async fn metrics_response(request: &[u8]) -> String {
         metrics_response_with(request, Arc::new(metrics::Metrics::new())).await
+    }
+
+    #[tokio::test]
+    async fn metrics_http_accepts_byte_fragmented_request_line() {
+        let (mut client, server) = tokio::io::duplex(1);
+        let task = tokio::spawn(handle_metrics_connection(
+            server,
+            Arc::new(metrics::Metrics::new()),
+            Arc::new(std::sync::RwLock::new(String::new())),
+            METRICS_TIMEOUTS,
+        ));
+        // A one-byte pipe forces every token and the CRLF pair to span reads.
+        client.write_all(b"GET /live HTTP/1.1\r\n").await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert!(
+            String::from_utf8(response)
+                .unwrap()
+                .starts_with("HTTP/1.1 200 OK\r\n")
+        );
+        assert_eq!(task.await.unwrap(), MetricsConnectionOutcome::Complete);
+    }
+
+    #[tokio::test]
+    async fn metrics_http_bounds_the_line_instead_of_the_first_read() {
+        let mut request = b"GET /live HTTP/1.1\r\nX-Padding: ".to_vec();
+        request.resize(1024, b'x');
+        let response = metrics_response(&request).await;
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+
+        let mut oversized = b"GET /".to_vec();
+        oversized.resize(1024, b'x');
+        assert!(
+            metrics_response(&oversized)
+                .await
+                .starts_with("HTTP/1.1 400 Bad Request\r\n")
+        );
+
+        let (mut client, server) = tokio::io::duplex(64);
+        let task = tokio::spawn(handle_metrics_connection(
+            server,
+            Arc::new(metrics::Metrics::new()),
+            Arc::new(std::sync::RwLock::new(String::new())),
+            METRICS_TIMEOUTS,
+        ));
+        client.write_all(b"GET /live HTTP/1.1").await.unwrap();
+        client.shutdown().await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert!(
+            String::from_utf8(response)
+                .unwrap()
+                .starts_with("HTTP/1.1 400 Bad Request\r\n")
+        );
+        assert_eq!(task.await.unwrap(), MetricsConnectionOutcome::Complete);
     }
 
     #[tokio::test]
