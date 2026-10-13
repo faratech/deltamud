@@ -26,7 +26,7 @@
 
 use crate::act::{ActArg, To, act};
 use crate::dg_comm::{TO_CHAR, TO_ROOM, send_to_zone, sub_write};
-use crate::dg_handler::ROOM_ID_BASE;
+use crate::dg_handler::UID_CHAR;
 use crate::interpreter::{
     command_interpreter, indirect_command_target_is_forceable, is_abbrev, search_block,
 };
@@ -38,8 +38,6 @@ use crate::types::*;
 // do_wsend subcmd selectors (dg_wldcmd.c).
 const SCMD_WSEND: i32 = 0;
 const SCMD_WECHOAROUND: i32 = 1;
-
-const UID_CHAR: char = '\x1b';
 
 // ---------------------------------------------------------------------------
 // Logging (wld_log): C prefixes the room number and forwards to script_log.
@@ -73,12 +71,7 @@ fn atoi(s: &str) -> Result<i32, crate::text::ParseIntError> {
 }
 
 fn parse_uid(name: &str) -> Option<i64> {
-    let mut chars = name.chars();
-    if chars.next()? == UID_CHAR {
-        chars.as_str().trim().parse::<i64>().ok()
-    } else {
-        None
-    }
+    crate::dg_handler::parse_uid(name)
 }
 
 fn visible_target(g: &GameState, cid: CharId) -> bool {
@@ -90,23 +83,11 @@ fn visible_target(g: &GameState, cid: CharId) -> bool {
 
 // A DG char/obj UID is the raw arena id (peer-consistent with dg_mobcmd.rs).
 fn find_char_by_id(g: &GameState, id: i64) -> Option<CharId> {
-    if id <= 0 {
-        return None;
-    }
-    let cid = CharId(id as u64);
-    if g.char_exists(cid) { Some(cid) } else { None }
+    crate::dg_handler::char_by_uid(g, id)
 }
 
 fn find_obj_by_id(g: &GameState, id: i64) -> Option<ObjId> {
-    if id <= 0 {
-        return None;
-    }
-    let oid = ObjId(id as u64);
-    if g.get_obj(oid).is_some() {
-        Some(oid)
-    } else {
-        None
-    }
+    crate::dg_handler::obj_by_uid(g, id)
 }
 
 fn name_matches_char(g: &GameState, cid: CharId, name: &str) -> bool {
@@ -184,21 +165,15 @@ fn get_obj_by_room(g: &GameState, room: RoomRnum, name: &str) -> Option<ObjId> {
 // get_room (dg_scripts.c): resolve a room spec (UID or vnum) into a real room.
 // ---------------------------------------------------------------------------
 fn get_room(g: &GameState, name: &str) -> Option<RoomRnum> {
-    if let Some(id) = parse_uid(name) {
-        return find_room_by_id(g, id);
+    if name.starts_with(UID_CHAR) {
+        return parse_uid(name).and_then(|id| find_room_by_id(g, id));
     }
     g.real_room(atoi(name).ok()?)
 }
 
-/// C get_room()/find_room(): a room UID is ROOM_ID_BASE + vnum (tolerating a
-/// bare-vnum encoding for robustness).
+/// An encoded room UID occupies only the reserved room range.
 fn find_room_by_id(g: &GameState, id: i64) -> Option<RoomRnum> {
-    let vnum = if id >= ROOM_ID_BASE {
-        (id - ROOM_ID_BASE) as RoomVnum
-    } else {
-        id as RoomVnum
-    };
-    g.real_room(vnum)
+    crate::dg_handler::room_by_uid(g, id)
 }
 
 /// cdsr() (maputils.c) — "coordinate destination string -> rnum". The string is
@@ -540,8 +515,8 @@ fn do_wteleport(g: &mut GameState, room: RoomRnum, argument: &str) {
     // Resolve the destination. C tries cdsr() (coordinate/vnum shortcut) first.
     let target: Option<RoomRnum> = if let Some(r) = cdsr(g, &arg2) {
         Some(r)
-    } else if let Some(id) = parse_uid(&arg2) {
-        find_room_by_id(g, id)
+    } else if arg2.starts_with(UID_CHAR) {
+        parse_uid(&arg2).and_then(|id| find_room_by_id(g, id))
     } else if let Some(ch) = get_char_vis_world(g, &arg2) {
         g.get_char(ch).and_then(|c| c.in_room)
     } else if let Some(tobj) = get_obj_vis_world(g, &arg2) {
@@ -643,7 +618,10 @@ fn do_wpurge(g: &mut GameState, room: RoomRnum, argument: &str) {
         for ch in people {
             if g.get_char(ch).map(|c| c.is_npc).unwrap_or(false) {
                 crate::dg_handler::on_char_extracted(g, ch);
-                g.extract_char(ch);
+                g.extract_char_with_disposition(
+                    ch,
+                    crate::handler::PossessionDisposition::DropToRoom,
+                );
             }
         }
         let contents = g
@@ -663,7 +641,7 @@ fn do_wpurge(g: &mut GameState, room: RoomRnum, argument: &str) {
             return;
         }
         crate::dg_handler::on_char_extracted(g, ch);
-        g.extract_char(ch);
+        g.extract_char_with_disposition(ch, crate::handler::PossessionDisposition::DropToRoom);
     } else if let Some(o) = get_obj_by_room(g, room, &arg) {
         crate::dg_handler::on_obj_extracted(g, o);
         g.extract_obj(o);
@@ -873,6 +851,40 @@ mod tests {
     use crate::character::Character;
     use crate::config::Config;
     use crate::room::Room;
+
+    #[test]
+    fn dg_uid_world_commands_drop_targeted_npc_possessions() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(700, 7, "DG room".into(), String::new()));
+        let room_zero = g.add_room(Room::new(0, 7, "zero".into(), String::new()));
+        let victim = g.create_char(Character::new_npc(701));
+        g.char_to_room(victim, room);
+        let carried = g.create_obj(crate::object::Object::new(
+            702,
+            "token".into(),
+            "a token".into(),
+        ));
+        g.obj_to_char(carried, victim);
+        assert_eq!(find_char_by_id(&g, carried.0 as i64), None);
+        assert_eq!(find_obj_by_id(&g, victim.0 as i64), None);
+        assert_eq!(get_room(&g, "700"), Some(room));
+        assert_eq!(get_room(&g, "\x1b700"), None);
+        assert_eq!(get_room(&g, "\x1b9223372036854775808"), None);
+        assert_eq!(
+            get_room(
+                &g,
+                &format!("{UID_CHAR}{}", crate::dg_handler::ROOM_ID_BASE)
+            ),
+            Some(room_zero)
+        );
+        assert!(dispatch_wld_command(
+            &mut g,
+            room,
+            &format!("wpurge {UID_CHAR}{}", victim.0)
+        ));
+        assert!(!g.char_exists(victim));
+        assert_eq!(g.get_obj(carried).unwrap().loc, ObjLoc::Room(room));
+    }
 
     #[test]
     fn wteleport_uses_forced_arena_departure_cleanup() {

@@ -709,30 +709,10 @@ pub fn do_gsay(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
 // ---------------------------------------------------------------------------
 /// get_char_vis (handler.c:1228-1249): a visible character found in the actor's
 /// room first, then `0.<name>` player lookup, then a numbered world-wide scan.
-/// The private copies in cmd_social/cmd_wizard/dg_mobcmd follow the same C
-/// body; do_tell/do_page need it here so cross-room immortal tells and
+/// The shared finder follows that C body; do_tell/do_page need it here so cross-room tells and
 /// numbered targets resolve the way C resolves them (#339).
 fn get_char_vis(g: &GameState, ch: CharId, arg: &str) -> Option<CharId> {
-    if let Some(found) = g.get_char_room_vis(ch, arg) {
-        return Some(found);
-    }
-    let (mut number, name) = crate::handler::get_number(arg);
-    if number == 0 {
-        return None;
-    }
-    for cid in g.char_ids() {
-        let target = match g.get_char(cid) {
-            Some(t) => t,
-            None => continue,
-        };
-        if crate::handler::isname(&name, &target.player.name) && g.can_see(ch, cid) {
-            number -= 1;
-            if number == 0 {
-                return Some(cid);
-            }
-        }
-    }
-    None
+    g.get_char_vis(ch, arg)
 }
 
 fn perform_tell(g: &mut GameState, ch: CharId, vict: CharId, arg: &str) {

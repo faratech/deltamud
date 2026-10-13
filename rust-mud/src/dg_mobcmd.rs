@@ -47,7 +47,7 @@ use crate::types::*;
 // ---------------------------------------------------------------------------
 // DG UID encoding: ESC byte then decimal id (dg_scripts.h: UID_CHAR '\x1b').
 // ---------------------------------------------------------------------------
-const UID_CHAR: char = '\x1b';
+use crate::dg_handler::UID_CHAR;
 
 /// VM hook: clear the self-purge flag before running a command (C zeroes the
 /// global at the top of the dispatch loop). Lives on GameState
@@ -139,15 +139,8 @@ fn blocked_by_desc_level(g: &GameState, ch: CharId) -> bool {
 // ---------------------------------------------------------------------------
 
 /// True if `s` is a DG UID token (`\x1b<id>`). Returns the decoded id.
-fn parse_uid(s: &str) -> Option<u64> {
-    let mut chars = s.chars();
-    if chars.next() != Some(UID_CHAR) {
-        return None;
-    }
-    // C uses atoi(name+1): leading digits, stop at first non-digit.
-    let rest = &s[UID_CHAR.len_utf8()..];
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    digits.parse::<u64>().ok()
+fn parse_uid(s: &str) -> Option<i64> {
+    crate::dg_handler::parse_uid(s)
 }
 
 /// C get_char(): UID → arena lookup, else first char in world by name.
@@ -155,7 +148,7 @@ fn parse_uid(s: &str) -> Option<u64> {
 /// immortal is not returned to a script.
 fn dg_get_char(g: &GameState, name: &str) -> Option<CharId> {
     if let Some(id) = parse_uid(name) {
-        let cid = CharId(id);
+        let cid = crate::dg_handler::char_by_uid(g, id)?;
         return match g.get_char(cid) {
             Some(c) if c.is_npc || c.invis_level == 0 => Some(cid),
             _ => None,
@@ -174,12 +167,7 @@ fn dg_get_char(g: &GameState, name: &str) -> Option<CharId> {
 /// C get_obj(): UID → arena lookup, else first object in world by name.
 fn dg_get_obj(g: &GameState, name: &str) -> Option<ObjId> {
     if let Some(id) = parse_uid(name) {
-        let oid = ObjId(id);
-        return if g.get_obj(oid).is_some() {
-            Some(oid)
-        } else {
-            None
-        };
+        return crate::dg_handler::obj_by_uid(g, id);
     }
     for oid in g.obj_ids() {
         if let Some(o) = g.get_obj(oid) {
@@ -199,7 +187,7 @@ fn get_char_room_vis(g: &GameState, mob: CharId, name: &str) -> Option<CharId> {
 
 /// Visible char anywhere in the world by name (get_char_vis).
 fn get_char_vis(g: &GameState, mob: CharId, name: &str) -> Option<CharId> {
-    crate::spell_parser::get_char_world_vis(g, mob, name)
+    g.get_char_vis(mob, name)
 }
 
 /// Visible object anywhere relevant to the mob (get_obj_vis): the mob's room,
@@ -950,7 +938,10 @@ fn do_mpurge(g: &mut GameState, ch: CharId, argument: &str) {
                 continue;
             }
             if g.get_char(victim).map(|c| c.is_npc).unwrap_or(false) {
-                g.extract_char(victim);
+                g.extract_char_with_disposition(
+                    victim,
+                    crate::handler::PossessionDisposition::DropToRoom,
+                );
             }
         }
         let contents = g.room(room).contents.clone();
@@ -986,7 +977,7 @@ fn do_mpurge(g: &mut GameState, ch: CharId, argument: &str) {
     if victim == ch {
         g.dg.owner_purged = true;
     }
-    g.extract_char(victim);
+    g.extract_char_with_disposition(victim, crate::handler::PossessionDisposition::DropToRoom);
 }
 
 /// do_mgoto — relocate the mob to a non-private room.
@@ -1786,6 +1777,40 @@ mod tests {
         g.get_char(ch)
             .map(|character| character.points.gold)
             .unwrap_or(0)
+    }
+
+    #[test]
+    fn dg_uid_mob_commands_drop_targeted_npc_possessions() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(crate::room::Room::new(
+            700,
+            7,
+            "DG room".into(),
+            String::new(),
+        ));
+        let owner = g.create_char(Character::new_npc(700));
+        g.char_to_room(owner, room);
+        let victim = g.create_char(Character::new_npc(701));
+        g.char_to_room(victim, room);
+        let carried = g.create_obj(crate::object::Object::new(
+            702,
+            "token".into(),
+            "a token".into(),
+        ));
+        g.obj_to_char(carried, victim);
+        let victim_uid = format!("{UID_CHAR}{}", victim.0);
+        assert_eq!(dg_get_obj(&g, &victim_uid), None);
+        assert_eq!(dg_get_char(&g, &format!("{UID_CHAR}{}", carried.0)), None);
+        assert!(dispatch_mob_command(
+            &mut g,
+            owner,
+            "mgold",
+            &format!("{victim_uid} 25")
+        ));
+        assert_eq!(carried_gold(&g, victim), 25);
+        assert!(dispatch_mob_command(&mut g, owner, "mpurge", &victim_uid));
+        assert!(!g.char_exists(victim));
+        assert_eq!(g.get_obj(carried).unwrap().loc, ObjLoc::Room(room));
     }
 
     #[test]

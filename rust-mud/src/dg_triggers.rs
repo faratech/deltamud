@@ -57,7 +57,7 @@ pub use crate::dg_handler::{
 };
 
 /// DG UID encoding: ESC byte then the entity's raw id (dg_scripts.h UID_CHAR).
-const UID_CHAR: char = '\x1b';
+use crate::dg_handler::UID_CHAR;
 
 // ── glue over the dg_handler storage layer ─────────────────────────────────
 

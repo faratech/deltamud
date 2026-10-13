@@ -1517,32 +1517,11 @@ fn obj_disp(g: &GameState, oid: ObjId, fname_only: bool) -> String {
 }
 
 // ===========================================================================
-// World-wide finders (handler.c get_char_vis / get_obj_vis). The id-indexed
-// GameState exposes only room-scoped finders, so the casting core supplies its
-// own world scan over char_list / obj_list (matching C newest-first order).
+// World-wide finders (handler.c get_char_vis / get_obj_vis). Character lookup
+// shares the canonical visibility/ordinal implementation in GameState.
 // ===========================================================================
 pub fn get_char_world_vis(g: &GameState, observer: CharId, arg: &str) -> Option<CharId> {
-    // First try the room (C get_char_vis checks the local room first).
-    if let Some(c) = g.get_char_room_vis(observer, arg) {
-        return Some(c);
-    }
-    let (mut count, name) = crate::handler::get_number(arg);
-    if count == 0 {
-        return None;
-    }
-    for cid in g.char_ids() {
-        let ch = match g.get_char(cid) {
-            Some(c) => c,
-            None => continue,
-        };
-        if crate::handler::isname(&name, &ch.player.name) && g.can_see(observer, cid) {
-            count -= 1;
-            if count == 0 {
-                return Some(cid);
-            }
-        }
-    }
-    None
+    g.get_char_vis(observer, arg)
 }
 
 pub fn get_obj_world_vis(g: &GameState, _observer: CharId, arg: &str) -> Option<ObjId> {

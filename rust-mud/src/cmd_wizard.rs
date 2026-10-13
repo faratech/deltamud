@@ -544,22 +544,7 @@ fn send_to_all(g: &mut GameState, msg: &str) {
 
 /// get_char_vis(ch, name): visible character in room first, then world.
 fn get_char_vis(g: &GameState, ch: CharId, arg: &str) -> Option<CharId> {
-    if let Some(id) = g.get_char_room_vis(ch, arg) {
-        return Some(id);
-    }
-    let (mut count, name) = crate::handler::get_number(arg);
-    if count == 0 {
-        return None;
-    }
-    for cid in g.char_ids() {
-        if crate::handler::isname(&name, &name_of(g, cid)) && g.can_see(ch, cid) {
-            count -= 1;
-            if count == 0 {
-                return Some(cid);
-            }
-        }
-    }
-    None
+    g.get_char_vis(ch, arg)
 }
 
 /// Async-bridge gate (the offline branch of do_set / do_stat-file / show
@@ -1840,7 +1825,14 @@ pub fn do_purge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 ActArg::Char(vict),
                 To::NotVict,
             );
-            g.extract_char(vict);
+            if vict_npc {
+                g.extract_char_with_disposition(
+                    vict,
+                    crate::handler::PossessionDisposition::DropToRoom,
+                );
+            } else {
+                g.extract_char(vict);
+            }
             g.send_to_char(ch, OK);
         } else {
             let room_objs = g.rooms[rnum].contents.clone();
@@ -1901,7 +1893,10 @@ pub fn do_purge(g: &mut GameState, ch: CharId, arg: &str, _subcmd: i32) {
                 || ch_trust >= i32::from(LVL_GRGOD)
                 || mob_vnum == NOBODY
             {
-                g.extract_char(vict);
+                g.extract_char_with_disposition(
+                    vict,
+                    crate::handler::PossessionDisposition::DropToRoom,
+                );
             }
         }
         let objs = g.rooms[rnum].contents.clone();
@@ -5942,6 +5937,45 @@ mod tests {
 
         do_purge(&mut g, requester, "Ordinary", 0);
         assert!(g.get_char(ordinary).is_none());
+    }
+
+    #[test]
+    fn targeted_npc_purge_leaves_inventory_equipment_and_nested_loot_in_room() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(100, 1, "Room".into(), String::new()));
+        let requester = connected_player(&mut g, ConnId(65), "Requester", LVL_IMPL);
+        let mut victim = Character::new_npc(NOBODY);
+        victim.player.name = "Victim".into();
+        let victim = g.create_char(victim);
+        g.char_to_room(requester, room);
+        g.char_to_room(victim, room);
+        let bag = g.create_obj(Object::new(21, "bag".into(), "a bag".into()));
+        let loot = g.create_obj(Object::new(22, "loot".into(), "loot".into()));
+        g.obj_to_obj(loot, bag);
+        g.obj_to_char(bag, victim);
+        let mut torch = Object::new(23, "torch".into(), "a torch".into());
+        torch.obj_type = crate::object::ObjectType::Light;
+        torch.values[2] = -1;
+        let torch = g.create_obj(torch);
+        g.equip_char(victim, torch, WEAR_LIGHT);
+        assert_eq!(g.room(room).light, 1);
+
+        do_purge(&mut g, requester, "Victim", 0);
+
+        assert!(!g.char_exists(victim));
+        assert_eq!(
+            g.get_obj(bag).unwrap().loc,
+            crate::object::ObjLoc::Room(room)
+        );
+        assert_eq!(
+            g.get_obj(torch).unwrap().loc,
+            crate::object::ObjLoc::Room(room)
+        );
+        assert_eq!(
+            g.get_obj(loot).unwrap().loc,
+            crate::object::ObjLoc::Contained(bag)
+        );
+        assert_eq!(g.room(room).light, 0);
     }
 
     #[test]

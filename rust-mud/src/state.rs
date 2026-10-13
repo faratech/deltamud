@@ -712,14 +712,17 @@ pub struct GameState {
     pub deferred_db_ops: Vec<DeferredDbOp>,
     pub pfileclean_requested: Option<AuthenticatedCommandRequest>,
     pub player_save_requests: Vec<CharId>,
+    pub player_extraction_requests: std::collections::HashSet<CharId>,
+    /// Completed rentals retained only until a failed sidecar save recovers.
+    /// Their equipment file is authoritative; they must not age or rent again.
+    pub rental_departures: std::collections::HashSet<CharId>,
 
     /// do_who's `boot_high` (act.informative.c): the highest simultaneous
     /// visible-player count seen this boot, reported as "There is a boot time
     /// high of N players." Updated by do_who as C does; reset on boot.
     pub boot_high: usize,
 
-    next_char_id: u64,
-    next_obj_id: u64,
+    next_entity_id: u64,
 
     pub rng: Rng,
     pub credits: String,
@@ -825,9 +828,10 @@ impl GameState {
             deferred_db_ops: Vec::new(),
             pfileclean_requested: None,
             player_save_requests: Vec::new(),
+            player_extraction_requests: std::collections::HashSet::new(),
+            rental_departures: std::collections::HashSet::new(),
             boot_high: 0,
-            next_char_id: 1,
-            next_obj_id: 1,
+            next_entity_id: crate::dg_handler::FIRST_ENTITY_UID,
             rng: Rng::default(),
             shutdown_requested: None,
             copyover_requested: None,
@@ -1173,8 +1177,7 @@ impl GameState {
     /// arena — CircleMUD prepends to character_list, but iteration order is
     /// internal-only here, so O(1) append is used). Does NOT place it in a room.
     pub fn create_char(&mut self, mut ch: Character) -> CharId {
-        let id = CharId(self.next_char_id);
-        self.next_char_id += 1;
+        let id = CharId(self.allocate_entity_id());
         ch.id = id;
         self.chars.insert(id, ch);
         id
@@ -1484,6 +1487,13 @@ impl GameState {
         }
     }
 
+    /// Queue a descriptorless departure for the async game owner, which saves
+    /// the player snapshot before removing the character from the world.
+    pub fn request_player_save_and_extract(&mut self, ch: CharId) {
+        self.request_player_save(ch);
+        self.player_extraction_requests.insert(ch);
+    }
+
     pub fn take_player_save_requests(&mut self) -> Vec<CharId> {
         std::mem::take(&mut self.player_save_requests)
     }
@@ -1496,10 +1506,16 @@ impl GameState {
         self.objs.get_mut(&id)
     }
     pub fn create_obj(&mut self, mut obj: Object) -> ObjId {
-        let id = ObjId(self.next_obj_id);
-        self.next_obj_id += 1;
+        let id = ObjId(self.allocate_entity_id());
         obj.id = id;
         self.objs.insert(id, obj);
+        id
+    }
+
+    fn allocate_entity_id(&mut self) -> u64 {
+        let id = self.next_entity_id;
+        assert!(id <= i64::MAX as u64, "DG entity UID space exhausted");
+        self.next_entity_id = id.checked_add(1).expect("entity id overflow");
         id
     }
 

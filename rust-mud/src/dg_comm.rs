@@ -21,12 +21,9 @@
 // Name resolution mirrors C: when `find_invis` is set the lookups ignore
 // visibility (get_char / get_obj by raw keyword over the whole world);
 // otherwise they are room-visibility-scoped from the actor `ch`'s vantage.
-// Because GameState exposes id-scoped finders rather than C's global keyword
-// finders, the invis path resolves over the actor's room + inventory + the
-// whole char/obj arenas, which is the faithful behaviour for the scripts in
-// lib/world/trg (they reference %actor% / %self% UID vars, never bare global
-// keywords here — the sub_write tokens are produced by the VM after UID
-// expansion, so they are always room-local names of entities still in scope).
+// The invis path supports both global keyword searches and typed numeric UID
+// references produced by VM substitution. UID lookups use the shared checked
+// decoder so an object reference cannot resolve to a character.
 //
 // Targets bitvector (TO_CHAR / TO_ROOM), matching the C `targets` arg.
 
@@ -176,6 +173,10 @@ fn find_obj_in_scope(g: &GameState, ch: CharId, name: &str) -> Option<ObjId> {
 /// Whole-world char lookup by keyword (C dg_scripts.c get_char(name), used on
 /// the find_invis path). First non-keyword match over the char arena.
 fn find_char_anywhere(g: &GameState, name: &str) -> Option<CharId> {
+    if name.starts_with(crate::dg_handler::UID_CHAR) {
+        return crate::dg_handler::parse_uid(name)
+            .and_then(|uid| crate::dg_handler::char_by_uid(g, uid));
+    }
     let want = name.to_lowercase();
     for cid in g.char_ids() {
         if let Some(ch) = g.get_char(cid) {
@@ -189,6 +190,10 @@ fn find_char_anywhere(g: &GameState, name: &str) -> Option<CharId> {
 
 /// Whole-world obj lookup by keyword (C dg_scripts.c get_obj(name)).
 fn find_obj_anywhere(g: &GameState, name: &str) -> Option<ObjId> {
+    if name.starts_with(crate::dg_handler::UID_CHAR) {
+        return crate::dg_handler::parse_uid(name)
+            .and_then(|uid| crate::dg_handler::obj_by_uid(g, uid));
+    }
     let want = name.to_lowercase();
     for oid in g.obj_ids() {
         if let Some(o) = g.get_obj(oid) {
@@ -413,5 +418,27 @@ pub fn obj_carrier(g: &GameState, oid: ObjId) -> Option<CharId> {
         ObjLoc::Worn(cid, _) => Some(cid),
         ObjLoc::Carried(cid) => Some(cid),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dg_uid_message_tokens_keep_character_and_object_targets_distinct() {
+        let mut g = GameState::new(crate::config::Config::default());
+        let actor = g.create_char(crate::character::Character::new_npc(100));
+        let object = g.create_obj(crate::object::Object::new(
+            100,
+            "token".into(),
+            "a ward token".into(),
+        ));
+        let input = format!("~\x1b{} holds `\x1b{}.", actor.0, object.0);
+        let parts = parse(&g, &input, actor, true);
+        assert_eq!(render_for(&g, &parts, actor), "You holds a ward token.\r\n");
+        assert_eq!(find_char_anywhere(&g, &format!("\x1b{}", object.0)), None);
+        assert_eq!(find_obj_anywhere(&g, &format!("\x1b{}", actor.0)), None);
+        assert_eq!(find_char_anywhere(&g, "\x1b-1"), None);
     }
 }

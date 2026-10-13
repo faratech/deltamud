@@ -97,6 +97,44 @@ pub const MAX_SCRIPT_DEPTH: i32 = 10;
 pub const ROOM_ID_BASE: i64 = 50000;
 pub const MOBOBJ_ID_BASE: i64 = 200000;
 
+/// Character/object ids share one allocator above every possible room UID.
+/// Room vnums include synthetic map cells and occupy the full nonnegative
+/// i32 range; keeping entities above that range prevents kind collisions.
+pub const FIRST_ENTITY_UID: u64 = (ROOM_ID_BASE + i32::MAX as i64 + 1) as u64;
+pub const UID_CHAR: char = '\x1b';
+
+/// Parse the common ESC + positive decimal UID syntax without narrowing.
+pub fn parse_uid(name: &str) -> Option<i64> {
+    let value = name.strip_prefix(UID_CHAR)?.trim().parse::<i64>().ok()?;
+    (value > 0).then_some(value)
+}
+
+pub fn char_by_uid(g: &GameState, uid: i64) -> Option<CharId> {
+    let id = u64::try_from(uid).ok()?;
+    if id < FIRST_ENTITY_UID {
+        return None;
+    }
+    let id = CharId(id);
+    g.get_char(id).map(|_| id)
+}
+
+pub fn obj_by_uid(g: &GameState, uid: i64) -> Option<ObjId> {
+    let id = u64::try_from(uid).ok()?;
+    if id < FIRST_ENTITY_UID {
+        return None;
+    }
+    let id = ObjId(id);
+    g.get_obj(id).map(|_| id)
+}
+
+/// Decode an encoded room UID only. Bare room vnums belong to the room
+/// argument parser, and values outside the room range cannot wrap to a room.
+pub fn room_by_uid(g: &GameState, uid: i64) -> Option<RoomRnum> {
+    let vnum = uid.checked_sub(ROOM_ID_BASE)?;
+    let vnum = RoomVnum::try_from(vnum).ok()?;
+    (vnum >= 0).then(|| g.real_room(vnum)).flatten()
+}
+
 // ---------------------------------------------------------------------------
 // ScriptKey — identifies a scriptable entity. C dispatches on `type` + a
 // void*; we key the static tables on this enum. RoomRnum is the dense index
@@ -500,6 +538,58 @@ pub static DG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dg_uid_ranges_are_disjoint_and_decoding_cannot_wrap() {
+        use crate::character::Character;
+        use crate::object::Object;
+        use crate::room::Room;
+
+        let mut g = GameState::new(crate::config::Config::default());
+        let room = g.add_room(Room::new(100, 1, String::new(), String::new()));
+        let map = g.add_room(Room::new(2_000_000, 1, String::new(), String::new()));
+        let highest_room = g.add_room(Room::new(i32::MAX, 1, String::new(), String::new()));
+        let ch = g.create_char(Character::new_npc(100));
+        let obj = g.create_obj(Object::new(100, "token".into(), "a token".into()));
+
+        assert_eq!(ch.0, FIRST_ENTITY_UID);
+        assert_eq!(obj.0, FIRST_ENTITY_UID + 1);
+        assert_eq!(char_by_uid(&g, ch.0 as i64), Some(ch));
+        assert_eq!(obj_by_uid(&g, obj.0 as i64), Some(obj));
+        assert_eq!(char_by_uid(&g, obj.0 as i64), None);
+        assert_eq!(obj_by_uid(&g, ch.0 as i64), None);
+        assert_eq!(room_by_uid(&g, ROOM_ID_BASE + 100), Some(room));
+        assert_eq!(room_by_uid(&g, ROOM_ID_BASE + 2_000_000), Some(map));
+        assert_eq!(
+            room_by_uid(&g, FIRST_ENTITY_UID as i64 - 1),
+            Some(highest_room)
+        );
+        for invalid in [
+            100,
+            -1,
+            i64::MIN,
+            i64::MAX,
+            ch.0 as i64,
+            obj.0 as i64,
+            ROOM_ID_BASE + 100 + (1_i64 << 32),
+        ] {
+            assert_eq!(room_by_uid(&g, invalid), None, "UID {invalid}");
+        }
+        assert_eq!(parse_uid(&format!("{UID_CHAR}{}", ch.0)), Some(ch.0 as i64));
+        for invalid in [
+            "100",
+            "\x1b-1",
+            "\x1b0",
+            "\x1b9223372036854775808",
+            "\x1b1garbage",
+        ] {
+            assert_eq!(parse_uid(invalid), None);
+        }
+        assert!(g.extract_obj(obj));
+        let replacement = g.create_obj(Object::new(100, "next".into(), "next".into()));
+        assert!(replacement.0 > obj.0);
+        assert_eq!(obj_by_uid(&g, obj.0 as i64), None);
+    }
 
     fn trigger(name: &str) -> TrigData {
         TrigData {

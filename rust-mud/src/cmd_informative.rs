@@ -1819,26 +1819,7 @@ pub fn do_worth(g: &mut GameState, ch: CharId, _arg: &str, _subcmd: i32) {
 /// cmd_social/cmd_wizard/cmd_comm/dg_mobcmd; do_status needs one here so an
 /// immortal `score <player>` finds a target in another room (#339).
 fn get_char_vis(g: &GameState, ch: CharId, arg: &str) -> Option<CharId> {
-    if let Some(found) = g.get_char_room_vis(ch, arg) {
-        return Some(found);
-    }
-    let (mut number, name) = get_number(arg);
-    if number == 0 {
-        return None;
-    }
-    for cid in g.char_ids() {
-        let target = match g.get_char(cid) {
-            Some(t) => t,
-            None => continue,
-        };
-        if isname(&name, &target.player.name) && g.can_see(ch, cid) {
-            number -= 1;
-            if number == 0 {
-                return Some(cid);
-            }
-        }
-    }
-    None
+    g.get_char_vis(ch, arg)
 }
 
 /// Resolve the persisted authority behind a character without allowing an

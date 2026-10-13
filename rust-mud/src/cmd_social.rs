@@ -1025,26 +1025,7 @@ fn two_arguments(argument: &str) -> (String, String) {
 /// get_char_vis: room first, then a world-wide name scan (C handler.c). Used
 /// by do_gmote. Honors visibility from the searcher's perspective.
 fn get_char_vis(g: &GameState, ch: CharId, name: &str) -> Option<CharId> {
-    if let Some(found) = g.get_char_room_vis(ch, name) {
-        return Some(found);
-    }
-    let (mut number, name) = crate::handler::get_number(name);
-    if number == 0 {
-        return None;
-    }
-    for cid in g.char_ids() {
-        let target = match g.get_char(cid) {
-            Some(t) => t,
-            None => continue,
-        };
-        if crate::handler::isname(&name, &target.player.name) && g.can_see(ch, cid) {
-            number -= 1;
-            if number == 0 {
-                return Some(cid);
-            }
-        }
-    }
-    None
+    g.get_char_vis(ch, name)
 }
 
 fn sex_of(g: &GameState, cid: CharId) -> Gender {

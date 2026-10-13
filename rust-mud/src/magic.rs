@@ -1216,6 +1216,11 @@ fn add_follower(g: &mut GameState, ch: CharId, leader: CharId) {
 pub fn affect_update(g: &mut GameState) {
     let ids: Vec<CharId> = g.char_ids();
     for cid in ids {
+        // A completed rental retained for sidecar retry has already departed;
+        // its active affects must not age or discharge into the offline body.
+        if g.rental_departures.contains(&cid) {
+            continue;
+        }
         // C skips the PRF2_INTANGIBLE check for PCs only (!IS_NPC guard):
         // intangible NPCs still age their affects.
         let skip = match g.get_char(cid) {
@@ -1241,11 +1246,13 @@ fn affect_update_char(g: &mut GameState, cid: CharId) {
         .map(|c| i < c.affected.len())
         .unwrap_or(false)
     {
-        let (stype, dur, modifier, bitvector) = {
-            let c = g.get_char(cid).unwrap();
-            let a = &c.affected[i];
-            (a.spell_type, a.duration, a.modifier, a.bitvector)
-        };
+        let mut expected_affect = g.get_char(cid).unwrap().affected[i].clone();
+        let (stype, dur, modifier, bitvector) = (
+            expected_affect.spell_type,
+            expected_affect.duration,
+            expected_affect.modifier,
+            expected_affect.bitvector,
+        );
         let mut action = AfUpdate::Keep;
         // Adrenaline branch of the decremented affect: 1 = brink of death
         // sustain, 2 = exhausted collapse, 3 = slow wear-off while upright.
@@ -1256,6 +1263,7 @@ fn affect_update_char(g: &mut GameState, cid: CharId) {
                 c.affected[i].duration -= 1;
                 c.affected[i].duration
             };
+            expected_affect.duration = new_dur;
             let (fighting, pos) = match g.get_char(cid) {
                 Some(c) => (c.fighting, c.position),
                 None => return,
@@ -1328,15 +1336,27 @@ fn affect_update_char(g: &mut GameState, cid: CharId) {
             action = AfUpdate::Remove;
         }
         if matches!(action, AfUpdate::Remove) {
-            // The discharge above may have extracted the character. The
-            // expired affect's bits are cleared with it (affect_remove).
-            if let Some(c) = g.get_char(cid) {
-                if i < c.affected.len() {
-                    let bv = c.affected[i].bitvector;
-                    let c2 = g.get_char_mut(cid).unwrap();
-                    c2.affected.remove(i);
-                    c2.affect_flags &= !bv;
+            // Discharge may extract the host or remove another affect (for
+            // example, combat strips invisibility). Revalidate the original
+            // entry instead of removing whatever now occupies its old index.
+            let removal_index = g.get_char(cid).and_then(|character| {
+                let matches_original = |affect: &Affect| {
+                    affect.spell_type == expected_affect.spell_type
+                        && affect.duration == expected_affect.duration
+                        && affect.modifier == expected_affect.modifier
+                        && affect.location == expected_affect.location
+                        && affect.bitvector == expected_affect.bitvector
+                        && affect.caster == expected_affect.caster
+                };
+                if character.affected.get(i).is_some_and(matches_original) {
+                    Some(i)
+                } else {
+                    character.affected.iter().position(matches_original)
                 }
+            });
+            if let Some(index) = removal_index {
+                g.affect_remove_at(cid, index);
+                i = i.min(index);
             }
         } else {
             i += 1;
@@ -1350,6 +1370,7 @@ mod affect_update_tests {
     use crate::character::Character;
     use crate::config::Config;
     use crate::connection::Descriptor;
+    use crate::flags::APPLY_HIT;
     use crate::types::Class;
     use crate::types::ConnId;
 
@@ -1557,6 +1578,184 @@ mod affect_update_tests {
             out.contains("You feel less protected."),
             "wear-off message missing, got: {out:?}"
         );
+    }
+
+    #[test]
+    fn expiring_spell_modifiers_restore_stats_without_losing_base_growth() {
+        let mut g = GameState::new(Config::default());
+        let ch = g.create_char(Character::new_player(
+            "Buffed".into(),
+            Class::Cleric,
+            crate::types::Race::Human,
+        ));
+        let base = g.get_char(ch).unwrap().clone();
+        for spell in [SPELL_ARMOR, SPELL_BLESS, SPELL_STRENGTH] {
+            mag_affects(&mut g, 50, ch, Some(ch), spell);
+        }
+        let mut hit_bonus = spell_affect(SPELL_ARMOR, 0);
+        hit_bonus.location = APPLY_HIT;
+        hit_bonus.modifier = 50;
+        g.get_char_mut(ch).unwrap().affected.push(hit_bonus);
+        g.affect_total(ch);
+        assert_eq!(
+            g.get_char(ch).unwrap().points.defense,
+            base.points.defense + 10
+        );
+        assert_eq!(
+            g.get_char(ch).unwrap().points.technique,
+            base.points.technique + 8
+        );
+        assert_eq!(
+            g.get_char(ch).unwrap().points.max_hit,
+            base.points.max_hit + 50
+        );
+
+        // Level advancement can grow the bare maximum while a buff is active.
+        let character = g.get_char_mut(ch).unwrap();
+        character.points.max_hit += 7;
+        for affect in &mut character.affected {
+            affect.duration = 0;
+        }
+        affect_update(&mut g);
+        for _ in 0..3 {
+            g.affect_total(ch);
+        }
+
+        let expired = g.get_char(ch).unwrap();
+        assert!(expired.affected.is_empty());
+        assert_eq!(expired.points.defense, base.points.defense);
+        assert_eq!(expired.points.technique, base.points.technique);
+        assert_eq!(expired.points.mdefense, base.points.mdefense);
+        assert_eq!(expired.aff_abils.str, base.aff_abils.str);
+        assert_eq!(expired.points.max_hit, base.points.max_hit + 7);
+        assert_eq!(expired.real_points.max_hit, base.points.max_hit + 7);
+        assert_eq!(expired.last_applied.max_hit, 0);
+    }
+
+    #[test]
+    fn expiring_one_affect_preserves_same_spell_and_equipment_flag_sources() {
+        let mut g = GameState::new(Config::default());
+        let mut character =
+            Character::new_player("Stacked".into(), Class::Warrior, crate::types::Race::Human);
+        let base_str = character.real_abils.str;
+        for (duration, modifier) in [(0, 2), (5, 3)] {
+            let mut affect = spell_affect(SPELL_STRENGTH, duration);
+            affect.location = APPLY_STR;
+            affect.modifier = modifier;
+            affect.bitvector = AFF_INVISIBLE;
+            character.affected.push(affect);
+        }
+        let ch = g.create_char(character);
+        let mut object = crate::object::Object::new(24, "cloak".into(), "a cloak".into());
+        object.bitvector = AFF_INVISIBLE;
+        let object = g.create_obj(object);
+        g.equip_char(ch, object, WEAR_HOLD);
+        assert_eq!(g.get_char(ch).unwrap().aff_abils.str, base_str + 5);
+
+        affect_update(&mut g);
+
+        let surviving = g.get_char(ch).unwrap();
+        assert_eq!(surviving.affected.len(), 1);
+        assert_eq!(surviving.affected[0].duration, 4);
+        assert_eq!(surviving.aff_abils.str, base_str + 3);
+        assert_ne!(surviving.affect_flags & AFF_INVISIBLE, 0);
+        g.affect_remove_spell(ch, SPELL_STRENGTH);
+        assert_eq!(g.get_char(ch).unwrap().aff_abils.str, base_str);
+        assert_ne!(g.get_char(ch).unwrap().affect_flags & AFF_INVISIBLE, 0);
+    }
+
+    #[test]
+    fn expiring_negative_modifier_and_adrenaline_restore_combat_stats() {
+        let mut g = GameState::new(Config::default());
+        let mut character =
+            Character::new_player("Debuffed".into(), Class::Warrior, crate::types::Race::Human);
+        character.position = Position::Sitting;
+        let base_power = character.points.power;
+        let base_defense = character.points.defense;
+        let mut curse = spell_affect(SPELL_CURSE, 0);
+        curse.location = APPLY_DEFENSE;
+        curse.modifier = -10;
+        let mut adrenaline = spell_affect(SKILL_ADRENALINE, 3);
+        adrenaline.location = APPLY_POWER;
+        adrenaline.modifier = 20;
+        character.affected.extend([curse, adrenaline]);
+        let ch = g.create_char(character);
+        g.affect_total(ch);
+
+        affect_update(&mut g);
+
+        let expired = g.get_char(ch).unwrap();
+        assert!(expired.affected.is_empty());
+        assert_eq!(expired.points.defense, base_defense);
+        assert_eq!(expired.points.power, base_power);
+    }
+
+    #[test]
+    fn lethal_redirect_expiration_can_remove_its_host_safely() {
+        let _dg = crate::lock_ok::lock(&crate::dg_handler::DG_TEST_LOCK);
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(crate::room::Room::new(
+            86_110,
+            0,
+            "Room".into(),
+            String::new(),
+        ));
+        let mut victim = Character::new_npc(86_111);
+        victim.points.hit = 1;
+        let mut charge = spell_affect(SPELL_REDIRECT_CHARGE, 0);
+        charge.modifier = 1000;
+        charge.bitvector = AFF_R_CHARGED;
+        victim.affected.push(charge);
+        let victim = g.create_char(victim);
+        g.char_to_room(victim, room);
+        g.affect_total(victim);
+
+        affect_update(&mut g);
+
+        assert!(!g.char_exists(victim));
+        assert!(g.room(room).people.is_empty());
+        assert_eq!(g.room(room).contents.len(), 1);
+    }
+
+    #[test]
+    fn redirect_expiration_revalidates_affect_after_combat_strips_invisibility() {
+        let _dg = crate::lock_ok::lock(&crate::dg_handler::DG_TEST_LOCK);
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(crate::room::Room::new(
+            86_112,
+            0,
+            "Room".into(),
+            String::new(),
+        ));
+        let mut victim = Character::new_npc(86_113);
+        victim.points.hit = 1000;
+        victim.points.max_hit = 1000;
+        let mut invisible = spell_affect(SPELL_INVISIBLE, 5);
+        invisible.bitvector = AFF_INVISIBLE;
+        invisible.location = APPLY_DEFENSE;
+        invisible.modifier = 10;
+        let mut charge = spell_affect(SPELL_REDIRECT_CHARGE, 0);
+        charge.modifier = 10;
+        charge.bitvector = AFF_R_CHARGED;
+        let mut bless = spell_affect(SPELL_BLESS, 5);
+        bless.location = APPLY_POWER;
+        bless.modifier = 7;
+        victim.affected.extend([invisible, charge, bless]);
+        let victim = g.create_char(victim);
+        g.char_to_room(victim, room);
+        g.affect_total(victim);
+
+        affect_update(&mut g);
+
+        let surviving = g.get_char(victim).unwrap();
+        assert_eq!(surviving.affected.len(), 1);
+        assert_eq!(surviving.affected[0].spell_type, SPELL_BLESS);
+        assert_eq!(surviving.affected[0].duration, 4);
+        assert_eq!(surviving.affect_flags & (AFF_INVISIBLE | AFF_R_CHARGED), 0);
+        let hit_after_discharge = surviving.points.hit;
+        assert!(hit_after_discharge < 1000);
+        affect_update(&mut g);
+        assert_eq!(g.get_char(victim).unwrap().points.hit, hit_after_discharge);
     }
 
     #[test]

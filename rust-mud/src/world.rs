@@ -310,6 +310,22 @@ impl GameState {
         counts
     }
 
+    // Reset gates read the live arenas because earlier commands and load
+    // triggers can create or extract entities, including entire subtrees.
+    fn mob_population(&self, vnum: MobVnum) -> usize {
+        self.chars
+            .values()
+            .filter(|ch| ch.is_npc && ch.nr == vnum)
+            .count()
+    }
+
+    fn obj_population(&self, vnum: ObjVnum) -> usize {
+        self.objs
+            .values()
+            .filter(|obj| obj.item_number == vnum)
+            .count()
+    }
+
     /// Run an initial reset of every zone (CircleMUD boot behaviour).
     pub fn prime_zones(&mut self) -> (u32, u32) {
         let zone_numbers: Vec<i32> = self.zones.iter().map(|z| z.number).collect();
@@ -328,9 +344,6 @@ impl GameState {
             Some(z) => z.reset_commands.clone(),
             None => return ResetSummary::default(),
         };
-
-        let mut mob_counts = self.count_mobs_by_vnum();
-        let mut obj_counts = self.count_objs_by_vnum();
 
         // Mirror db.c reset_zone's persistent state. `last_mob`/`last_obj`
         // are the C `mob`/`obj` pointers — they persist across iterations and
@@ -380,7 +393,7 @@ impl GameState {
                     load_chance,
                     ..
                 } => {
-                    if mob_counts.get(mob_vnum).copied().unwrap_or(0) >= *max_count
+                    if self.mob_population(*mob_vnum) as i64 >= i64::from(*max_count)
                         || self.rng.number(1, 100) < *load_chance
                     {
                         last_cmd = false;
@@ -396,7 +409,6 @@ impl GameState {
                     if let Some(mob) = self.load_mobile(*mob_vnum) {
                         self.char_to_room(mob, rnum);
                         crate::dg_triggers::load_mtrigger(self, mob);
-                        *mob_counts.entry(*mob_vnum).or_insert(0) += 1;
                         summary.mobs_spawned += 1;
                         last_mob = Some(mob);
                         last_cmd = true;
@@ -412,7 +424,7 @@ impl GameState {
                     load_chance,
                     ..
                 } => {
-                    if obj_counts.get(obj_vnum).copied().unwrap_or(0) >= *max_count
+                    if self.obj_population(*obj_vnum) as i64 >= i64::from(*max_count)
                         || self.rng.number(1, 100) < *load_chance
                     {
                         last_cmd = false;
@@ -430,7 +442,6 @@ impl GameState {
                             }
                         }
                         crate::dg_triggers::load_otrigger(self, obj);
-                        *obj_counts.entry(*obj_vnum).or_insert(0) += 1;
                         summary.objs_spawned += 1;
                         last_obj = Some(obj);
                         last_cmd = true;
@@ -446,7 +457,7 @@ impl GameState {
                     ..
                 } => {
                     // C 'G': gated on mob_load (not just a live mob pointer).
-                    if obj_counts.get(obj_vnum).copied().unwrap_or(0) >= *max_count
+                    if self.obj_population(*obj_vnum) as i64 >= i64::from(*max_count)
                         || last_mob.is_none()
                         || !mob_load
                         || self.rng.number(1, 100) < *load_chance
@@ -457,7 +468,6 @@ impl GameState {
                     if let Some(obj) = self.load_object(*obj_vnum) {
                         self.obj_to_char(obj, last_mob.unwrap());
                         crate::dg_triggers::load_otrigger(self, obj);
-                        *obj_counts.entry(*obj_vnum).or_insert(0) += 1;
                         summary.objs_spawned += 1;
                         last_obj = Some(obj);
                         last_cmd = true;
@@ -473,7 +483,7 @@ impl GameState {
                     ..
                 } => {
                     // C 'E': gated on mob_load (not just a live mob pointer).
-                    if obj_counts.get(obj_vnum).copied().unwrap_or(0) >= *max_count
+                    if self.obj_population(*obj_vnum) as i64 >= i64::from(*max_count)
                         || last_mob.is_none()
                         || !mob_load
                         || self.rng.number(1, 100) < *load_chance
@@ -485,7 +495,6 @@ impl GameState {
                     if let Some(obj) = self.load_object(*obj_vnum) {
                         self.equip_char(last_mob.unwrap(), obj, *wear_pos);
                         crate::dg_triggers::load_otrigger(self, obj);
-                        *obj_counts.entry(*obj_vnum).or_insert(0) += 1;
                         summary.objs_spawned += 1;
                         last_obj = Some(obj);
                         last_cmd = true;
@@ -501,18 +510,20 @@ impl GameState {
                     ..
                 } => {
                     // C 'P': gated on obj_load (a prior 'O' must have loaded).
-                    if obj_counts.get(obj_vnum).copied().unwrap_or(0) >= *max_count
+                    if self.obj_population(*obj_vnum) as i64 >= i64::from(*max_count)
                         || !obj_load
                         || self.rng.number(1, 100) < *load_chance
                     {
                         last_cmd = false;
                         continue;
                     }
+                    // Match C's newest-first lookup without relying on arena order.
                     let container = self
                         .objs
                         .iter()
-                        .find(|(_, o)| o.item_number == *container_vnum)
-                        .map(|(id, _)| *id);
+                        .filter(|(_, o)| o.item_number == *container_vnum)
+                        .map(|(id, _)| *id)
+                        .max();
                     let container = match container {
                         Some(c) => c,
                         None => {
@@ -523,7 +534,6 @@ impl GameState {
                     if let Some(obj) = self.load_object(*obj_vnum) {
                         self.obj_to_obj(obj, container);
                         crate::dg_triggers::load_otrigger(self, obj);
-                        *obj_counts.entry(*obj_vnum).or_insert(0) += 1;
                         summary.objs_spawned += 1;
                         last_obj = Some(obj);
                         last_cmd = true;
@@ -713,5 +723,211 @@ mod hit_dice_tests {
         };
         assert_eq!(mob.points.max_hit, expected);
         assert!(mob.points.max_hit >= 52 && mob.points.max_hit <= 70);
+    }
+
+    fn reset_world(commands: Vec<ResetCmd>) -> GameState {
+        use crate::object::{ExtraFlags, ObjectType, WearFlags};
+        use crate::room::Room;
+
+        let mut g = GameState::new(Config::default());
+        g.add_room(Room::new(100, 1, "first".into(), String::new()));
+        g.add_room(Room::new(101, 1, "second".into(), String::new()));
+        g.zones.push(Zone {
+            number: 1,
+            name: "test".into(),
+            builders: String::new(),
+            lifespan: 10,
+            age: 0,
+            top: 199,
+            reset_mode: 2,
+            min_level: 1,
+            max_level: 100,
+            status_mode: 1,
+            map_x: None,
+            map_y: None,
+            reset_commands: commands,
+        });
+        for vnum in [201, 202, 203] {
+            g.obj_protos.insert(
+                vnum,
+                ObjectProto {
+                    vnum,
+                    name: format!("object{vnum}"),
+                    short_desc: format!("object{vnum}"),
+                    description: String::new(),
+                    obj_type: if vnum == 201 {
+                        ObjectType::Container
+                    } else {
+                        ObjectType::Other
+                    },
+                    wear_flags: WearFlags::TAKE,
+                    extra_flags: ExtraFlags::empty(),
+                    weight: 1,
+                    cost: 1,
+                    rent: 1,
+                    values: [0; 4],
+                    curr_slots: 0,
+                    total_slots: 0,
+                    obj_class: 0,
+                    min_level: 0,
+                    bitvector: 0,
+                    action_description: String::new(),
+                    affects: Vec::new(),
+                    ex_descriptions: Vec::new(),
+                },
+            );
+        }
+        g.mob_protos.insert(2000, bare_proto((1, 1, 10)));
+        g
+    }
+
+    fn reset_load(vnum: ObjVnum, cap: i32, room: RoomVnum) -> ResetCmd {
+        ResetCmd::LoadObjInRoom {
+            if_flag: false,
+            obj_vnum: vnum,
+            max_count: cap,
+            room_vnum: room,
+            load_chance: 0,
+        }
+    }
+
+    fn reset_put(vnum: ObjVnum, cap: i32) -> ResetCmd {
+        ResetCmd::PutObjInObj {
+            if_flag: true,
+            obj_vnum: vnum,
+            max_count: cap,
+            container_vnum: 201,
+            load_chance: 0,
+        }
+    }
+
+    fn reset_load_trigger(g: &mut GameState, kind: i32, vnum: i32, command: &str) {
+        crate::dg_db_scripts::set_test_proto_trigger(
+            g,
+            kind,
+            vnum,
+            crate::dg_db_scripts::TrigProto {
+                vnum: 9000,
+                attach_type: kind,
+                name: "load test".into(),
+                trigger_type: if kind == crate::dg_handler::MOB_TRIGGER {
+                    crate::dg_handler::MTRIG_LOAD
+                } else {
+                    crate::dg_handler::OTRIG_LOAD
+                },
+                narg: 100,
+                arglist: String::new(),
+                cmdlist: vec![command.into()],
+            },
+        );
+    }
+
+    #[test]
+    fn reset_put_fills_each_newest_matching_container() {
+        let mut g = reset_world(vec![
+            reset_load(201, 10, 100),
+            reset_put(202, 10),
+            reset_load(201, 10, 101),
+            reset_put(203, 10),
+        ]);
+        g.reset_zone(1);
+        for (room_vnum, loot_vnum) in [(100, 202), (101, 203)] {
+            let room = g.real_room(room_vnum).unwrap();
+            let chest = g.rooms[room].contents[0];
+            let contents = &g.get_obj(chest).unwrap().contains;
+            assert_eq!(contents.len(), 1);
+            assert_eq!(g.get_obj(contents[0]).unwrap().item_number, loot_vnum);
+        }
+    }
+
+    #[test]
+    fn reset_put_uses_newest_id_even_when_arena_order_changes() {
+        let mut g = reset_world(vec![reset_load(202, 10, 100), reset_put(203, 10)]);
+        let first = g.load_object(201).unwrap();
+        let second = g.load_object(201).unwrap();
+        let newest = g.load_object(201).unwrap();
+        assert!(g.extract_obj(first));
+        // Exercise an arena order that is not creation order: selecting by
+        // reverse iteration would pick the older container here.
+        g.objs.swap_indices(0, 1);
+        assert_eq!(
+            g.objs.keys().copied().collect::<Vec<_>>(),
+            vec![newest, second]
+        );
+        g.reset_zone(1);
+        assert!(g.get_obj(second).unwrap().contains.is_empty());
+        let contents = &g.get_obj(newest).unwrap().contains;
+        assert_eq!(contents.len(), 1);
+        assert_eq!(g.get_obj(contents[0]).unwrap().item_number, 203);
+    }
+
+    #[test]
+    fn reset_population_refills_capped_objects_and_removed_descendants() {
+        let mut g = reset_world(vec![
+            ResetCmd::RemoveObj {
+                if_flag: false,
+                room_vnum: 100,
+                obj_vnum: 201,
+            },
+            reset_load(201, 1, 100),
+            reset_put(202, 1),
+        ]);
+        for _ in 0..4 {
+            let summary = g.reset_zone(1);
+            assert_eq!(summary.objs_spawned, 2);
+            assert_eq!(g.obj_population(201), 1);
+            assert_eq!(g.obj_population(202), 1);
+            let room = g.real_room(100).unwrap();
+            let chest = g.rooms[room].contents[0];
+            assert_eq!(g.get_obj(chest).unwrap().contains.len(), 1);
+        }
+    }
+
+    #[test]
+    fn reset_population_observes_object_load_trigger_extraction() {
+        let mut g = reset_world(vec![reset_load(201, 1, 100), reset_load(201, 1, 101)]);
+        reset_load_trigger(&mut g, crate::dg_handler::OBJ_TRIGGER, 201, "opurge self");
+        let summary = g.reset_zone(1);
+        assert_eq!(summary.objs_spawned, 2);
+        assert_eq!(g.obj_population(201), 0);
+    }
+
+    #[test]
+    fn reset_population_observes_mobile_load_trigger_creation() {
+        let mut g = reset_world(vec![
+            ResetCmd::LoadMob {
+                if_flag: false,
+                mob_vnum: 2000,
+                max_count: 1,
+                room_vnum: 100,
+                load_chance: 0,
+            },
+            reset_load(202, 1, 100),
+        ]);
+        reset_load_trigger(
+            &mut g,
+            crate::dg_handler::MOB_TRIGGER,
+            2000,
+            "mload obj 202",
+        );
+        let summary = g.reset_zone(1);
+        assert_eq!(summary.objs_spawned, 0);
+        assert_eq!(g.obj_population(202), 1);
+    }
+
+    #[test]
+    fn reset_population_observes_mobile_load_trigger_extraction() {
+        let command = ResetCmd::LoadMob {
+            if_flag: false,
+            mob_vnum: 2000,
+            max_count: 1,
+            room_vnum: 100,
+            load_chance: 0,
+        };
+        let mut g = reset_world(vec![command.clone(), command]);
+        reset_load_trigger(&mut g, crate::dg_handler::MOB_TRIGGER, 2000, "mpurge self");
+        let summary = g.reset_zone(1);
+        assert_eq!(summary.mobs_spawned, 2);
+        assert_eq!(g.mob_population(2000), 0);
     }
 }

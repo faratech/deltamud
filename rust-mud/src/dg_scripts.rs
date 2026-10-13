@@ -8,11 +8,10 @@
 // per-event fire hooks, e.g. greet_mtrigger / speech_mtrigger / command_*) is
 // the public surface other modules call to drive scripts.
 //
-// Object identity: C uses GET_ID(go) — a unique long per char/obj, plus
-// ROOM_ID_BASE+rnum for rooms. We reproduce that numbering in `id_of` so UID
-// strings round-trip through find_char/find_obj/find_room exactly. Char ids
-// are CharId.0 (offset into MOBOBJ range), obj ids likewise; rooms use
-// ROOM_ID_BASE+rnum.
+// Object identity: character/object ids share one numeric allocator above the
+// complete room UID range. The port retains ROOM_ID_BASE+vnum for rooms,
+// including synthetic map cells. Central checked decoders keep each kind
+// distinct while preserving numeric id fields and ESC-prefixed references.
 //
 // Borrow discipline: the trigger arena + script tables live in dg_handler
 // behind mutexes; the VM pulls a *clone* of the running trigger's cmdlist and
@@ -28,7 +27,7 @@ use crate::object::{ObjLoc, ObjectGraphOrder, walk_object_graph};
 use crate::state::GameState;
 use crate::types::*;
 
-pub const UID_CHAR: char = '\x1b';
+pub use crate::dg_handler::UID_CHAR;
 const MAX_DEPTH_RECURSE: i32 = MAX_SCRIPT_DEPTH;
 
 // C static `depth` in script_driver and dg_owner_purged now live on
@@ -94,39 +93,19 @@ pub fn script_log(msg: &str) {
 // find_char / find_obj / find_room by UID number (search-by-number routines).
 // ---------------------------------------------------------------------------
 fn find_char_by_uid(g: &GameState, n: i64) -> Option<CharId> {
-    if n <= 0 {
-        return None;
-    }
-    let cid = CharId(n as u64);
-    g.get_char(cid).map(|_| cid)
+    dg_handler::char_by_uid(g, n)
 }
 fn find_obj_by_uid(g: &GameState, n: i64) -> Option<ObjId> {
-    if n <= 0 {
-        return None;
-    }
-    let oid = ObjId(n as u64);
-    g.get_obj(oid).map(|_| oid)
+    dg_handler::obj_by_uid(g, n)
 }
 fn find_room_by_uid(g: &GameState, n: i64) -> Option<RoomRnum> {
-    // Room UID = ROOM_ID_BASE + vnum (matches dg_wldcmd/dg_objcmd). Tolerate a
-    // bare vnum encoding too.
-    let vnum: RoomVnum = if n >= ROOM_ID_BASE {
-        (n - ROOM_ID_BASE) as RoomVnum
-    } else {
-        n as RoomVnum
-    };
-    g.real_room(vnum)
+    dg_handler::room_by_uid(g, n)
 }
 
 // ---- generic name searches (get_char / get_obj / get_room by name) --------
 
 fn parse_uid(name: &str) -> Option<i64> {
-    let mut chars = name.chars();
-    if chars.next() == Some(UID_CHAR) {
-        chars.as_str().trim().parse::<i64>().ok()
-    } else {
-        None
-    }
+    dg_handler::parse_uid(name)
 }
 
 /// get_char(name): UID or world-wide name (visible). For DG we ignore
@@ -1402,12 +1381,8 @@ fn process_remote(g: &mut GameState, go: GoRef, trig: TrigId, cmd: &str) {
         return;
     };
     let uid = atoi(&uid_s);
-    // C (dg_scripts.c:2125) only rejects uid<=0 as illegal. Its second branch
-    // (`uid < ROOM_ID_BASE` => "is a PC?") relied on C's id scheme where mob/obj
-    // ids sat in MOBOBJ_ID_BASE..ROOM_ID_BASE; in THIS port mob UID = raw CharId
-    // and obj UID = raw ObjId (small positive ints below ROOM_ID_BASE), so that
-    // range gate would reject every valid mob/obj target. Drop it: remote may set
-    // a global on any valid target (mob/obj/room).
+    // All runtime entity ids occupy the shared range above room UIDs. Resolve
+    // the numeric id without treating a bare room vnum as an encoded UID.
     if uid <= 0 {
         log_cmd_err(g, trig, "remote", "illegal uid");
         return;
@@ -2193,6 +2168,102 @@ mod vm_tests {
         script_driver(&mut g, GoRef::Mob(cid), trig, MOB_TRIGGER, TRIG_NEW);
         assert_eq!(read_global(&g, cid, "doubled").as_deref(), Some("14"));
         assert_eq!(read_global(&g, cid, "good").as_deref(), Some("yes"));
+    }
+
+    #[test]
+    fn dg_uid_substitution_and_remote_preserve_entity_kind() {
+        use crate::object::Object;
+
+        let (_lock, mut g, runner) = world();
+        let room = g.get_char(runner).unwrap().in_room.unwrap();
+        let object = g.create_obj(Object::new(700, "wardtoken".into(), "a ward token".into()));
+        g.obj_to_room(object, room);
+        let mut actor = Character::new_npc(800);
+        actor.player.name = "actor".into();
+        actor.short_desc = Some("the actor".into());
+        let actor = g.create_char(actor);
+        g.char_to_room(actor, room);
+        // With independent allocators this carried object has the actor's ID,
+        // and the room object has the runner's ID.
+        let held = g.create_obj(Object::new(701, "heldtoken".into(), "a held token".into()));
+        g.obj_to_char(held, runner);
+        let trig = make_trig(&mut g, &[]);
+        dg_handler::with_trig_mut(&mut g, trig, |t| {
+            add_var_in(
+                &mut t.var_list,
+                "actor",
+                &format!("{UID_CHAR}{}", actor.0),
+                0,
+            );
+            add_var_in(
+                &mut t.var_list,
+                "object",
+                &format!("{UID_CHAR}{}", object.0),
+                0,
+            );
+            add_var_in(&mut t.var_list, "marker", "yes", 0);
+        });
+        for owner in [GoRef::Mob(runner), GoRef::Obj(object), GoRef::Room(room)] {
+            assert_eq!(var_subst(&g, owner, trig, "%object.name%"), "wardtoken");
+            assert_eq!(var_subst(&g, owner, trig, "%actor.name%"), "the actor");
+            assert_eq!(
+                var_subst(&g, owner, trig, "%object.id%"),
+                object.0.to_string()
+            );
+            assert_eq!(
+                var_subst(&g, owner, trig, "%actor.id%"),
+                actor.0.to_string()
+            );
+        }
+        makeuid_var(
+            &mut g,
+            GoRef::Mob(runner),
+            trig,
+            &format!("makeuid recovered {}", object.0),
+        );
+        assert_eq!(
+            var_subst(&g, GoRef::Mob(runner), trig, "%recovered%"),
+            format!("{UID_CHAR}{}", object.0)
+        );
+        assert_eq!(
+            var_subst(&g, GoRef::Mob(runner), trig, "%recovered.name%"),
+            "wardtoken"
+        );
+        process_remote(
+            &mut g,
+            GoRef::Mob(runner),
+            trig,
+            &format!("remote marker {}", object.0),
+        );
+        assert_eq!(
+            dg_handler::get_global_var(&g, ScriptKey::Obj(object), "marker").as_deref(),
+            Some("yes")
+        );
+        assert_eq!(
+            dg_handler::get_global_var(&g, ScriptKey::Mob(runner), "marker"),
+            None
+        );
+        process_remote(
+            &mut g,
+            GoRef::Mob(runner),
+            trig,
+            &format!("remote marker {}", actor.0),
+        );
+        assert_eq!(
+            dg_handler::get_global_var(&g, ScriptKey::Mob(actor), "marker").as_deref(),
+            Some("yes")
+        );
+        let room_uid = ROOM_ID_BASE + i64::from(g.rooms[room].number);
+        process_remote(
+            &mut g,
+            GoRef::Mob(runner),
+            trig,
+            &format!("remote marker {room_uid}"),
+        );
+        assert_eq!(
+            dg_handler::get_global_var(&g, ScriptKey::Room(room), "marker").as_deref(),
+            Some("yes")
+        );
     }
 
     #[test]

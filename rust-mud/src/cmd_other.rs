@@ -312,9 +312,9 @@ fn check_perm_duration(g: &GameState, cid: CharId, bitvector: i64) -> bool {
 
 /// appear(): break invisibility / hide, announce arrival (fight.c).
 pub(crate) fn appear(g: &mut GameState, cid: CharId) {
-    // SPELL_INVISIBLE == 5 (spells.h). We clear the spell affect if present,
-    // then the AFF_INVISIBLE flag, unless a permanent affect holds it.
-    const SPELL_INVISIBLE: i32 = 5;
+    // Clear the canonical invisibility spell and its flag unless a permanent
+    // affect holds it. Spell 5 is burning hands, not invisibility (#446).
+    use crate::spell_parser::SPELL_INVISIBLE;
     if !check_perm_duration(g, cid, AFF_INVISIBLE) {
         if affected_by_spell(g, cid, SPELL_INVISIBLE) {
             affect_from_char(g, cid, SPELL_INVISIBLE);
@@ -3338,30 +3338,10 @@ fn any_one_arg(argument: &str) -> (String, &str) {
 }
 
 /// get_char_vis(ch, arg) (handler.c): the visible character matching `arg` in
-/// the actor's room first, then a whole-world scan. Implemented here (as in
-/// cmd_wizard.rs / cmd_social.rs) because the shared contract exposes only the
-/// room-scoped finder.
+/// the actor's room first, then a whole-world scan. Delegate to the shared
+/// finder so exact-PC ordinals have the same visibility rules everywhere.
 fn get_char_vis(g: &GameState, ch: CharId, arg: &str) -> Option<CharId> {
-    if let Some(id) = g.get_char_room_vis(ch, arg) {
-        return Some(id);
-    }
-    let (mut count, name) = crate::handler::get_number(arg);
-    if count == 0 {
-        return None;
-    }
-    for cid in g.char_ids() {
-        let target_name = g
-            .get_char(cid)
-            .map(|c| c.player.name.clone())
-            .unwrap_or_default();
-        if isname(&name, &target_name) && g.can_see(ch, cid) {
-            count -= 1;
-            if count == 0 {
-                return Some(cid);
-            }
-        }
-    }
-    None
+    g.get_char_vis(ch, arg)
 }
 
 // ===========================================================================
@@ -4252,6 +4232,60 @@ mod tests {
 
     fn output(g: &GameState, conn: ConnId) -> &str {
         &g.descriptors.get(&conn).unwrap().outbuf
+    }
+
+    #[test]
+    fn appear_removes_invisibility_spell_and_its_defense_without_returning() {
+        let mut g = GameState::new(Config::default());
+        let ch = connected_player(&mut g, ConnId(95), "Invisible", 20);
+        let base_defense = g.get_char(ch).unwrap().points.defense;
+        crate::magic::mag_affects(
+            &mut g,
+            20,
+            ch,
+            Some(ch),
+            crate::spell_parser::SPELL_INVISIBLE,
+        );
+        assert!(affected_by_spell(
+            &g,
+            ch,
+            crate::spell_parser::SPELL_INVISIBLE
+        ));
+        assert_ne!(g.get_char(ch).unwrap().affect_flags & AFF_INVISIBLE, 0);
+        assert_eq!(g.get_char(ch).unwrap().points.defense, base_defense + 10);
+
+        appear(&mut g, ch);
+        g.affect_total(ch);
+
+        assert!(!affected_by_spell(
+            &g,
+            ch,
+            crate::spell_parser::SPELL_INVISIBLE
+        ));
+        assert_eq!(g.get_char(ch).unwrap().affect_flags & AFF_INVISIBLE, 0);
+        assert_eq!(g.get_char(ch).unwrap().points.defense, base_defense);
+    }
+
+    #[test]
+    fn appear_preserves_permanent_invisibility_affect() {
+        let mut g = GameState::new(Config::default());
+        let ch = connected_player(&mut g, ConnId(96), "Permanent", 20);
+        g.get_char_mut(ch).unwrap().affected.push(Affect {
+            spell_type: -1,
+            duration: -1,
+            modifier: 0,
+            location: APPLY_NONE,
+            bitvector: AFF_INVISIBLE,
+            caster: None,
+        });
+        g.affect_total(ch);
+
+        appear(&mut g, ch);
+        g.affect_total(ch);
+
+        assert_ne!(g.get_char(ch).unwrap().affect_flags & AFF_INVISIBLE, 0);
+        assert_eq!(g.get_char(ch).unwrap().affected.len(), 1);
+        assert_eq!(g.get_char(ch).unwrap().affected[0].duration, -1);
     }
 
     fn peaceful_steal_fixture(level: Level, trust: i32) -> (GameState, CharId, CharId, ConnId) {

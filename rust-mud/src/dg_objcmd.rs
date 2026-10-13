@@ -29,7 +29,7 @@
 
 use crate::act::{ActArg, To, act};
 use crate::dg_comm::{TO_CHAR, TO_ROOM, sub_write};
-use crate::dg_handler::ROOM_ID_BASE;
+use crate::dg_handler::UID_CHAR;
 use crate::interpreter::{command_interpreter, indirect_command_target_is_forceable, is_abbrev};
 use crate::object::{ObjLoc, ObjectGraphOrder, ObjectType, walk_object_graph};
 use crate::room::RoomFlags;
@@ -39,10 +39,6 @@ use crate::types::*;
 // do_osend subcmd selectors (dg_objcmd.c).
 const SCMD_OSEND: i32 = 0;
 const SCMD_OECHOAROUND: i32 = 1;
-
-// UID prefix byte (dg_scripts.h UID_CHAR == '\x1b'). A script var that expands
-// to a char/obj is rendered as "<UID_CHAR><id>"; the id is base + GET_ID.
-const UID_CHAR: char = '\x1b';
 
 // ---------------------------------------------------------------------------
 // dg_owner_purged: set when opurge destroys the object that owns the running
@@ -156,46 +152,22 @@ fn cycle_up(g: &GameState, obj: ObjId) -> ObjId {
 // that resolved to a live entity is rendered "<UID_CHAR><base+id>".
 // ---------------------------------------------------------------------------
 fn parse_uid(name: &str) -> Option<i64> {
-    let mut chars = name.chars();
-    if chars.next()? == UID_CHAR {
-        chars.as_str().trim().parse::<i64>().ok()
-    } else {
-        None
-    }
+    crate::dg_handler::parse_uid(name)
 }
 
 // A DG char/obj UID is the *raw arena id* (this port's GET_ID == CharId/ObjId),
 // matching the peer dg_mobcmd.rs convention so the VM's UID strings resolve
 // identically across all script-command modules.
 fn find_char_by_id(g: &GameState, id: i64) -> Option<CharId> {
-    if id <= 0 {
-        return None;
-    }
-    let cid = CharId(id as u64);
-    if g.char_exists(cid) { Some(cid) } else { None }
+    crate::dg_handler::char_by_uid(g, id)
 }
 
 fn find_obj_by_id(g: &GameState, id: i64) -> Option<ObjId> {
-    if id <= 0 {
-        return None;
-    }
-    let oid = ObjId(id as u64);
-    if g.get_obj(oid).is_some() {
-        Some(oid)
-    } else {
-        None
-    }
+    crate::dg_handler::obj_by_uid(g, id)
 }
 
 fn find_room_by_id(g: &GameState, id: i64) -> Option<RoomRnum> {
-    // C get_room()/find_room(): a room UID is ROOM_ID_BASE + vnum. Decode the
-    // vnum back out (and tolerate a bare vnum encoding for robustness).
-    let vnum = if id >= ROOM_ID_BASE {
-        (id - ROOM_ID_BASE) as RoomVnum
-    } else {
-        id as RoomVnum
-    };
-    g.real_room(vnum)
+    crate::dg_handler::room_by_uid(g, id)
 }
 
 // ---------------------------------------------------------------------------
@@ -346,9 +318,9 @@ fn find_obj_target_room(g: &GameState, obj: ObjId, rawroomstr: &str) -> Option<R
     }
 
     let location: RoomRnum;
-    if let Some(id) = parse_uid(&roomstr) {
+    if roomstr.starts_with(UID_CHAR) {
         // UID room reference.
-        location = find_room_by_id(g, id)?;
+        location = find_room_by_id(g, parse_uid(&roomstr)?)?;
     } else if is_number(&roomstr) {
         location = g.real_room(atoi(&roomstr).ok()?)?;
     } else if let Some(cid) = get_char_by_obj(g, obj, &roomstr) {
@@ -621,7 +593,10 @@ fn do_opurge(g: &mut GameState, obj: ObjId, argument: &str) {
             for ch in people {
                 if g.get_char(ch).map(|c| c.is_npc).unwrap_or(false) {
                     crate::dg_handler::on_char_extracted(g, ch);
-                    g.extract_char(ch);
+                    g.extract_char_with_disposition(
+                        ch,
+                        crate::handler::PossessionDisposition::DropToRoom,
+                    );
                 }
             }
             let contents = g.room(rnum).contents.clone();
@@ -641,7 +616,7 @@ fn do_opurge(g: &mut GameState, obj: ObjId, argument: &str) {
             return;
         }
         crate::dg_handler::on_char_extracted(g, ch);
-        g.extract_char(ch);
+        g.extract_char_with_disposition(ch, crate::handler::PossessionDisposition::DropToRoom);
     } else if let Some(o) = get_obj_by_obj(g, obj, &arg) {
         if o == obj {
             // The trigger purged its own object: flag it for the VM so it stops
@@ -1159,6 +1134,30 @@ mod object_ancestry_tests {
     use crate::config::Config;
     use crate::object::Object;
     use crate::room::Room;
+
+    #[test]
+    fn dg_uid_object_commands_drop_targeted_npc_possessions() {
+        let mut g = GameState::new(Config::default());
+        let room = g.add_room(Room::new(700, 7, "DG room".into(), String::new()));
+        let owner = g.create_obj(Object::new(NOTHING, "owner".into(), "owner".into()));
+        g.obj_to_room(owner, room);
+        let victim = g.create_char(crate::character::Character::new_npc(701));
+        g.char_to_room(victim, room);
+        let carried = g.create_obj(Object::new(702, "token".into(), "a token".into()));
+        g.obj_to_char(carried, victim);
+        assert_eq!(find_char_by_id(&g, owner.0 as i64), None);
+        assert_eq!(find_obj_by_id(&g, victim.0 as i64), None);
+        assert!(dispatch_obj_command(
+            &mut g,
+            owner,
+            &format!("opurge {UID_CHAR}{}", victim.0)
+        ));
+        assert!(!g.char_exists(victim));
+        assert_eq!(g.get_obj(carried).unwrap().loc, ObjLoc::Room(room));
+        assert!(g.get_obj(owner).is_some());
+        assert_eq!(find_obj_target_room(&g, owner, "\x1b-1"), None);
+        assert_eq!(find_obj_target_room(&g, owner, "700"), Some(room));
+    }
 
     #[test]
     fn dg_object_ancestry_is_cycle_safe_and_depth_bounded() {

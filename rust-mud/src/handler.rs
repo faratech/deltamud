@@ -32,21 +32,31 @@ pub fn isname(arg: &str, namelist: &str) -> bool {
 
 /// Parse "3.sword" -> (3, "sword"); "sword" -> (1, "sword").
 /// "all.coin" -> (i32::MAX, "coin"); "all" -> (i32::MAX, "all" w/ all-flag).
+/// Negative or overflowing ordinals return -1, distinct from the exact-PC
+/// selector 0, and cannot underflow the countdown in existing finders.
 pub fn get_number(arg: &str) -> (i32, String) {
     if let Some((num, name)) = arg.split_once('.') {
         if num.eq_ignore_ascii_case("all") {
             return (i32::MAX, name.to_string());
         }
         match crate::text::parse_i32_strict(num) {
-            Ok(n) => return (n, name.to_string()),
+            Ok(n) => return (n.max(-1), name.to_string()),
             Err(crate::text::ParseIntError::Overflow) => {
                 log::warn!("object/character ordinal is outside i32 range: {num:?}");
-                return (0, name.to_string());
+                return (-1, name.to_string());
             }
             Err(crate::text::ParseIntError::Empty | crate::text::ParseIntError::Invalid) => {}
         }
     }
     (1, arg.to_string())
+}
+
+/// The caller decides whether extraction leaves possessions in the world or
+/// removes a runtime copy that has already been saved for the next login.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PossessionDisposition {
+    DropToRoom,
+    Destroy,
 }
 
 impl GameState {
@@ -123,15 +133,30 @@ impl GameState {
     /// affect of a spell, CLEAR its affect bits from the flag word (the
     /// old retain()s left bits stuck), then recompute (#98).
     pub fn affect_remove_spell(&mut self, cid: CharId, spell: i32) {
-        let mut cleared = 0i64;
-        if let Some(ch) = self.chars.get_mut(&cid) {
-            for a in ch.affected.iter().filter(|a| a.spell_type == spell) {
-                cleared |= a.bitvector;
-            }
-            ch.affected.retain(|a| a.spell_type != spell);
-            ch.affect_flags &= !cleared;
+        while let Some(index) = self
+            .chars
+            .get(&cid)
+            .and_then(|ch| ch.affected.iter().position(|a| a.spell_type == spell))
+        {
+            self.affect_remove_at(cid, index);
         }
         self.affect_total(cid);
+    }
+
+    /// Remove one affect, then rebuild stats and flags from the surviving
+    /// equipment/affects. `last_applied` strips the old numeric contribution;
+    /// subtracting its modifier here as well would subtract it twice.
+    pub(crate) fn affect_remove_at(&mut self, cid: CharId, index: usize) -> bool {
+        let Some(ch) = self.chars.get_mut(&cid) else {
+            return false;
+        };
+        if index >= ch.affected.len() {
+            return false;
+        }
+        let removed = ch.affected.remove(index);
+        ch.affect_flags &= !removed.bitvector;
+        self.affect_total(cid);
+        true
     }
 
     // ---- Object placement ----------------------------------------------
@@ -492,7 +517,7 @@ impl GameState {
     fn is_lit_light(&self, oid: ObjId) -> bool {
         self.objs
             .get(&oid)
-            .map(|o| o.obj_type == ObjectType::Light && o.values[2] > 0)
+            .map(|o| o.obj_type == ObjectType::Light && o.values[2] != 0)
             .unwrap_or(false)
     }
 
@@ -542,8 +567,17 @@ impl GameState {
     }
 
     /// Remove a character from the world. Detaches from room, drops fighters,
-    /// and extracts inventory/equipment. PCs are normally respawned instead.
+    /// and removes their runtime inventory/equipment. Saved disconnects use
+    /// this policy so the same items cannot also be left on the room floor.
     pub fn extract_char(&mut self, cid: CharId) {
+        self.extract_char_with_disposition(cid, PossessionDisposition::Destroy);
+    }
+
+    pub fn extract_char_with_disposition(
+        &mut self,
+        cid: CharId,
+        disposition: PossessionDisposition,
+    ) {
         // Restore arena-backed state while the Character still exists. The
         // helper is idempotent, so disconnect/death paths may already have run
         // it before reaching extract_char.
@@ -609,11 +643,9 @@ impl GameState {
             }
         }
 
-        self.char_from_room(cid);
-
-        // C handler.c:1101-1112: extraction leaves the character's objects
-        // behind - carried items and worn equipment are dropped in the room
-        // ('purge' / force-rent must not destroy gear; #103).
+        // C handler.c:1101-1124 drops possessions before removing the
+        // character from its room. Session teardown instead destroys the
+        // runtime copy after its object file has been saved (#103).
         let (carried, worn, in_room) = match self.chars.get(&cid) {
             Some(ch) => (
                 ch.carrying.clone(),
@@ -622,7 +654,7 @@ impl GameState {
             ),
             None => (Vec::new(), Vec::new(), None),
         };
-        if let Some(rnum) = in_room {
+        if let Some(rnum) = in_room.filter(|_| disposition == PossessionDisposition::DropToRoom) {
             for o in carried {
                 self.obj_from_anywhere(o);
                 self.obj_to_room(o, rnum);
@@ -633,8 +665,8 @@ impl GameState {
                 }
             }
         } else {
-            // Nowhere to drop them (void extraction) - C's obj_to_room with
-            // NOWHERE is a no-op, so the objects vanish as before.
+            // Persisted session teardown, temporary entities, or no room in
+            // which a gameplay extraction could leave possessions.
             for o in worn {
                 self.extract_obj(o);
             }
@@ -642,6 +674,8 @@ impl GameState {
                 self.extract_obj(o);
             }
         }
+
+        self.char_from_room(cid);
 
         // Unlink descriptor / name index.
         if let Some(ch) = self.chars.get(&cid) {
@@ -724,14 +758,21 @@ impl GameState {
         // C handler.c:1208-1215: 'self'/'me' resolve to the observer, and a
         // '0.<name>' ordinal resolves the PC by name via get_player_vis
         // (count == 0 after get_number strips the '0.') (#226).
-        let (mut count, name) = get_number(arg);
-        if name.eq_ignore_ascii_case("self") || name.eq_ignore_ascii_case("me") {
+        if arg.eq_ignore_ascii_case("self") || arg.eq_ignore_ascii_case("me") {
             return Some(observer);
         }
+        let (mut count, name) = get_number(arg);
+        if count < 0 {
+            return None;
+        }
         if count == 0 {
-            // 0.<name>: world-wide player lookup.
+            // C get_player_vis(..., 1): exact visible PC in this room.
             for (cid, ch) in self.chars.iter() {
-                if !ch.is_npc && isname(&name, &ch.player.name) {
+                if !ch.is_npc
+                    && ch.in_room == Some(rnum)
+                    && ch.player.name.eq_ignore_ascii_case(&name)
+                    && self.can_see(observer, *cid)
+                {
                     return Some(*cid);
                 }
             }
@@ -744,6 +785,34 @@ impl GameState {
             };
             let names = ch.player.name.clone();
             if isname(&name, &names) && self.can_see(observer, cid) {
+                count -= 1;
+                if count == 0 {
+                    return Some(cid);
+                }
+            }
+        }
+        None
+    }
+
+    /// C get_char_vis: room first, then exact visible PCs for `0.Name`, or
+    /// a numbered world-wide character scan for ordinary keywords.
+    pub fn get_char_vis(&self, observer: CharId, arg: &str) -> Option<CharId> {
+        if let Some(found) = self.get_char_room_vis(observer, arg) {
+            return Some(found);
+        }
+        let (mut count, name) = get_number(arg);
+        if count < 0 {
+            return None;
+        }
+        for (&cid, ch) in &self.chars {
+            if !self.can_see(observer, cid) {
+                continue;
+            }
+            if count == 0 {
+                if !ch.is_npc && ch.player.name.eq_ignore_ascii_case(&name) {
+                    return Some(cid);
+                }
+            } else if isname(&name, &ch.player.name) {
                 count -= 1;
                 if count == 0 {
                     return Some(cid);
@@ -1068,8 +1137,9 @@ mod tests {
     #[test]
     fn get_number_rejects_overflow_instead_of_falling_back_to_first_match() {
         assert_eq!(get_number("2147483647.sword"), (i32::MAX, "sword".into()));
-        assert_eq!(get_number("2147483648.sword"), (0, "sword".into()));
-        assert_eq!(get_number("-2147483649.sword"), (0, "sword".into()));
+        assert_eq!(get_number("2147483648.sword"), (-1, "sword".into()));
+        assert_eq!(get_number("-2147483649.sword"), (-1, "sword".into()));
+        assert_eq!(get_number("-2147483648.sword"), (-1, "sword".into()));
         assert_eq!(
             get_number("not-a-number.sword"),
             (1, "not-a-number.sword".into())
@@ -1118,6 +1188,123 @@ mod tests {
         g.char_to_room(viewer, rn);
         g.char_to_room(target, rn);
         (g, viewer, target)
+    }
+
+    #[test]
+    fn zero_ordinal_room_lookup_requires_exact_visible_local_player() {
+        let (mut g, viewer, target) = visible_pair();
+        let room = g.get_char(viewer).unwrap().in_room.unwrap();
+        let mut npc = Character::new_npc(21);
+        npc.player.name = "Target".into();
+        let npc = g.create_char(npc);
+        g.char_to_room(npc, room);
+
+        assert_eq!(g.get_char_room_vis(viewer, "0.tArGeT"), Some(target));
+        assert_eq!(g.get_char_room_vis(viewer, "0.Tar"), None);
+        assert_eq!(g.get_char_room_vis(viewer, "self"), Some(viewer));
+        assert_eq!(g.get_char_room_vis(viewer, "2.self"), None);
+        for invalid in ["2147483648.Target", "-2147483649.Target", "2147483648.self"] {
+            assert_eq!(g.get_char_room_vis(viewer, invalid), None);
+            assert_eq!(g.get_char_vis(viewer, invalid), None);
+        }
+
+        g.get_char_mut(target).unwrap().affect_flags = AFF_HIDE;
+        assert_eq!(g.get_char_room_vis(viewer, "0.Target"), None);
+        g.get_char_mut(viewer).unwrap().affect_flags = AFF_SENSE_LIFE;
+        assert_eq!(g.get_char_room_vis(viewer, "0.Target"), Some(target));
+        g.get_char_mut(target).unwrap().invis_level = 1;
+        assert_eq!(g.get_char_room_vis(viewer, "0.Target"), None);
+        g.get_char_mut(target).unwrap().invis_level = 0;
+        g.get_char_mut(viewer).unwrap().affect_flags = AFF_BLIND;
+        assert_eq!(g.get_char_room_vis(viewer, "0.Target"), None);
+        g.get_char_mut(viewer).unwrap().affect_flags = 0;
+        g.get_char_mut(target).unwrap().affect_flags = 0;
+        g.room_mut(room)
+            .room_flags
+            .insert(crate::room::RoomFlags::DARK);
+        assert_eq!(g.get_char_room_vis(viewer, "0.Target"), None);
+        g.get_char_mut(viewer).unwrap().affect_flags = AFF_INFRAVISION;
+        assert_eq!(g.get_char_room_vis(viewer, "0.Target"), Some(target));
+    }
+
+    #[test]
+    fn zero_ordinal_world_lookup_keeps_distant_player_visibility() {
+        let (mut g, viewer, target) = visible_pair();
+        let distant = g.add_room(crate::room::Room::new(
+            11,
+            0,
+            "Distant".into(),
+            String::new(),
+        ));
+        g.char_from_room(target);
+        g.char_to_room(target, distant);
+
+        assert_eq!(g.get_char_room_vis(viewer, "0.Target"), None);
+        assert_eq!(g.get_char_vis(viewer, "0.tArGeT"), Some(target));
+        assert_eq!(
+            crate::spell_parser::get_char_world_vis(&g, viewer, "0.Target"),
+            Some(target)
+        );
+        assert_eq!(g.get_char_vis(viewer, "0.Tar"), None);
+        g.get_char_mut(target).unwrap().affect_flags = AFF_INVISIBLE;
+        assert_eq!(g.get_char_vis(viewer, "0.Target"), None);
+        g.get_char_mut(viewer).unwrap().affect_flags = AFF_DETECT_INVIS;
+        assert_eq!(g.get_char_vis(viewer, "0.Target"), Some(target));
+    }
+
+    #[test]
+    fn remote_zero_ordinal_steal_and_give_cannot_transfer_possessions() {
+        let (mut g, thief, victim) = visible_pair();
+        let distant = g.add_room(crate::room::Room::new(
+            11,
+            0,
+            "Distant".into(),
+            String::new(),
+        ));
+        g.char_from_room(victim);
+        g.char_to_room(victim, distant);
+        g.get_char_mut(victim).unwrap().position = Position::Sleeping;
+        g.get_char_mut(victim).unwrap().points.gold = 10_000;
+        g.get_char_mut(thief).unwrap().points.gold = 100;
+        let loot = g.create_obj(Object::new(42, "loot".into(), "loot".into()));
+        g.obj_to_char(loot, victim);
+
+        crate::cmd_other::do_steal(&mut g, thief, "coins 0.Target", 0);
+        crate::cmd_other::do_steal(&mut g, thief, "loot 0.Target", 0);
+        crate::cmd_item::do_give(&mut g, thief, "10 coins 0.Target", 0);
+
+        assert_eq!(g.get_char(thief).unwrap().points.gold, 100);
+        assert_eq!(g.get_char(victim).unwrap().points.gold, 10_000);
+        assert_eq!(g.get_obj(loot).unwrap().loc, ObjLoc::Carried(victim));
+    }
+
+    #[test]
+    fn tell_zero_ordinal_still_delivers_to_distant_visible_player() {
+        let (mut g, sender, target) = visible_pair();
+        let distant = g.add_room(crate::room::Room::new(
+            11,
+            0,
+            "Distant".into(),
+            String::new(),
+        ));
+        g.char_from_room(target);
+        g.char_to_room(target, distant);
+        for (cid, conn) in [(sender, ConnId(71)), (target, ConnId(72))] {
+            let mut descriptor = Descriptor::new(conn, "tell.test".into());
+            descriptor.state = ConState::Playing;
+            descriptor.character = Some(cid);
+            g.descriptors.insert(conn, descriptor);
+            g.get_char_mut(cid).unwrap().desc = Some(conn);
+        }
+
+        crate::cmd_comm::do_tell(&mut g, sender, "0.Target hello from afar", 0);
+
+        assert!(
+            g.descriptors[&ConnId(72)]
+                .outbuf
+                .contains("hello from afar")
+        );
+        assert_eq!(g.get_char(target).unwrap().last_tell, Some(sender));
     }
 
     #[test]
@@ -1663,6 +1850,102 @@ mod tests {
 
         g.char_to_room(cid, to);
         assert_eq!(g.rooms[to].light, 1);
+    }
+
+    #[test]
+    fn infinite_light_illuminates_moves_and_never_burns_down() {
+        let mut g = fresh_game();
+        let from = g.add_room(crate::room::Room::new(10, 0, "From".into(), String::new()));
+        let to = g.add_room(crate::room::Room::new(11, 0, "To".into(), String::new()));
+        g.room_mut(from)
+            .room_flags
+            .insert(crate::room::RoomFlags::DARK);
+        g.room_mut(to)
+            .room_flags
+            .insert(crate::room::RoomFlags::DARK);
+        let mut bearer = Character::new_player("Bearer".into(), Class::Warrior, Race::Human);
+        bearer.player.level = LVL_IMMORT;
+        let bearer = g.create_char(bearer);
+        g.char_to_room(bearer, from);
+        let light = lit_light(&mut g);
+        g.get_obj_mut(light).unwrap().values[2] = -1;
+
+        assert!(g.is_dark(from));
+        g.equip_char(bearer, light, WEAR_LIGHT);
+        assert_eq!(g.room(from).light, 1);
+        assert!(!g.is_dark(from));
+        for _ in 0..3 {
+            crate::limits::point_update(&mut g);
+        }
+        assert_eq!(g.get_obj(light).unwrap().values[2], -1);
+        assert_eq!(g.room(from).light, 1);
+        g.char_from_room(bearer);
+        g.char_to_room(bearer, to);
+        assert_eq!(g.room(from).light, 0);
+        assert_eq!(g.room(to).light, 1);
+        g.unequip_char(bearer, WEAR_LIGHT);
+        assert_eq!(g.room(to).light, 0);
+        assert!(g.is_dark(to));
+    }
+
+    #[test]
+    fn zero_fuel_light_stays_dark_and_positive_fuel_burns_out() {
+        let (mut g, bearer, _) = visible_pair();
+        let room = g.get_char(bearer).unwrap().in_room.unwrap();
+        let light = lit_light(&mut g);
+        g.get_obj_mut(light).unwrap().values[2] = 0;
+        g.equip_char(bearer, light, WEAR_LIGHT);
+        assert_eq!(g.room(room).light, 0);
+        g.unequip_char(bearer, WEAR_LIGHT);
+        g.get_obj_mut(light).unwrap().values[2] = 1;
+        g.equip_char(bearer, light, WEAR_LIGHT);
+        assert_eq!(g.room(room).light, 1);
+        crate::limits::point_update(&mut g);
+        assert_eq!(g.get_obj(light).unwrap().values[2], 0);
+        assert_eq!(g.room(room).light, 0);
+        g.unequip_char(bearer, WEAR_LIGHT);
+        assert_eq!(g.room(room).light, 0);
+    }
+
+    #[test]
+    fn extraction_disposition_preserves_purge_loot_and_removes_runtime_copies() {
+        for disposition in [
+            PossessionDisposition::DropToRoom,
+            PossessionDisposition::Destroy,
+        ] {
+            let mut g = fresh_game();
+            let room = g.add_room(crate::room::Room::new(10, 0, "Room".into(), String::new()));
+            let victim = g.create_char(Character::new_npc(20));
+            g.char_to_room(victim, room);
+            let mut container = Object::new(21, "bag".into(), "a bag".into());
+            container.obj_type = ObjectType::Container;
+            let container = g.create_obj(container);
+            let child = g.create_obj(Object::new(22, "loot".into(), "loot".into()));
+            g.obj_to_obj(child, container);
+            g.obj_to_char(container, victim);
+            let light = lit_light(&mut g);
+            g.equip_char(victim, light, WEAR_LIGHT);
+            assert_eq!(g.room(room).light, 1);
+
+            if disposition == PossessionDisposition::DropToRoom {
+                g.extract_char_with_disposition(victim, disposition);
+            } else {
+                g.extract_char(victim);
+            }
+
+            assert!(!g.char_exists(victim));
+            assert!(g.room(room).people.is_empty());
+            assert_eq!(g.room(room).light, 0);
+            if disposition == PossessionDisposition::DropToRoom {
+                assert_eq!(g.get_obj(container).unwrap().loc, ObjLoc::Room(room));
+                assert_eq!(g.get_obj(light).unwrap().loc, ObjLoc::Room(room));
+                assert_eq!(g.get_obj(child).unwrap().loc, ObjLoc::Contained(container));
+                assert_eq!(g.get_obj(container).unwrap().contains, vec![child]);
+            } else {
+                assert!(g.objs.is_empty());
+                assert!(g.room(room).contents.is_empty());
+            }
+        }
     }
 
     /// BUG 14: moving objects on/off a PC sets PLR_CRASH (so crash_save_all is
