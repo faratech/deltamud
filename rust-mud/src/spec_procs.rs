@@ -1882,7 +1882,15 @@ pub fn tent(g: &mut GameState, ch: CharId, me: ObjId, cmd: &str, _arg: &str) -> 
         return true;
     }
 
-    // Record the camp-out coordinates on the player (saved.mapx / saved.mapy).
+    if !crate::objsave::crash_rentsave(g, ch, 0) {
+        g.send_to_char(
+            ch,
+            "Your belongings could not be saved. Please try again.\r\n",
+        );
+        return true;
+    }
+
+    // Record the camp-out coordinates only after the equipment is durable.
     if let Some(c) = g.get_char_mut(ch) {
         c.mapx = mapx;
         c.mapy = mapy;
@@ -1900,7 +1908,6 @@ pub fn tent(g: &mut GameState, ch: CharId, me: ObjId, cmd: &str, _arg: &str) -> 
 
     // write_aliases(g, ch) — alias persistence is handled by the regular save path;
     // Crash_rentsave(ch, 0) banks the inventory at zero cost.
-    crate::objsave::crash_rentsave(g, ch, 0);
 
     let name = get_name(g, ch);
     let rcds = room_vnum(g, rnum);

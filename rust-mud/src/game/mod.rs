@@ -7,7 +7,11 @@ mod db_bridge;
 mod deferred;
 mod heartbeat;
 mod nanny;
+#[cfg(test)]
+mod persistence_tests;
 mod presentation;
+#[cfg(test)]
+mod rental_tests;
 mod teardown;
 
 use crate::DatabaseInterface;
@@ -535,7 +539,30 @@ impl ShutdownReport {
 struct PendingPlayerSave {
     name: String,
     snapshot: crate::character::Character,
-    task: tokio::task::JoinHandle<std::result::Result<(), String>>,
+    host: String,
+    retry_delay_secs: u64,
+    task: tokio::task::JoinHandle<PlayerSaveCompletion>,
+}
+
+struct PlayerSaveCompletion {
+    result: std::result::Result<(), String>,
+    failures: u32,
+}
+
+struct FailedPlayerSave {
+    name: String,
+    snapshot: crate::character::Character,
+    host: String,
+    retry_at: tokio::time::Instant,
+    retry_delay_secs: u64,
+    error: String,
+}
+
+struct LinklessObjectSave {
+    host: String,
+    rental_saved: bool,
+    retry_at: tokio::time::Instant,
+    retry_delay_secs: u64,
 }
 
 pub struct Game {
@@ -556,6 +583,8 @@ pub struct Game {
     /// non-blocking, while a later save waits behind the prior generation so an
     /// old snapshot can never finish last and overwrite a newer session.
     pending_player_saves: HashMap<i64, PendingPlayerSave>,
+    failed_player_saves: HashMap<i64, FailedPlayerSave>,
+    linkless_object_saves: HashMap<CharId, LinklessObjectSave>,
     player_save_failures: u32,
     /// The live input receiver is kept on the Game so a database wait can
     /// continue servicing established sessions. Messages which would start a
@@ -599,6 +628,8 @@ impl Game {
             pending_load: HashMap::new(),
             just_created: std::collections::HashSet::new(),
             pending_player_saves: HashMap::new(),
+            failed_player_saves: HashMap::new(),
+            linkless_object_saves: HashMap::new(),
             player_save_failures: 0,
             game_rx: None,
             deferred_messages: VecDeque::new(),

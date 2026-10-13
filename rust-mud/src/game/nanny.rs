@@ -155,6 +155,8 @@ impl Game {
             None => return,
         };
 
+        let session_name = self.descriptor_name(conn_id);
+
         match state {
             ConState::QAnsi => {
                 // C interpreter.c:1706-1735 CON_QANSI (#198).
@@ -218,6 +220,9 @@ impl Game {
                         return;
                     }
                 };
+                if !self.login_session_is_current(conn_id, state, &session_name) {
+                    return;
+                }
                 if !exists && crate::olc::name_reserved_by_zone_acl(&self.state, &name) {
                     self.out(conn_id, "Invalid name, please try another.\r\nName: ");
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
@@ -333,6 +338,9 @@ impl Game {
                         }
                     }
                 };
+                if !self.login_session_is_current(conn_id, state, &session_name) {
+                    return;
+                }
                 let ok = match stored_hash.as_ref() {
                     Some(hash) => {
                         self.await_database(crate::password::check_password_async(
@@ -343,6 +351,9 @@ impl Game {
                     }
                     None => false,
                 };
+                if !self.login_session_is_current(conn_id, state, &session_name) {
+                    return;
+                }
                 if !ok {
                     // C 1897-1911: mudlog the attempt, bump GET_BAD_PWS (and
                     // persist it), re-prompt; disconnect at max_bad_pws (#194).
@@ -368,9 +379,19 @@ impl Game {
                             LVL_GOD,
                         );
                     }
-                    if let Ok(mut rec) = self.load_player_latest(&name).await {
-                        rec.bad_pws = rec.bad_pws.saturating_add(1);
-                        let _ = self.db_save_player(&rec).await;
+                    if let Ok(rec) = self.load_player_latest(&name).await {
+                        if !self.login_session_is_current(conn_id, state, &session_name) {
+                            return;
+                        }
+                        if let Err(error) = self
+                            .db_update_login_failure_count(rec.idnum, rec.get_name(), false)
+                            .await
+                        {
+                            warn!("record bad password for {} failed: {}", name, error);
+                        }
+                    }
+                    if !self.login_session_is_current(conn_id, state, &session_name) {
+                        return;
                     }
                     let tries = {
                         let d = self
@@ -408,10 +429,25 @@ impl Game {
                         return;
                     }
                 };
-                let load_result = rec.bad_pws;
-                if load_result > 0 {
-                    rec.bad_pws = 0;
-                    let _ = self.db_save_player(&rec).await;
+                if !self.login_session_is_current(conn_id, state, &session_name) {
+                    return;
+                }
+                let load_result = match self
+                    .db_update_login_failure_count(rec.idnum, rec.get_name(), true)
+                    .await
+                {
+                    Ok(Some(previous)) => {
+                        rec.bad_pws = 0;
+                        previous
+                    }
+                    Ok(None) => return,
+                    Err(error) => {
+                        warn!("clear bad-password count for {} failed: {}", name, error);
+                        rec.bad_pws
+                    }
+                };
+                if !self.login_session_is_current(conn_id, state, &session_name) {
+                    return;
                 }
 
                 // C 1914-1952: automatic upgrade of legacy password hashes
@@ -425,6 +461,9 @@ impl Game {
                         .await_database(crate::password::hash_password_async(input.clone()))
                         .await
                     {
+                        if !self.login_session_is_current(conn_id, state, &session_name) {
+                            return;
+                        }
                         let upgrade_result = match self
                             .db_update_password_hash(
                                 rec.idnum,
@@ -482,6 +521,9 @@ impl Game {
                     }
                 }
 
+                if !self.login_session_is_current(conn_id, state, &session_name) {
+                    return;
+                }
                 // Cache the exact durable session hash so `unlock <password>`
                 // (act.other.c do_lockout) verifies the real account password.
                 if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
@@ -642,6 +684,9 @@ for access.\r\n\r\n",
                         }
                         return;
                     };
+                    if !self.login_session_is_current(conn_id, state, &session_name) {
+                        return;
+                    }
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                         d.state = ConState::GetNewbie;
                         // Session password hash, for the `unlock` gate.
@@ -827,6 +872,9 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
                 } else {
                     self.db_get_password_hash(&name).await
                 };
+                if !self.login_session_is_current(conn_id, state, &session_name) {
+                    return;
+                }
                 let authenticated_hash = match stored_hash {
                     Ok(Some(hash)) => {
                         let matches = self
@@ -855,6 +903,9 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
                         return;
                     }
                 };
+                if !self.login_session_is_current(conn_id, state, &session_name) {
+                    return;
+                }
                 if let Some(expected_hash) = authenticated_hash {
                     if let Some(d) = self.state.descriptors.get_mut(&conn_id) {
                         d.password_change_expected_hash = Some(expected_hash);
@@ -933,6 +984,9 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
                         }
                     },
                 };
+                if !self.login_session_is_current(conn_id, state, &session_name) {
+                    return;
+                }
                 let Some(password_hash) = self
                     .await_database(crate::password::hash_password_async(input.clone()))
                     .await
@@ -949,6 +1003,9 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
                     }
                     return;
                 };
+                if !self.login_session_is_current(conn_id, state, &session_name) {
+                    return;
+                }
                 let expected_hash = self
                     .state
                     .descriptors
@@ -976,6 +1033,9 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
                     }
                     result => result,
                 };
+                if !self.login_session_is_current(conn_id, state, &session_name) {
+                    return;
+                }
                 match durable {
                     Ok(crate::PasswordHashUpdateOutcome::Updated) => {
                         self.out(conn_id, "\r\nDone.\n\r");
@@ -1031,6 +1091,9 @@ Str: {:2} Int: {:2} Wis: {:2} Dex: {:2} Con: {:2} Cha: {:2}\r\n",
                         .await
                         .unwrap_or(false)
                 };
+                if !self.login_session_is_current(conn_id, state, &session_name) {
+                    return;
+                }
                 if ok {
                     self.out(
                         conn_id,
@@ -1053,6 +1116,9 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                 if input == "yes" || input == "YES" {
                     let name = self.descriptor_name(conn_id);
                     if let Ok(mut rec) = self.load_player_latest(&name).await {
+                        if !self.login_session_is_current(conn_id, state, &session_name) {
+                            return;
+                        }
                         if rec.act_flags & crate::flags::PLR_FROZEN != 0 {
                             self.out(
                                 conn_id,
@@ -1214,6 +1280,22 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
             .unwrap_or_default()
     }
 
+    fn login_session_is_current(
+        &self,
+        conn_id: ConnId,
+        expected_state: ConState,
+        expected_name: &str,
+    ) -> bool {
+        self.state
+            .descriptors
+            .get(&conn_id)
+            .is_some_and(|descriptor| {
+                descriptor.state == expected_state
+                    && descriptor.state != ConState::Close
+                    && descriptor.temp_name.as_deref().unwrap_or_default() == expected_name
+            })
+    }
+
     pub(crate) fn descriptor_host(&self, conn_id: ConnId) -> String {
         self.state
             .descriptors
@@ -1234,6 +1316,13 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
     }
 
     pub(crate) async fn create_and_enter(&mut self, conn_id: ConnId) {
+        let Some(expected_state) = self.state.descriptors.get(&conn_id).map(|d| d.state) else {
+            return;
+        };
+        if expected_state == ConState::Close {
+            return;
+        }
+        let creation_host = self.descriptor_host(conn_id);
         let (name, password_hash) = {
             let d = match self.state.descriptors.get(&conn_id) {
                 Some(d) => d,
@@ -1292,14 +1381,10 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                 // collision-safe creation transaction before any targeted
                 // generic save can match the durable row.
                 ch.idnum = idnum;
-                let host = self
-                    .state
-                    .descriptors
-                    .get(&conn_id)
-                    .map(|d| d.host.clone())
-                    .unwrap_or_default();
-                if let Err(e) = self.db_save_player_with_host(&ch, &host).await {
-                    warn!("save new player {} failed: {}", name, e);
+                if self.login_session_is_current(conn_id, expected_state, &name) {
+                    if let Err(e) = self.db_save_player_with_host(&ch, &creation_host).await {
+                        warn!("save new player {} failed: {}", name, e);
+                    }
                 }
                 crate::alias::clear_aliases(&mut self.state, ch.idnum);
                 // Register the new player in the in-memory index immediately (C
@@ -1318,6 +1403,11 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                     &host,
                 );
                 crate::mail::mail_register_player(&mut self.state, ch.idnum, &name);
+                // Creation may already be committed when its socket disappears.
+                // Reconcile the index above, but never resurrect session caches.
+                if !self.login_session_is_current(conn_id, expected_state, &name) {
+                    return;
+                }
                 // C interpreter.c start_player (1637-1653): the new character
                 // gets the MOTD + PRESS RETURN and lands at the MENU; the
                 // actual world-enter happens at menu option 1.
@@ -1491,6 +1581,32 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
     /// (#218). Returns true when THIS connection should go straight to
     /// Playing (dupe handled).
     pub(crate) async fn perform_dupe_check(&mut self, conn_id: ConnId, idnum: i64) -> bool {
+        if !self
+            .state
+            .descriptors
+            .get(&conn_id)
+            .is_some_and(|d| d.state != ConState::Close)
+        {
+            return false;
+        }
+        // A completed rental has already moved its equipment into the rent
+        // file. Its retained body is only a persistence retry owner; adopting
+        // that empty body would bypass crash_load and lose the rental later.
+        if self
+            .state
+            .rental_departures
+            .iter()
+            .any(|&body| self.state.get_char(body).is_some_and(|c| c.idnum == idnum))
+        {
+            self.out(
+                conn_id,
+                "Your saved departure is still finishing. Please try connecting again shortly.\r\n",
+            );
+            if let Some(descriptor) = self.state.descriptors.get_mut(&conn_id) {
+                descriptor.state = ConState::Close;
+            }
+            return true;
+        }
         // --- Pre-enter_game window (issue #396): a descriptor parked at the
         // MOTD/menu holds its loaded Character in `pending_load` with
         // character == None, so the body match below could not see it -- two
@@ -1657,6 +1773,12 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
     /// Load (or, for fresh chars, re-load) the player, place them in the
     /// world, and start play.
     pub(crate) async fn enter_game(&mut self, conn_id: ConnId, _is_new: bool) {
+        let Some(expected_state) = self.state.descriptors.get(&conn_id).map(|d| d.state) else {
+            return;
+        };
+        if expected_state == ConState::Close {
+            return;
+        }
         // C interpreter.c enter_player_game. The record was usually already
         // loaded at password-verify (pending_load) — consume it so login hits
         // the DB once.
@@ -1672,6 +1794,9 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
                 }
             },
         };
+        if !self.login_session_is_current(conn_id, expected_state, &name) {
+            return;
+        }
         // Re-run the same-id gate immediately before create_char. The password
         // gate normally makes two pending menu sessions impossible, but this is
         // the final invariant boundary: even a pre-existing/raced pending login
@@ -1952,6 +2077,9 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         // the OLD process right before exec (do_copyover); here we emit the C
         // "reboot completed" confirmation, then enter the world.
         let exists = self.db_player_exists(&name).await.unwrap_or(false);
+        if !self.login_session_is_current(conn_id, ConState::GetName, &name) {
+            return;
+        }
         if !exists {
             // C: "\n\rSomehow, your character was lost in the copyover. Sorry.\n\r"
             self.out(
@@ -1974,6 +2102,75 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         self.write_prompt(conn_id);
     }
 
+    pub(crate) fn finish_linkless_extraction(&mut self, character: CharId) {
+        let idnum = self.state.get_char(character).map(|c| c.idnum);
+        self.state.extract_char(character);
+        if let Some(idnum) = idnum {
+            crate::alias::clear_aliases(&mut self.state, idnum);
+        }
+        self.linkless_object_saves.remove(&character);
+        self.state.rental_departures.remove(&character);
+    }
+
+    pub(crate) fn retry_linkless_object_saves(&mut self) {
+        let now = tokio::time::Instant::now();
+        let ids: Vec<CharId> = self.linkless_object_saves.keys().copied().collect();
+        for cid in ids {
+            // A reconnect adopts the retained live body; subsequent saves now
+            // belong to that live session, not this abandoned close request.
+            if self.state.get_char(cid).is_none_or(|c| c.desc.is_some()) {
+                self.linkless_object_saves.remove(&cid);
+                if !self.state.char_exists(cid) {
+                    self.state.rental_departures.remove(&cid);
+                }
+                continue;
+            }
+            let retry = &self.linkless_object_saves[&cid];
+            if retry.retry_at > now {
+                continue;
+            }
+            let delay = retry.retry_delay_secs;
+            let host = retry.host.clone();
+            let rental_saved = retry.rental_saved;
+            let lib_path = self.state.config.lib_path.clone();
+            let character = self
+                .state
+                .get_char(cid)
+                .expect("retained player checked above");
+            let aliases_saved = match crate::alias::write_aliases(
+                &self.state,
+                &lib_path,
+                character.get_name(),
+                character.idnum,
+            ) {
+                Ok(()) => true,
+                Err(error) => {
+                    warn!("retained player alias save failed: {error}");
+                    false
+                }
+            };
+            if aliases_saved
+                && (rental_saved || crate::objsave::crash_save(&mut self.state, cid, &lib_path))
+            {
+                // The retained body continued to participate in the world
+                // during the outage; hand off its current row before removing
+                // it, rather than restoring the earlier disconnect snapshot.
+                if let Some(snapshot) = self.snapshot_online_player_for_save(cid) {
+                    self.state.update_player_index_from_character(
+                        &snapshot,
+                        snapshot.last_logon.timestamp(),
+                        &host,
+                    );
+                    self.queue_player_save(snapshot, host);
+                }
+                self.finish_linkless_extraction(cid);
+            } else if let Some(retry) = self.linkless_object_saves.get_mut(&cid) {
+                retry.retry_at = now + Duration::from_secs(delay);
+                retry.retry_delay_secs = (delay * 2).min(30);
+            }
+        }
+    }
+
     pub(crate) async fn disconnect(&mut self, conn_id: ConnId) {
         // If the player was mid-OLC, drop the editor's working copy and release
         // the lock on the edited vnum (C frees the editor on connection
@@ -1991,51 +2188,75 @@ ARE YOU ABSOLUTELY SURE?\r\n\r\nPlease type \"yes\" to confirm: ",
         self.pending_load.remove(&conn_id);
         self.pending.remove(&conn_id);
         self.just_created.remove(&conn_id);
-        let ch = self
+        let (controlled, original, rental_saved, host) = self
             .state
             .descriptors
             .get(&conn_id)
-            .and_then(|d| d.character);
-        if let Some(cid) = ch {
-            let mut alias_id_to_clear = None;
-            // C comm.c:2010 — arena combatants get their backed-up affects,
-            // wimpy and recall restored BEFORE the save, or the zeroed values
-            // persist to SQL (issue #390).
+            .map(|d| (d.character, d.original, d.rental_saved, d.host.clone()))
+            .unwrap_or_default();
+        // A switch borrows a body; losing its socket must detach that body,
+        // preserve the NPC, and persist the authenticated original PC.
+        for body in controlled.into_iter().chain(original) {
+            if let Some(character) = self.state.get_char_mut(body) {
+                if character.desc == Some(conn_id) {
+                    character.desc = None;
+                }
+            }
+        }
+        if let Some(cid) = original.or(controlled).filter(|&cid| {
+            self.state
+                .get_char(cid)
+                .is_some_and(|c| !c.is_npc && c.desc.is_none())
+        }) {
             crate::arena::on_link_lost(&mut self.state, cid);
-            // Persist then remove the character from the world.
+            let mut aliases_saved = true;
             if let Some(snapshot) = self.snapshot_online_player_for_save(cid) {
-                // Keep the index current with the saved record (level can
-                // have changed this session); host carries over the last
-                // login's host (update_player_index ignores an empty host).
-                let (idnum, pname, llogon) = (
-                    snapshot.idnum,
-                    snapshot.get_name().to_string(),
+                self.state.update_player_index_from_character(
+                    &snapshot,
                     snapshot.last_logon.timestamp(),
+                    &host,
                 );
-                alias_id_to_clear = Some(idnum);
-                self.state
-                    .update_player_index_from_character(&snapshot, llogon, "");
-                if let Err(err) = crate::alias::write_aliases(
+                if let Err(error) = crate::alias::write_aliases(
                     &self.state,
                     &self.state.config.lib_path,
-                    &pname,
-                    idnum,
+                    snapshot.get_name(),
+                    snapshot.idnum,
                 ) {
-                    warn!("write_aliases(g, {}) failed: {}", pname, err);
+                    aliases_saved = false;
+                    warn!(
+                        "disconnect alias save for {} failed: {}",
+                        snapshot.get_name(),
+                        error
+                    );
                 }
-                let host = self
-                    .state
-                    .descriptors
-                    .get(&conn_id)
-                    .map(|d| d.host.clone())
-                    .unwrap_or_default();
-                self.queue_player_save(snapshot, host);
+                self.queue_player_save(snapshot, host.clone());
             }
+            // A successful rent/camp/cryo already published the complete
+            // object file and removed its objects from the world. Writing an
+            // empty crash file here would destroy that durable rental.
             let lib_path = self.state.config.lib_path.clone();
-            crate::objsave::crash_save(&mut self.state, cid, &lib_path);
-            self.state.extract_char(cid);
-            if let Some(idnum) = alias_id_to_clear {
-                crate::alias::clear_aliases(&mut self.state, idnum);
+            let objects_saved =
+                rental_saved || crate::objsave::crash_save(&mut self.state, cid, &lib_path);
+            if aliases_saved && objects_saved {
+                self.finish_linkless_extraction(cid);
+            } else {
+                warn!(
+                    "disconnect file save for {:?} failed; retaining linkless player, aliases, and inventory",
+                    cid
+                );
+                if rental_saved {
+                    self.state.rental_departures.insert(cid);
+                    self.state.char_from_room(cid);
+                }
+                self.linkless_object_saves.insert(
+                    cid,
+                    LinklessObjectSave {
+                        host,
+                        rental_saved,
+                        retry_at: tokio::time::Instant::now() + Duration::from_secs(1),
+                        retry_delay_secs: 2,
+                    },
+                );
             }
         }
         // Dropping the Game's sender is what ends the connection task (#421);

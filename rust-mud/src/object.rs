@@ -433,7 +433,7 @@ pub enum ObjLoc {
     Contained(ObjId),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Object {
     pub id: ObjId,
     pub item_number: ObjVnum, // prototype vnum, or NOTHING for synthetic

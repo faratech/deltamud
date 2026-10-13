@@ -1043,21 +1043,63 @@ pub fn crash_crashsave(g: &mut GameState, ch: CharId) -> bool {
     true
 }
 
-/// Crash_rentsave(): RENT_RENTED save. Scrubs norents, records the per-diem
-/// cost and the player's gold/bank, writes the file, then extracts the objects
-/// from the world (the player walks away empty). Skips NPCs.
-pub fn crash_rentsave(g: &mut GameState, ch: CharId, cost: i32) {
-    if is_npc(g, ch) {
-        return;
+/// Prepare only this player's object forest in scratch state. Rent pruning,
+/// equipment relocation, and fees must not mutate the live player before the
+/// complete replacement is durable.
+fn prepare_rental_state(g: &GameState, ch: CharId) -> Option<GameState> {
+    let character = g.get_char(ch)?;
+    let roots: Vec<ObjId> = character
+        .equipment
+        .iter()
+        .flatten()
+        .copied()
+        .chain(character.carrying.iter().copied())
+        .collect();
+    let walk = walk_object_graph(
+        roots,
+        ObjectGraphOrder::Preorder,
+        "prepare rental snapshot",
+        |oid| g.get_obj(oid).map(|o| o.contains.clone()),
+    );
+    if walk.malformed() {
+        return None;
     }
-    crash_extract_norents_from_equipped(g, ch);
-    let carrying = g
-        .get_char(ch)
-        .map(|c| c.carrying.clone())
-        .unwrap_or_default();
-    crash_extract_norents(g, &carrying);
+    let mut prepared = GameState::new(g.config.clone());
+    prepared.chars.insert(ch, character.clone());
+    for visit in walk.visits {
+        prepared.objs.insert(visit.id, g.get_obj(visit.id)?.clone());
+    }
+    crash_extract_norents_from_equipped(&mut prepared, ch);
+    let carrying = prepared.get_char(ch)?.carrying.clone();
+    crash_extract_norents(&mut prepared, &carrying);
+    Some(prepared)
+}
 
-    let (gold, account) = g
+/// Commit the runtime half only after publishing the rental file. A subsequent
+/// disconnect must preserve that file rather than snapshot the emptied body.
+fn finish_rental_save(g: &mut GameState, ch: CharId) {
+    extract_all_player_objects(g, ch);
+    set_load_room_to_current(g, ch);
+    let conn = g.get_char(ch).and_then(|c| c.desc);
+    if let Some(c) = g.get_char_mut(ch) {
+        c.act_flags &= !PLR_CRASH;
+    }
+    if let Some(d) = conn.and_then(|conn| g.descriptors.get_mut(&conn)) {
+        d.rental_saved = true;
+    }
+    g.request_player_save(ch);
+}
+
+/// Publish RENT_RENTED before removing any live possessions. False leaves the
+/// player and equipment available for retry and forbids departure.
+pub fn crash_rentsave(g: &mut GameState, ch: CharId, cost: i32) -> bool {
+    if is_npc(g, ch) {
+        return true;
+    }
+    let Some(prepared) = prepare_rental_state(g, ch) else {
+        return false;
+    };
+    let (gold, account) = prepared
         .get_char(ch)
         .map(|c| (c.points.gold, c.points.bank_gold))
         .unwrap_or((0, 0));
@@ -1068,30 +1110,26 @@ pub fn crash_rentsave(g: &mut GameState, ch: CharId, cost: i32) {
         gold,
         account,
     };
-    if !write_crash_file(g, ch, &rent) {
-        return;
+    if !write_crash_file(&prepared, ch, &rent) {
+        return false;
     }
-    extract_all_player_objects(g, ch);
-    set_load_room_to_current(g, ch);
-    g.request_player_save(ch);
+    finish_rental_save(g, ch);
+    true
 }
 
-/// Crash_cryosave(): RENT_CRYO save (one-time freeze fee already charged by the
-/// caller). Sets PLR_CRYO and extracts the player's objects. Skips NPCs.
-pub fn crash_cryosave(g: &mut GameState, ch: CharId, cost: i32) {
+/// Prepare the freeze fee in scratch state; charge and publish PLR_CRYO only
+/// once the complete RENT_CRYO replacement is durable.
+pub fn crash_cryosave(g: &mut GameState, ch: CharId, cost: i32) -> bool {
     if is_npc(g, ch) {
-        return;
+        return true;
     }
-    crash_extract_norents_from_equipped(g, ch);
-    let carrying = g
-        .get_char(ch)
-        .map(|c| c.carrying.clone())
-        .unwrap_or_default();
-    crash_extract_norents(g, &carrying);
-    if let Some(c) = g.get_char_mut(ch) {
+    let Some(mut prepared) = prepare_rental_state(g, ch) else {
+        return false;
+    };
+    if let Some(c) = prepared.get_char_mut(ch) {
         crate::gold::debit_up_to(c, crate::gold::Account::Carried, i64::from(cost));
     }
-    let (gold, account) = g
+    let (gold, account) = prepared
         .get_char(ch)
         .map(|c| (c.points.gold, c.points.bank_gold))
         .unwrap_or((0, 0));
@@ -1102,73 +1140,50 @@ pub fn crash_cryosave(g: &mut GameState, ch: CharId, cost: i32) {
         gold,
         account,
     };
-    if !write_crash_file(g, ch, &rent) {
-        return;
+    if !write_crash_file(&prepared, ch, &rent) {
+        return false;
     }
-    extract_all_player_objects(g, ch);
     if let Some(c) = g.get_char_mut(ch) {
+        c.points.gold = gold;
         c.act_flags |= PLR_CRYO;
     }
-    set_load_room_to_current(g, ch);
-    g.request_player_save(ch);
+    finish_rental_save(g, ch);
+    true
 }
 
-/// Crash_idlesave(): RENT_TIMEDOUT (force-rent) save at 2x cost, dropping the
-/// most expensive items until the player can afford the bill. Skips NPCs.
-pub fn crash_idlesave(g: &mut GameState, ch: CharId) {
+/// Force-rent at twice normal cost. All pruning happens in scratch state so a
+/// failed publication cannot silently consume the player's belongings.
+pub fn crash_idlesave(g: &mut GameState, ch: CharId) -> bool {
     if is_npc(g, ch) {
-        return;
+        return true;
     }
-    crash_extract_norents_from_equipped(g, ch);
-    let carrying = g
-        .get_char(ch)
-        .map(|c| c.carrying.clone())
-        .unwrap_or_default();
-    crash_extract_norents(g, &carrying);
-
-    let (gold, account) = g
+    let Some(mut prepared) = prepare_rental_state(g, ch) else {
+        return false;
+    };
+    let (gold, account) = prepared
         .get_char(ch)
         .map(|c| (c.points.gold, c.points.bank_gold))
         .unwrap_or((0, 0));
-
-    // inventory + equipment rent, each doubled (forcerent is 2x normal).
-    let mut cost = inventory_rent(g, ch).saturating_mul(2);
-    let mut cost_eq = equipment_rent(g, ch).saturating_mul(2);
-
+    let mut cost = inventory_rent(&prepared, ch).saturating_mul(2);
+    let cost_eq = equipment_rent(&prepared, ch).saturating_mul(2);
     if i64::from(cost) + i64::from(cost_eq) > i64::from(gold) + i64::from(account) {
-        // unequip everything (eq folds into inventory).
         for j in 0..NUM_WEARS {
-            if let Some(o) = g.unequip_char(ch, j) {
-                g.obj_to_char(o, ch);
+            if let Some(o) = prepared.unequip_char(ch, j) {
+                prepared.obj_to_char(o, ch);
             }
         }
         cost = cost.saturating_add(cost_eq);
-        cost_eq = 0;
-        let _ = cost_eq;
-
-        // drop the single most expensive carried item until affordable.
         while i64::from(cost) > i64::from(gold) + i64::from(account)
-            && !g
+            && prepared
                 .get_char(ch)
-                .map(|c| c.carrying.is_empty())
-                .unwrap_or(true)
+                .is_some_and(|c| !c.carrying.is_empty())
         {
-            crash_extract_expensive(g, ch);
-            cost = inventory_rent(g, ch).saturating_mul(2);
+            crash_extract_expensive(&mut prepared, ch);
+            cost = inventory_rent(&prepared, ch).saturating_mul(2);
         }
     }
-
-    // If nothing left at all, delete the file and bail.
-    let has_inv = !g
-        .get_char(ch)
-        .map(|c| c.carrying.is_empty())
-        .unwrap_or(true);
-    let has_eq = (0..NUM_WEARS).any(|j| g.get_char(ch).and_then(|c| c.equipment[j]).is_some());
-    if !has_inv && !has_eq {
-        crash_delete_file(g, ch);
-        return;
-    }
-
+    // An empty, atomically replaced rental is safer than an unchecked delete
+    // of the previous file; both supported formats represent zero objects.
     let rent = RentInfo {
         rentcode: RENT_TIMEDOUT,
         time: unix_now(),
@@ -1176,10 +1191,11 @@ pub fn crash_idlesave(g: &mut GameState, ch: CharId) {
         gold,
         account,
     };
-    if !write_crash_file(g, ch, &rent) {
-        return;
+    if !write_crash_file(&prepared, ch, &rent) {
+        return false;
     }
-    extract_all_player_objects(g, ch);
+    finish_rental_save(g, ch);
+    true
 }
 
 /// Crash_extract_expensive(): extract the single highest-rent item in the
@@ -1977,6 +1993,13 @@ fn gen_receptionist(g: &mut GameState, ch: CharId, recep: CharId, cmd: &str, mod
 
         let name = get_name(g, ch);
         if mode == RENT_FACTOR {
+            if !crash_rentsave(g, ch, cost as i32) {
+                g.send_to_char(
+                    ch,
+                    "Your belongings could not be saved. Please try again.\r\n",
+                );
+                return true;
+            }
             act(
                 g,
                 "$n stores your belongings and helps you into your private chamber.",
@@ -1989,7 +2012,6 @@ fn gen_receptionist(g: &mut GameState, ch: CharId, recep: CharId, cmd: &str, mod
             if let Some(c) = g.get_char_mut(ch) {
                 c.prf2_flags &= !PRF2_LOCKOUT;
             }
-            crash_rentsave(g, ch, cost as i32);
             let total = g
                 .get_char(ch)
                 .map(|c| i64::from(c.points.gold) + i64::from(c.points.bank_gold))
@@ -1999,6 +2021,13 @@ fn gen_receptionist(g: &mut GameState, ch: CharId, recep: CharId, cmd: &str, mod
             mudlog(g, &log, lev);
         } else {
             // cryo
+            if !crash_cryosave(g, ch, cost as i32) {
+                g.send_to_char(
+                    ch,
+                    "Your belongings could not be saved. Please try again.\r\n",
+                );
+                return true;
+            }
             act(
                 g,
                 "$n stores your belongings and helps you into your private chamber.\r\n\
@@ -2010,10 +2039,6 @@ fn gen_receptionist(g: &mut GameState, ch: CharId, recep: CharId, cmd: &str, mod
                 ActArg::Char(ch),
                 To::Vict,
             );
-            crash_cryosave(g, ch, cost as i32);
-            if let Some(c) = g.get_char_mut(ch) {
-                c.act_flags |= PLR_CRYO;
-            }
             let log = format!("{} has wiz-rented.", name);
             let lev = invis_lev(g, ch).max(LVL_IMMORT);
             mudlog(g, &log, lev);

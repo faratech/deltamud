@@ -674,6 +674,9 @@ pub struct Descriptor {
     pub gmcp_client: GmcpClientState,
     pub character: Option<CharId>,
     pub original: Option<CharId>, // for `switch`
+    /// A completed rental departure already owns the durable object file.
+    /// Ordinary disconnect must not overwrite it with the emptied inventory.
+    pub rental_saved: bool,
     /// Output accumulated this pulse; flushed by the Game task.
     pub outbuf: String,
     /// At least one append was dropped after `outbuf` reached its hard limit.
@@ -758,6 +761,7 @@ impl Descriptor {
             gmcp_client: GmcpClientState::default(),
             character: None,
             original: None,
+            rental_saved: false,
             outbuf: String::new(),
             output_overflowed: false,
             idle_tics: 0,

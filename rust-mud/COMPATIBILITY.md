@@ -69,6 +69,18 @@ an ambiguous outcome quarantines the identity so it cannot exercise staff
 authority until reconciliation. Generic player saves cannot publish a pending
 authority or password change.
 
+Login-failure counters also use narrow identity-guarded updates; generic player
+saves preserve the counter. Failed latest player saves retain their snapshots
+and retry with bounded 1-30 second backoff. Reconnect reads retained progress,
+and unresolved saves block shutdown/copyover. Rental departure preserves its
+completed object file instead of overwriting it during socket teardown. Rental
+pruning and cryo fees become live only after durable file publication.
+
+NPC purge drops possessions into the original room. Player departure removes
+runtime copies after saving, so saved gear is not duplicated on the floor.
+An empty force-rent snapshot is atomically published rather than deleting the
+previous file without checking durability; both C and Rust codecs support it.
+
 Player aliases now use the C sidecar format under
 `plralias/<bucket>/<lowername>.alias`: alias, replacement, and type triples are
 loaded on login and rewritten on alias changes, saves, disconnects, shutdown,
@@ -149,6 +161,9 @@ the C world grammar or command-oracle policy:
   empty fields.
 - UTF-8 negotiation/input policy, NAWS, TTYPE/MTTS, MCCP, `Room.Add/Remove`, and
   `Char.Items` are deliberately deferred rather than partially advertised.
+- DG character/object UIDs share a monotonic allocator above all encoded room
+  UIDs. Numeric fields and ESC syntax remain supported; UID room decoding
+  accepts only the encoded room form, while ordinary room arguments use vnums.
 - Connection slots are always reclaimed (#421, #423, #424). A Game-initiated
   close (quit, bad passwords, timeouts, input overflow, a full output queue)
   ends the socket task and frees its `MUD_MAX_CONN` permit, and a peer that

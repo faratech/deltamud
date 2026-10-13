@@ -1164,6 +1164,40 @@ impl Database {
         self.save_player_with_host(ch, "").await
     }
 
+    pub async fn update_login_failure_count(
+        &self,
+        idnum: i64,
+        expected_name: &str,
+        reset: bool,
+    ) -> Result<Option<u8>> {
+        let mut conn = self.pool.get_conn().await?;
+        let mut tx = conn
+            .start_transaction(mysql_async::TxOpts::default())
+            .await?;
+        let row: Option<(Option<i64>,)> = tx.exec_first(
+            "SELECT bad_pws FROM player_main WHERE idnum = ? AND BINARY name = BINARY ? FOR UPDATE",
+            (idnum, expected_name),
+        ).await?;
+        let Some((stored,)) = row else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        // The compatible schema uses a signed TINYINT; never overflow it.
+        let previous = stored.unwrap_or(0).clamp(0, 127) as u8;
+        let replacement = if reset {
+            0
+        } else {
+            previous.saturating_add(1).min(127)
+        };
+        tx.exec_drop(
+            "UPDATE player_main SET bad_pws = ? WHERE idnum = ? AND BINARY name = BINARY ?",
+            (replacement, idnum, expected_name),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(Some(previous))
+    }
+
     pub async fn save_player_with_host(&self, ch: &Character, host: &str) -> Result<()> {
         // A generic Character save must never carry credentials. The old
         // SELECT-pwd / drop-connection / REPLACE sequence could straddle a
@@ -1351,7 +1385,8 @@ impl Database {
         let mut assignments = Vec::with_capacity(columns.len());
         let mut values = Vec::with_capacity(columns.len());
         for (column, value) in columns.iter().zip(row_values) {
-            if matches!(*column, "idnum" | "name" | "pwd") || (*column == "host" && host.is_empty())
+            if matches!(*column, "idnum" | "name" | "pwd" | "bad_pws")
+                || (*column == "host" && host.is_empty())
             {
                 continue;
             }
@@ -1594,6 +1629,59 @@ mod mysql_integration {
         ch.tloadroom = 310;
         ch.act_flags |= (1 << 16) | (1 << 2); // PLR_QUESTOR | POSTALIZED whatever bits round-trip
         ch
+    }
+
+    #[tokio::test]
+    async fn login_counter_updates_are_narrow_and_survive_stale_generic_saves() {
+        let Some(db) = test_db() else { return };
+        db.init_tables().await.unwrap();
+        let name = unique_name("Counter");
+        let mut stale = rich_player(&name);
+        stale.bad_pws = 0;
+        stale.idnum = db.create_player(&stale, "counter-password").await.unwrap();
+        let credential = db.get_password_hash(&name).await.unwrap();
+        assert_eq!(
+            db.update_login_failure_count(stale.idnum, &name, false)
+                .await
+                .unwrap(),
+            Some(0)
+        );
+        stale.bad_pws = 99;
+        db.save_player_with_host(&stale, "counter.example.test")
+            .await
+            .unwrap();
+        let updated = db.load_player(&name).await.unwrap();
+        assert_eq!(updated.bad_pws, 1);
+        assert_eq!(updated.points.gold, stale.points.gold);
+        assert_eq!(
+            db.update_login_failure_count(stale.idnum, &name, true)
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        db.save_player(&stale).await.unwrap();
+        assert_eq!(db.load_player(&name).await.unwrap().bad_pws, 0);
+        assert_eq!(
+            db.update_login_failure_count(-1, &name, false)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(db.get_password_hash(&name).await.unwrap(), credential);
+        let mut conn = db.pool.get_conn().await.unwrap();
+        conn.exec_drop(
+            "UPDATE player_main SET bad_pws = 127 WHERE idnum = ?",
+            (stale.idnum,),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db.update_login_failure_count(stale.idnum, &name, false)
+                .await
+                .unwrap(),
+            Some(127)
+        );
+        assert_eq!(db.load_player(&name).await.unwrap().bad_pws, 127);
     }
 
     #[tokio::test]

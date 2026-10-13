@@ -53,40 +53,58 @@ impl Game {
             .pending_player_saves
             .remove(&idnum)
             .map(|save| save.task);
+        let retry_delay_secs = self
+            .failed_player_saves
+            .remove(&idnum)
+            .map(|save| save.retry_delay_secs)
+            .unwrap_or(1);
         let db = self.db.clone();
         let timeout = Duration::from_secs(self.state.config.db_timeout_secs.max(1));
         let task_name = name.clone();
         let task_snapshot = snapshot.clone();
+        let task_host = host.clone();
         let task = tokio::spawn(async move {
-            let mut errors = Vec::new();
+            let mut failures = 0u32;
             if let Some(prior) = prior {
                 match prior.await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => errors.push(error),
-                    Err(error) => errors.push(format!("prior save task failed: {error}")),
+                    Ok(prior) => {
+                        failures = failures.saturating_add(prior.failures);
+                        if let Err(error) = prior.result {
+                            warn!("superseded player save failed: {error}");
+                        }
+                    }
+                    Err(error) => {
+                        failures = failures.saturating_add(1);
+                        warn!("superseded player save task failed: {error}");
+                    }
                 }
             }
-            match tokio::time::timeout(timeout, db.save_player_with_host(&task_snapshot, &host))
-                .await
+            // The newest complete snapshot repairs an older failed generation.
+            // Its durable outcome, rather than historical failures, controls
+            // whether this identity remains unresolved.
+            let result = match tokio::time::timeout(
+                timeout,
+                db.save_player_with_host(&task_snapshot, &task_host),
+            )
+            .await
             {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => errors.push(error.to_string()),
-                Err(_) => errors.push(format!(
-                    "database save timed out after {}s",
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(format!("{task_name}: {error}")),
+                Err(_) => Err(format!(
+                    "{task_name}: database save timed out after {}s",
                     timeout.as_secs()
                 )),
-            }
-            if errors.is_empty() {
-                Ok(())
-            } else {
-                Err(format!("{}: {}", task_name, errors.join("; ")))
-            }
+            };
+            failures = failures.saturating_add(u32::from(result.is_err()));
+            PlayerSaveCompletion { result, failures }
         });
         self.pending_player_saves.insert(
             idnum,
             PendingPlayerSave {
                 name,
                 snapshot,
+                host,
+                retry_delay_secs,
                 task,
             },
         );
@@ -100,6 +118,59 @@ impl Game {
             .values()
             .find(|save| save.name.eq_ignore_ascii_case(name))
             .map(|save| save.snapshot.clone())
+            .or_else(|| {
+                self.failed_player_saves
+                    .values()
+                    .find(|save| save.name.eq_ignore_ascii_case(name))
+                    .map(|save| save.snapshot.clone())
+            })
+    }
+
+    async fn finish_player_save(
+        &mut self,
+        idnum: i64,
+        save: PendingPlayerSave,
+    ) -> std::result::Result<(), String> {
+        let completion = match save.task.await {
+            Ok(completion) => completion,
+            Err(error) => PlayerSaveCompletion {
+                result: Err(format!(
+                    "player save task for {} failed: {error}",
+                    save.name
+                )),
+                failures: 1,
+            },
+        };
+        self.player_save_failures = self
+            .player_save_failures
+            .saturating_add(completion.failures);
+        let result = completion.result;
+        if let Err(error) = &result {
+            warn!("ordered player save failed; retaining snapshot for retry: {error}");
+            self.failed_player_saves.insert(
+                idnum,
+                FailedPlayerSave {
+                    name: save.name,
+                    snapshot: save.snapshot,
+                    host: save.host,
+                    retry_at: tokio::time::Instant::now()
+                        + Duration::from_secs(save.retry_delay_secs),
+                    retry_delay_secs: (save.retry_delay_secs * 2).min(30),
+                    error: error.clone(),
+                },
+            );
+        }
+        result
+    }
+
+    async fn await_player_save(&mut self, idnum: i64) -> std::result::Result<(), String> {
+        if let Some(save) = self.pending_player_saves.remove(&idnum) {
+            self.finish_player_save(idnum, save).await?;
+        }
+        match self.failed_player_saves.get(&idnum) {
+            Some(save) => Err(save.error.clone()),
+            None => Ok(()),
+        }
     }
 
     pub(crate) async fn reap_completed_player_saves(&mut self) {
@@ -112,38 +183,29 @@ impl Game {
             let Some(save) = self.pending_player_saves.remove(&idnum) else {
                 continue;
             };
-            match save.task.await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    self.player_save_failures = self.player_save_failures.saturating_add(1);
-                    warn!("ordered player save failed: {error}");
-                }
-                Err(error) => {
-                    self.player_save_failures = self.player_save_failures.saturating_add(1);
-                    warn!("ordered player save task for {} failed: {error}", save.name);
-                }
-            }
+            let _ = self.finish_player_save(idnum, save).await;
         }
+        let now = tokio::time::Instant::now();
+        let due: Vec<i64> = self
+            .failed_player_saves
+            .iter()
+            .filter_map(|(&idnum, save)| (save.retry_at <= now).then_some(idnum))
+            .collect();
+        for idnum in due {
+            let Some(save) = self.failed_player_saves.get(&idnum) else {
+                continue;
+            };
+            self.queue_player_save(save.snapshot.clone(), save.host.clone());
+        }
+        self.retry_linkless_object_saves();
     }
 
     pub(crate) async fn await_all_player_saves(&mut self) -> u32 {
         let pending = std::mem::take(&mut self.pending_player_saves);
-        let mut failures = 0u32;
-        for (_, save) in pending {
-            match save.task.await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    failures = failures.saturating_add(1);
-                    warn!("ordered player save failed: {error}");
-                }
-                Err(error) => {
-                    failures = failures.saturating_add(1);
-                    warn!("ordered player save task for {} failed: {error}", save.name);
-                }
-            }
+        for (idnum, save) in pending {
+            let _ = self.finish_player_save(idnum, save).await;
         }
-        self.player_save_failures = self.player_save_failures.saturating_add(failures);
-        failures
+        u32::try_from(self.failed_player_saves.len()).unwrap_or(u32::MAX)
     }
 
     pub(crate) async fn drain_deferred_db_ops(&mut self) {
@@ -376,25 +438,18 @@ impl Game {
             // A previously launched broad save contains an older copy of every
             // authority field. It must finish before the narrow CAS so it can
             // never commit later and resurrect the superseded tuple.
-            if let Some(save) = self.pending_player_saves.remove(&request.idnum) {
-                let save_result = match save.task.await {
-                    Ok(result) => result,
-                    Err(error) => Err(format!("prior save task failed: {error}")),
-                };
-                if let Err(error) = save_result {
-                    self.player_save_failures = self.player_save_failures.saturating_add(1);
-                    error!(
-                        "AUDIT: authority update for {} (id {}) aborted after prior player save failure: {}",
-                        request.name, request.idnum, error
+            if let Err(error) = self.await_player_save(request.idnum).await {
+                error!(
+                    "AUDIT: authority update for {} (id {}) aborted after prior player save failure: {}",
+                    request.name, request.idnum, error
+                );
+                if authority_update_request_is_current(&self.state, &request) {
+                    self.state.send_to_char(
+                        request.authorization.requester_body,
+                        "Authority change failed because the player's pending save did not complete; no authority change was made.\r\n",
                     );
-                    if authority_update_request_is_current(&self.state, &request) {
-                        self.state.send_to_char(
-                            request.authorization.requester_body,
-                            "Authority change failed because the player's pending save did not complete; no authority change was made.\r\n",
-                        );
-                    }
-                    continue;
                 }
+                continue;
             }
 
             // Awaiting a prior save is quiescent today, but repeat the exact
@@ -619,24 +674,11 @@ impl Game {
             // Order this credential change after any already-launched save for
             // the same player. Generic saves now exclude `pwd` atomically, so
             // they cannot resurrect a hash on either side of this boundary.
-            if let Some(save) = self.pending_player_saves.remove(&request.idnum) {
-                match save.task.await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(save_error)) => {
-                        self.player_save_failures = self.player_save_failures.saturating_add(1);
-                        warn!(
-                            "ordered save preceding password update for {} failed: {}",
-                            request.name, save_error
-                        );
-                    }
-                    Err(save_error) => {
-                        self.player_save_failures = self.player_save_failures.saturating_add(1);
-                        warn!(
-                            "ordered save task preceding password update for {} failed: {}",
-                            request.name, save_error
-                        );
-                    }
-                }
+            if let Err(error) = self.await_player_save(request.idnum).await {
+                warn!(
+                    "ordered save preceding password update for {} remains unresolved: {}",
+                    request.name, error
+                );
             }
 
             if password_update_request_is_current(&self.state, &request).is_none() {
@@ -781,25 +823,18 @@ impl Game {
             // A disconnect save from an earlier iteration may still be running
             // with the old name.  It must finish before the conditional rename
             // so it cannot commit later and restore the old key.
-            if let Some(save) = self.pending_player_saves.remove(&request.idnum) {
-                let save_result = match save.task.await {
-                    Ok(result) => result,
-                    Err(error) => Err(format!("prior save task failed: {error}")),
-                };
-                if let Err(error) = save_result {
-                    self.player_save_failures = self.player_save_failures.saturating_add(1);
-                    error!(
-                        "AUDIT: rename {} (id {}) -> {} aborted after prior player save failure: {}",
-                        request.old_name, request.idnum, request.new_name, error
+            if let Err(error) = self.await_player_save(request.idnum).await {
+                error!(
+                    "AUDIT: rename {} (id {}) -> {} aborted after prior player save failure: {}",
+                    request.old_name, request.idnum, request.new_name, error
+                );
+                if player_rename_request_is_current(&self.state, &request).is_some() {
+                    self.state.send_to_char(
+                        request.authorization.requester_body,
+                        "Rename failed because the player's pending save did not complete; no name change was made.\r\n",
                     );
-                    if player_rename_request_is_current(&self.state, &request).is_some() {
-                        self.state.send_to_char(
-                            request.authorization.requester_body,
-                            "Rename failed because the player's pending save did not complete; no name change was made.\r\n",
-                        );
-                    }
-                    continue;
                 }
+                continue;
             }
 
             if player_rename_request_is_current(&self.state, &request).is_none() {
@@ -1186,6 +1221,7 @@ impl Game {
         if requests.is_empty() {
             return;
         }
+        let extractions = std::mem::take(&mut self.state.player_extraction_requests);
 
         let mut snapshots = Vec::new();
         for cid in requests {
@@ -1195,6 +1231,8 @@ impl Game {
         }
 
         for snapshot in snapshots {
+            let character = snapshot.id;
+            let mut aliases_saved = true;
             let host = snapshot
                 .desc
                 .and_then(|conn| self.state.descriptors.get(&conn))
@@ -1211,13 +1249,34 @@ impl Game {
                 snapshot.get_name(),
                 snapshot.idnum,
             ) {
+                aliases_saved = false;
                 warn!(
                     "queued write_aliases(g, {}) failed: {}",
                     snapshot.get_name(),
                     err
                 );
             }
-            self.queue_player_save(snapshot, host);
+            self.queue_player_save(snapshot, host.clone());
+            if extractions.contains(&character) {
+                // Descriptorless idle rent hands off the final SQL snapshot
+                // before destroying the live body. The save queue retains it
+                // even if the database subsequently fails.
+                if aliases_saved {
+                    self.finish_linkless_extraction(character);
+                } else {
+                    self.state.rental_departures.insert(character);
+                    self.state.char_from_room(character);
+                    self.linkless_object_saves.insert(
+                        character,
+                        LinklessObjectSave {
+                            host,
+                            rental_saved: true,
+                            retry_at: tokio::time::Instant::now() + Duration::from_secs(1),
+                            retry_delay_secs: 2,
+                        },
+                    );
+                }
+            }
         }
     }
 }

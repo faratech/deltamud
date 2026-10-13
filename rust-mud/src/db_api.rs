@@ -72,6 +72,16 @@ pub trait DatabaseInterface: Send + Sync {
     ) -> Result<i64>;
     async fn load_player(&self, name: &str) -> Result<character::Character>;
     async fn save_player(&self, character: &character::Character) -> Result<()>;
+    /// Atomically increment the login-failure counter, or reset it after a
+    /// successful login, for this exact identity. Returns the previous count;
+    /// None means the player disappeared/was renamed. Ordinary saves preserve
+    /// this counter, so login bookkeeping never rewrites gameplay snapshots.
+    async fn update_login_failure_count(
+        &self,
+        idnum: i64,
+        expected_name: &str,
+        reset: bool,
+    ) -> Result<Option<u8>>;
     async fn save_player_with_host(
         &self,
         character: &character::Character,
@@ -171,6 +181,15 @@ impl DatabaseInterface for database::Database {
     }
     async fn save_player(&self, c: &character::Character) -> Result<()> {
         self.save_player(c).await
+    }
+    async fn update_login_failure_count(
+        &self,
+        idnum: i64,
+        expected_name: &str,
+        reset: bool,
+    ) -> Result<Option<u8>> {
+        self.update_login_failure_count(idnum, expected_name, reset)
+            .await
     }
     async fn save_player_with_host(&self, c: &character::Character, host: &str) -> Result<()> {
         self.save_player_with_host(c, host).await

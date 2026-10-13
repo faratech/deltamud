@@ -77,6 +77,13 @@ impl Game {
     }
 
     pub(crate) async fn execute_copyover(&mut self, requester: CharId) {
+        if !self.linkless_object_saves.is_empty() {
+            self.state.send_to_char(
+                requester,
+                "Copyover aborted: disconnected player files still need a durable save.\n\r",
+            );
+            return;
+        }
         if !self.state.authority_quarantine.is_empty() {
             warn!(
                 "Copyover aborted because {} player authority update(s) have an indeterminate durable outcome",
@@ -174,7 +181,7 @@ impl Game {
         // Finish any disconnect generation first. New snapshots are then
         // chained and awaited, so no stale task can outlive exec and no player
         // is recovered from an older SQL row.
-        let mut failures = self.await_all_player_saves().await;
+        self.await_all_player_saves().await;
         let mut seen_players = HashSet::new();
         let players: Vec<(CharId, String)> = self
             .state
@@ -215,8 +222,7 @@ impl Game {
             }
             self.queue_player_save(snapshot, host);
         }
-        failures = failures.saturating_add(self.await_all_player_saves().await);
-        failures
+        self.await_all_player_saves().await
     }
 
     /// Persist shutdown state first, then perform irreversible process-exit and
@@ -233,8 +239,16 @@ impl Game {
 
         // A prior disconnect save cannot be allowed to outlive the final
         // snapshot. Account for its outcome before queueing current rows.
-        let pending_attempted = u32::try_from(self.pending_player_saves.len()).unwrap_or(u32::MAX);
-        let pending_failures = self.await_all_player_saves().await;
+        let pending_ids: Vec<i64> = self.pending_player_saves.keys().copied().collect();
+        let pending_attempted = u32::try_from(pending_ids.len()).unwrap_or(u32::MAX);
+        self.await_all_player_saves().await;
+        let pending_failures = u32::try_from(
+            pending_ids
+                .iter()
+                .filter(|idnum| self.failed_player_saves.contains_key(idnum))
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
         report.player_saves_attempted = report
             .player_saves_attempted
             .saturating_add(pending_attempted);
@@ -295,6 +309,7 @@ impl Game {
             }
         }
         let mut current_player_saves = 0u32;
+        let mut current_player_ids = HashSet::new();
         for (_conn, ch, host) in player_connections {
             let Some(snapshot) = self.snapshot_online_player_for_shutdown(ch) else {
                 continue;
@@ -316,18 +331,29 @@ impl Game {
                 report.aliases_written = report.aliases_written.saturating_add(1);
             }
             current_player_saves = current_player_saves.saturating_add(1);
+            current_player_ids.insert(snapshot.idnum);
             self.queue_player_save(snapshot, host);
         }
         report.player_saves_attempted = report
             .player_saves_attempted
             .saturating_add(current_player_saves);
         let current_database_errors = self.await_all_player_saves().await;
+        let current_failed = u32::try_from(
+            current_player_ids
+                .iter()
+                .filter(|idnum| self.failed_player_saves.contains_key(idnum))
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
         report.players_saved = report
             .players_saved
-            .saturating_add(current_player_saves.saturating_sub(current_database_errors));
-        report.database_errors = report
-            .database_errors
-            .saturating_add(current_database_errors);
+            .saturating_add(current_player_saves.saturating_sub(current_failed));
+        // A successful current snapshot can repair an earlier failed save.
+        // Only identities still lacking a durable newest generation block exit.
+        report.database_errors = current_database_errors;
+        report.crash_save_errors = report
+            .crash_save_errors
+            .saturating_add(u32::try_from(self.linkless_object_saves.len()).unwrap_or(u32::MAX));
         report.finish_persistence_counts();
 
         if !report.persistence_succeeded() {

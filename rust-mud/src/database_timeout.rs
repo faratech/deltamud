@@ -82,6 +82,19 @@ impl DatabaseInterface for TimedDatabase {
         self.bounded("save_player", self.inner.save_player(character))
             .await
     }
+    async fn update_login_failure_count(
+        &self,
+        idnum: i64,
+        expected_name: &str,
+        reset: bool,
+    ) -> Result<Option<u8>> {
+        self.bounded(
+            "update_login_failure_count",
+            self.inner
+                .update_login_failure_count(idnum, expected_name, reset),
+        )
+        .await
+    }
 
     async fn save_player_with_host(&self, character: &Character, host: &str) -> Result<()> {
         self.bounded(
@@ -229,5 +242,21 @@ mod tests {
             .await;
         let error = result.expect_err("pending operation must time out");
         assert!(error.to_string().contains("hung_test timed out after 10ms"));
+    }
+
+    #[tokio::test]
+    async fn login_counter_adapter_has_an_operation_deadline() {
+        let inner = Arc::new(MockDatabase::new());
+        let _pause = inner.pause_next_operation("update_login_failure_count");
+        let db = TimedDatabase::new(inner, Duration::from_millis(10));
+        let error = db
+            .update_login_failure_count(1, "Timedcounter", false)
+            .await
+            .expect_err("counter operation must not park the game indefinitely");
+        assert!(
+            error
+                .to_string()
+                .contains("update_login_failure_count timed out")
+        );
     }
 }

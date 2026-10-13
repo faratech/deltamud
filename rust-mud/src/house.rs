@@ -1791,17 +1791,20 @@ pub fn do_bed(g: &mut GameState, ch: CharId, _argument: &str, _subcmd: i32) {
         return;
     }
 
-    // write_aliases(g, ch): no alias system ported — no-op.
-    // Clear the AFK lockout pref (C: REMOVE_BIT PRF2_LOCKOUT).
-    if let Some(c) = g.get_char_mut(ch) {
-        c.prf2_flags &= !PRF2_LOCKOUT;
-    }
-
     // C act.other.c:506 do_bed: Crash_rentsave then House_crashsave for the
     // house room before quitting (#164).
     {
-        crate::objsave::crash_rentsave(g, ch, 0);
+        if !crate::objsave::crash_rentsave(g, ch, 0) {
+            g.send_to_char(
+                ch,
+                "Your belongings could not be saved. Please try again.\r\n",
+            );
+            return;
+        }
         house_crashsave(g, room_vnum);
+    }
+    if let Some(c) = g.get_char_mut(ch) {
+        c.prf2_flags &= !PRF2_LOCKOUT;
     }
 
     // Announce departure first.

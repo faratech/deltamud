@@ -216,7 +216,7 @@ mariadb --no-defaults --binary-mode --skip-ssl -u root --socket="$SOCK" deltamud
 
 cd "$ROOT"
 SOCKET_URL=${SOCK//\//%2F}
-EXPECTED_MYSQL_TESTS=12
+EXPECTED_MYSQL_TESTS=13
 MYSQL_TEST_LIST=$(cargo test --locked mysql_integration -- --list)
 MYSQL_TEST_COUNT=$(printf '%s\n' "$MYSQL_TEST_LIST" | awk '/mysql_integration.*: test$/ { count++ } END { print count + 0 }')
 [ "$MYSQL_TEST_COUNT" -eq "$EXPECTED_MYSQL_TESTS" ] || {

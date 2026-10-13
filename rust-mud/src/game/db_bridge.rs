@@ -193,6 +193,18 @@ impl Game {
             .await
     }
 
+    pub(crate) async fn db_update_login_failure_count(
+        &mut self,
+        idnum: i64,
+        name: &str,
+        reset: bool,
+    ) -> Result<Option<u8>> {
+        let db = self.db.clone();
+        let name = name.to_string();
+        self.await_database(async move { db.update_login_failure_count(idnum, &name, reset).await })
+            .await
+    }
+
     pub(crate) async fn db_save_player_with_host(
         &mut self,
         character: &crate::character::Character,

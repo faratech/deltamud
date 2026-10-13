@@ -45,6 +45,16 @@ pub struct MockDatabase {
     fail_next_authority_update_after_commit: Mutex<bool>,
     fail_next_rename: Mutex<bool>,
     fail_rename_on_call: Mutex<Option<u64>>,
+    #[cfg(test)]
+    operation_pauses: Mutex<
+        HashMap<
+            &'static str,
+            (
+                std::sync::Arc<tokio::sync::Notify>,
+                std::sync::Arc<tokio::sync::Notify>,
+            ),
+        >,
+    >,
 }
 
 impl MockDatabase {
@@ -65,11 +75,37 @@ impl MockDatabase {
             fail_next_authority_update_after_commit: Mutex::new(false),
             fail_next_rename: Mutex::new(false),
             fail_rename_on_call: Mutex::new(None),
+            #[cfg(test)]
+            operation_pauses: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn set_save_delay(&self, delay: Option<std::time::Duration>) {
         *crate::lock_ok::lock(&self.save_delay) = delay;
+    }
+
+    #[cfg(test)]
+    pub fn pause_next_operation(
+        &self,
+        name: &'static str,
+    ) -> (
+        std::sync::Arc<tokio::sync::Notify>,
+        std::sync::Arc<tokio::sync::Notify>,
+    ) {
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        crate::lock_ok::lock(&self.operation_pauses)
+            .insert(name, (entered.clone(), release.clone()));
+        (entered, release)
+    }
+
+    #[cfg(test)]
+    async fn pause_operation(&self, name: &'static str) {
+        let pause = crate::lock_ok::lock(&self.operation_pauses).remove(name);
+        if let Some((entered, release)) = pause {
+            entered.notify_one();
+            release.notified().await;
+        }
     }
 
     pub fn set_exists_delay(&self, delay: Option<std::time::Duration>) {
@@ -173,30 +209,37 @@ impl crate::DatabaseInterface for MockDatabase {
         if crate::password::password_needs_upgrade(password_hash) {
             anyhow::bail!("new player credential is not a current bounded Argon2id hash");
         }
-        let key = character.get_name().to_lowercase();
-        let mut players = crate::lock_ok::lock(&self.players);
-        if players.contains_key(&key) {
-            anyhow::bail!("player name {} already exists", character.get_name());
-        }
-        let mut idnum = crate::lock_ok::lock(&self.next_idnum);
-        let id = *idnum;
-        *idnum = id
-            .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("player idnum space is exhausted"))?;
-        let mut ch = character.clone();
-        ch.idnum = id;
-        ch.pending_password_hash = None;
-        players.insert(
-            key,
-            Stored {
-                character: ch,
-                password: password_hash.to_string(),
-            },
-        );
+        let id = {
+            let key = character.get_name().to_lowercase();
+            let mut players = crate::lock_ok::lock(&self.players);
+            if players.contains_key(&key) {
+                anyhow::bail!("player name {} already exists", character.get_name());
+            }
+            let mut idnum = crate::lock_ok::lock(&self.next_idnum);
+            let id = *idnum;
+            *idnum = id
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("player idnum space is exhausted"))?;
+            let mut ch = character.clone();
+            ch.idnum = id;
+            ch.pending_password_hash = None;
+            players.insert(
+                key,
+                Stored {
+                    character: ch,
+                    password: password_hash.to_string(),
+                },
+            );
+            id
+        };
+        #[cfg(test)]
+        self.pause_operation("created_player").await;
         Ok(id)
     }
 
     async fn load_player(&self, name: &str) -> Result<Character> {
+        #[cfg(test)]
+        self.pause_operation("load_player").await;
         let players = crate::lock_ok::lock(&self.players);
         players
             .get(&name.to_lowercase())
@@ -205,6 +248,8 @@ impl crate::DatabaseInterface for MockDatabase {
     }
 
     async fn save_player(&self, character: &Character) -> Result<()> {
+        #[cfg(test)]
+        self.pause_operation("save_player").await;
         let delay = *crate::lock_ok::lock(&self.save_delay);
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
@@ -216,9 +261,34 @@ impl crate::DatabaseInterface for MockDatabase {
         if let Some(s) = players.get_mut(&character.get_name().to_lowercase()) {
             let mut snapshot = character.clone();
             snapshot.pending_password_hash = None;
+            snapshot.bad_pws = s.character.bad_pws;
             s.character = snapshot;
         }
         Ok(())
+    }
+
+    async fn update_login_failure_count(
+        &self,
+        idnum: i64,
+        expected_name: &str,
+        reset: bool,
+    ) -> Result<Option<u8>> {
+        #[cfg(test)]
+        self.pause_operation("update_login_failure_count").await;
+        let mut players = crate::lock_ok::lock(&self.players);
+        let Some(stored) = players.get_mut(&expected_name.to_lowercase()) else {
+            return Ok(None);
+        };
+        if stored.character.idnum != idnum || stored.character.get_name() != expected_name {
+            return Ok(None);
+        }
+        let previous = stored.character.bad_pws.min(127);
+        stored.character.bad_pws = if reset {
+            0
+        } else {
+            previous.saturating_add(1).min(127)
+        };
+        Ok(Some(previous))
     }
 
     async fn rename_player_if_current(
@@ -404,6 +474,8 @@ impl crate::DatabaseInterface for MockDatabase {
     }
 
     async fn get_password_hash(&self, name: &str) -> Result<Option<String>> {
+        #[cfg(test)]
+        self.pause_operation("get_password_hash").await;
         let players = crate::lock_ok::lock(&self.players);
         Ok(players
             .get(&name.to_lowercase())

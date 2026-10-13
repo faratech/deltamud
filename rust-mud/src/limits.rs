@@ -756,6 +756,9 @@ pub fn gain_condition(g: &mut GameState, ch: CharId, condition: usize, value: i3
 /// at >5, void-pull at >8, force-rent+extract at >48. The rent/crash saves are
 /// handled by the save layer (see manifest gaps).
 pub fn check_idling(g: &mut GameState, ch: CharId) {
+    if g.rental_departures.contains(&ch) {
+        return;
+    }
     let lockout = g
         .get_char(ch)
         .map(|c| c.prf2_flags & PRF2_LOCKOUT != 0)
@@ -828,28 +831,31 @@ pub fn check_idling(g: &mut GameState, ch: CharId) {
             }
         } else if timer > 48 {
             // Force-rent + extract.
+            let previous_room = g.get_char(ch).and_then(|c| c.in_room);
             if g.get_char(ch).and_then(|c| c.in_room).is_some() {
                 g.char_from_room(ch);
             }
             if let Some(rent) = g.real_room(3) {
                 g.char_to_room(ch, rent);
             }
-            // close_socket(ch->desc): drop the descriptor link.
-            if let Some(conn) = g.get_char(ch).and_then(|c| c.desc) {
-                if let Some(d) = g.descriptors.get_mut(&conn) {
-                    d.character = None;
-                }
-            }
-            if let Some(c) = g.get_char_mut(ch) {
-                c.desc = None;
-            }
             // free_rent || LVL_IMMORT -> rentsave, else idlesave (limits.c). This
             // MUST run before extract_char or the idle player loses all objects.
             let level = g.get_char(ch).map(|c| c.player.level).unwrap_or(0);
-            if level >= LVL_IMMORT {
-                crate::objsave::crash_rentsave(g, ch, 0);
+            let saved = if level >= LVL_IMMORT {
+                crate::objsave::crash_rentsave(g, ch, 0)
             } else {
-                crate::objsave::crash_idlesave(g, ch);
+                crate::objsave::crash_idlesave(g, ch)
+            };
+            if !saved {
+                g.char_from_room(ch);
+                if let Some(room) = previous_room {
+                    g.char_to_room(ch, room);
+                }
+                log::warn!(
+                    "Idle rental failed for {:?}; retaining player and equipment for retry",
+                    ch
+                );
+                return;
             }
             let name = g
                 .get_char(ch)
@@ -861,7 +867,15 @@ pub fn check_idling(g: &mut GameState, ch: CharId) {
                 PFT,
                 LVL_GOD,
             );
-            g.extract_char(ch);
+            if let Some(conn) = g.get_char(ch).and_then(|c| c.desc) {
+                if let Some(d) = g.descriptors.get_mut(&conn) {
+                    d.state = crate::connection::ConState::Close;
+                }
+            } else {
+                // The Game must retain a player snapshot before removing a
+                // linkless body; a queued CharId alone would become stale.
+                g.request_player_save_and_extract(ch);
+            }
         }
     }
 }
@@ -1226,7 +1240,7 @@ pub fn point_update(g: &mut GameState) {
     let chars: Vec<CharId> = g.char_ids();
     for ch in chars {
         // Skip if extracted by an earlier iteration's side effect.
-        if !g.char_exists(ch) {
+        if !g.char_exists(ch) || g.rental_departures.contains(&ch) {
             continue;
         }
 
