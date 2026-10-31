@@ -79,3 +79,6 @@ mysql/plrbackup*
 # OS files
 .DS_Store
 Thumbs.db
+
+# Agent guidance stays on the server, not in this public repository (operator decision 2026-10-31)
+CLAUDE.md
