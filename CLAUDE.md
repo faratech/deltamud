@@ -2,6 +2,22 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Status (verified 2026-10-31).**
+> - **Two engines.** The Rust engine in `rust-mud/` is the actively developed, supported server.
+>   It has its own `rust-mud/CLAUDE.md`, `rust-mud/README.md` and `rust-mud/docs/RUNBOOK.md`.
+>   This file documents the **legacy C codebase** (`src/`, `bin/circle`), which is kept as the
+>   behavior oracle for parity work. The repo-level `README.md` explains the split.
+> - **Not running on windowsforum.com's server.** `deltamud.service` (`bin/circle -q 4000`) and
+>   `deltamud-websocat.service` have been **masked** (symlinked to `/dev/null`) since 2026-09-28. The
+>   original unit files sit beside them as `*.pre-mask-20260928`. "Production mode" below describes
+>   the historical `autorun` setup, not anything live.
+> - Git submodule of `/web` (origin `faratech/deltamud`, branch `main`). Fetch and check
+>   ahead/behind before work, commit and push here, then bump the pointer in `/web` with the
+>   pathspec form (`git commit -m … -- deltamud`).
+> - The 2026-10-09 security fixes (issues #421–#433: connection slots, login throttling, clan
+>   ranks, GMCP visibility) and the 2026-10-13 gameplay/persistence fixes landed after this file's
+>   last full revision. Read `git log` and the Rust runbook before relying on behaviour notes below.
+
 ## Build Commands
 
 ```bash
